@@ -1,160 +1,117 @@
-
-/* ============================================================
-AO-002 | FIL-ID: employee/employee.js
-Projekt: HR Onboarding
-Syfte: Medarbetar-gren – auth-guard + header-fill + logout (för separata sidor)
-Gäller för: employee/home.html, tasks.html, questions.html, schedule.html, docs.html, report.html, profile.html
+<!-- ============================================================
+AO-001 | FIL-ID: employee/home.html
+Projekt: HR-System
+Syfte: Medarbetarens startsida (Dashboard) – UI-only v1
 Policy:
-- Ingen backend (v1)
-- Läser endast session från sessionStorage (AO-001_LOGIN_V1)
+- Ingen backend
 - Ingen känslig data lagras
-============================================================ */
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Medarbetare</title>
 
-(function () {
-  "use strict";
+  <!-- Gemensam styling -->
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+</head>
+<body>
 
-  const STORAGE_KEY = "AO-001_LOGIN_V1";
+  <header class="top">
+    <div class="brand">
+      <strong>HR-System</strong>
+      <span class="muted">• Medarbetare</span>
+    </div>
 
-  const $ = (sel) => document.querySelector(sel);
+    <nav class="nav" aria-label="Meny">
+      <a href="./home.html" aria-current="page">Hem</a>
+      <a href="./tasks.html">Uppgifter</a>
+      <a href="./questions.html">Frågor</a>
+      <a href="./schedule.html">Schema</a>
+      <a href="./docs.html">Dokument</a>
+      <a href="./report.html">Rapportera fel</a>
+    </nav>
+  </header>
 
-  // Standardfält (finns i home.html, kan återanvändas i andra sidor)
-  const whoName = $("#whoName");
-  const whoEmpNo = $("#whoEmpNo");
-  const whoRole = $("#whoRole");
-  const btnLogout = $("#btnLogout");
+  <main class="container">
 
-  // Profile-sidan kan ha dessa
-  const pName = $("#pName");
-  const pEmp = $("#pEmp");
-  const pRole = $("#pRole");
-  const pwStatus = $("#pwStatus");
+    <section class="card">
+      <div class="row space-between wrap">
+        <div>
+          <h1 class="tight">Min sida</h1>
+          <div class="muted">
+            Hej <strong id="whoName">—</strong>
+            • Anst.nr <span id="whoEmpNo">—</span>
+            • Roll <span id="whoRole">employee</span>
+          </div>
+        </div>
 
-  // Report-sidan kan ha dessa
-  const techInfo = $("#techInfo");
-  const reportForm = $("#reportForm");
-  const reportText = $("#reportText");
-  const reportStatus = $("#reportStatus");
+        <div class="row wrap">
+          <a class="btn secondary" href="./profile.html">Min profil</a>
+          <button id="btnLogout" class="secondary" type="button">Logga ut</button>
+        </div>
+      </div>
 
-  function safeJsonParse(raw) {
-    try { return JSON.parse(raw); } catch (e) { return null; }
-  }
+      <!-- Snabbnavigering -->
+      <div class="grid-cards">
+        <a class="bigcard" href="./tasks.html">
+          <div class="bigcard-title">Uppgifter</div>
+          <div class="muted">3 att göra idag <span class="tag">demo</span></div>
+        </a>
 
-  function sanitizeText(s) {
-    return String(s || "").trim().replace(/\s+/g, " ");
-  }
+        <a class="bigcard" href="./questions.html">
+          <div class="bigcard-title">Frågor</div>
+          <div class="muted">2 nya från chef <span class="tag">demo</span></div>
+        </a>
 
-  function readSessionEmployee() {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
+        <a class="bigcard" href="./schedule.html">
+          <div class="bigcard-title">Schema</div>
+          <div class="muted">Nästa pass: tis 07:00 <span class="tag">demo</span></div>
+        </a>
 
-    const data = safeJsonParse(raw);
-    if (!data || data.v !== 1 || !data.auth) return null;
+        <a class="bigcard" href="./docs.html">
+          <div class="bigcard-title">Dokument</div>
+          <div class="muted">1 policy att kvittera <span class="tag">demo</span></div>
+        </a>
 
-    const a = data.auth;
-    const expiresAt = Number(a.expiresAt || 0);
+        <a class="bigcard" href="./report.html">
+          <div class="bigcard-title">Rapportera fel</div>
+          <div class="muted">Skicka fel med teknisk info</div>
+        </a>
 
-    if (!a.isAuthed) return null;
-    if (!expiresAt || expiresAt <= Date.now()) return null;
-    if (a.role !== "employee") return null;
+        <a class="bigcard" href="./profile.html">
+          <div class="bigcard-title">Min sida</div>
+          <div class="muted">Profil & lösenord</div>
+        </a>
+      </div>
 
-    return {
-      displayName: a.displayName || "—",
-      empNo: a.empNo || "—",
-      role: a.role || "employee"
-    };
-  }
+      <!-- Dashboard-paneler -->
+      <div class="dashgrid">
+        <section class="panel">
+          <div class="panel-title">Dagens uppgifter <span class="tag">demo</span></div>
+          <ul class="list">
+            <li><span>Check-in (2 min)</span><span class="pill">Ej startad</span></li>
+            <li><span>Läs rutin: Hygien</span><span class="pill">Pågår</span></li>
+            <li><span>Bekräfta leverans</span><span class="pill">Ej startad</span></li>
+          </ul>
+          <a class="link" href="./tasks.html">Visa alla →</a>
+        </section>
 
-  function redirectToLogin() {
-    // Vi är i /employee/ så login ligger i /UI/
-    window.location.assign("../UI/UI-01-SKELETON.html#login");
-  }
+        <section class="panel">
+          <div class="panel-title">Väntar på svar <span class="tag">demo</span></div>
+          <ul class="list">
+            <li><span>Hur gick första veckan?</span><span class="pill">Svar krävs</span></li>
+            <li><span>Har du rätt verktyg?</span><span class="pill">Svar krävs</span></li>
+          </ul>
+          <a class="link" href="./questions.html">Öppna frågor →</a>
+        </section>
+      </div>
+    </section>
 
-  function computeTechInfo(auth) {
-    const lang = document.documentElement.lang || navigator.language || "sv";
-    return {
-      page: window.location.href,
-      language: lang,
-      role: auth.role || "employee",
-      empNo: auth.empNo || "",
-      userAgent: navigator.userAgent,
-      time: new Date().toISOString()
-    };
-  }
+  </main>
 
-  function fillIdentity(auth) {
-    if (whoName) whoName.textContent = auth.displayName || "—";
-    if (whoEmpNo) whoEmpNo.textContent = auth.empNo || "—";
-    if (whoRole) whoRole.textContent = auth.role || "employee";
-
-    // Om profile-sidan har extra fält
-    if (pName) pName.textContent = auth.displayName || "—";
-    if (pEmp) pEmp.textContent = auth.empNo || "—";
-    if (pRole) pRole.textContent = auth.role || "employee";
-  }
-
-  function wireLogout() {
-    if (!btnLogout) return;
-    btnLogout.addEventListener("click", () => {
-      try { sessionStorage.removeItem(STORAGE_KEY); } catch (e) {}
-      redirectToLogin();
-    });
-  }
-
-  function wireDemoActions() {
-    document.querySelectorAll("[data-demo-action]").forEach((btn) => {
-      if (btn.dataset.bound === "1") return;
-      btn.dataset.bound = "1";
-
-      btn.addEventListener("click", () => {
-        const action = btn.getAttribute("data-demo-action");
-
-        if (action === "done") alert("Demo: markerad som klar (ingen lagring i v1).");
-        if (action === "read") alert("Demo: markerad som läst (ingen lagring i v1).");
-        if (action === "send-answer") alert("Demo: svar skickat (ska senare gå till Chef + Admin).");
-        if (action === "change-password") {
-          if (pwStatus) pwStatus.textContent = "Kräver backend för säker lösenordsändring (placeholder).";
-        }
-      });
-    });
-  }
-
-  function wireReport(auth) {
-    if (!reportForm || !techInfo) return;
-
-    // Fyll teknisk info direkt
-    techInfo.textContent = JSON.stringify(computeTechInfo(auth), null, 2);
-
-    reportForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-
-      const text = sanitizeText(reportText ? reportText.value : "");
-      if (!text) {
-        if (reportStatus) reportStatus.textContent = "Skriv en kort beskrivning innan du skickar.";
-        return;
-      }
-
-      // UI-only: inget sparas/skickas
-      if (reportStatus) reportStatus.textContent = "Demo: rapport skickad (inget sparas i v1).";
-      if (reportText) reportText.value = "";
-
-      // uppdatera tid
-      techInfo.textContent = JSON.stringify(computeTechInfo(auth), null, 2);
-    });
-  }
-
-  function init() {
-    const auth = readSessionEmployee();
-    if (!auth) {
-      redirectToLogin();
-      return;
-    }
-
-    fillIdentity(auth);
-    wireLogout();
-    wireDemoActions();
-    wireReport(auth);
-  }
-
-  init();
-})();
-
+  <!-- AO-001 | FIL-ID: employee/employee.js -->
+  <script src="./employee.js"></script>
+</body>
+</html>
