@@ -1,21 +1,20 @@
 <!-- ============================================================
-AO-049 | FIL-ID: employee/questions.html
+AO-052 | FIL-ID: employee/questions.html
 Projekt: HR-System
-Syfte: Medarbetare – Frågor (tilldelade) + Svara – UI-only v1 (nivå 3)
+Syfte: Employee – Frågor (tilldelade) + svara – UI-only v1 (nivå 3)
 Krav:
-- Employee kan INTE skapa frågor
-- Employee ser endast frågor som är tilldelade dem (anst.nr) eller deras grupp/all
-- Employee kan svara (fritext)
-- Svar sparas på separat lista (blandas inte med frågorna)
-- Anonymt svar om admin tillåtit (allowAnonymous=true på frågan)
+- Employee kan bara se tilldelade frågor och svara
+- Admin skapar frågor (på admin/questions.html)
+- Anonymt svar: endast om admin markerat allowAnonymous=true på frågan
+- Svaren ska INTE blandas med frågor i admin: visas på admin/answers.html
 Policy:
 - Ingen backend
 - Ingen känslig data lagras
 - Robust guard: sessionStorage först, fallback localStorage
 Lagring:
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
-- AO-015_QUESTIONS_V1 (localStorage) – frågor (skapade av admin)
-- AO-016_ANSWERS_V1 (localStorage) – svar (separat)
+- AO-015_QUESTIONS_V1 (localStorage) – frågor (tilldelning + allowAnonymous)
+- AO-016_ANSWERS_V1 (localStorage) – svar (append-only)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -29,7 +28,6 @@ Lagring:
   <style>
     .panel{
       border: 1px solid var(--line);
-      background: rgba(191,219,254,.12);
       transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
     }
     .panel:hover{
@@ -37,38 +35,7 @@ Lagring:
       box-shadow: var(--shadow-soft);
       filter: brightness(1.01);
     }
-
-    .toolbar{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:end;
-      justify-content:space-between;
-      margin: 10px 0;
-    }
-
-    .kpis{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-    }
-    .kpi{
-      display:flex;
-      gap:8px;
-      align-items:center;
-      padding: 6px 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background:#fff;
-      font-size:.95rem;
-    }
-
-    .list{
-      display:flex;
-      flex-direction:column;
-      gap:10px;
-    }
+    .panel.list{ background: rgba(191,219,254,.18); }
 
     .item{
       border:1px solid var(--line);
@@ -81,6 +48,7 @@ Lagring:
       justify-content:space-between;
       align-items:flex-start;
       flex-wrap:wrap;
+      margin-top:10px;
     }
     .item:hover{
       transform: var(--lift);
@@ -88,10 +56,8 @@ Lagring:
       filter: brightness(1.02);
     }
 
-    .title{ font-weight: 950; margin:0; }
+    .item-title{ font-weight: 950; margin:0; }
     .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
-    .actions{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-
     .empty{
       padding:18px;
       border:1px dashed var(--line);
@@ -99,19 +65,7 @@ Lagring:
       color: var(--muted);
       background:#fff;
       text-align:center;
-    }
-
-    textarea.small{ min-height: 90px; }
-
-    .pill{
-      border:1px solid var(--line);
-      border-radius:999px;
-      padding: 4px 10px;
-      background:#fff;
-      font-size:.9rem;
-      display:inline-flex;
-      gap:8px;
-      align-items:center;
+      margin-top:10px;
     }
 
     .row2{
@@ -122,6 +76,10 @@ Lagring:
     @media (max-width: 760px){
       .row2{ grid-template-columns: 1fr; }
     }
+
+    textarea{ min-height: 92px; }
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+    code{ font-size:.95em; }
   </style>
 </head>
 
@@ -138,65 +96,58 @@ Lagring:
     <a href="./tasks.html">Uppgifter</a>
     <a href="./questions.html" aria-current="page">Frågor</a>
     <a href="./schedule.html">Schema</a>
-    <a href="./documents.html">Dokument</a>
+    <a href="./docs.html">Dokument</a>
     <a href="./report.html">Rapportera fel</a>
     <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
   </nav>
 </header>
 
 <main class="container">
-  <h1 class="tight">Frågor till mig</h1>
-  <p class="muted">Svar du skickar sparas separat och kan ses av admin (och ev. enhetschef när den rollen finns).</p>
+  <h1 class="tight">Frågor</h1>
+  <p class="muted">Här svarar du på frågor från admin/chef. Skapande sker inte här.</p>
 
-  <section class="card panel">
-    <div class="row space-between wrap">
+  <section class="card panel list" aria-label="Frågor och svar">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
       <div class="muted">
         Inloggad: <strong id="whoName">—</strong> • Anst.nr <span id="whoEmpNo">—</span> • Roll <span>employee</span>
       </div>
-      <div class="kpis" aria-label="Sammanfattning">
-        <div class="kpi">Obesvarade: <strong id="kpiOpen">0</strong></div>
-        <div class="kpi">Besvarade: <strong id="kpiDone">0</strong></div>
-      </div>
-    </div>
-
-    <div class="toolbar" aria-label="Filter och sök">
-      <label style="min-width:240px; flex: 1 1 260px;">
-        Visa
-        <select id="filter">
-          <option value="open" selected>Obesvarade</option>
-          <option value="all">Alla</option>
-          <option value="answered">Besvarade</option>
-        </select>
-      </label>
-
-      <label style="min-width:240px; flex: 1 1 260px;">
-        Sök
-        <input id="search" type="text" placeholder="t.ex. första veckan…" />
-      </label>
-
-      <div class="actions">
+      <div class="row wrap">
         <button id="btnRefresh" type="button" class="secondary">Uppdatera</button>
       </div>
     </div>
 
-    <div id="list" class="list" aria-label="Frågelista"></div>
+    <div class="row2" aria-label="Filter">
+      <label>
+        Visa
+        <select id="filter">
+          <option value="open" selected>Obesvarade</option>
+          <option value="answered">Besvarade</option>
+          <option value="all">Alla</option>
+        </select>
+      </label>
 
-    <p id="msg" class="message" aria-live="polite"></p>
+      <label>
+        Sök (text)
+        <input id="search" type="text" placeholder="t.ex. introduktion" />
+      </label>
+    </div>
+
+    <div id="list"></div>
 
     <div class="smallnote">
-      Om admin tillåtit anonymitet kan du välja “Svara anonymt”. Då sparas svaret utan anst.nr.
+      Svar sparas till <code>AO-016_ANSWERS_V1</code> och visas för admin på <code>admin/answers.html</code>.
     </div>
   </section>
 </main>
 
 <script>
 /* ============================================================
-AO-049 | FIL-ID: employee/questions.html (inline JS)
+AO-052 | FIL-ID: employee/questions.html (inline JS)
 ============================================================ */
 (function(){
   "use strict";
 
-  const SESSION_KEY  = "AO-001_LOGIN_V1";
+  const SESSION_KEY   = "AO-001_LOGIN_V1";
   const QUESTIONS_KEY = "AO-015_QUESTIONS_V1";
   const ANSWERS_KEY   = "AO-016_ANSWERS_V1";
 
@@ -243,10 +194,23 @@ AO-049 | FIL-ID: employee/questions.html (inline JS)
       .replaceAll("'","&#039;");
   }
 
-  function setMsg(kind, text){
-    const m = $("#msg");
-    m.className = "message" + (kind ? " " + kind : "");
-    m.textContent = text || "";
+  function fmtTime(ts){
+    const t = Number(ts);
+    if(!Number.isFinite(t)) return "—";
+    const d = new Date(t);
+    if(String(d) === "Invalid Date") return "—";
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const day = String(d.getDate()).padStart(2,"0");
+    const hh = String(d.getHours()).padStart(2,"0");
+    const mm = String(d.getMinutes()).padStart(2,"0");
+    return `${y}-${m}-${day} ${hh}:${mm}`;
+  }
+
+  function normalizeEmpNo(v){
+    const s = String(v || "").trim();
+    const digits = s.replace(/[^\d]/g, "");
+    return digits;
   }
 
   function genId(prefix){
@@ -277,190 +241,159 @@ AO-049 | FIL-ID: employee/questions.html (inline JS)
     return Array.isArray(arr) ? arr : [];
   }
 
-  function isAssignedToMe(q, empNo){
-    // Enkel routing för UI-only:
-    // q.targetMode: "one" | "all" | "group"
-    // q.targetEmpNo: "1234"
-    // q.targetEmpNos: ["1234","5555"] (tillåten extraform)
-    // q.targetGroupId: "...", (group-funktionen kommer från admin)
-    // I v1 utan grupp-upplösning här: "group" visas som "tilldelad" om admin redan duplicerat per empNo.
-    const mode = String(q.targetMode || "").toLowerCase();
-    if(mode === "all") return true;
+  function isTargetedToMe(q){
+    // Förväntad question-struktur (admin skapar):
+    // q.targets = { mode:"one"|"all"|"group", empNo?: "1234", groupId?: "...", empNos?:[] }
+    // För UI-only håller vi enkel: mode all => alla, mode one => match empNo, annars empNos-lista.
+    const my = normalizeEmpNo(auth.empNo);
+    const t = q?.targets || null;
+    if(!t) return false;
 
-    const direct = String(q.targetEmpNo || "").trim();
-    if(mode === "one" && direct) return direct === String(empNo);
+    if(t.mode === "all") return true;
 
-    if(Array.isArray(q.targetEmpNos) && q.targetEmpNos.map(String).includes(String(empNo))) return true;
+    if(t.mode === "one"){
+      return normalizeEmpNo(t.empNo) === my;
+    }
 
-    // Om admin skapar “group” utan att expandera, kan vi inte veta gruppmedlemskap här (ingen groups-key i employee v1).
-    // Fail-safe: visa inte group om den saknar explicit empNo.
+    if(t.mode === "list" && Array.isArray(t.empNos)){
+      return t.empNos.map(normalizeEmpNo).includes(my);
+    }
+
+    // legacy: q.empNo direkt
+    if(q.empNo){
+      return normalizeEmpNo(q.empNo) === my;
+    }
+
     return false;
   }
 
-  function answerExistsForMe(questionId, empNo){
-    const all = loadAnswers();
-    return all.some(a => a && a.questionId === questionId && (a.empNo === String(empNo)));
+  function hasAnswered(questionId){
+    const my = normalizeEmpNo(auth.empNo);
+    return loadAnswers().some(a => String(a.questionId) === String(questionId) && (a.empNo ? normalizeEmpNo(a.empNo) === my : false));
   }
-
-  function countAnswered(empNo){
-    const my = loadQuestions().filter(q => isAssignedToMe(q, empNo));
-    const allAns = loadAnswers();
-
-    let done = 0;
-    my.forEach(q => {
-      // anonymt svar saknar empNo, så det kan inte kopplas till employee senare.
-      // Därför räknar vi "besvarad" som: antingen empNo-match, eller lokal markering i q.answeredEmpNos (om admin valt det senare).
-      if(allAns.some(a => a.questionId === q.id && a.empNo === String(empNo))) done++;
-    });
-    return { total: my.length, done };
-  }
-
-  function renderKpis(empNo){
-    const c = countAnswered(empNo);
-    $("#kpiDone").textContent = String(c.done);
-    $("#kpiOpen").textContent = String(Math.max(0, c.total - c.done));
-  }
-
-  function storeAnswer(payload){
-    const all = loadAnswers();
-    all.push(payload);
-    save(ANSWERS_KEY, all);
-  }
-
-  function normalizeBool(v){ return v === true || v === "true" || v === 1 || v === "1"; }
 
   function render(){
-    setMsg("", "");
     const list = $("#list");
     list.innerHTML = "";
 
-    const empNo = String(auth.empNo || "").trim();
     const filter = $("#filter").value;
     const q = String($("#search").value || "").trim().toLowerCase();
 
-    const qs = loadQuestions()
-      .filter(x => x && x.id)
-      .filter(x => isAssignedToMe(x, empNo))
+    const questions = loadQuestions()
+      .filter(isTargetedToMe)
       .slice()
       .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
 
-    renderKpis(empNo);
+    const rows = questions.map(x => {
+      const answered = hasAnswered(x.id);
+      return { q: x, answered };
+    });
 
-    let shown = qs;
-
-    if(filter === "open"){
-      shown = shown.filter(x => !answerExistsForMe(x.id, empNo));
-    }
-    if(filter === "answered"){
-      shown = shown.filter(x => answerExistsForMe(x.id, empNo));
-    }
+    let shown = rows;
+    if(filter === "open") shown = shown.filter(r => !r.answered);
+    if(filter === "answered") shown = shown.filter(r => r.answered);
 
     if(q){
-      shown = shown.filter(x => {
-        const blob = `${x.title||""} ${x.prompt||""} ${x.note||""}`.toLowerCase();
+      shown = shown.filter(r => {
+        const blob = `${r.q.title||""} ${r.q.prompt||""}`.toLowerCase();
         return blob.includes(q);
       });
     }
 
     if(shown.length === 0){
-      list.innerHTML = `<div class="empty">Inga frågor för valt filter.</div>`;
+      list.innerHTML = `<div class="empty">Inga frågor matchar filtret.</div>`;
       return;
     }
 
-    shown.forEach(x => {
-      const already = answerExistsForMe(x.id, empNo);
-      const allowAnon = normalizeBool(x.allowAnonymous);
+    shown.forEach(r => {
+      const x = r.q;
+      const allowAnon = (x.allowAnonymous === true);
+      const answered = r.answered;
 
       const el = document.createElement("div");
       el.className = "item";
       el.innerHTML = `
-        <div style="min-width:260px; max-width: 760px;">
-          <p class="title">${escapeHtml(x.title || "Fråga")}</p>
+        <div style="min-width:260px; flex: 1 1 520px;">
+          <p class="item-title">${escapeHtml(x.title || "Fråga")}</p>
           <div class="meta">
-            <span class="pill">${already ? "Besvarad" : "Obesvarad"}</span>
+            <span class="pill">${answered ? "Besvarad" : "Obesvarad"}</span>
             ${allowAnon ? `<span class="pill">Anonymt tillåtet</span>` : ``}
+            <span><strong>Skapad:</strong> ${escapeHtml(fmtTime(x.createdAt))}</span>
           </div>
+          <div class="meta"><span><strong>Fråga:</strong> ${escapeHtml(x.prompt || "—")}</span></div>
 
-          <div class="meta">
-            <span><strong>Fråga:</strong> ${escapeHtml(x.prompt || "—")}</span>
-          </div>
+          ${answered
+            ? `<div class="meta"><span>Du har redan svarat. (Se admin/answers.html)</span></div>`
+            : `
+              <div style="margin-top:10px;">
+                <label style="margin-top:0;">
+                  Svar
+                  <textarea data-a="answer" placeholder="Skriv ditt svar..."></textarea>
+                </label>
 
-          ${x.note ? `<div class="meta"><span><strong>Info:</strong> ${escapeHtml(x.note)}</span></div>` : ``}
+                <div class="row space-between wrap" style="margin-top:8px;">
+                  <label style="margin:0; display:flex; gap:10px; align-items:center;">
+                    <input data-a="anon" type="checkbox" ${allowAnon ? "" : "disabled"} />
+                    Svara anonymt
+                  </label>
 
-          <div class="row2" style="margin-top:10px;">
-            <label>
-              Svar
-              <textarea class="small" data-answer="${escapeHtml(x.id)}" placeholder="Skriv ditt svar här..." ${already ? "disabled" : ""}></textarea>
-            </label>
-
-            <div>
-              <label>
-                <span>Alternativ</span>
-                <div class="meta" style="margin-top:8px;">
-                  ${allowAnon ? `
-                    <label style="display:flex; gap:10px; align-items:center; margin:0;">
-                      <input type="checkbox" data-anon="${escapeHtml(x.id)}" ${already ? "disabled" : ""} />
-                      Svara anonymt
-                    </label>
-                  ` : `<span class="muted">Anonymitet ej tillåten.</span>`}
+                  <div class="row wrap" style="gap:8px;">
+                    <button type="button" class="secondary" data-a="clear">Rensa</button>
+                    <button type="button" data-a="send">Skicka svar</button>
+                  </div>
                 </div>
-              </label>
 
-              <div class="actions" style="margin-top:10px;">
-                <button type="button" data-send="${escapeHtml(x.id)}" ${already ? "disabled" : ""}>Skicka svar</button>
+                ${allowAnon ? `<div class="smallnote">Om du svarar anonymt sparas inte ditt anst.nr i svaret.</div>`
+                            : `<div class="smallnote">Anonyma svar är inte tillåtna för denna fråga.</div>`}
               </div>
-
-              ${already ? `<div class="muted small" style="margin-top:8px;">Du har redan svarat på denna fråga.</div>` : ``}
-            </div>
-          </div>
+            `
+          }
         </div>
       `;
+
       list.appendChild(el);
-    });
 
-    list.querySelectorAll("button[data-send]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        setMsg("", "");
+      if(!answered){
+        const txt = el.querySelector("textarea[data-a='answer']");
+        const cb  = el.querySelector("input[data-a='anon']");
+        const btnSend = el.querySelector("button[data-a='send']");
+        const btnClear= el.querySelector("button[data-a='clear']");
 
-        const qid = btn.getAttribute("data-send");
-        const question = loadQuestions().find(x => x && x.id === qid);
-        if(!question){
-          setMsg("err", "Kunde inte hitta frågan (den kan ha tagits bort).");
-          return;
-        }
+        btnClear.addEventListener("click", () => { txt.value = ""; if(cb && !cb.disabled) cb.checked = false; });
 
-        const empNo = String(auth.empNo || "").trim();
-        if(answerExistsForMe(qid, empNo)){
-          setMsg("err", "Du har redan svarat på den här frågan.");
-          return;
-        }
+        btnSend.addEventListener("click", () => {
+          const answer = String(txt.value || "").trim();
+          if(!answer){
+            alert("Skriv ett svar först.");
+            return;
+          }
 
-        const ta = document.querySelector(`textarea[data-answer="${CSS.escape(qid)}"]`);
-        const text = String(ta?.value || "").trim();
-        if(!text){
-          setMsg("err", "Skriv ett svar innan du skickar.");
-          return;
-        }
+          const wantsAnon = !!(cb && cb.checked);
+          if(wantsAnon && !allowAnon){
+            alert("Anonyma svar är inte tillåtna för denna fråga.");
+            return;
+          }
 
-        const allowAnon = (question.allowAnonymous === true);
-        const anonBox = document.querySelector(`input[data-anon="${CSS.escape(qid)}"]`);
-        const wantsAnon = allowAnon && !!anonBox?.checked;
+          const now = Date.now();
+          const all = loadAnswers();
 
-        const answer = {
-          id: genId("a"),
-          questionId: qid,
-          createdAt: Date.now(),
-          // Om anonymt: spara utan empNo/displayName
-          empNo: wantsAnon ? null : empNo,
-          displayName: wantsAnon ? null : (auth.displayName || null),
-          isAnonymous: wantsAnon ? true : false,
-          text
-        };
+          // append-only svar
+          all.push({
+            id: genId("a"),
+            questionId: String(x.id),
+            // om anonymt: spara inte empNo alls
+            empNo: wantsAnon ? "" : normalizeEmpNo(auth.empNo),
+            anonymous: wantsAnon,
+            answer,
+            createdAt: now
+          });
 
-        storeAnswer(answer);
-        setMsg("ok", wantsAnon ? "Skickat (anonymt)." : "Skickat.");
-        render();
-      });
+          save(ANSWERS_KEY, all);
+
+          // markera UI som besvarad (re-render)
+          render();
+        });
+      }
     });
   }
 
