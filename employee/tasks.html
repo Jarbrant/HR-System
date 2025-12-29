@@ -1,16 +1,19 @@
 <!-- ============================================================
-AO-035 | FIL-ID: employee/tasks.html
+AO-048 | FIL-ID: employee/tasks.html
 Projekt: HR-System
-Syfte: Medarbetare – Uppgifter (tilldelade) + status + kommentar (anonym om tillåtet) – UI-only v1
-Fix:
-- Robust session-guard: läser AO-001_LOGIN_V1 från sessionStorage, fallback localStorage
-- Undviker "klickar Uppgifter => login" när session råkar ligga i annat storage eller saknar expiresAt
+Syfte: Medarbetare – Uppgifter (tilldelade) – UI-only v1 (nivå 3)
+Krav:
+- Employee kan INTE skapa uppgifter
+- Employee ser sina tilldelade uppgifter (AO-014_TASKS_V1)
+- Employee kan uppdatera status + kommentar
+- Återkommande: "Klar idag" via exceptionsDone (per datum)
 Policy:
 - Ingen backend
 - Ingen känslig data lagras
+- Robust guard: sessionStorage först, fallback localStorage
 Lagring:
-- AO-001_LOGIN_V1 (sessionStorage eller localStorage) – session
-- AO-014_TASKS_V1 (localStorage) – uppgifter
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-014_TASKS_V1 (localStorage) – uppgifter (inkl. recurring + exceptionsDone)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -22,34 +25,71 @@ Lagring:
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
   <style>
-    .layout{
-      display:grid;
-      grid-template-columns: 0.95fr 1.05fr;
-      gap: 12px;
-      align-items:start;
+    .panel{
+      border: 1px solid var(--line);
+      background: rgba(167,243,208,.12);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
     }
-    @media (max-width: 980px){
-      .layout{ grid-template-columns: 1fr; }
+    .panel:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
     }
+
+    .toolbar{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:end;
+      justify-content:space-between;
+      margin: 10px 0;
+    }
+
+    .kpis{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .kpi{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.95rem;
+    }
+
+    .list{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+
     .item{
       border:1px solid var(--line);
       border-radius: var(--r14);
       padding: 12px;
       background:#fff;
       transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
-      cursor:pointer;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
     }
     .item:hover{
       transform: var(--lift);
       box-shadow: var(--shadow-soft);
       filter: brightness(1.02);
     }
-    .item.active{
-      outline: 3px solid rgba(17,17,17,0.10);
-      outline-offset: 2px;
-    }
-    .item-title{ font-weight: 900; margin:0; }
-    .item-meta{ margin-top:6px; display:flex; gap:10px; flex-wrap:wrap; color:var(--muted); font-size:.9rem; }
+
+    .title{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .actions{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+
     .empty{
       padding:18px;
       border:1px dashed var(--line);
@@ -58,19 +98,32 @@ Lagring:
       background:#fff;
       text-align:center;
     }
-    .toggle{
-      display:flex;
-      gap:10px;
-      align-items:center;
-      user-select:none;
-      margin-top: 10px;
-      padding: 10px;
-      border: 1px solid var(--line);
-      border-radius: var(--r14);
-      background:#fff;
+
+    textarea.small{
+      min-height: 70px;
     }
-    .toggle input{ transform: scale(1.1); }
-    .hint{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+
+    .pill{
+      border:1px solid var(--line);
+      border-radius:999px;
+      padding: 4px 10px;
+      background:#fff;
+      font-size:.9rem;
+      display:inline-flex;
+      gap:8px;
+      align-items:center;
+    }
+
+    .row2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 760px){
+      .row2{ grid-template-columns: 1fr; }
+    }
+
+    code{ font-size:.95em; }
   </style>
 </head>
 
@@ -87,93 +140,62 @@ Lagring:
     <a href="./tasks.html" aria-current="page">Uppgifter</a>
     <a href="./questions.html">Frågor</a>
     <a href="./schedule.html">Schema</a>
-    <a href="./docs.html">Dokument</a>
+    <a href="./documents.html">Dokument</a>
     <a href="./report.html">Rapportera fel</a>
-    <a href="./profile.html">Min sida</a>
     <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
   </nav>
 </header>
 
 <main class="container">
-  <h1 class="tight">Uppgifter</h1>
-  <p class="muted">Här ser du uppgifter som är tilldelade till dig. Uppdatera status och lämna kommentar.</p>
+  <h1 class="tight">Mina uppgifter</h1>
+  <p class="muted">Här ser du uppgifter som admin/enhetschef tilldelat. Uppdatera status och lämna kommentar vid behov.</p>
 
-  <section class="card">
-    <div class="row space-between wrap" style="margin-bottom:10px;">
+  <section class="card panel">
+    <div class="row space-between wrap">
       <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Anst.nr <span id="whoEmpNo">—</span>
+        Inloggad: <strong id="whoName">—</strong> • Anst.nr <span id="whoEmpNo">—</span> • Roll <span>employee</span>
       </div>
-
-      <label style="margin:0; font-weight:800;">
-        Filter
-        <select id="filter" style="margin-top:6px; width:auto;">
-          <option value="open">Ej klara</option>
-          <option value="all">Alla</option>
-          <option value="done">Klara</option>
-        </select>
-      </label>
+      <div class="kpis" aria-label="Sammanfattning">
+        <div class="kpi">Öppna idag: <strong id="kpiOpenToday">0</strong></div>
+        <div class="kpi">Pågår: <strong id="kpiProg">0</strong></div>
+        <div class="kpi">Klara: <strong id="kpiDone">0</strong></div>
+      </div>
     </div>
 
-    <div class="layout">
-      <section class="panel" aria-label="Lista">
-        <div class="panel-title">Mina uppgifter</div>
-        <div id="list"></div>
-      </section>
+    <div class="toolbar" aria-label="Filter och sök">
+      <label style="min-width:240px; flex: 1 1 260px;">
+        Visa
+        <select id="filter">
+          <option value="todayOpen" selected>Öppna idag</option>
+          <option value="all">Alla</option>
+          <option value="done">Klara</option>
+          <option value="progress">Pågår</option>
+          <option value="recurring">Återkommande</option>
+        </select>
+      </label>
 
-      <section class="panel" aria-label="Detalj">
-        <div class="panel-title">Detalj</div>
+      <label style="min-width:240px; flex: 1 1 260px;">
+        Sök
+        <input id="search" type="text" placeholder="t.ex. hygien, introduktion…" />
+      </label>
 
-        <div id="detailEmpty" class="empty">Välj en uppgift i listan.</div>
+      <div class="actions">
+        <button id="btnRefresh" type="button" class="secondary">Uppdatera</button>
+      </div>
+    </div>
 
-        <div id="detail" style="display:none;">
-          <p class="item-title" id="dTitle">—</p>
-          <div class="item-meta">
-            <span class="pill" id="dStatus">—</span>
-            <span class="pill" id="dAnonRule">Anonym kommentar: —</span>
-          </div>
+    <div id="list" class="list" aria-label="Uppgiftslista"></div>
 
-          <div style="margin-top:10px;">
-            <div class="muted small" style="font-weight:900;">Uppgift</div>
-            <div id="dBody" class="muted" style="margin-top:6px;">—</div>
-          </div>
-
-          <label style="margin-top:10px;">
-            Status
-            <select id="status">
-              <option value="todo">Ej startad</option>
-              <option value="doing">Pågår</option>
-              <option value="done">Klar</option>
-            </select>
-          </label>
-
-          <div id="anonWrap" style="display:none;">
-            <label class="toggle">
-              <input id="anonToggle" type="checkbox" />
-              <span><strong>Kommentera anonymt</strong> <span class="muted">(endast om tillåtet för denna uppgift)</span></span>
-            </label>
-          </div>
-
-          <label style="margin-top:10px;">
-            Kommentar
-            <textarea id="comment" placeholder="Skriv en kort kommentar…"></textarea>
-          </label>
-
-          <div class="row-actions" style="margin-top:10px;">
-            <button id="btnSave" type="button">Spara</button>
-            <button id="btnReset" class="secondary" type="button">Ångra</button>
-          </div>
-
-          <p id="msg" class="message" aria-live="polite"></p>
-          <div class="hint">v1: Kommentar syns för admin senare (om/ när vi gör admin-vy för uppgiftskommentarer).</div>
-        </div>
-      </section>
+    <p id="msg" class="message" aria-live="polite"></p>
+    <div class="smallnote">
+      Återkommande uppgift: du kan markera <strong>Klar idag</strong> (sparas per datum via <code>exceptionsDone</code>).
     </div>
   </section>
 </main>
 
 <script>
 /* ============================================================
-AO-035 | FIL-ID: employee/tasks.html (inline JS)
+AO-048 | FIL-ID: employee/tasks.html (inline JS)
 ============================================================ */
 (function(){
   "use strict";
@@ -185,7 +207,6 @@ AO-035 | FIL-ID: employee/tasks.html (inline JS)
 
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
-  // Robust: sessionStorage först, fallback localStorage (för äldre/andra sidor)
   function readRawSession(){
     const s1 = sessionStorage.getItem(SESSION_KEY);
     if (s1) return s1;
@@ -201,39 +222,20 @@ AO-035 | FIL-ID: employee/tasks.html (inline JS)
       const data = JSON.parse(raw);
       if(!data?.auth?.isAuthed) return null;
       if(data.auth.role !== "employee") return null;
-
-      // Guard: om expiresAt finns, respektera. Om saknas (vissa äldre varianter), låt den passera.
       if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-
       return data.auth;
     }catch{
       return null;
     }
   }
 
-  const auth = readAuth();
-  if(!auth){ redirectLogin(); return; }
-
-  $("#whoName").textContent = auth.displayName || "—";
-  $("#whoEmpNo").textContent = auth.empNo || "—";
-
-  function doLogout(){
-    sessionStorage.removeItem(SESSION_KEY);
-    // rensa ev fallback också, men bara på aktiv logout
-    localStorage.removeItem(SESSION_KEY);
-    redirectLogin();
-  }
-  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
-
-  function loadTasks(){
+  function safeParse(key, fallback){
     try{
-      const arr = JSON.parse(localStorage.getItem(TASKS_KEY) || "[]");
-      return Array.isArray(arr) ? arr : [];
-    }catch{
-      return [];
-    }
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
   }
-  function saveTasks(arr){ localStorage.setItem(TASKS_KEY, JSON.stringify(arr)); }
+  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
 
   function escapeHtml(s){
     return String(s ?? "")
@@ -244,159 +246,371 @@ AO-035 | FIL-ID: employee/tasks.html (inline JS)
       .replaceAll("'","&#039;");
   }
 
-  function isDone(t){ return (t.status || "todo") === "done"; }
-  function statusLabel(t){
-    const s = (t.status || "todo");
-    if(s === "done") return "Klar";
-    if(s === "doing") return "Pågår";
-    return "Ej startad";
-  }
-  function anonRuleLabel(t){
-    return (t.allowAnonymousComment === true) ? "Tillåtet" : "Ej tillåtet";
-  }
-
   function setMsg(kind, text){
     const m = $("#msg");
     m.className = "message" + (kind ? " " + kind : "");
     m.textContent = text || "";
   }
 
-  const empNo = String(auth.empNo || "").trim();
-
-  let tasks = loadTasks();
-  let my = [];
-  let selectedId = null;
-  let snapshot = null;
-
-  function reload(){
-    tasks = loadTasks();
-    my = tasks.filter(t => String(t.empNo || "").trim() === empNo);
+  function todayISO(){
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const day = String(d.getDate()).padStart(2,"0");
+    return `${y}-${m}-${day}`;
   }
 
-  function closeDetail(){
-    $("#detail").style.display = "none";
-    $("#detailEmpty").style.display = "block";
-    $("#anonWrap").style.display = "none";
-    selectedId = null;
-    snapshot = null;
-    setMsg("", "");
+  function isISODate(s){
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(s||""));
   }
 
-  function openDetail(id){
-    reload();
-    const t = my.find(x => x.id === id) || null;
-    if(!t){ closeDetail(); return; }
-
-    snapshot = JSON.parse(JSON.stringify(t));
-
-    $("#detailEmpty").style.display = "none";
-    $("#detail").style.display = "block";
-
-    $("#dTitle").textContent = t.title || "—";
-    $("#dStatus").textContent = statusLabel(t);
-    $("#dAnonRule").textContent = "Anonym kommentar: " + anonRuleLabel(t);
-    $("#dBody").textContent = t.body || "—";
-
-    $("#status").value = (t.status || "todo");
-
-    const allowAnon = (t.allowAnonymousComment === true);
-    $("#anonWrap").style.display = allowAnon ? "block" : "none";
-    $("#anonToggle").checked = !!t.commentAnonymous;
-
-    $("#comment").value = t.comment || "";
-
-    setMsg("", "");
+  function parseISOToTime(iso){
+    if(!isISODate(iso)) return null;
+    const t = Date.parse(iso + "T00:00:00");
+    return Number.isFinite(t) ? t : null;
   }
 
-  function renderList(){
-    reload();
+  function statusLabel(s){
+    if(s === "done") return "Klar";
+    if(s === "progress") return "Pågår";
+    return "Ej startad";
+  }
 
-    const filter = $("#filter").value;
-    const listEl = $("#list");
-    listEl.innerHTML = "";
+  function kindLabel(k){
+    if(k === "recurring") return "Återkommande";
+    return "Engång";
+  }
 
-    const arr = my.slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
-    const shown = arr.filter(t => {
-      if(filter === "open") return !isDone(t);
-      if(filter === "done") return isDone(t);
+  function recurringRuleLabel(rec){
+    if(!rec || rec.kind !== "recurring") return "";
+    const freq = rec.freq || "daily";
+    const interval = Number(rec.interval || 1);
+    const freqSv = (freq === "weekly") ? "vecka" : (freq === "monthly" ? "månad" : "dag");
+    const iv = interval === 1 ? "" : ` var ${interval}e`;
+    let days = "";
+    if(freq === "weekly" && Array.isArray(rec.byWeekday) && rec.byWeekday.length){
+      const map = {1:"mån",2:"tis",3:"ons",4:"tor",5:"fre",6:"lör",7:"sön"};
+      days = " (" + rec.byWeekday.map(d => map[String(d)] || "").filter(Boolean).join(", ") + ")";
+    }
+    const until = rec.untilDate ? ` t.o.m. ${rec.untilDate}` : " tillsvidare";
+    return `Varje${iv} ${freqSv}${days}${until}`;
+  }
+
+  function dateLabel(task){
+    const kind = task.kind || "oneoff";
+    const s = task.startDate || "";
+    const e = task.endDate || "";
+    if(kind === "recurring"){
+      const u = task.recurring?.untilDate || "";
+      if(s && u) return `${s} → t.o.m. ${u}`;
+      if(s) return `${s} → tillsvidare`;
+      return "—";
+    }
+    if(s && e) return `${s}–${e}`;
+    if(s) return `${s}`;
+    if(e) return `t.o.m. ${e}`;
+    return "—";
+  }
+
+  function isRecurringActiveToday(task){
+    // UI-only: vi avgör "synlig idag" baserat på startDate + untilDate + ev. weekly byWeekday
+    if((task.kind||"oneoff") !== "recurring") return false;
+
+    const today = todayISO();
+    const start = task.startDate || "";
+    const until = task.recurring?.untilDate || "";
+
+    // måste ha startdatum
+    if(!start || !isISODate(start)) return true; // fail-open: visa hellre än dölj
+    const tNow = parseISOToTime(today);
+    const tStart = parseISOToTime(start);
+    if(tNow !== null && tStart !== null && tNow < tStart) return false;
+
+    if(until && isISODate(until)){
+      const tUntil = parseISOToTime(until);
+      if(tNow !== null && tUntil !== null && tNow > tUntil) return false; // inclusive policy
+    }
+
+    const rec = task.recurring || {};
+    if((rec.freq||"daily") === "weekly"){
+      const by = Array.isArray(rec.byWeekday) ? rec.byWeekday : [];
+      if(by.length){
+        const js = new Date().getDay(); // 0 Sun .. 6 Sat
+        const wd = (js === 0) ? 7 : js; // 1..7
+        return by.includes(wd);
+      }
+      // inga dagar => visa (admin fixar default, men fail-open här)
       return true;
-    });
+    }
 
-    if(!shown.length){
-      listEl.innerHTML = `<div class="empty">Inga uppgifter för valt filter.</div>`;
-      closeDetail();
+    // daily/monthly: vi visar (monthly exakt-dag kräver mer logik; vi fail-open)
+    return true;
+  }
+
+  function isOneOffActiveToday(task){
+    // Engång: om datum finns - visa om inom intervall eller deadline idag
+    const kind = task.kind || "oneoff";
+    if(kind !== "oneoff") return false;
+
+    const today = todayISO();
+    const start = task.startDate || "";
+    const end = task.endDate || "";
+
+    if(!start && !end) return true; // ingen datumstyrning => alltid synlig
+    const tNow = parseISOToTime(today);
+
+    if(start && isISODate(start)){
+      const tStart = parseISOToTime(start);
+      if(tNow !== null && tStart !== null && tNow < tStart) return false;
+    }
+
+    if(end && isISODate(end)){
+      const tEnd = parseISOToTime(end);
+      if(tNow !== null && tEnd !== null && tNow > tEnd) return false;
+    }
+
+    return true;
+  }
+
+  function effectiveStatusForToday(task){
+    // Engång: statusfältet gäller alltid
+    // Återkommande: "done idag" styrs av exceptionsDone
+    if((task.kind||"oneoff") !== "recurring") return (task.status || "open");
+
+    const ex = Array.isArray(task.exceptionsDone) ? task.exceptionsDone : [];
+    const today = todayISO();
+    if(ex.includes(today)) return "done_today";
+    return (task.status || "open");
+  }
+
+  function loadTasksForEmp(empNo){
+    const all = safeParse(TASKS_KEY, []);
+    if(!Array.isArray(all)) return [];
+    return all.filter(t => String(t.empNo||"") === String(empNo||""));
+  }
+
+  function saveTaskUpdate(taskId, updater){
+    const all = safeParse(TASKS_KEY, []);
+    if(!Array.isArray(all)) return false;
+    const idx = all.findIndex(t => t.id === taskId);
+    if(idx < 0) return false;
+    const t = all[idx];
+    const next = updater({ ...t });
+    next.updatedAt = Date.now();
+    all[idx] = next;
+    save(TASKS_KEY, all);
+    return true;
+  }
+
+  // --- Guard ---
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+
+  $("#whoName").textContent = auth.displayName || "—";
+  $("#whoEmpNo").textContent = auth.empNo || "—";
+
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  function updateKpis(tasks){
+    const todayOpen = tasks.filter(t => {
+      const eff = effectiveStatusForToday(t);
+      const isDone = (eff === "done") || (eff === "done_today");
+      const activeToday = (t.kind === "recurring") ? isRecurringActiveToday(t) : isOneOffActiveToday(t);
+      return activeToday && !isDone;
+    }).length;
+
+    const prog = tasks.filter(t => (t.status||"open") === "progress").length;
+    const done = tasks.filter(t => {
+      const eff = effectiveStatusForToday(t);
+      return eff === "done" || eff === "done_today";
+    }).length;
+
+    $("#kpiOpenToday").textContent = String(todayOpen);
+    $("#kpiProg").textContent = String(prog);
+    $("#kpiDone").textContent = String(done);
+  }
+
+  function render(){
+    setMsg("", "");
+    const list = $("#list");
+    list.innerHTML = "";
+
+    const empNo = String(auth.empNo || "").trim();
+    const filter = $("#filter").value;
+    const q = String($("#search").value || "").trim().toLowerCase();
+
+    const tasks = loadTasksForEmp(empNo)
+      .slice()
+      .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+
+    updateKpis(tasks);
+
+    let shown = tasks;
+
+    // filter
+    if(filter === "todayOpen"){
+      shown = shown.filter(t => {
+        const activeToday = (t.kind === "recurring") ? isRecurringActiveToday(t) : isOneOffActiveToday(t);
+        const eff = effectiveStatusForToday(t);
+        const done = (eff === "done") || (eff === "done_today");
+        return activeToday && !done;
+      });
+    }
+    if(filter === "done"){
+      shown = shown.filter(t => {
+        const eff = effectiveStatusForToday(t);
+        return eff === "done" || eff === "done_today";
+      });
+    }
+    if(filter === "progress"){
+      shown = shown.filter(t => (t.status||"open") === "progress");
+    }
+    if(filter === "recurring"){
+      shown = shown.filter(t => (t.kind||"oneoff") === "recurring");
+    }
+
+    if(q){
+      shown = shown.filter(t => {
+        const blob = `${t.title||""} ${t.text||""} ${t.adminNote||""} ${t.employeeComment||""}`.toLowerCase();
+        return blob.includes(q);
+      });
+    }
+
+    if(shown.length === 0){
+      list.innerHTML = `<div class="empty">Inga uppgifter för valt filter.</div>`;
       return;
     }
+
+    const today = todayISO();
 
     shown.forEach(t => {
+      const kind = t.kind || "oneoff";
+      const eff = effectiveStatusForToday(t);
+      const recLabel = (kind === "recurring") ? recurringRuleLabel(t.recurring) : "";
+      const dates = dateLabel(t);
+
+      const isDoneToday = (eff === "done_today");
+      const isDone = (t.status === "done") || isDoneToday;
+
       const el = document.createElement("div");
-      el.className = "item" + (t.id === selectedId ? " active" : "");
+      el.className = "item";
       el.innerHTML = `
-        <p class="item-title">${escapeHtml(t.title || "—")}</p>
-        <div class="item-meta">
-          <span class="pill">${escapeHtml(statusLabel(t))}</span>
-          <span class="pill">Anonym kommentar: ${escapeHtml(anonRuleLabel(t))}</span>
+        <div style="min-width:260px; max-width: 760px;">
+          <p class="title">${escapeHtml(t.title || "Uppgift")}</p>
+
+          <div class="meta">
+            <span class="pill">${escapeHtml(kindLabel(kind))}</span>
+            <span class="pill">${escapeHtml(isDoneToday ? "Klar idag" : statusLabel(t.status||"open"))}</span>
+            <span class="pill">Prio: ${escapeHtml(t.prio || "normal")}</span>
+          </div>
+
+          <div class="meta">
+            <span><strong>Datum:</strong> ${escapeHtml(dates)}</span>
+            ${recLabel ? `<span><strong>Regel:</strong> ${escapeHtml(recLabel)}</span>` : ``}
+          </div>
+
+          <div class="meta"><span><strong>Uppgift:</strong> ${escapeHtml(t.text || "—")}</span></div>
+          ${t.adminNote ? `<div class="meta"><span><strong>Admin:</strong> ${escapeHtml(t.adminNote)}</span></div>` : ``}
+
+          <div class="row2" style="margin-top:10px;">
+            <label>
+              Status
+              <select data-status="${escapeHtml(t.id)}">
+                <option value="open">Ej startad</option>
+                <option value="progress">Pågår</option>
+                <option value="done">${kind === "recurring" ? "Klar (tillsvidare)" : "Klar"}</option>
+              </select>
+            </label>
+
+            <label>
+              Kommentar (valfri)
+              <textarea class="small" data-comment="${escapeHtml(t.id)}" placeholder="Skriv kort…">${escapeHtml(t.employeeComment || "")}</textarea>
+            </label>
+          </div>
+
+          ${kind === "recurring" ? `
+            <div class="meta" style="margin-top:10px;">
+              <span class="pill">Idag: <strong>${escapeHtml(today)}</strong></span>
+              <button type="button" class="secondary" data-done-today="${escapeHtml(t.id)}">
+                ${isDoneToday ? "Ångra Klar idag" : "Markera Klar idag"}
+              </button>
+            </div>
+          ` : ``}
+        </div>
+
+        <div class="actions">
+          <button type="button" data-save="${escapeHtml(t.id)}">Spara</button>
         </div>
       `;
-      el.addEventListener("click", () => {
-        selectedId = t.id;
-        renderList();
-        openDetail(t.id);
-      });
-      listEl.appendChild(el);
+
+      // select default
+      const sel = el.querySelector(`select[data-status="${CSS.escape(t.id)}"]`);
+      if(sel){
+        sel.value = (t.status || "open");
+      }
+
+      list.appendChild(el);
     });
 
-    if(!selectedId && shown[0]){
-      selectedId = shown[0].id;
-      openDetail(selectedId);
-      renderList();
-    }else if(selectedId && !shown.find(x => x.id === selectedId)){
-      selectedId = shown[0].id;
-      openDetail(selectedId);
-      renderList();
-    }
+    // handlers
+    list.querySelectorAll("button[data-save]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-save");
+        const sel = list.querySelector(`select[data-status="${CSS.escape(id)}"]`);
+        const ta  = list.querySelector(`textarea[data-comment="${CSS.escape(id)}"]`);
+
+        const nextStatus = sel ? sel.value : "open";
+        const nextComment = ta ? ta.value : "";
+
+        const ok = saveTaskUpdate(id, (curr) => {
+          curr.status = nextStatus;
+          curr.employeeComment = String(nextComment || "");
+          return curr;
+        });
+
+        if(ok){
+          setMsg("ok", "Sparat.");
+          render();
+        }else{
+          setMsg("err", "Kunde inte spara (hittade inte uppgiften).");
+        }
+      });
+    });
+
+    list.querySelectorAll("button[data-done-today]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-done-today");
+        const iso = todayISO();
+
+        const ok = saveTaskUpdate(id, (curr) => {
+          curr.kind = curr.kind || "recurring";
+          curr.exceptionsDone = Array.isArray(curr.exceptionsDone) ? curr.exceptionsDone : [];
+          const set = new Set(curr.exceptionsDone.map(String));
+          if(set.has(iso)) set.delete(iso); else set.add(iso);
+          curr.exceptionsDone = Array.from(set).sort();
+          return curr;
+        });
+
+        if(ok){
+          setMsg("ok", "Uppdaterat (Klar idag).");
+          render();
+        }else{
+          setMsg("err", "Kunde inte uppdatera.");
+        }
+      });
+    });
   }
 
-  $("#filter").addEventListener("change", renderList);
+  $("#filter").addEventListener("change", render);
+  $("#search").addEventListener("input", render);
+  $("#btnRefresh").addEventListener("click", render);
 
-  $("#btnReset").addEventListener("click", () => {
-    if(!snapshot || !selectedId) return;
-    $("#status").value = snapshot.status || "todo";
-    $("#comment").value = snapshot.comment || "";
-    $("#anonToggle").checked = !!snapshot.commentAnonymous;
-    setMsg("warn", "Ångrat (inte sparat).");
-  });
-
-  $("#btnSave").addEventListener("click", () => {
-    if(!selectedId) return;
-
-    const newStatus = $("#status").value;
-    const rawComment = String($("#comment").value || "").trim();
-
-    tasks = loadTasks();
-    const idx = tasks.findIndex(x => x.id === selectedId);
-    if(idx < 0){
-      setMsg("err", "Kunde inte spara (uppgiften hittades inte).");
-      return;
-    }
-
-    const t = tasks[idx];
-    const allowAnon = (t.allowAnonymousComment === true);
-    const wantAnon = allowAnon ? !!$("#anonToggle").checked : false;
-
-    t.status = newStatus;
-    t.commentAnonymous = wantAnon ? true : false;
-    t.comment = rawComment;
-    t.updatedAt = Date.now();
-
-    saveTasks(tasks);
-
-    setMsg("ok", "Sparat.");
-    renderList();
-    openDetail(selectedId);
-  });
-
-  renderList();
+  render();
 
 })();
 </script>
