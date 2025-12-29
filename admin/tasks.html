@@ -1,18 +1,20 @@
 <!-- ============================================================
-AO-024 | FIL-ID: admin/tasks.html
+AO-046 | FIL-ID: admin/tasks.html
 Projekt: HR-System
-Syfte: Admin – Tilldela uppgifter (en / alla / grupp) + batch (UI-only v1)
-Mål:
-- Välj mottagare: en (empNo), alla, grupp
-- Skicka flera uppgifter åt gången (en per rad)
-- Uppgifter syns hos employee/tasks.html (läser samma key)
+Syfte: Admin – Uppgifter (tilldela) – UI-only v1 (nivå 3)
+Krav:
+- Admin skapar/tilldelar uppgifter (batch)
+- Mottagare: en employee, alla, eller grupp
+- Status + kommentar (admin-notis)
+- Inga skapafunktioner på employee-sidan (employee markerar bara status + kommentar)
 Policy:
 - Ingen backend
 - Ingen känslig data lagras
-- Guard + logout (admin)
+- Robust guard: sessionStorage först, fallback localStorage
 Lagring:
-- AO-014_TASKS_V1 (localStorage) – uppgifter (employee läser)
-- AO-023_GROUPS_V1 (localStorage) – grupper (admin UI-only, återanvänds)
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-017_GROUPS_V1 (localStorage) – grupper
+- AO-014_TASKS_V1 (localStorage) – uppgifter
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -26,32 +28,56 @@ Lagring:
   <style>
     .layout{
       display:grid;
-      grid-template-columns: 1.05fr 0.95fr;
+      grid-template-columns: 1fr 1fr;
       gap: 12px;
       align-items:start;
     }
     @media (max-width: 980px){
       .layout{ grid-template-columns: 1fr; }
     }
+
+    .panel{
+      border: 1px solid var(--line);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .panel:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+    .panel.create{ background: rgba(167,243,208,.18); }
+    .panel.list{ background: rgba(191,219,254,.18); }
+
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+
+    .row2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 620px){
+      .row2{ grid-template-columns: 1fr; }
+    }
+
     .item{
       border:1px solid var(--line);
       border-radius: var(--r14);
       padding: 12px;
       background:#fff;
       transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
-      cursor:pointer;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
     }
     .item:hover{
       transform: var(--lift);
       box-shadow: var(--shadow-soft);
       filter: brightness(1.02);
     }
-    .item.active{
-      outline: 3px solid rgba(17,17,17,0.10);
-      outline-offset: 2px;
-    }
-    .item-title{ font-weight: 900; margin:0; }
-    .item-meta{ margin-top:6px; display:flex; gap:10px; flex-wrap:wrap; color:var(--muted); font-size:.9rem; }
+    .item-title{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
     .empty{
       padding:18px;
       border:1px dashed var(--line);
@@ -60,15 +86,6 @@ Lagring:
       background:#fff;
       text-align:center;
     }
-    .split{
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-    @media (max-width: 980px){
-      .split{ grid-template-columns: 1fr; }
-    }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
   </style>
 </head>
 
@@ -82,146 +99,118 @@ Lagring:
 
   <nav class="nav" aria-label="Meny">
     <a href="./home.html">Hem</a>
-    <a href="./reports.html">Felrapporter</a>
-    <a href="./questions.html">Frågor</a>
     <a href="./tasks.html" aria-current="page">Uppgifter</a>
-    <a href="./docs.html">Dokument</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
     <a href="./integrations.html">Integrationer</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
   </nav>
-
-  <div class="row-actions" style="margin-left:auto;">
-    <button id="btnLogout" class="secondary" type="button">Logga ut</button>
-  </div>
 </header>
 
 <main class="container">
-  <h1 class="tight">Uppgifter</h1>
-  <p class="muted">Tilldela uppgifter till en, alla eller grupp. Batch = en uppgift per rad.</p>
+  <h1 class="tight">Uppgifter (Admin)</h1>
+  <p class="muted">Skapa och tilldela uppgifter. Medarbetaren uppdaterar status på sin sida.</p>
 
   <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+      </div>
+      <div class="row wrap">
+        <a class="btn secondary" href="../employee/tasks.html">Öppna employee/tasks (demo)</a>
+      </div>
+    </div>
+
     <div class="layout">
 
-      <!-- Skapa / batch -->
-      <section class="panel" aria-label="Tilldela uppgifter">
-        <div class="panel-title">Tilldela uppgifter <span class="tag">batch</span></div>
+      <!-- SKAPA -->
+      <section class="panel create" aria-label="Skapa uppgifter">
+        <div class="panel-title">Skapa uppgifter (batch)</div>
 
-        <div class="split">
-          <label>
-            Rubrik (gemensam)
-            <input id="title" type="text" placeholder="t.ex. Onboarding – Dag 1" maxlength="140" />
-          </label>
-
+        <div class="row2">
           <label>
             Mottagare
             <select id="targetMode">
               <option value="one">En medarbetare</option>
               <option value="all">Alla medarbetare</option>
-              <option value="group">En grupp</option>
+              <option value="group">Grupp</option>
+            </select>
+          </label>
+
+          <label id="oneWrap">
+            Anst.nr (employee)
+            <input id="targetEmpNo" type="text" placeholder="t.ex. 1234" />
+          </label>
+
+          <label id="groupWrap" style="display:none;">
+            Grupp
+            <select id="targetGroup"></select>
+          </label>
+
+          <label>
+            Prioritet
+            <select id="prio">
+              <option value="normal">Normal</option>
+              <option value="high">Hög</option>
+              <option value="low">Låg</option>
             </select>
           </label>
         </div>
 
-        <div id="targetOne" class="split" style="margin-top:8px;">
-          <label>
-            Anställningsnummer (mål)
-            <input id="empNo" type="text" placeholder="t.ex. 1234" inputmode="numeric" />
-          </label>
-
-          <label>
-            Snabbval (kända anst.nr)
-            <select id="empPick">
-              <option value="">—</option>
-            </select>
-          </label>
-        </div>
-
-        <div id="targetGroup" style="display:none; margin-top:8px;">
-          <label>
-            Välj grupp
-            <select id="groupPick">
-              <option value="">—</option>
-            </select>
-          </label>
-          <div class="muted small" id="groupInfo" style="margin-top:6px;">—</div>
-        </div>
-
-        <div class="split" style="margin-top:8px;">
-          <label>
-            Deadline (valfri, gäller alla i batch)
-            <input id="due" type="date" />
-          </label>
-
-          <label>
-            Status vid skapande
-            <select id="initStatus">
-              <option value="todo">Ej startad</option>
-              <option value="doing">Pågår</option>
-            </select>
-          </label>
-        </div>
-
-        <label style="margin-top:8px;">
-          Uppgifter (en per rad)
-          <textarea id="tasksBatch" placeholder="Skriv en uppgift per rad…&#10;Ex: Läs rutin: Hygien&#10;Ex: Bekräfta leverans&#10;Ex: Check-in (2 min)"></textarea>
+        <label style="margin-top:10px;">
+          Titel (valfri)
+          <input id="title" type="text" placeholder="t.ex. Introduktion dag 1" />
         </label>
 
-        <label style="margin-top:8px;">
-          Beskrivning (gemensam instruktion, valfri)
-          <textarea id="desc" placeholder="Tilläggsinstruktion som gäller alla uppgifter i batch (valfritt)…" maxlength="2000"></textarea>
+        <label style="margin-top:10px;">
+          Uppgifter (en per rad)
+          <textarea id="tasks" placeholder="Skriv en uppgift per rad..."></textarea>
+        </label>
+
+        <label style="margin-top:10px;">
+          Admin-notis (valfri)
+          <input id="adminNote" type="text" placeholder="t.ex. Klart senast fredag" />
         </label>
 
         <div class="row-actions" style="margin-top:10px;">
-          <button id="btnSend" type="button">Skicka</button>
+          <button id="btnCreate" type="button">Skapa & tilldela</button>
           <button id="btnClear" class="secondary" type="button">Rensa</button>
         </div>
 
         <p id="msg" class="message" aria-live="polite"></p>
 
-        <p class="muted small" style="margin-top:10px;">
-          “Alla” utan backend = alla anst.nr som systemet känner till via tidigare tasks/frågor/grupper.
-        </p>
+        <div class="smallnote">
+          Batch: en rad = en uppgift. Skapas per mottagare.
+        </div>
       </section>
 
-      <!-- Lista / detalj -->
-      <section class="panel" aria-label="Tilldelade uppgifter">
-        <div class="row space-between wrap">
-          <div class="panel-title">Tilldelade uppgifter</div>
+      <!-- LISTA -->
+      <section class="panel list" aria-label="Översikt">
+        <div class="panel-title">Översikt</div>
 
-          <label style="margin:0; font-weight:700;">
-            Filter
-            <select id="filter" style="margin-top:6px; width:auto;">
-              <option value="all">Alla</option>
-              <option value="todo">Ej startad</option>
-              <option value="doing">Pågår</option>
-              <option value="done">Klar</option>
+        <div class="row2" style="margin-bottom:10px;">
+          <label>
+            Visa
+            <select id="listFilter">
+              <option value="last50">Senaste 50</option>
+              <option value="open">Ej klara</option>
+              <option value="done">Klara</option>
+              <option value="progress">Pågår</option>
             </select>
+          </label>
+
+          <label>
+            Sök (text/anst.nr)
+            <input id="search" type="text" placeholder="t.ex. hygien eller 1234" />
           </label>
         </div>
 
         <div id="list"></div>
 
-        <div id="detail" style="margin-top:10px; display:none;">
-          <div class="panel-title">Detalj</div>
-          <div class="item" style="cursor:default;">
-            <p class="item-title" id="dTitle">—</p>
-            <div class="item-meta">
-              <span class="pill" id="dEmp">Anst.nr: —</span>
-              <span class="pill" id="dStatus">—</span>
-              <span class="pill" id="dDue">Deadline: —</span>
-            </div>
-            <p class="muted" id="dDesc" style="margin:10px 0 0;">—</p>
-
-            <div style="margin-top:10px;">
-              <div class="muted small" style="font-weight:800;">Kommentar från medarbetare</div>
-              <div id="dComment" class="muted" style="margin-top:6px;">—</div>
-            </div>
-
-            <div class="row-actions" style="margin-top:10px;">
-              <button id="btnDelete" class="secondary" type="button">Ta bort (v1)</button>
-            </div>
-          </div>
+        <div class="smallnote">
+          Medarbetaren uppdaterar status på <code>employee/tasks.html</code>.
         </div>
-
       </section>
 
     </div>
@@ -230,335 +219,49 @@ Lagring:
 
 <script>
 /* ============================================================
-AO-024 | FIL-ID: admin/tasks.html (inline JS)
+AO-046 | FIL-ID: admin/tasks.html (inline JS)
 ============================================================ */
 (function(){
   "use strict";
 
   const SESSION_KEY = "AO-001_LOGIN_V1";
   const TASKS_KEY   = "AO-014_TASKS_V1";
-  const QA_KEY      = "AO-015_QA_V1";   // för att hitta “kända” empNo (alla-läge)
-  const GROUP_KEY   = "AO-023_GROUPS_V1";
+  const GROUPS_KEY  = "AO-017_GROUPS_V1";
 
   const $ = (s) => document.querySelector(s);
 
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
   function readAuth(){
     try{
-      const raw = sessionStorage.getItem(SESSION_KEY);
+      const raw = readRawSession();
       if(!raw) return null;
       const data = JSON.parse(raw);
       if(!data?.auth?.isAuthed) return null;
       if(data.auth.role !== "admin") return null;
-      if(!data.auth.expiresAt || data.auth.expiresAt < Date.now()) return null;
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
       return data.auth;
-    }catch{ return null; }
-  }
-
-  const auth = readAuth();
-  if(!auth){ redirectLogin(); return; }
-
-  $("#btnLogout").addEventListener("click", () => {
-    sessionStorage.removeItem(SESSION_KEY);
-    redirectLogin();
-  });
-
-  function uid(){
-    return "t_" + Math.random().toString(36).slice(2,10) + "_" + Date.now().toString(36);
+    }catch{
+      return null;
+    }
   }
 
   function safeParse(key, fallback){
     try{
       const v = JSON.parse(localStorage.getItem(key) || "null");
       return (v === null || v === undefined) ? fallback : v;
-    }catch{
-      return fallback;
-    }
+    }catch{ return fallback; }
   }
+  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
 
-  function loadTasks(){
-    const arr = safeParse(TASKS_KEY, []);
-    return Array.isArray(arr) ? arr : [];
-  }
-  function saveTasks(arr){ localStorage.setItem(TASKS_KEY, JSON.stringify(arr)); }
-
-  function loadQA(){
-    const arr = safeParse(QA_KEY, []);
-    return Array.isArray(arr) ? arr : [];
-  }
-
-  function loadGroups(){
-    const g = safeParse(GROUP_KEY, { groups: [] });
-    if(!g || typeof g !== "object") return { groups: [] };
-    if(!Array.isArray(g.groups)) g.groups = [];
-    return g;
-  }
-
-  function setMsg(kind, text){
-    const m = $("#msg");
-    m.className = "message" + (kind ? " " + kind : "");
-    m.textContent = text || "";
-  }
-
-  function statusLabel(s){
-    if(s === "doing") return "Pågår";
-    if(s === "done") return "Klar";
-    return "Ej startad";
-  }
-
-  function normalizeEmpNo(s){
-    return String(s || "").trim();
-  }
-
-  function uniq(arr){
-    return Array.from(new Set(arr.filter(Boolean)));
-  }
-
-  function dueTsFromDateInput(v){
-    if(!v) return null;
-    const parts = v.split("-").map(n => parseInt(n,10));
-    if(parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return null;
-    const d = new Date(parts[0], parts[1]-1, parts[2], 12, 0, 0, 0);
-    return d.getTime();
-  }
-
-  function fmtDate(ts){
-    if(!ts) return "—";
-    try{
-      const d = new Date(ts);
-      const y = d.getFullYear();
-      const m = String(d.getMonth()+1).padStart(2,"0");
-      const da = String(d.getDate()).padStart(2,"0");
-      return `${y}-${m}-${da}`;
-    }catch{ return "—"; }
-  }
-
-  // ---- target UI ----
-  let tasks = loadTasks();
-  let selectedId = null;
-
-  function refreshKnownEmpNos(){
-    const fromTasks = uniq(tasks.map(t => normalizeEmpNo(t.empNo)));
-    const fromQA = uniq(loadQA().map(q => normalizeEmpNo(q.empNo)));
-    const fromGroups = uniq(loadGroups().groups.flatMap(g => (g.members||[]).map(normalizeEmpNo)));
-
-    const all = uniq([...fromTasks, ...fromQA, ...fromGroups]).sort();
-
-    const sel = $("#empPick");
-    sel.innerHTML = `<option value="">—</option>` + all.map(e => `<option value="${e}">${e}</option>`).join("");
-  }
-
-  function refreshGroupsUI(){
-    const g = loadGroups();
-    const pick = $("#groupPick");
-    pick.innerHTML = `<option value="">—</option>` + g.groups.map(gr => `<option value="${gr.id}">${escapeHtml(gr.name)}</option>`).join("");
-    updateGroupInfo();
-  }
-
-  function updateGroupInfo(){
-    const gid = $("#groupPick").value;
-    const g = loadGroups();
-    const found = g.groups.find(x => x.id === gid) || null;
-    $("#groupInfo").textContent = found ? `Medlemmar: ${found.members.join(", ")}` : "—";
-  }
-
-  function updateTargetMode(){
-    const mode = $("#targetMode").value;
-    $("#targetOne").style.display = (mode === "one") ? "grid" : "none";
-    $("#targetGroup").style.display = (mode === "group") ? "block" : "none";
-  }
-
-  $("#targetMode").addEventListener("change", updateTargetMode);
-  $("#empPick").addEventListener("change", () => {
-    const v = $("#empPick").value;
-    if(v) $("#empNo").value = v;
-  });
-  $("#groupPick").addEventListener("change", updateGroupInfo);
-
-  function getRecipients(){
-    const mode = $("#targetMode").value;
-
-    if(mode === "one"){
-      const empNo = normalizeEmpNo($("#empNo").value);
-      return empNo ? [empNo] : [];
-    }
-
-    if(mode === "group"){
-      const gid = $("#groupPick").value;
-      if(!gid) return [];
-      const g = loadGroups();
-      const found = g.groups.find(x => x.id === gid) || null;
-      return found ? found.members.slice() : [];
-    }
-
-    if(mode === "all"){
-      // “alla” = allt vi känner till i v1
-      const fromTasks = uniq(loadTasks().map(t => normalizeEmpNo(t.empNo)));
-      const fromQA = uniq(loadQA().map(q => normalizeEmpNo(q.empNo)));
-      const fromGroups = uniq(loadGroups().groups.flatMap(gr => (gr.members||[]).map(normalizeEmpNo)));
-      return uniq([...fromTasks, ...fromQA, ...fromGroups]).sort();
-    }
-
-    return [];
-  }
-
-  function parseBatchLines(txt){
-    return String(txt || "")
-      .split(/\r?\n/g)
-      .map(l => l.trim())
-      .filter(l => l.length > 0);
-  }
-
-  // ---- list/detail ----
-  function renderList(){
-    const listEl = $("#list");
-    const filter = $("#filter").value;
-
-    const arr = tasks.slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
-    const shown = filter === "all" ? arr : arr.filter(t => (t.status || "todo") === filter);
-
-    listEl.innerHTML = "";
-
-    if(!shown.length){
-      listEl.innerHTML = `<div class="empty">Inga uppgifter för valt filter.</div>`;
-      $("#detail").style.display = "none";
-      return;
-    }
-
-    shown.forEach(t => {
-      const el = document.createElement("div");
-      el.className = "item" + (t.id === selectedId ? " active" : "");
-      el.innerHTML = `
-        <p class="item-title">${escapeHtml(t.title || "—")}</p>
-        <div class="item-meta">
-          <span class="pill">Anst.nr: ${escapeHtml(t.empNo || "—")}</span>
-          <span class="pill">${escapeHtml(statusLabel(t.status || "todo"))}</span>
-          <span class="pill">Deadline: ${escapeHtml(fmtDate(t.dueAt))}</span>
-        </div>
-      `;
-      el.addEventListener("click", () => {
-        selectedId = t.id;
-        renderList();
-        openDetail(t.id);
-      });
-      listEl.appendChild(el);
-    });
-
-    if(!selectedId && shown[0]){
-      selectedId = shown[0].id;
-      openDetail(selectedId);
-      renderList();
-    }
-  }
-
-  function openDetail(id){
-    const t = tasks.find(x => x.id === id) || null;
-    if(!t){
-      $("#detail").style.display = "none";
-      return;
-    }
-
-    $("#detail").style.display = "block";
-    $("#dTitle").textContent = t.title || "—";
-    $("#dEmp").textContent = "Anst.nr: " + (t.empNo || "—");
-    $("#dStatus").textContent = statusLabel(t.status || "todo");
-    $("#dDue").textContent = "Deadline: " + fmtDate(t.dueAt);
-    $("#dDesc").textContent = t.desc || "—";
-    $("#dComment").textContent = (t.comment && String(t.comment).trim().length) ? t.comment : "—";
-  }
-
-  $("#filter").addEventListener("change", renderList);
-
-  $("#btnDelete").addEventListener("click", () => {
-    if(!selectedId) return;
-    const idx = tasks.findIndex(x => x.id === selectedId);
-    if(idx < 0) return;
-
-    tasks.splice(idx, 1);
-    saveTasks(tasks);
-
-    tasks = loadTasks();
-    selectedId = null;
-    renderList();
-    refreshKnownEmpNos();
-  });
-
-  // ---- send batch ----
-  $("#btnSend").addEventListener("click", () => {
-    setMsg("", "");
-
-    const title = String($("#title").value || "").trim();
-    const initStatus = $("#initStatus").value || "todo";
-    const dueAt = dueTsFromDateInput($("#due").value);
-    const descCommon = String($("#desc").value || "").trim();
-
-    const lines = parseBatchLines($("#tasksBatch").value);
-
-    if(!title){
-      setMsg("err", "Fyll i en gemensam rubrik.");
-      return;
-    }
-    if(!lines.length){
-      setMsg("err", "Skriv minst en uppgift (en per rad).");
-      return;
-    }
-
-    const recipients = getRecipients();
-    if(!recipients.length){
-      if($("#targetMode").value === "all"){
-        setMsg("err", "‘Alla’ kräver att systemet känner till minst en anst.nr (via tasks/frågor/grupper). Skapa en grupp först eller välj en specifik medarbetare.");
-      }else{
-        setMsg("err", "Välj mottagare (anst.nr / grupp).");
-      }
-      return;
-    }
-
-    const created = [];
-    recipients.forEach(empNo => {
-      lines.forEach(line => {
-        created.push({
-          id: uid(),
-          empNo,
-          title: title + " – " + line, // tydligt i listan (v1)
-          desc: descCommon ? (line + "\n\n" + descCommon) : line,
-          status: initStatus,
-          dueAt: dueAt,
-          comment: "",
-          createdAt: Date.now()
-        });
-      });
-    });
-
-    tasks = loadTasks();
-    tasks.push(...created);
-    saveTasks(tasks);
-
-    setMsg("ok", `Skickat: ${lines.length} uppgift(er) till ${recipients.length} mottagare (${created.length} totalt).`);
-
-    // refresh UI
-    tasks = loadTasks();
-    refreshKnownEmpNos();
-    renderList();
-
-    if(created.length){
-      selectedId = created[created.length - 1].id;
-      renderList();
-      openDetail(selectedId);
-    }
-  });
-
-  $("#btnClear").addEventListener("click", () => {
-    $("#title").value = "";
-    $("#empNo").value = "";
-    $("#tasksBatch").value = "";
-    $("#desc").value = "";
-    $("#due").value = "";
-    $("#initStatus").value = "todo";
-    setMsg("", "");
-  });
-
-  // ---- helpers ----
   function escapeHtml(s){
     return String(s ?? "")
       .replaceAll("&","&amp;")
@@ -568,10 +271,236 @@ AO-024 | FIL-ID: admin/tasks.html (inline JS)
       .replaceAll("'","&#039;");
   }
 
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function genId(prefix){
+    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  // --- Guard ---
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+  $("#whoName").textContent = auth.displayName || "Admin";
+
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  // --- Groups (read only here, created in admin/questions.html) ---
+  function loadGroups(){
+    const arr = safeParse(GROUPS_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+  function renderGroupSelect(){
+    const sel = $("#targetGroup");
+    sel.innerHTML = "";
+    const groups = loadGroups();
+    if(!groups.length){
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "(Skapa grupp först)";
+      sel.appendChild(opt);
+      return;
+    }
+    groups.forEach(g => {
+      const opt = document.createElement("option");
+      opt.value = g.id;
+      opt.textContent = `${g.name} (${(g.members||[]).length})`;
+      sel.appendChild(opt);
+    });
+  }
+
+  // --- Target mode UI ---
+  function syncTargetUI(){
+    const mode = $("#targetMode").value;
+    $("#oneWrap").style.display = (mode === "one") ? "block" : "none";
+    $("#groupWrap").style.display = (mode === "group") ? "block" : "none";
+  }
+  $("#targetMode").addEventListener("change", syncTargetUI);
+
+  // --- Tasks store ---
+  function loadTasks(){
+    const arr = safeParse(TASKS_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function statusLabel(s){
+    if(s === "done") return "Klar";
+    if(s === "progress") return "Pågår";
+    return "Ej startad";
+  }
+
+  function pushTasks(targetEmpNos, title, lines, prio, adminNote){
+    const now = Date.now();
+    const all = loadTasks();
+    let count = 0;
+
+    targetEmpNos.forEach(empNo => {
+      lines.forEach(text => {
+        all.push({
+          id: genId("t"),
+          empNo: String(empNo).trim(),
+          title: title || "Uppgift",
+          text,
+          prio: prio || "normal",
+          adminNote: adminNote || "",
+          // employee-respons
+          status: "open",
+          employeeComment: "",
+          // timestamps
+          createdAt: now,
+          updatedAt: now
+        });
+        count++;
+      });
+    });
+
+    save(TASKS_KEY, all);
+    return count;
+  }
+
+  $("#btnCreate").addEventListener("click", () => {
+    setMsg("", "");
+
+    const mode = $("#targetMode").value;
+    const title = String($("#title").value || "").trim();
+    const prio = $("#prio").value;
+    const adminNote = String($("#adminNote").value || "").trim();
+
+    const lines = String($("#tasks").value || "")
+      .split("\n")
+      .map(x => String(x).trim())
+      .filter(Boolean);
+
+    if(lines.length === 0){
+      setMsg("err", "Skriv minst en uppgift (en per rad).");
+      return;
+    }
+
+    let targets = [];
+
+    if(mode === "one"){
+      const empNo = String($("#targetEmpNo").value || "").trim();
+      if(!empNo){
+        setMsg("err", "Skriv anst.nr för mottagaren.");
+        return;
+      }
+      targets = [empNo];
+    }
+
+    if(mode === "all"){
+      // UI-only v1: “alla” = union av empNo i grupper + empNo i befintliga tasks
+      const set = new Set(loadTasks().map(t => String(t.empNo||"").trim()).filter(Boolean));
+      loadGroups().forEach(g => (g.members||[]).forEach(m => set.add(String(m).trim())));
+      targets = Array.from(set);
+      if(targets.length === 0){
+        setMsg("err", "‘Alla’ kräver att minst en medarbetare finns i grupper eller redan har uppgifter.");
+        return;
+      }
+    }
+
+    if(mode === "group"){
+      const gid = $("#targetGroup").value;
+      const g = loadGroups().find(x => x.id === gid);
+      if(!g){
+        setMsg("err", "Välj en grupp.");
+        return;
+      }
+      targets = (g.members||[]).map(x => String(x).trim()).filter(Boolean);
+      if(targets.length === 0){
+        setMsg("err", "Gruppen har inga medlemmar (anst.nr).");
+        return;
+      }
+    }
+
+    const created = pushTasks(targets, title, lines, prio, adminNote);
+    setMsg("ok", `Skapat ${created} uppgift(er).`);
+    renderList();
+  });
+
+  $("#btnClear").addEventListener("click", () => {
+    $("#title").value = "";
+    $("#tasks").value = "";
+    $("#adminNote").value = "";
+    setMsg("", "");
+  });
+
+  // --- List ---
+  function renderList(){
+    const list = $("#list");
+    list.innerHTML = "";
+
+    const filter = $("#listFilter").value;
+    const q = String($("#search").value || "").trim().toLowerCase();
+
+    const all = loadTasks().slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+
+    let shown = all;
+
+    if(filter === "open") shown = shown.filter(x => (x.status||"open") !== "done");
+    if(filter === "done") shown = shown.filter(x => (x.status||"open") === "done");
+    if(filter === "progress") shown = shown.filter(x => (x.status||"open") === "progress");
+
+    if(q){
+      shown = shown.filter(x => {
+        const blob = `${x.empNo||""} ${x.title||""} ${x.text||""} ${x.adminNote||""} ${x.employeeComment||""}`.toLowerCase();
+        return blob.includes(q);
+      });
+    }
+
+    shown = shown.slice(0, 50);
+
+    if(shown.length === 0){
+      list.innerHTML = `<div class="empty">Inga uppgifter för vald filter/sök.</div>`;
+      return;
+    }
+
+    shown.forEach(x => {
+      const el = document.createElement("div");
+      el.className = "item";
+      el.innerHTML = `
+        <div style="min-width:260px;">
+          <p class="item-title">${escapeHtml(x.title || "Uppgift")}</p>
+          <div class="meta">
+            <span><strong>Anst.nr:</strong> ${escapeHtml(x.empNo || "—")}</span>
+            <span class="pill">${escapeHtml(statusLabel(x.status))}</span>
+            <span class="pill">Prio: ${escapeHtml(x.prio || "normal")}</span>
+          </div>
+          <div class="meta"><span><strong>Text:</strong> ${escapeHtml(x.text || "—")}</span></div>
+          ${x.adminNote ? `<div class="meta"><span><strong>Admin:</strong> ${escapeHtml(x.adminNote)}</span></div>` : ``}
+          ${x.employeeComment ? `<div class="meta"><span><strong>Medarbetare:</strong> ${escapeHtml(x.employeeComment)}</span></div>` : ``}
+        </div>
+        <div class="row" style="gap:8px;">
+          <button type="button" class="secondary" data-del="${escapeHtml(x.id)}">Ta bort</button>
+        </div>
+      `;
+      list.appendChild(el);
+    });
+
+    list.querySelectorAll("button[data-del]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-del");
+        if(!confirm("Ta bort uppgiften?")) return;
+        const next = loadTasks().filter(x => x.id !== id);
+        save(TASKS_KEY, next);
+        renderList();
+      });
+    });
+  }
+
+  $("#listFilter").addEventListener("change", renderList);
+  $("#search").addEventListener("input", renderList);
+
   // init
-  updateTargetMode();
-  refreshGroupsUI();
-  refreshKnownEmpNos();
+  renderGroupSelect();
+  syncTargetUI();
   renderList();
 
 })();
