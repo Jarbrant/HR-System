@@ -1,1 +1,842 @@
+<!-- ============================================================
+AO-006 | FIL-ID: employee/questions.html
+Projekt: HR-System
+Syfte: Medarbetare – Frågor & Svar (UI-only v1)
+Scope:
+- Endast mottagna frågor (demo-seed om tomt)
+- Medarbetaren kan svara + markera inskickad
+- Ingen "skapa fråga" här (chef/admin skapar senare)
+Policy:
+- Ingen backend (v1)
+- Ingen känslig data lagras
+- Guard + logout
+- 1 storage-key för frågor
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Medarbetare • Frågor</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    /* ===== Layout (Nivå 3) ===== */
+    .app-shell{
+      display:grid;
+      grid-template-columns: 280px 1fr;
+      min-height: 100vh;
+    }
+    .side{
+      border-right: 1px solid var(--line);
+      padding: 14px 12px;
+      background:#fff;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow:auto;
+    }
+    .content{ padding: 18px 22px; }
+
+    @media (max-width: 980px){
+      .app-shell{ grid-template-columns: 1fr; }
+      .side{
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: min(320px, 88vw);
+        transform: translateX(-105%);
+        transition: transform 0.18s ease;
+        z-index: 50;
+        box-shadow: 0 18px 48px rgba(0,0,0,0.18);
+      }
+      .side.open{ transform: translateX(0); }
+      .overlay{
+        display:none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.28);
+        z-index: 40;
+      }
+      .overlay.show{ display:block; }
+      .btn-menu{ display:inline-flex; }
+      .content{ padding: 14px 14px; }
+    }
+
+    /* ===== Top ===== */
+    .top{ align-items:center; }
+    .btn-menu{ display:none; background:#fff; color:#111; }
+    .top-actions{
+      margin-left:auto;
+      display:flex;
+      gap:10px;
+      white-space:nowrap;
+      align-items:center;
+    }
+    .btn-logout{ opacity:0.85; }
+    .btn-logout:hover{ opacity:1; }
+
+    /* ===== Sidebar ===== */
+    .side-header{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:10px;
+    }
+    .side-title{ font-weight:800; font-size:1.02rem; }
+    .side-sub{ margin-top:2px; font-size:0.9rem; color:var(--muted); }
+    .side-badge{
+      font-size: 0.78rem;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      color: var(--muted);
+      white-space:nowrap;
+    }
+    .side-group{
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+    }
+    .side-group:first-of-type{ border-top:none; padding-top:0; }
+    .side-group-title{
+      font-weight:800;
+      font-size:0.92rem;
+      margin:0 0 8px;
+      color:#111;
+    }
+    .side-link{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding: 10px 10px;
+      border-radius: 12px;
+      border: 1px solid transparent;
+      color:#111;
+      text-decoration:none;
+      margin-bottom:6px;
+    }
+    .side-link:hover{
+      background: rgba(0,0,0,0.03);
+      border-color: rgba(0,0,0,0.04);
+      text-decoration:none;
+    }
+    .side-link[aria-current="page"]{
+      background:#f9fafb;
+      border-color: var(--line);
+    }
+
+    /* ===== Questions layout ===== */
+    .q-shell{
+      display:grid;
+      grid-template-columns: 1fr 420px;
+      gap: 14px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .q-shell{ grid-template-columns: 1fr; }
+    }
+
+    .toolbar{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:end;
+      margin-bottom:10px;
+    }
+
+    .chips{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .chip{
+      border:1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 10px;
+      background:#fff;
+      cursor:pointer;
+      user-select:none;
+      font-size: 0.95rem;
+    }
+    .chip[aria-pressed="true"]{
+      background:#f3f4f6;
+      font-weight:700;
+    }
+
+    .qlist{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+
+    .qcard{
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 12px;
+      cursor:pointer;
+      transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+    }
+    .qcard:hover{
+      transform: translateY(-2px);
+      box-shadow: 0 10px 28px rgba(0,0,0,0.10);
+      filter: brightness(1.01);
+    }
+    .qcard[data-state="new"]{ background:#f3efff; }      /* mjuk lila */
+    .qcard[data-state="answered"]{ background:#eef9f1; } /* mjuk grön */
+    .qcard[data-state="sent"]{ background:#eef4ff; }     /* mjuk blå */
+
+    .q-top{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:10px;
+    }
+    .q-title{ font-weight:800; margin:0; }
+    .q-meta{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      color: var(--muted);
+      font-size:0.92rem;
+      margin-top:4px;
+    }
+
+    .badge{
+      border:1px solid var(--line);
+      border-radius:999px;
+      padding:2px 8px;
+      font-size:0.82rem;
+      color: var(--muted);
+      white-space:nowrap;
+      background: rgba(255,255,255,0.6);
+    }
+
+    .detail-empty{
+      border:1px dashed var(--line);
+      border-radius: 14px;
+      padding: 14px;
+      color: var(--muted);
+      background:#fff;
+    }
+
+    .detail h1{
+      font-size: 1.35rem;
+      margin: 0 0 6px;
+    }
+    .detail .sub{
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .actions-row{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+
+    .note{
+      color: var(--muted);
+      font-size:0.92rem;
+      margin-top:8px;
+    }
+
+    /* list hover-princip */
+    .list li{
+      transition: background-color 0.15s ease, box-shadow 0.15s ease;
+      border-radius: 10px;
+      padding-inline: 8px;
+    }
+    .list li:hover{
+      background-color: rgba(0,0,0,0.03);
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,0.04);
+    }
+
+    /* Toast */
+    .toast{
+      position: fixed;
+      bottom: 16px;
+      left: 16px;
+      z-index: 60;
+      background:#111;
+      color:#fff;
+      border-radius: 12px;
+      padding: 10px 12px;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+      max-width: min(520px, calc(100vw - 32px));
+      pointer-events:none;
+    }
+    .toast.show{ opacity:0.95; transform: translateY(0); }
+
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <button id="btnMenu" class="btn secondary btn-menu" type="button" aria-label="Öppna meny">☰ Meny</button>
+    <div>
+      <strong>HR-System</strong>
+      <span class="muted">• Medarbetare</span>
+    </div>
+  </div>
+
+  <div class="top-actions">
+    <a class="btn secondary" href="./report.html">Rapportera fel</a>
+    <button id="btnLogout" class="secondary btn-logout" type="button">Logga ut</button>
+  </div>
+</header>
+
+<div id="overlay" class="overlay" aria-hidden="true"></div>
+
+<div class="app-shell">
+  <!-- Sidebar -->
+  <aside id="side" class="side" aria-label="Moduler">
+    <div class="side-header">
+      <div>
+        <div class="side-title">Moduler</div>
+        <div class="side-sub">Medarbetare</div>
+      </div>
+      <span class="side-badge">v1</span>
+    </div>
+
+    <div class="side-group">
+      <div class="side-group-title">Kärna</div>
+      <a class="side-link" href="./home.html"><span>Hem</span><span class="side-badge">start</span></a>
+      <a class="side-link" href="./tasks.html"><span>Uppgifter</span><span class="side-badge">v1</span></a>
+      <a class="side-link" href="./questions.html" aria-current="page"><span>Frågor & svar</span><span class="side-badge">v1</span></a>
+      <a class="side-link" href="./schedule.html"><span>Schema</span><span class="side-badge">sen</span></a>
+      <a class="side-link" href="./docs.html"><span>Dokument</span><span class="side-badge">sen</span></a>
+      <a class="side-link" href="./report.html"><span>Rapportera fel</span><span class="side-badge">nästa</span></a>
+    </div>
+
+    <div class="side-group">
+      <div class="side-group-title">Inloggad som</div>
+      <div class="muted small">Namn: <strong id="whoNameSide">—</strong></div>
+      <div class="muted small">Anst.nr: <strong id="whoEmpNoSide">—</strong></div>
+      <div class="muted small">Roll: <strong>employee</strong></div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="content">
+    <h1 style="margin:0 0 6px;">Frågor & svar</h1>
+    <div class="muted" style="margin-bottom:12px;">
+      Hej <strong id="whoName">—</strong> • Anst.nr <span id="whoEmpNo">—</span> • Chef/admin skickar frågor – du svarar.
+    </div>
+
+    <div class="q-shell">
+      <!-- Left: list -->
+      <section class="card" aria-label="Frågelista">
+        <div class="toolbar">
+          <label style="min-width: 240px; flex:1;">
+            Sök
+            <input id="inpSearch" type="text" placeholder="Sök i fråga eller text…" />
+          </label>
+
+          <label style="min-width: 200px;">
+            Sortera
+            <select id="selSort">
+              <option value="newest">Nyast först</option>
+              <option value="oldest">Äldst först</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="chips" aria-label="Filter">
+          <button class="chip" type="button" data-filter="all" aria-pressed="true">Alla</button>
+          <button class="chip" type="button" data-filter="new" aria-pressed="false">Nya</button>
+          <button class="chip" type="button" data-filter="answered" aria-pressed="false">Besvarade</button>
+          <button class="chip" type="button" data-filter="sent" aria-pressed="false">Inskickade</button>
+        </div>
+
+        <div id="list" class="qlist" style="margin-top:12px;"></div>
+
+        <p class="note">
+          <span class="badge">v1</span> Här kan du bara svara. Enhetschef skapar och skickar frågor senare.
+        </p>
+      </section>
+
+      <!-- Right: detail -->
+      <section class="card detail" aria-label="Detaljvy">
+        <div id="detailEmpty" class="detail-empty">
+          Välj en fråga i listan för att svara.
+        </div>
+
+        <div id="detail" style="display:none;">
+          <h1 id="dTitle">—</h1>
+          <div class="sub" id="dSub">—</div>
+
+          <div class="dashgrid">
+            <section class="panel">
+              <div class="panel-title">Fråga</div>
+              <p id="dBody" class="tight">—</p>
+            </section>
+
+            <section class="panel">
+              <div class="panel-title">Info</div>
+              <ul class="list">
+                <li><span>Status</span><span id="dState" class="pill">—</span></li>
+                <li><span>Skickad av</span><span id="dFrom" class="pill">—</span></li>
+                <li><span>Skapad</span><span id="dCreated" class="pill">—</span></li>
+                <li><span>ID</span><span id="dId" class="pill mono">—</span></li>
+              </ul>
+            </section>
+          </div>
+
+          <div style="margin-top:12px;">
+            <label>
+              Ditt svar
+              <textarea id="inpAnswer" placeholder="Skriv ditt svar här…"></textarea>
+            </label>
+
+            <div class="actions-row">
+              <button id="btnSave" type="button">Spara svar</button>
+              <button id="btnSend" type="button" class="secondary">Markera inskickad</button>
+              <button id="btnBack" type="button" class="secondary">Till listan</button>
+            </div>
+
+            <p id="msg" class="message" aria-live="polite"></p>
+
+            <p class="note">
+              v1: svar sparas lokalt. Senare skickas till Enhetschef + Admin/Systemansvarig.
+            </p>
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+<script>
+/* ============================================================
+AO-006 | FIL-ID: employee/questions.html (inline JS)
+Syfte:
+- Guard (employee)
+- localStorage questions (1 key) + demo-seed
+- List: filter/search/sort
+- Detail: svar + markera inskickad
+- Logout + mobile sidebar
+============================================================ */
+(function () {
+  "use strict";
+
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const Q_KEY = "AO-006_QA_V1";
+
+  const $ = (sel) => document.querySelector(sel);
+  const $$ = (sel) => Array.from(document.querySelectorAll(sel));
+
+  function redirectToLogin() {
+    window.location.replace("../UI/UI-01-SKELETON.html");
+  }
+
+  function readSession() {
+    try {
+      const raw = sessionStorage.getItem(SESSION_KEY);
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (!data?.auth?.isAuthed) return null;
+      if (data.auth.role !== "employee") return null;
+      if (!data.auth.expiresAt || data.auth.expiresAt < Date.now()) return null;
+      return data.auth;
+    } catch {
+      return null;
+    }
+  }
+
+  function toast(text){
+    const t = $("#toast");
+    if(!t) return;
+    t.textContent = text || "";
+    t.classList.add("show");
+    window.setTimeout(() => t.classList.remove("show"), 1700);
+  }
+
+  function fmtDate(ts){
+    if(!ts) return "—";
+    try{
+      const d = new Date(ts);
+      return d.toLocaleString("sv-SE", { year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
+    }catch{ return "—"; }
+  }
+
+  function stateLabel(s){
+    if(s === "new") return "Ny";
+    if(s === "answered") return "Besvarad";
+    if(s === "sent") return "Inskickad";
+    return "—";
+  }
+
+  function fromLabel(q){
+    if(q.fromRole === "manager") return "Enhetschef";
+    if(q.fromRole === "admin") return "Admin";
+    return "System";
+  }
+
+  function uid(){
+    return "q_" + Math.random().toString(36).slice(2, 10) + "_" + Date.now().toString(36);
+  }
+
+  function loadQs(){
+    try{
+      const raw = localStorage.getItem(Q_KEY);
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!Array.isArray(data)) return null;
+      return data;
+    }catch{ return null; }
+  }
+
+  function saveQs(arr){
+    localStorage.setItem(Q_KEY, JSON.stringify(arr));
+  }
+
+  function seedIfEmpty(){
+    const existing = loadQs();
+    if(existing && existing.length) return existing;
+
+    const now = Date.now();
+    const demo = [
+      {
+        id: uid(),
+        title: "Hur gick första veckan?",
+        body: "Beskriv kort vad som fungerat bra och vad som varit svårt.",
+        fromRole: "manager",
+        fromId: "MGR-001",
+        createdAt: now - (3 * 24 * 60 * 60 * 1000),
+        state: "new",
+        answer: "",
+        answeredAt: null,
+        sentAt: null
+      },
+      {
+        id: uid(),
+        title: "Har du rätt verktyg?",
+        body: "Saknar du något för att kunna göra jobbet bra? Svara ja/nej och skriv vad.",
+        fromRole: "manager",
+        fromId: "MGR-001",
+        createdAt: now - (2 * 24 * 60 * 60 * 1000),
+        state: "new",
+        answer: "",
+        answeredAt: null,
+        sentAt: null
+      },
+      {
+        id: uid(),
+        title: "Rutin: Hygien – förståelse",
+        body: "Är något i hygienrutinen oklart? Svara kort.",
+        fromRole: "admin",
+        fromId: "ADM-001",
+        createdAt: now - (7 * 24 * 60 * 60 * 1000),
+        state: "sent",
+        answer: "Allt tydligt, inga frågor just nu.",
+        answeredAt: now - (6 * 24 * 60 * 60 * 1000),
+        sentAt: now - (6 * 24 * 60 * 60 * 1000)
+      }
+    ];
+
+    saveQs(demo);
+    return demo;
+  }
+
+  const ui = {
+    list: $("#list"),
+    inpSearch: $("#inpSearch"),
+    selSort: $("#selSort"),
+    chips: $$(".chip"),
+    detailEmpty: $("#detailEmpty"),
+    detail: $("#detail"),
+    dTitle: $("#dTitle"),
+    dSub: $("#dSub"),
+    dBody: $("#dBody"),
+    dState: $("#dState"),
+    dFrom: $("#dFrom"),
+    dCreated: $("#dCreated"),
+    dId: $("#dId"),
+    inpAnswer: $("#inpAnswer"),
+    msg: $("#msg"),
+    btnSave: $("#btnSave"),
+    btnSend: $("#btnSend"),
+    btnBack: $("#btnBack")
+  };
+
+  const state = {
+    auth: null,
+    qs: [],
+    filter: "all",
+    selectedId: null
+  };
+
+  function setMsg(kind, text){
+    ui.msg.className = "message" + (kind ? " " + kind : "");
+    ui.msg.textContent = text || "";
+  }
+
+  function setFilter(f){
+    state.filter = f;
+    ui.chips.forEach(btn => {
+      const on = btn.getAttribute("data-filter") === f;
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    renderList();
+  }
+
+  function sorted(arr){
+    const mode = ui.selSort.value;
+    const copy = arr.slice();
+    if(mode === "oldest") copy.sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
+    else copy.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    return copy;
+  }
+
+  function filtered(){
+    const q = String(ui.inpSearch.value || "").trim().toLowerCase();
+    let arr = state.qs.slice();
+
+    if(state.filter !== "all"){
+      arr = arr.filter(x => x.state === state.filter);
+    }
+
+    if(q){
+      arr = arr.filter(x => ((x.title||"") + " " + (x.body||"")).toLowerCase().includes(q));
+    }
+
+    return sorted(arr);
+  }
+
+  function renderList(){
+    const items = filtered();
+    ui.list.innerHTML = "";
+
+    if(!items.length){
+      const empty = document.createElement("div");
+      empty.className = "detail-empty";
+      empty.textContent = "Inga frågor matchar filtret.";
+      ui.list.appendChild(empty);
+      return;
+    }
+
+    for(const q of items){
+      const card = document.createElement("div");
+      card.className = "qcard";
+      card.setAttribute("data-state", q.state);
+      card.setAttribute("role","button");
+      card.tabIndex = 0;
+
+      const top = document.createElement("div");
+      top.className = "q-top";
+
+      const left = document.createElement("div");
+      const h = document.createElement("div");
+      h.className = "q-title";
+      h.textContent = q.title;
+
+      const meta = document.createElement("div");
+      meta.className = "q-meta";
+      meta.innerHTML =
+        `<span class="badge">${stateLabel(q.state)}</span>
+         <span class="badge">${fromLabel(q)}</span>
+         <span class="badge">${fmtDate(q.createdAt)}</span>`;
+
+      left.appendChild(h);
+      left.appendChild(meta);
+
+      const right = document.createElement("div");
+      const hasAnswer = Boolean(String(q.answer||"").trim());
+      right.innerHTML = `<span class="badge">${hasAnswer ? "Har svar" : "Inget svar"}</span>`;
+
+      top.appendChild(left);
+      top.appendChild(right);
+      card.appendChild(top);
+
+      const open = () => openDetail(q.id);
+      card.addEventListener("click", open);
+      card.addEventListener("keydown", (e) => {
+        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); open(); }
+      });
+
+      ui.list.appendChild(card);
+    }
+  }
+
+  function getQ(id){
+    return state.qs.find(x => x.id === id) || null;
+  }
+
+  function persist(){
+    saveQs(state.qs);
+  }
+
+  function openDetail(id){
+    const q = getQ(id);
+    if(!q) return;
+
+    state.selectedId = id;
+
+    ui.detailEmpty.style.display = "none";
+    ui.detail.style.display = "block";
+
+    ui.dTitle.textContent = q.title;
+    ui.dSub.textContent = `${fromLabel(q)} • ID ${q.id}`;
+    ui.dBody.textContent = q.body;
+
+    ui.dState.textContent = stateLabel(q.state);
+    ui.dFrom.textContent = fromLabel(q);
+    ui.dCreated.textContent = fmtDate(q.createdAt);
+    ui.dId.textContent = q.id;
+
+    ui.inpAnswer.value = q.answer || "";
+    setMsg("", "");
+
+    window.location.hash = "#q=" + encodeURIComponent(id);
+  }
+
+  function closeDetail(){
+    state.selectedId = null;
+    ui.detail.style.display = "none";
+    ui.detailEmpty.style.display = "block";
+    setMsg("", "");
+    window.location.hash = "#list";
+  }
+
+  function saveAnswer(id){
+    const q = getQ(id);
+    if(!q) return;
+
+    const text = String(ui.inpAnswer.value || "").trim();
+    if(!text){
+      setMsg("err","Skriv ett svar först.");
+      return;
+    }
+
+    q.answer = text;
+    q.answeredAt = Date.now();
+    // Om den var "new" så blir den "answered"
+    if(q.state === "new") q.state = "answered";
+
+    persist();
+    renderList();
+    openDetail(id);
+    toast("Sparat");
+    setMsg("", "Sparat.");
+  }
+
+  function markSent(id){
+    const q = getQ(id);
+    if(!q) return;
+
+    const text = String(q.answer || "").trim();
+    if(!text){
+      setMsg("err","Spara ett svar först.");
+      return;
+    }
+
+    q.state = "sent";
+    q.sentAt = Date.now();
+
+    persist();
+    renderList();
+    openDetail(id);
+    toast("Markerad inskickad");
+    setMsg("", "Markerad inskickad (v1).");
+  }
+
+  function parseHash(){
+    const h = String(window.location.hash || "");
+    if(h.startsWith("#q=")){
+      const id = decodeURIComponent(h.slice("#q=".length));
+      return { mode:"q", id };
+    }
+    return { mode:"list" };
+  }
+
+  function openFromHash(){
+    const p = parseHash();
+    if(p.mode === "q" && p.id){
+      const q = getQ(p.id);
+      if(q) openDetail(p.id);
+      else closeDetail();
+      return;
+    }
+    closeDetail();
+  }
+
+  function openSide(){
+    $("#side").classList.add("open");
+    $("#overlay").classList.add("show");
+    $("#overlay").setAttribute("aria-hidden","false");
+  }
+
+  function closeSide(){
+    $("#side").classList.remove("open");
+    $("#overlay").classList.remove("show");
+    $("#overlay").setAttribute("aria-hidden","true");
+  }
+
+  function init(){
+    // Guard
+    state.auth = readSession();
+    if(!state.auth){ redirectToLogin(); return; }
+
+    $("#whoName").textContent = state.auth.displayName || "—";
+    $("#whoEmpNo").textContent = state.auth.empNo || "—";
+    $("#whoNameSide").textContent = state.auth.displayName || "—";
+    $("#whoEmpNoSide").textContent = state.auth.empNo || "—";
+
+    // Logout
+    $("#btnLogout").addEventListener("click", () => {
+      sessionStorage.removeItem(SESSION_KEY);
+      redirectToLogin();
+    });
+
+    // Mobile sidebar
+    $("#btnMenu").addEventListener("click", openSide);
+    $("#overlay").addEventListener("click", closeSide);
+
+    // Load + seed
+    state.qs = seedIfEmpty();
+
+    // Filters
+    ui.chips.forEach(btn => btn.addEventListener("click", () => setFilter(btn.getAttribute("data-filter"))));
+
+    // Search/sort
+    ui.inpSearch.addEventListener("input", renderList);
+    ui.selSort.addEventListener("change", renderList);
+
+    // Detail actions
+    ui.btnBack.addEventListener("click", closeDetail);
+    ui.btnSave.addEventListener("click", () => {
+      if(!state.selectedId) return;
+      setMsg("", "");
+      saveAnswer(state.selectedId);
+    });
+    ui.btnSend.addEventListener("click", () => {
+      if(!state.selectedId) return;
+      setMsg("", "");
+      markSent(state.selectedId);
+    });
+
+    // Initial render
+    renderList();
+    openFromHash();
+    window.addEventListener("hashchange", openFromHash);
+  }
+
+  init();
+})();
+</script>
+
+</body>
+</html>
 
