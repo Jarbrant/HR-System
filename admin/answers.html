@@ -1,1 +1,327 @@
+<!-- ============================================================
+AO-026 | FIL-ID: admin/answers.html
+Projekt: HR-System
+Syfte: Admin – Svar (separerad vy, inte blandat med frågor) – UI-only v1
+Mål:
+- Visa endast inkomna svar (från AO-015_QA_V1)
+- Filter: alla / svarade / anonyma / ej anonyma
+- Detaljvy för svar
+Policy:
+- Ingen backend
+- Ingen känslig data lagras
+- Guard + logout (admin)
+Lagring:
+- AO-015_QA_V1 (localStorage) – frågor/svar
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Svar</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .layout{
+      display:grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .layout{ grid-template-columns: 1fr; }
+    }
+    .item{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background:#fff;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      cursor:pointer;
+    }
+    .item:hover{
+      transform: var(--lift);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.02);
+    }
+    .item.active{
+      outline: 3px solid rgba(17,17,17,0.10);
+      outline-offset: 2px;
+    }
+    .item-title{ font-weight: 900; margin:0; }
+    .item-meta{ margin-top:6px; display:flex; gap:10px; flex-wrap:wrap; color:var(--muted); font-size:.9rem; }
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+    }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin • Svar</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./answers.html" aria-current="page">Svar</a>
+    <a href="./tasks.html">Uppgifter</a>
+    <a href="./docs.html">Dokument</a>
+    <a href="./integrations.html">Integrationer</a>
+  </nav>
+
+  <div class="row-actions" style="margin-left:auto;">
+    <button id="btnLogout" class="secondary" type="button">Logga ut</button>
+  </div>
+</header>
+
+<main class="container">
+  <h1 class="tight">Svar</h1>
+  <p class="muted">Här visas endast inkomna svar (separat från “Frågor”).</p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Källa: <span class="mono">AO-015_QA_V1</span>
+      </div>
+
+      <label style="margin:0; font-weight:800;">
+        Filter
+        <select id="filter" style="margin-top:6px; width:auto;">
+          <option value="answered">Svarade</option>
+          <option value="all">Alla</option>
+          <option value="anon">Anonyma</option>
+          <option value="named">Ej anonyma</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="layout">
+      <section class="panel" aria-label="Lista">
+        <div class="panel-title">Inkomna svar</div>
+        <div id="list"></div>
+      </section>
+
+      <section class="panel" aria-label="Detalj">
+        <div class="panel-title">Detalj</div>
+        <div id="detailEmpty" class="empty">Välj ett svar i listan.</div>
+
+        <div id="detail" style="display:none;">
+          <p class="item-title" id="dTitle">—</p>
+          <div class="item-meta">
+            <span class="pill" id="dEmp">Anst.nr: —</span>
+            <span class="pill" id="dAnon">Anonymt: —</span>
+            <span class="pill" id="dWhen">—</span>
+          </div>
+
+          <div style="margin-top:10px;">
+            <div class="muted small" style="font-weight:900;">Fråga</div>
+            <div id="dQ" class="muted" style="margin-top:6px;">—</div>
+          </div>
+
+          <div style="margin-top:10px;">
+            <div class="muted small" style="font-weight:900;">Svar</div>
+            <div id="dA" style="margin-top:6px;">—</div>
+          </div>
+
+          <div class="row-actions" style="margin-top:10px;">
+            <button id="btnMarkNeeds" class="secondary" type="button">Markera “Svar krävs”</button>
+          </div>
+
+          <p class="muted small" style="margin-top:10px;">
+            v1: “Markera svar krävs” flyttar tillbaka frågan till behov av svar (status).
+          </p>
+        </div>
+      </section>
+    </div>
+
+  </section>
+</main>
+
+<script>
+/* ============================================================
+AO-026 | FIL-ID: admin/answers.html (inline JS)
+============================================================ */
+(function(){
+  "use strict";
+
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const QA_KEY      = "AO-015_QA_V1";
+
+  const $ = (s) => document.querySelector(s);
+
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function readAuth(){
+    try{
+      const raw = sessionStorage.getItem(SESSION_KEY);
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+      if(data.auth.role !== "admin") return null;
+      if(!data.auth.expiresAt || data.auth.expiresAt < Date.now()) return null;
+      return data.auth;
+    }catch{ return null; }
+  }
+
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+
+  $("#btnLogout").addEventListener("click", () => {
+    sessionStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  });
+
+  function loadQA(){
+    try{
+      const arr = JSON.parse(localStorage.getItem(QA_KEY) || "[]");
+      return Array.isArray(arr) ? arr : [];
+    }catch{
+      return [];
+    }
+  }
+  function saveQA(arr){ localStorage.setItem(QA_KEY, JSON.stringify(arr)); }
+
+  function isAnswered(q){
+    const hasAnswer = !!(q.answer && String(q.answer).trim().length);
+    return q.status === "answered" || hasAnswer;
+  }
+
+  function isAnon(q){
+    // Vi stödjer både framtida flagga och enkel prefix-markering
+    if(q.answerAnonymous === true) return true;
+    const a = String(q.answer || "").trim();
+    return a.startsWith("(Anonymt)") || a.startsWith("[Anonymt]");
+  }
+
+  function fmtWhen(ts){
+    if(!ts) return "—";
+    try{
+      const d = new Date(ts);
+      if(Number.isNaN(d.getTime())) return "—";
+      return d.toLocaleString("sv-SE");
+    }catch{ return "—"; }
+  }
+
+  let qa = loadQA();
+  let selectedId = null;
+
+  function closeDetail(){
+    $("#detail").style.display = "none";
+    $("#detailEmpty").style.display = "block";
+    selectedId = null;
+  }
+
+  function openDetail(id){
+    const q = qa.find(x => x.id === id) || null;
+    if(!q){ closeDetail(); return; }
+
+    $("#detailEmpty").style.display = "none";
+    $("#detail").style.display = "block";
+
+    $("#dTitle").textContent = q.title || "—";
+    $("#dEmp").textContent = "Anst.nr: " + (q.empNo || "—");
+    $("#dAnon").textContent = "Anonymt: " + (isAnon(q) ? "Ja" : "Nej");
+    $("#dWhen").textContent = fmtWhen(q.answeredAt || q.updatedAt || q.createdAt);
+
+    $("#dQ").textContent = q.question || "—";
+    $("#dA").textContent = (q.answer && String(q.answer).trim().length) ? q.answer : "—";
+  }
+
+  function renderList(){
+    qa = loadQA();
+
+    const filter = $("#filter").value;
+    const listEl = $("#list");
+    listEl.innerHTML = "";
+
+    let arr = qa.slice();
+
+    // Endast svar
+    arr = arr.filter(isAnswered);
+
+    if(filter === "anon") arr = arr.filter(isAnon);
+    if(filter === "named") arr = arr.filter(q => !isAnon(q));
+    if(filter === "answered") arr = arr.filter(isAnswered);
+    // "all" = samma som svar (men behåller)
+
+    arr.sort((a,b) => ( (b.answeredAt||b.updatedAt||b.createdAt||0) - (a.answeredAt||a.updatedAt||a.createdAt||0) ));
+
+    if(!arr.length){
+      listEl.innerHTML = `<div class="empty">Inga svar för valt filter.</div>`;
+      closeDetail();
+      return;
+    }
+
+    arr.forEach(q => {
+      const el = document.createElement("div");
+      el.className = "item" + (q.id === selectedId ? " active" : "");
+      el.innerHTML = `
+        <p class="item-title">${escapeHtml(q.title || "—")}</p>
+        <div class="item-meta">
+          <span class="pill">Anst.nr: ${escapeHtml(q.empNo || "—")}</span>
+          <span class="pill">${escapeHtml(isAnon(q) ? "Anonymt" : "Ej anonymt")}</span>
+          <span class="pill">${escapeHtml(fmtWhen(q.answeredAt || q.updatedAt || q.createdAt))}</span>
+        </div>
+      `;
+      el.addEventListener("click", () => {
+        selectedId = q.id;
+        renderList();
+        openDetail(q.id);
+      });
+      listEl.appendChild(el);
+    });
+
+    if(!selectedId && arr[0]){
+      selectedId = arr[0].id;
+      openDetail(selectedId);
+      renderList();
+    }else if(selectedId && !arr.find(x => x.id === selectedId)){
+      selectedId = arr[0].id;
+      openDetail(selectedId);
+      renderList();
+    }
+  }
+
+  $("#filter").addEventListener("change", renderList);
+
+  $("#btnMarkNeeds").addEventListener("click", () => {
+    if(!selectedId) return;
+    qa = loadQA();
+    const q = qa.find(x => x.id === selectedId);
+    if(!q) return;
+
+    q.status = "needs";
+    // behåll svartext (admin kan välja att rensa senare om vi vill)
+    saveQA(qa);
+    renderList();
+  });
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  renderList();
+
+})();
+</script>
+
+</body>
+</html>
 
