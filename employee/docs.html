@@ -1,17 +1,19 @@
 <!-- ============================================================
-AO-017 | FIL-ID: employee/docs.html
+AO-047 | FIL-ID: employee/docs.html
 Projekt: HR-System
-Syfte: Medarbetare – Dokument (läsa + kvittera “läst”) – UI-only v1
-Mål:
-- Lista dokument (demo)
-- Öppna dokument (textvisning i panel)
+Syfte: Medarbetare – Dokument (läs + kvittera) – UI-only v1
+Krav:
+- Lista dokument
+- Öppna/läs (modal/detail)
 - Kvittera “läst” per dokument
 Policy:
 - Ingen backend
 - Ingen känslig data lagras
-- Guard + logout (employee)
+- Robust guard: sessionStorage först, fallback localStorage
 Lagring:
-- AO-017_DOCS_V1 (localStorage) – kvittens per empNo + docId
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-018_DOCS_V1 (localStorage) – dokument (admin kan lägga senare)
+- AO-018_DOCS_ACK_V1 (localStorage) – kvittenser per empNo
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -25,14 +27,27 @@ Lagring:
   <style>
     .layout{
       display:grid;
-      grid-template-columns: 1.1fr 0.9fr;
+      grid-template-columns: 1fr 1fr;
       gap: 12px;
       align-items:start;
     }
     @media (max-width: 980px){
       .layout{ grid-template-columns: 1fr; }
     }
-    .doc{
+
+    .panel{
+      border: 1px solid var(--line);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .panel:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+    .panel.list{ background: rgba(254,243,199,.18); }
+    .panel.detail{ background: rgba(245,245,244,1.0); }
+
+    .item{
       border:1px solid var(--line);
       border-radius: var(--r14);
       padding: 12px;
@@ -40,17 +55,17 @@ Lagring:
       transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
       cursor:pointer;
     }
-    .doc:hover{
+    .item:hover{
       transform: var(--lift);
       box-shadow: var(--shadow-soft);
       filter: brightness(1.02);
     }
-    .doc.active{
+    .item.active{
       outline: 3px solid rgba(17,17,17,0.10);
       outline-offset: 2px;
     }
-    .doc-title{ font-weight: 900; margin:0; }
-    .doc-meta{ margin-top:6px; display:flex; gap:10px; flex-wrap:wrap; color:var(--muted); font-size:.9rem; }
+    .item-title{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
     .empty{
       padding:18px;
       border:1px dashed var(--line);
@@ -59,21 +74,15 @@ Lagring:
       background:#fff;
       text-align:center;
     }
-    .viewer{
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      padding: 12px;
-      background:#fff;
-      min-height: 260px;
-    }
-    .viewer h2{ margin-top:0; }
-    .viewer pre{
-      margin:0;
+
+    .docBody{
       white-space: pre-wrap;
-      word-break: break-word;
-      font-family: inherit;
-      color: var(--ink);
       line-height: 1.55;
+      margin-top:10px;
+      padding: 12px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: rgba(245,245,244,1);
     }
   </style>
 </head>
@@ -93,129 +102,112 @@ Lagring:
     <a href="./schedule.html">Schema</a>
     <a href="./docs.html" aria-current="page">Dokument</a>
     <a href="./report.html">Rapportera fel</a>
+    <a href="./profile.html">Min sida</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
   </nav>
-
-  <div class="row-actions" style="margin-left:auto;">
-    <button id="btnLogout" class="secondary" type="button">Logga ut</button>
-  </div>
 </header>
 
 <main class="container">
   <h1 class="tight">Dokument</h1>
-  <p class="muted">Öppna och kvittera när du läst. (UI-only v1.)</p>
+  <p class="muted">Läs och kvittera dokument. v1 är UI-only.</p>
 
   <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Anst.nr <span id="whoEmpNo">—</span>
+      </div>
+      <div class="row wrap">
+        <button id="btnReload" class="secondary" type="button">Uppdatera</button>
+      </div>
+    </div>
+
     <div class="layout">
-
-      <!-- Lista -->
-      <section class="panel" aria-label="Lista">
-        <div class="row space-between wrap">
-          <div class="panel-title">Dokument <span class="tag">demo</span></div>
-          <label style="margin:0; font-weight:700;">
-            Filter
-            <select id="filter" style="margin-top:6px; width:auto;">
-              <option value="all">Alla</option>
-              <option value="unread">Ej kvitterade</option>
-              <option value="read">Kvitterade</option>
-            </select>
-          </label>
-        </div>
-
+      <section class="panel list" aria-label="Lista">
+        <div class="panel-title">Tillgängliga dokument</div>
         <div id="list"></div>
-        <p class="muted small" style="margin-top:10px;">
-          Tips: Klicka ett dokument för att läsa.
-        </p>
+        <div class="muted small" style="margin-top:8px;">
+          Källa v1: <code>AO-018_DOCS_V1</code> + kvittens <code>AO-018_DOCS_ACK_V1</code>.
+        </div>
       </section>
 
-      <!-- Viewer -->
-      <section class="panel" aria-label="Läs dokument">
+      <section class="panel detail" aria-label="Detalj">
         <div class="panel-title">Läs</div>
 
-        <div id="viewerEmpty" class="empty">Välj ett dokument i listan.</div>
+        <div id="detailEmpty" class="empty">Välj ett dokument i listan.</div>
 
-        <div id="viewer" class="viewer" style="display:none;">
-          <div class="row space-between wrap">
-            <div>
-              <h2 id="vTitle" class="tight">—</h2>
-              <div class="muted">
-                Version <span id="vVer">—</span> •
-                <span id="vTag" class="pill">—</span>
-              </div>
-            </div>
-
-            <div class="row wrap">
-              <span id="vStatus" class="pill">—</span>
-              <button id="btnAcknowledge" type="button">Kvittera “läst”</button>
-            </div>
+        <div id="detail" style="display:none;">
+          <p class="item-title" id="dTitle">—</p>
+          <div class="meta">
+            <span class="pill" id="dAck">—</span>
+            <span class="pill" id="dVersion">—</span>
           </div>
 
-          <div style="margin-top:10px;">
-            <pre id="vBody">—</pre>
+          <div class="docBody" id="dBody">—</div>
+
+          <div class="row-actions" style="margin-top:10px;">
+            <button id="btnAck" type="button">Kvittera “läst”</button>
+            <button id="btnUnAck" class="secondary" type="button">Ångra kvittens</button>
           </div>
 
           <p id="msg" class="message" aria-live="polite"></p>
         </div>
       </section>
-
     </div>
   </section>
 </main>
 
 <script>
 /* ============================================================
-AO-017 | FIL-ID: employee/docs.html (inline JS)
-Syfte: Guard + docs list + read ack (UI-only)
+AO-047 | FIL-ID: employee/docs.html (inline JS)
 ============================================================ */
 (function(){
   "use strict";
 
   const SESSION_KEY = "AO-001_LOGIN_V1";
-  const DOCS_KEY    = "AO-017_DOCS_V1"; // kvittens per empNo/docId
+  const DOCS_KEY    = "AO-018_DOCS_V1";
+  const ACK_KEY     = "AO-018_DOCS_ACK_V1";
 
   const $ = (s) => document.querySelector(s);
 
-  function redirectLogin(){
-    window.location.replace("../UI/UI-01-SKELETON.html");
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
   }
 
   function readAuth(){
     try{
-      const raw = sessionStorage.getItem(SESSION_KEY);
+      const raw = readRawSession();
       if(!raw) return null;
       const data = JSON.parse(raw);
       if(!data?.auth?.isAuthed) return null;
       if(data.auth.role !== "employee") return null;
-      if(!data.auth.expiresAt || data.auth.expiresAt < Date.now()) return null;
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
       return data.auth;
-    }catch{ return null; }
-  }
-
-  const auth = readAuth();
-  if(!auth){ redirectLogin(); return; }
-
-  $("#btnLogout").addEventListener("click", () => {
-    sessionStorage.removeItem(SESSION_KEY);
-    redirectLogin();
-  });
-
-  function loadAck(){
-    try{
-      const obj = JSON.parse(localStorage.getItem(DOCS_KEY) || "{}");
-      return obj && typeof obj === "object" ? obj : {};
     }catch{
-      return {};
+      return null;
     }
   }
 
-  function saveAck(obj){
-    localStorage.setItem(DOCS_KEY, JSON.stringify(obj));
-  }
-
-  function fmt(ts){
-    if(!ts) return "—";
+  function safeParse(key, fallback){
     try{
-      return new Date(ts).toLocaleString("sv-SE", { year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
-    }catch{ return "—"; }
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
   }
 
   function setMsg(kind, text){
@@ -224,156 +216,145 @@ Syfte: Guard + docs list + read ack (UI-only)
     m.textContent = text || "";
   }
 
-  // Demo docs (v1)
-  const docs = [
-    {
-      id: "doc_workenv_01",
-      title: "Policy: Arbetsmiljö",
-      version: "1.0",
-      tag: "Policy",
-      body:
-`Syfte
-- Skapa en trygg arbetsmiljö.
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
 
-Grundregler
-- Rapportera risker direkt.
-- Följ rutiner.
-- Be om hjälp vid osäkerhet.
+  $("#whoName").textContent = auth.displayName || "—";
+  $("#whoEmpNo").textContent = auth.empNo || "—";
 
-Kvittens
-- Markera “läst” när du tagit del av innehållet.`
-    },
-    {
-      id: "doc_hygiene_01",
-      title: "Rutin: Hygien",
-      version: "1.0",
-      tag: "Rutin",
-      body:
-`Syfte
-- Säker hygien i arbetet.
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-Checklista
-- Tvätta händer enligt rutin.
-- Rena arbetsytor.
-- Hantera råvaror korrekt.`
-    },
-    {
-      id: "doc_clean_01",
-      title: "Rutin: Städcheck",
-      version: "1.0",
-      tag: "Rutin",
-      body:
-`Syfte
-- Hålla lokaler rena och säkra.
+  function demoDocs(){
+    return [
+      { id:"d1", title:"Policy: Arbetsmiljö", version:"v1.0", body:"Kort policytext (demo).\n\n• Rapportera risker\n• Använd skydd\n• Pauser" },
+      { id:"d2", title:"Rutin: Städcheck", version:"v1.0", body:"Rutin (demo):\n\n1) Kontrollera ytor\n2) Byt trasor\n3) Signera i lista" },
+      { id:"d3", title:"Rutin: Hygien", version:"v1.0", body:"Hygien (demo):\n\n• Tvätta händer\n• Handskar vid behov\n• Ren arbetsyta" },
+    ];
+  }
 
-Dagligt
-- Golv, ytor, sopor.
-- Kontroll av toalett och omklädning.
+  function loadDocs(){
+    const arr = safeParse(DOCS_KEY, null);
+    if(Array.isArray(arr) && arr.length) return arr;
+    return demoDocs();
+  }
 
-Veckovis
-- Djupstäd enligt schema.`
+  function loadAck(){
+    const empNo = String(auth.empNo || "").trim();
+    const all = safeParse(ACK_KEY, {});
+    const map = (all && typeof all === "object") ? all : {};
+    const mine = map[empNo] && typeof map[empNo] === "object" ? map[empNo] : {};
+    return { all: map, empNo, mine };
+  }
+
+  function setAck(docId, isAck){
+    const { all, empNo, mine } = loadAck();
+    const nextMine = Object.assign({}, mine);
+
+    if(isAck){
+      nextMine[docId] = { ackedAt: Date.now() };
+    }else{
+      delete nextMine[docId];
     }
-  ];
 
-  let ack = loadAck();
-  const empNo = auth.empNo || "1234";
-  const ackKey = "emp_" + empNo;
-  if(!ack[ackKey]) ack[ackKey] = {}; // docId -> { readAt }
+    const nextAll = Object.assign({}, all);
+    nextAll[empNo] = nextMine;
+    save(ACK_KEY, nextAll);
+  }
 
   let selectedId = null;
 
-  function isRead(docId){
-    return !!ack[ackKey]?.[docId]?.readAt;
-  }
+  function updateDetail(doc){
+    $("#detailEmpty").style.display = "none";
+    $("#detail").style.display = "block";
 
-  function renderList(){
-    const filter = $("#filter").value;
-    const listEl = $("#list");
-    listEl.innerHTML = "";
+    $("#dTitle").textContent = doc.title || "Dokument";
+    $("#dVersion").textContent = doc.version ? `Version ${doc.version}` : "Version —";
+    $("#dBody").textContent = doc.body || "—";
 
-    const shown = docs.filter(d => {
-      const r = isRead(d.id);
-      if(filter === "read") return r;
-      if(filter === "unread") return !r;
-      return true;
-    });
-
-    if(!shown.length){
-      listEl.innerHTML = `<div class="empty">Inga dokument för valt filter.</div>`;
-      return;
-    }
-
-    shown.forEach(d => {
-      const read = isRead(d.id);
-      const el = document.createElement("div");
-      el.className = "doc" + (d.id === selectedId ? " active" : "");
-      el.innerHTML = `
-        <p class="doc-title">${d.title}</p>
-        <div class="doc-meta">
-          <span class="pill">${d.tag}</span>
-          <span class="pill">v${d.version}</span>
-          <span class="pill">${read ? "Kvitterad" : "Ej kvitterad"}</span>
-        </div>
-      `;
-      el.addEventListener("click", () => {
-        selectedId = d.id;
-        renderList();
-        openDoc(d.id);
-      });
-      listEl.appendChild(el);
-    });
-  }
-
-  function openDoc(docId){
-    const d = docs.find(x => x.id === docId) || null;
-    if(!d){
-      $("#viewer").style.display = "none";
-      $("#viewerEmpty").style.display = "block";
-      return;
-    }
-
-    $("#viewerEmpty").style.display = "none";
-    $("#viewer").style.display = "block";
-
-    $("#vTitle").textContent = d.title;
-    $("#vVer").textContent = d.version;
-    $("#vTag").textContent = d.tag;
-    $("#vBody").textContent = d.body;
-
-    const readAt = ack[ackKey]?.[docId]?.readAt || null;
-    $("#vStatus").textContent = readAt ? ("Kvitterad: " + fmt(readAt)) : "Ej kvitterad";
-    $("#btnAcknowledge").disabled = !!readAt;
+    const { mine } = loadAck();
+    const ack = mine[selectedId];
+    $("#dAck").textContent = ack ? "Kvitterad" : "Ej kvitterad";
 
     setMsg("", "");
   }
 
-  $("#btnAcknowledge").addEventListener("click", () => {
+  function closeDetail(){
+    $("#detail").style.display = "none";
+    $("#detailEmpty").style.display = "block";
+    selectedId = null;
+    setMsg("", "");
+  }
+
+  function render(){
+    const list = $("#list");
+    list.innerHTML = "";
+
+    const docs = loadDocs();
+    const { mine } = loadAck();
+
+    if(!docs.length){
+      list.innerHTML = `<div class="empty">Inga dokument.</div>`;
+      closeDetail();
+      return;
+    }
+
+    docs.forEach(doc => {
+      const isActive = (doc.id === selectedId);
+      const isAcked = !!mine[doc.id];
+
+      const el = document.createElement("div");
+      el.className = "item" + (isActive ? " active" : "");
+      el.innerHTML = `
+        <p class="item-title">${escapeHtml(doc.title || "Dokument")}</p>
+        <div class="meta">
+          <span class="pill">${isAcked ? "Kvitterad" : "Ej kvitterad"}</span>
+          <span class="pill">${escapeHtml(doc.version || "v1")}</span>
+        </div>
+      `;
+      el.addEventListener("click", () => {
+        selectedId = doc.id;
+        render();
+        updateDetail(doc);
+      });
+      list.appendChild(el);
+    });
+
     if(!selectedId){
-      setMsg("err", "Välj ett dokument först.");
-      return;
+      selectedId = docs[0].id;
+      render();
+      updateDetail(docs[0]);
     }
+  }
 
-    if(!ack[ackKey]) ack[ackKey] = {};
-    if(ack[ackKey][selectedId]?.readAt){
-      setMsg("warn", "Redan kvitterad.");
-      return;
-    }
-
-    ack[ackKey][selectedId] = { readAt: Date.now() };
-    saveAck(ack);
-
-    setMsg("ok", "Kvitterat som läst.");
-    renderList();
-    openDoc(selectedId);
+  $("#btnAck").addEventListener("click", () => {
+    if(!selectedId) return;
+    setAck(selectedId, true);
+    setMsg("ok", "Kvitterad.");
+    render();
+    const doc = loadDocs().find(d => d.id === selectedId);
+    if(doc) updateDetail(doc);
   });
 
-  $("#filter").addEventListener("change", renderList);
+  $("#btnUnAck").addEventListener("click", () => {
+    if(!selectedId) return;
+    setAck(selectedId, false);
+    setMsg("warn", "Kvittens borttagen.");
+    render();
+    const doc = loadDocs().find(d => d.id === selectedId);
+    if(doc) updateDetail(doc);
+  });
 
-  renderList();
+  $("#btnReload").addEventListener("click", render);
+
+  render();
 
 })();
 </script>
 
 </body>
 </html>
-
