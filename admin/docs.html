@@ -1,1 +1,1163 @@
+<!-- ============================================================
+AO-056 | FIL-ID: admin/docs.html
+Projekt: HR-System
+Syfte: Admin – Dokument (skapa/publicera) + kvittens per anst.nr per version – UI-only v1 (nivå 3)
+
+Krav (MUST-HAVE):
+- Admin kan skapa dokument (titel + text och/eller bilaga)
+- Målgrupp: one / all / group (empNo / groupId) via AO-017_GROUPS_V1
+- Publicerad (draft/public)
+- Kvittens krävs (requireAck)
+- Versionering: kvittens per version (docId + version + empNo)
+- Version++ triggas av ändring i: text, bilaga (upload/url), målgrupp (target)
+  (Publicerad-toggle triggar INTE version++)
+- Admin kan se kvittenslista per anst.nr för vald doc + vald version
+- Ta bort dokument: raderar också kvittenser (A)
+- Fil-uppladdning i demo (localStorage) med maxstorlek 1 MB (fail-closed)
+
+Policy:
+- Ingen backend
+- Ingen känslig persondata lagras
+- Robust guard: sessionStorage först, fallback localStorage (fail-closed)
+- Inga spontana designändringar utanför AO
+- Inga nya keys utöver nedan
+
+Lagring:
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-017_GROUPS_V1 (localStorage) – grupper
+- AO-018_DOCS_V1 (localStorage) – dokument
+- AO-018_DOCS_ACK_V1 (localStorage) – kvittenser
+
+Ack-format (v1):
+- Key: "${docId}|${version}|${empNo}" -> { at: timestamp }
+
+Dokumentformat (v1):
+{
+  id, title, body,
+  attachment: { mode:"none"|"upload"|"url", fileName, fileType, fileSize, fileDataUrl, fileUrl },
+  target: { mode:"one"|"all"|"group", empNo, groupId },
+  requireAck: boolean,
+  published: boolean,
+  version: number,
+  createdAt, updatedAt
+}
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Dokument</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .layout{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .layout{ grid-template-columns: 1fr; }
+    }
+
+    .panel{
+      border: 1px solid var(--line);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .panel:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+    .panel.create{ background: rgba(167,243,208,.18); }
+    .panel.list{ background: rgba(191,219,254,.18); }
+
+    .row2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 620px){
+      .row2{ grid-template-columns: 1fr; }
+    }
+
+    .subcard{
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.7);
+    }
+    .subcard .title{
+      font-weight: 850;
+      margin: 0 0 8px;
+    }
+
+    .item{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background:#fff;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+    .item:hover{
+      transform: var(--lift);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.02);
+    }
+
+    .item-title{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+      margin-top:10px;
+    }
+
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+    code{ font-size:.95em; }
+
+    .warn{
+      border:1px solid rgba(239,68,68,.35);
+      background: rgba(254,226,226,.65);
+      border-radius: var(--r14);
+      padding: 10px;
+      margin-top: 10px;
+      font-size: .95rem;
+    }
+
+    .kpis{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin: 10px 0 2px;
+    }
+    .kpi{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.95rem;
+    }
+
+    table{
+      width:100%;
+      border-collapse: collapse;
+      background:#fff;
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      overflow:hidden;
+      margin-top:10px;
+    }
+    th, td{
+      text-align:left;
+      padding:10px;
+      border-bottom: 1px solid var(--line);
+      font-size:.95rem;
+    }
+    th{ font-weight: 850; background: rgba(249,250,251,.9); }
+    tr:last-child td{ border-bottom:none; }
+
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin • Dokument</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Uppgifter</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./docs.html" aria-current="page">Dokument</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Dokument (Admin)</h1>
+  <p class="muted">Skapa/publicera dokument. Kvittens loggas per anst.nr och per version.</p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+      </div>
+      <div class="row wrap">
+        <a class="btn secondary" href="../employee/docs.html">Öppna employee/docs (demo)</a>
+      </div>
+    </div>
+
+    <div class="layout">
+
+      <!-- SKAPA / REDIGERA -->
+      <section class="panel create" aria-label="Skapa eller redigera dokument">
+        <div class="panel-title">Skapa / Redigera</div>
+
+        <div class="warn">
+          <strong>Viktigt:</strong> “Ladda upp fil” i v1 sparas bara i <code>localStorage</code> på denna browser/dator.
+          Max <strong>1 MB</strong>. För “riktigt” krävs server senare.
+        </div>
+
+        <div class="subcard" aria-label="Grunddata">
+          <p class="title">Grund</p>
+
+          <label>
+            Titel (krav)
+            <input id="title" type="text" placeholder="t.ex. Hygienrutin v1" />
+          </label>
+
+          <label style="margin-top:10px;">
+            Text (valfri om bilaga finns)
+            <textarea id="body" placeholder="Skriv dokumentets innehåll..."></textarea>
+          </label>
+
+          <div class="row2" style="margin-top:10px;">
+            <label>
+              Publicerad
+              <select id="published">
+                <option value="false" selected>Nej (utkast)</option>
+                <option value="true">Ja</option>
+              </select>
+            </label>
+
+            <label>
+              Kvittens krävs
+              <select id="requireAck">
+                <option value="true" selected>Ja</option>
+                <option value="false">Nej</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="subcard" aria-label="Målgrupp">
+          <p class="title">Målgrupp</p>
+
+          <div class="row2">
+            <label>
+              Mål
+              <select id="targetMode">
+                <option value="one">En medarbetare</option>
+                <option value="all">Alla (från grupper)</option>
+                <option value="group">Grupp</option>
+              </select>
+            </label>
+
+            <label id="oneWrap">
+              Anst.nr (employee)
+              <input id="targetEmpNo" type="text" inputmode="numeric" placeholder="t.ex. 1234" />
+            </label>
+
+            <label id="groupWrap" style="display:none;">
+              Grupp
+              <select id="targetGroup"></select>
+            </label>
+          </div>
+
+          <div class="smallnote">
+            “Alla” och “Grupp” bygger på <code>AO-017_GROUPS_V1</code>. Tom grupp = fail-closed (går inte att publicera).
+          </div>
+        </div>
+
+        <div class="subcard" aria-label="Bilaga">
+          <p class="title">Bilaga</p>
+
+          <div class="row2">
+            <label>
+              Typ
+              <select id="attachMode">
+                <option value="none" selected>Ingen</option>
+                <option value="upload">Ladda upp fil (demo)</option>
+                <option value="url">Länk (URL)</option>
+              </select>
+            </label>
+
+            <label id="attachUrlWrap" style="display:none;">
+              URL
+              <input id="attachUrl" type="url" placeholder="https://..." />
+            </label>
+
+            <label id="attachUploadWrap" style="display:none;">
+              Fil (max 1 MB)
+              <input id="attachFile" type="file" />
+            </label>
+          </div>
+
+          <div class="smallnote" id="attachInfo">—</div>
+        </div>
+
+        <div class="row-actions" style="margin-top:10px;">
+          <button id="btnSave" type="button">Spara</button>
+          <button id="btnNew" class="secondary" type="button">Nytt dokument</button>
+        </div>
+
+        <p id="msg" class="message" aria-live="polite"></p>
+
+        <div class="smallnote">
+          Version++ triggas av: ändrad text, ändrad bilaga (upload/url), ändrad målgrupp.
+        </div>
+      </section>
+
+      <!-- LISTA / KVITTENS -->
+      <section class="panel list" aria-label="Lista och kvittens">
+        <div class="panel-title">Översikt</div>
+
+        <div class="kpis" aria-label="Sammanfattning">
+          <div class="kpi">Totalt: <strong id="kpiTotal">0</strong></div>
+          <div class="kpi">Publicerade: <strong id="kpiPub">0</strong></div>
+          <div class="kpi">Utkast: <strong id="kpiDraft">0</strong></div>
+        </div>
+
+        <div class="row2" style="margin-bottom:10px;">
+          <label>
+            Visa
+            <select id="listFilter">
+              <option value="all" selected>Alla</option>
+              <option value="published">Publicerade</option>
+              <option value="draft">Utkast</option>
+            </select>
+          </label>
+
+          <label>
+            Sök (titel)
+            <input id="search" type="text" placeholder="t.ex. hygien" />
+          </label>
+        </div>
+
+        <div id="list"></div>
+
+        <div class="subcard" aria-label="Kvittens">
+          <p class="title">Kvittens (per version)</p>
+          <div class="row2">
+            <label>
+              Dokument
+              <select id="ackDocSelect"></select>
+            </label>
+            <label>
+              Version
+              <select id="ackVerSelect"></select>
+            </label>
+          </div>
+
+          <div class="smallnote" id="ackSummary">Välj dokument och version.</div>
+          <div id="ackTableWrap"></div>
+        </div>
+
+      </section>
+
+    </div>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+AO-056 | FIL-ID: admin/docs.html (inline JS)
+Guard + docs CRUD + versioning + ack per empNo per version
+Fail-closed:
+- storage save errors
+- all/group recipients require groups data
+- upload size cap 1MB
+Delete doc -> deletes ack keys for docId
+============================================================ */
+(function(){
+  "use strict";
+
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const GROUPS_KEY  = "AO-017_GROUPS_V1";
+  const DOCS_KEY    = "AO-018_DOCS_V1";
+  const ACK_KEY     = "AO-018_DOCS_ACK_V1";
+
+  const MAX_UPLOAD_BYTES = 1 * 1024 * 1024; // 1 MB
+
+  const $ = (s) => document.querySelector(s);
+
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
+  function readAuth(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+      if(data.auth.role !== "admin") return null;
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+      return data.auth;
+    }catch{
+      return null;
+    }
+  }
+
+  function safeParse(key, fallback){
+    try{
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+
+  function saveFailClosed(key, value){
+    try{
+      localStorage.setItem(key, JSON.stringify(value));
+      return { ok:true };
+    }catch(e){
+      return { ok:false, err:e };
+    }
+  }
+
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function genId(prefix){
+    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function normalizeEmpNo(v){
+    const s = String(v || "").trim();
+    return s.replace(/[^\d]/g, "");
+  }
+  function validateEmpNo(v){
+    const emp = normalizeEmpNo(v);
+    if(!emp) return { ok:false, empNo:"" };
+    if(emp.length > 10) return { ok:false, empNo: emp };
+    return { ok:true, empNo: emp };
+  }
+
+  // --- Guard ---
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+  $("#whoName").textContent = auth.displayName || "Admin";
+
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  // --- Groups ---
+  function loadGroups(){
+    const arr = safeParse(GROUPS_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+  function renderGroupSelect(){
+    const sel = $("#targetGroup");
+    sel.innerHTML = "";
+    const groups = loadGroups();
+    if(!groups.length){
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "(Skapa grupp först)";
+      sel.appendChild(opt);
+      return;
+    }
+    groups.forEach(g => {
+      const opt = document.createElement("option");
+      opt.value = g.id;
+      opt.textContent = `${g.name} (${(g.members||[]).length})`;
+      sel.appendChild(opt);
+    });
+  }
+
+  function computeTargetsFor(mode, empNo, groupId){
+    const groups = loadGroups();
+    const set = new Set();
+
+    if(mode === "one"){
+      const v = validateEmpNo(empNo);
+      if(!v.ok) return { ok:false, list:[], err:"Skriv ett giltigt anst.nr (bara siffror, max 10)." };
+      return { ok:true, list:[v.empNo] };
+    }
+
+    if(mode === "group"){
+      const g = groups.find(x => x.id === groupId);
+      if(!g) return { ok:false, list:[], err:"Välj en grupp." };
+      (g.members||[]).forEach(m => {
+        const v = validateEmpNo(m);
+        if(v.ok) set.add(v.empNo);
+      });
+      const list = Array.from(set);
+      if(list.length === 0) return { ok:false, list:[], err:"Gruppen har inga giltiga medlemmar (anst.nr)." };
+      return { ok:true, list };
+    }
+
+    if(mode === "all"){
+      groups.forEach(g => (g.members||[]).forEach(m => {
+        const v = validateEmpNo(m);
+        if(v.ok) set.add(v.empNo);
+      }));
+      const list = Array.from(set);
+      if(list.length === 0) return { ok:false, list:[], err:"‘Alla’ kräver att minst en medarbetare finns i grupper." };
+      return { ok:true, list };
+    }
+
+    return { ok:false, list:[], err:"Ogiltig målgrupp." };
+  }
+
+  // --- Docs store ---
+  function loadDocs(){
+    const arr = safeParse(DOCS_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+  function saveDocs(arr){
+    const res = saveFailClosed(DOCS_KEY, Array.isArray(arr) ? arr : []);
+    if(!res.ok){
+      setMsg("err", "Kunde inte spara dokument (localStorage fullt eller blockerad).");
+      return false;
+    }
+    return true;
+  }
+
+  function loadAck(){
+    const obj = safeParse(ACK_KEY, {});
+    return (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
+  }
+  function saveAck(obj){
+    const res = saveFailClosed(ACK_KEY, obj && typeof obj === "object" ? obj : {});
+    if(!res.ok){
+      setMsg("err", "Kunde inte spara kvittens (localStorage fullt eller blockerad).");
+      return false;
+    }
+    return true;
+  }
+
+  // --- UI state ---
+  let editingId = null;
+  let uploadCache = null; // { fileName, fileType, fileSize, fileDataUrl }
+
+  function syncTargetUI(){
+    const mode = $("#targetMode").value;
+    $("#oneWrap").style.display = (mode === "one") ? "block" : "none";
+    $("#groupWrap").style.display = (mode === "group") ? "block" : "none";
+  }
+  $("#targetMode").addEventListener("change", syncTargetUI);
+
+  function syncAttachUI(){
+    const mode = $("#attachMode").value;
+    $("#attachUploadWrap").style.display = (mode === "upload") ? "block" : "none";
+    $("#attachUrlWrap").style.display = (mode === "url") ? "block" : "none";
+
+    if(mode !== "upload"){
+      $("#attachFile").value = "";
+      uploadCache = null;
+    }
+    if(mode !== "url"){
+      $("#attachUrl").value = "";
+    }
+    renderAttachInfo();
+  }
+  $("#attachMode").addEventListener("change", syncAttachUI);
+
+  function renderAttachInfo(){
+    const mode = $("#attachMode").value;
+    if(mode === "none"){
+      $("#attachInfo").textContent = "Ingen bilaga.";
+      return;
+    }
+    if(mode === "url"){
+      const u = String($("#attachUrl").value || "").trim();
+      $("#attachInfo").textContent = u ? ("URL: " + u) : "Ange en URL.";
+      return;
+    }
+    if(mode === "upload"){
+      if(!uploadCache){
+        $("#attachInfo").textContent = "Välj en fil (max 1 MB).";
+        return;
+      }
+      $("#attachInfo").textContent = `Fil: ${uploadCache.fileName} (${Math.round(uploadCache.fileSize/1024)} KB)`;
+      return;
+    }
+  }
+  $("#attachUrl").addEventListener("input", renderAttachInfo);
+
+  $("#attachFile").addEventListener("change", () => {
+    setMsg("", "");
+    const file = $("#attachFile").files && $("#attachFile").files[0];
+    if(!file){
+      uploadCache = null;
+      renderAttachInfo();
+      return;
+    }
+    if(file.size > MAX_UPLOAD_BYTES){
+      $("#attachFile").value = "";
+      uploadCache = null;
+      renderAttachInfo();
+      setMsg("err", "Filen är för stor. Max 1 MB i v1.");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onerror = () => {
+      $("#attachFile").value = "";
+      uploadCache = null;
+      renderAttachInfo();
+      setMsg("err", "Kunde inte läsa filen.");
+    };
+    reader.onload = () => {
+      const dataUrl = String(reader.result || "");
+      uploadCache = {
+        fileName: file.name || "fil",
+        fileType: file.type || "application/octet-stream",
+        fileSize: file.size || 0,
+        fileDataUrl: dataUrl
+      };
+      renderAttachInfo();
+      setMsg("ok", "Fil laddad (demo).");
+    };
+    reader.readAsDataURL(file);
+  });
+
+  // --- Version bump rules (locked) ---
+  function normalizeTarget(mode, empNo, groupId){
+    if(mode === "one"){
+      const v = validateEmpNo(empNo);
+      return { mode:"one", empNo: v.ok ? v.empNo : "", groupId:"" };
+    }
+    if(mode === "group"){
+      return { mode:"group", empNo:"", groupId: String(groupId||"") };
+    }
+    return { mode:"all", empNo:"", groupId:"" };
+  }
+
+  function normalizeAttachment(mode){
+    if(mode === "none"){
+      return { mode:"none", fileName:"", fileType:"", fileSize:0, fileDataUrl:"", fileUrl:"" };
+    }
+    if(mode === "url"){
+      return {
+        mode:"url",
+        fileName:"",
+        fileType:"",
+        fileSize:0,
+        fileDataUrl:"",
+        fileUrl: String($("#attachUrl").value || "").trim()
+      };
+    }
+    // upload
+    const u = uploadCache;
+    return {
+      mode:"upload",
+      fileName: u?.fileName || "",
+      fileType: u?.fileType || "",
+      fileSize: u?.fileSize || 0,
+      fileDataUrl: u?.fileDataUrl || "",
+      fileUrl:""
+    };
+  }
+
+  function bumpNeeded(prev, next){
+    // Locked: bump on text, attachment (upload/url), target
+    const a = String(prev?.body || "");
+    const b = String(next?.body || "");
+    if(a !== b) return true;
+
+    const pAtt = prev?.attachment || {};
+    const nAtt = next?.attachment || {};
+    const pAttSig = JSON.stringify([pAtt.mode||"none", pAtt.fileUrl||"", pAtt.fileName||"", pAtt.fileType||"", pAtt.fileSize||0, pAtt.fileDataUrl||""]);
+    const nAttSig = JSON.stringify([nAtt.mode||"none", nAtt.fileUrl||"", nAtt.fileName||"", nAtt.fileType||"", nAtt.fileSize||0, nAtt.fileDataUrl||""]);
+    if(pAttSig !== nAttSig) return true;
+
+    const pT = prev?.target || {};
+    const nT = next?.target || {};
+    const pTSig = JSON.stringify([pT.mode||"all", pT.empNo||"", pT.groupId||""]);
+    const nTSig = JSON.stringify([nT.mode||"all", nT.empNo||"", nT.groupId||""]);
+    if(pTSig !== nTSig) return true;
+
+    return false;
+  }
+
+  function clearForm(){
+    editingId = null;
+    uploadCache = null;
+
+    $("#title").value = "";
+    $("#body").value = "";
+    $("#published").value = "false";
+    $("#requireAck").value = "true";
+
+    $("#targetMode").value = "one";
+    $("#targetEmpNo").value = "";
+    $("#targetGroup").value = ($("#targetGroup").options[0]?.value) || "";
+
+    $("#attachMode").value = "none";
+    $("#attachUrl").value = "";
+    $("#attachFile").value = "";
+    renderAttachInfo();
+
+    syncTargetUI();
+    syncAttachUI();
+    setMsg("", "");
+  }
+
+  function fillForm(doc){
+    editingId = doc.id;
+
+    $("#title").value = String(doc.title || "");
+    $("#body").value = String(doc.body || "");
+    $("#published").value = String(!!doc.published);
+    $("#requireAck").value = String(!!doc.requireAck);
+
+    const t = doc.target || { mode:"one" };
+    $("#targetMode").value = String(t.mode || "one");
+    $("#targetEmpNo").value = String(t.empNo || "");
+    $("#targetGroup").value = String(t.groupId || "");
+
+    const att = doc.attachment || { mode:"none" };
+    $("#attachMode").value = String(att.mode || "none");
+
+    uploadCache = null;
+    $("#attachFile").value = "";
+    $("#attachUrl").value = "";
+
+    if(att.mode === "url"){
+      $("#attachUrl").value = String(att.fileUrl || "");
+    }
+    if(att.mode === "upload"){
+      // Vi kan inte återfylla <input type=file>. Vi håller bara metadata i uploadCache för att spara oförändrat.
+      uploadCache = {
+        fileName: String(att.fileName || ""),
+        fileType: String(att.fileType || "application/octet-stream"),
+        fileSize: Number(att.fileSize || 0),
+        fileDataUrl: String(att.fileDataUrl || "")
+      };
+    }
+
+    syncTargetUI();
+    syncAttachUI();
+    renderAttachInfo();
+    setMsg("", "");
+  }
+
+  function validateDocDraft(nextDoc){
+    const title = String(nextDoc.title || "").trim();
+    const body = String(nextDoc.body || "").trim();
+
+    const hasUpload = (nextDoc.attachment?.mode === "upload" && !!nextDoc.attachment?.fileDataUrl);
+    const hasUrl = (nextDoc.attachment?.mode === "url" && !!String(nextDoc.attachment?.fileUrl||"").trim());
+    const hasAnyAttachment = hasUpload || hasUrl;
+
+    if(!title) return { ok:false, err:"Titel krävs." };
+    if(!body && !hasAnyAttachment) return { ok:false, err:"Skriv text eller lägg till en bilaga." };
+
+    // validate target
+    const tm = nextDoc.target?.mode || "one";
+    if(tm === "one"){
+      const v = validateEmpNo(nextDoc.target?.empNo || "");
+      if(!v.ok) return { ok:false, err:"Mål: Skriv ett giltigt anst.nr (bara siffror, max 10)." };
+    }
+    if(tm === "group"){
+      const gid = String(nextDoc.target?.groupId || "");
+      if(!gid) return { ok:false, err:"Mål: Välj en grupp." };
+      const check = computeTargetsFor("group", "", gid);
+      if(!check.ok) return { ok:false, err:"Mål: " + check.err };
+    }
+    if(tm === "all"){
+      const check = computeTargetsFor("all", "", "");
+      if(!check.ok) return { ok:false, err:"Mål: " + check.err };
+    }
+
+    // validate attachment url if chosen
+    if(nextDoc.attachment?.mode === "url"){
+      const u = String(nextDoc.attachment.fileUrl || "").trim();
+      if(!u) return { ok:false, err:"Bilaga (URL): Ange en URL eller välj Ingen bilaga." };
+    }
+    if(nextDoc.attachment?.mode === "upload"){
+      const u = nextDoc.attachment;
+      if(!u?.fileDataUrl) return { ok:false, err:"Bilaga (Upload): Välj en fil eller välj Ingen bilaga." };
+      if(Number(u.fileSize||0) > MAX_UPLOAD_BYTES) return { ok:false, err:"Bilaga (Upload): Filen är för stor. Max 1 MB." };
+    }
+
+    return { ok:true };
+  }
+
+  // --- Save ---
+  $("#btnSave").addEventListener("click", () => {
+    setMsg("", "");
+
+    const title = String($("#title").value || "").trim();
+    const body = String($("#body").value || "");
+
+    const published = ($("#published").value === "true");
+    const requireAck = ($("#requireAck").value === "true");
+
+    const targetMode = $("#targetMode").value;
+    const target = normalizeTarget(targetMode, $("#targetEmpNo").value, $("#targetGroup").value);
+
+    const attachMode = $("#attachMode").value;
+    const attachment = normalizeAttachment(attachMode);
+
+    const now = Date.now();
+    const docs = loadDocs();
+
+    if(!editingId){
+      // Create
+      const doc = {
+        id: genId("doc"),
+        title,
+        body,
+        attachment,
+        target,
+        requireAck,
+        published,
+        version: 1,
+        createdAt: now,
+        updatedAt: now
+      };
+
+      const val = validateDocDraft(doc);
+      if(!val.ok){ setMsg("err", val.err); return; }
+
+      docs.push(doc);
+      if(!saveDocs(docs)) return;
+
+      setMsg("ok", "Dokument skapat (v1).");
+      fillForm(doc);
+      renderAll();
+      return;
+    }
+
+    // Update
+    const idx = docs.findIndex(d => String(d?.id) === String(editingId));
+    if(idx < 0){
+      setMsg("err", "Dokumentet hittades inte längre.");
+      clearForm();
+      renderAll();
+      return;
+    }
+
+    const prev = docs[idx];
+    const next = {
+      ...prev,
+      title,
+      body,
+      attachment,
+      target,
+      requireAck,
+      published,
+      updatedAt: now
+    };
+
+    const val = validateDocDraft(next);
+    if(!val.ok){ setMsg("err", val.err); return; }
+
+    // Version bump rules (locked)
+    if(bumpNeeded(prev, next)){
+      next.version = Number(prev.version || 1) + 1;
+    }else{
+      next.version = Number(prev.version || 1);
+    }
+
+    docs[idx] = next;
+    if(!saveDocs(docs)) return;
+
+    setMsg("ok", (next.version !== (prev.version||1)) ? `Sparat. Ny version: v${next.version}` : "Sparat (ingen ny version).");
+    fillForm(next);
+    renderAll();
+  });
+
+  $("#btnNew").addEventListener("click", () => {
+    clearForm();
+  });
+
+  // --- List / KPI ---
+  function updateKpis(docs){
+    const total = docs.length;
+    const pub = docs.filter(d => !!d.published).length;
+    const draft = total - pub;
+    $("#kpiTotal").textContent = String(total);
+    $("#kpiPub").textContent = String(pub);
+    $("#kpiDraft").textContent = String(draft);
+  }
+
+  function targetLabel(t){
+    const mode = t?.mode || "all";
+    if(mode === "one") return `En: ${t.empNo || "—"}`;
+    if(mode === "group"){
+      const g = loadGroups().find(x => x.id === t.groupId);
+      return `Grupp: ${g?.name || t.groupId || "—"}`;
+    }
+    return "Alla";
+  }
+
+  function attachLabel(att){
+    const mode = att?.mode || "none";
+    if(mode === "none") return "Ingen";
+    if(mode === "url") return "URL";
+    return "Upload";
+  }
+
+  function renderList(){
+    const list = $("#list");
+    list.innerHTML = "";
+
+    const docs = loadDocs().slice().sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+    updateKpis(docs);
+
+    const filter = $("#listFilter").value;
+    const q = String($("#search").value || "").trim().toLowerCase();
+
+    let shown = docs;
+    if(filter === "published") shown = shown.filter(d => !!d.published);
+    if(filter === "draft") shown = shown.filter(d => !d.published);
+
+    if(q){
+      shown = shown.filter(d => String(d.title||"").toLowerCase().includes(q));
+    }
+
+    if(shown.length === 0){
+      list.innerHTML = `<div class="empty">Inga dokument att visa.</div>`;
+      return;
+    }
+
+    shown.slice(0, 80).forEach(d => {
+      const el = document.createElement("div");
+      el.className = "item";
+      el.innerHTML = `
+        <div style="min-width:260px; flex: 1 1 520px;">
+          <p class="item-title">${escapeHtml(d.title || "Dokument")}</p>
+          <div class="meta">
+            <span class="pill">${d.published ? "Publicerad" : "Utkast"}</span>
+            <span class="pill">v${escapeHtml(String(d.version || 1))}</span>
+            <span class="pill">${escapeHtml(targetLabel(d.target))}</span>
+            <span class="pill">Bilaga: ${escapeHtml(attachLabel(d.attachment))}</span>
+            <span class="pill">Ack: ${d.requireAck ? "Ja" : "Nej"}</span>
+          </div>
+          <div class="meta">
+            <span class="mono">ID: ${escapeHtml(d.id)}</span>
+          </div>
+        </div>
+
+        <div class="row" style="gap:8px;">
+          <button type="button" class="secondary" data-edit="${escapeHtml(d.id)}">Redigera</button>
+          <button type="button" class="secondary" data-del="${escapeHtml(d.id)}">Ta bort</button>
+        </div>
+      `;
+      list.appendChild(el);
+    });
+
+    list.querySelectorAll("button[data-edit]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-edit");
+        const doc = loadDocs().find(x => String(x?.id) === String(id));
+        if(!doc){
+          setMsg("err", "Dokumentet hittades inte.");
+          renderAll();
+          return;
+        }
+        fillForm(doc);
+      });
+    });
+
+    list.querySelectorAll("button[data-del]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-del");
+        const doc = loadDocs().find(x => String(x?.id) === String(id));
+        if(!doc) return;
+        if(!confirm(`Ta bort dokument "${doc.title || "Dokument"}"? (Kvittens raderas också)`)) return;
+
+        // Delete doc
+        const nextDocs = loadDocs().filter(d => String(d?.id) !== String(id));
+        if(!saveDocs(nextDocs)) return;
+
+        // Delete ack for docId (locked: A)
+        const ack = loadAck();
+        const prefix = String(id) + "|";
+        let changed = false;
+        Object.keys(ack).forEach(k => {
+          if(k.startsWith(prefix)){
+            delete ack[k];
+            changed = true;
+          }
+        });
+        if(changed) saveAck(ack);
+
+        if(editingId && String(editingId) === String(id)){
+          clearForm();
+        }
+
+        setMsg("ok", "Dokument borttaget.");
+        renderAll();
+      });
+    });
+  }
+
+  // --- Ack view ---
+  function renderAckDocSelect(){
+    const sel = $("#ackDocSelect");
+    sel.innerHTML = "";
+
+    const docs = loadDocs().slice().sort((a,b) => String(a.title||"").localeCompare(String(b.title||""), "sv"));
+
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = "(Välj dokument)";
+    sel.appendChild(opt0);
+
+    docs.forEach(d => {
+      const opt = document.createElement("option");
+      opt.value = d.id;
+      opt.textContent = `${d.title || d.id} (v${d.version || 1})`;
+      sel.appendChild(opt);
+    });
+  }
+
+  function renderAckVerSelect(doc){
+    const sel = $("#ackVerSelect");
+    sel.innerHTML = "";
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = "(Välj version)";
+    sel.appendChild(opt0);
+
+    if(!doc) return;
+
+    const maxV = Number(doc.version || 1);
+    for(let v = 1; v <= maxV; v++){
+      const opt = document.createElement("option");
+      opt.value = String(v);
+      opt.textContent = "v" + String(v);
+      sel.appendChild(opt);
+    }
+  }
+
+  function renderAckTable(doc, version){
+    const wrap = $("#ackTableWrap");
+    wrap.innerHTML = "";
+
+    if(!doc || !version){
+      $("#ackSummary").textContent = "Välj dokument och version.";
+      return;
+    }
+
+    const vNum = Number(version);
+    const targets = computeTargetsFor(doc.target?.mode || "all", doc.target?.empNo || "", doc.target?.groupId || "");
+    if(!targets.ok){
+      $("#ackSummary").textContent = "Målgrupp kan inte beräknas: " + targets.err;
+      return;
+    }
+
+    const empNos = targets.list.slice().sort((a,b) => String(a).localeCompare(String(b), "sv"));
+    const ack = loadAck();
+
+    const rows = empNos.map(empNo => {
+      const k = `${doc.id}|${vNum}|${empNo}`;
+      const at = ack[k]?.at ? new Date(ack[k].at) : null;
+      return { empNo, at };
+    });
+
+    const acked = rows.filter(r => !!r.at).length;
+    $("#ackSummary").textContent = `${acked} av ${rows.length} kvitterade för v${vNum}.`;
+
+    const table = document.createElement("table");
+    table.innerHTML = `
+      <thead>
+        <tr>
+          <th>Anst.nr</th>
+          <th>Kvitterad</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    `;
+    const tbody = table.querySelector("tbody");
+
+    rows.forEach(r => {
+      const tr = document.createElement("tr");
+      const atText = r.at ? r.at.toLocaleString("sv-SE") : "—";
+      tr.innerHTML = `
+        <td class="mono">${escapeHtml(r.empNo)}</td>
+        <td>${escapeHtml(atText)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    wrap.appendChild(table);
+  }
+
+  $("#ackDocSelect").addEventListener("change", () => {
+    const id = $("#ackDocSelect").value;
+    const doc = loadDocs().find(d => d.id === id) || null;
+    renderAckVerSelect(doc);
+    $("#ackVerSelect").value = "";
+    renderAckTable(doc, "");
+  });
+
+  $("#ackVerSelect").addEventListener("change", () => {
+    const id = $("#ackDocSelect").value;
+    const ver = $("#ackVerSelect").value;
+    const doc = loadDocs().find(d => d.id === id) || null;
+    renderAckTable(doc, ver);
+  });
+
+  // --- init ---
+  function renderAll(){
+    renderGroupSelect();
+    syncTargetUI();
+    syncAttachUI();
+    renderAttachInfo();
+
+    renderList();
+    renderAckDocSelect();
+
+    // keep ack panel consistent if selections exist
+    const did = $("#ackDocSelect").value;
+    const doc = loadDocs().find(d => d.id === did) || null;
+    renderAckVerSelect(doc);
+    const ver = $("#ackVerSelect").value;
+    renderAckTable(doc, ver);
+  }
+
+  $("#listFilter").addEventListener("change", renderList);
+  $("#search").addEventListener("input", renderList);
+
+  clearForm();
+  renderAll();
+
+})();
+</script>
+
+</body>
+</html>
 
