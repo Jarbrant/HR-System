@@ -1,19 +1,18 @@
 <!-- ============================================================
-AO-027 | FIL-ID: admin/questions.html
+AO-029 | FIL-ID: admin/questions.html
 Projekt: HR-System
-Syfte: Admin – Frågor (skapa + skickade) – UTAN svar-vy (UI-only v1)
-Mål:
-- Skicka frågor till en / alla / grupp
-- Batch: flera frågor (en per rad)
-- Lista: skickade frågor + status (Svar krävs / Svarat)
-- INGA svar visas här (se admin/answers.html)
+Syfte: Admin – Frågor (skapa + skickade) + adminstyrd anonym-policy per fråga (UI-only v1)
+Ny funktion:
+- Admin kan välja "Tillåt anonymt svar" (per batch) => sparas på frågan som allowAnonymous
+Viktigt:
+- Svar visas inte här (se admin/answers.html)
 Policy:
 - Ingen backend
 - Ingen känslig data lagras
 - Guard + logout (admin)
 Lagring:
-- AO-015_QA_V1 (localStorage) – frågor/svar (employee läser)
-- AO-023_GROUPS_V1 (localStorage) – grupper (admin UI-only)
+- AO-015_QA_V1 (localStorage) – frågor/svar
+- AO-023_GROUPS_V1 (localStorage) – grupper
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -70,6 +69,18 @@ Lagring:
     @media (max-width: 980px){
       .split{ grid-template-columns: 1fr; }
     }
+    .toggle{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      user-select:none;
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+    }
+    .toggle input{ transform: scale(1.1); }
   </style>
 </head>
 
@@ -98,7 +109,7 @@ Lagring:
 
 <main class="container">
   <h1 class="tight">Frågor</h1>
-  <p class="muted">Skicka frågor till en medarbetare, alla eller en grupp. Svar visas i <a class="link" href="./answers.html">Svar</a>.</p>
+  <p class="muted">Skicka frågor (batch, en/alla/grupp). Svar visas i <a class="link" href="./answers.html">Svar</a>.</p>
 
   <section class="card">
     <div class="layout">
@@ -152,6 +163,15 @@ Lagring:
           <textarea id="questionsBatch" placeholder="Skriv en fråga per rad…&#10;Ex: Hur gick första veckan?&#10;Ex: Har du rätt verktyg?"></textarea>
         </label>
 
+        <!-- Adminstyrd anonym-policy -->
+        <label class="toggle">
+          <input id="allowAnon" type="checkbox" />
+          <span><strong>Tillåt anonymt svar</strong> <span class="muted">(medarbetaren får välja anonym toggle)</span></span>
+        </label>
+        <div class="muted small" style="margin-top:6px;">
+          Om avstängd: medarbetaren kan inte svara anonymt på dessa frågor.
+        </div>
+
         <div class="row-actions" style="margin-top:10px;">
           <button id="btnSend" type="button">Skicka</button>
           <button id="btnClear" class="secondary" type="button">Rensa</button>
@@ -166,9 +186,6 @@ Lagring:
         <hr style="margin:14px 0; border:none; border-top:1px solid var(--line);" />
 
         <div class="panel-title">Grupper <span class="tag">v1</span></div>
-        <p class="muted small">
-          Grupper skapas/uppdateras i <span class="mono">AO-023_GROUPS_V1</span> via sidan “Frågor” (v1).
-        </p>
 
         <div class="split">
           <label>
@@ -212,6 +229,7 @@ Lagring:
             <div class="item-meta">
               <span class="pill" id="dEmp">Anst.nr: —</span>
               <span class="pill" id="dStatus">—</span>
+              <span class="pill" id="dAnonRule">Anonymt: —</span>
               <span class="pill" id="dFrom">Från: admin</span>
             </div>
 
@@ -240,7 +258,7 @@ Lagring:
 
 <script>
 /* ============================================================
-AO-027 | FIL-ID: admin/questions.html (inline JS)
+AO-029 | FIL-ID: admin/questions.html (inline JS)
 ============================================================ */
 (function(){
   "use strict";
@@ -306,13 +324,20 @@ AO-027 | FIL-ID: admin/questions.html (inline JS)
     m.textContent = text || "";
   }
 
-  function statusLabel(q){
-    const answered = q.status === "answered" || (!!q.answer && String(q.answer).trim().length);
-    return answered ? "Svarat" : "Svar krävs";
-  }
-
   function normalizeEmpNo(s){ return String(s || "").trim(); }
   function uniq(arr){ return Array.from(new Set(arr.filter(Boolean))); }
+
+  function answered(q){
+    return (q.status === "answered") || (!!q.answer && String(q.answer).trim().length);
+  }
+
+  function statusLabel(q){
+    return answered(q) ? "Svarat" : "Svar krävs";
+  }
+
+  function anonRuleLabel(q){
+    return (q.allowAnonymous === true) ? "Tillåtet" : "Ej tillåtet";
+  }
 
   let qa = loadQA();
   let selectedId = null;
@@ -386,7 +411,7 @@ AO-027 | FIL-ID: admin/questions.html (inline JS)
       .filter(l => l.length > 0);
   }
 
-  // ---- list/detail (no answers) ----
+  // ---- list/detail ----
   function renderList(){
     qa = loadQA();
 
@@ -395,11 +420,9 @@ AO-027 | FIL-ID: admin/questions.html (inline JS)
     listEl.innerHTML = "";
 
     const arr = qa.slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
-
     const shown = arr.filter(q => {
-      const answered = (q.status === "answered") || (!!q.answer && String(q.answer).trim().length);
-      if(filter === "needs") return !answered;
-      if(filter === "answered") return answered;
+      if(filter === "needs") return !answered(q);
+      if(filter === "answered") return answered(q);
       return true;
     });
 
@@ -417,7 +440,7 @@ AO-027 | FIL-ID: admin/questions.html (inline JS)
         <div class="item-meta">
           <span class="pill">Anst.nr: ${escapeHtml(q.empNo || "—")}</span>
           <span class="pill">${escapeHtml(statusLabel(q))}</span>
-          <span class="pill">Från: ${escapeHtml(q.fromRole || "admin")}</span>
+          <span class="pill">Anonymt: ${escapeHtml(anonRuleLabel(q))}</span>
         </div>
       `;
       el.addEventListener("click", () => {
@@ -448,6 +471,7 @@ AO-027 | FIL-ID: admin/questions.html (inline JS)
     $("#dTitle").textContent = q.title || "—";
     $("#dEmp").textContent = "Anst.nr: " + (q.empNo || "—");
     $("#dStatus").textContent = statusLabel(q);
+    $("#dAnonRule").textContent = "Anonymt: " + anonRuleLabel(q);
     $("#dFrom").textContent = "Från: " + (q.fromRole || "admin");
     $("#dQ").textContent = q.question || "—";
   }
@@ -484,6 +508,7 @@ AO-027 | FIL-ID: admin/questions.html (inline JS)
 
     const title = String($("#title").value || "").trim();
     const lines = parseBatchLines($("#questionsBatch").value);
+    const allowAnon = !!$("#allowAnon").checked;
 
     if(!title){
       setMsg("err", "Fyll i en gemensam titel.");
@@ -515,6 +540,7 @@ AO-027 | FIL-ID: admin/questions.html (inline JS)
           fromRole: "admin",
           status: "needs",
           answer: "",
+          allowAnonymous: allowAnon,
           createdAt: Date.now()
         });
       });
@@ -524,7 +550,7 @@ AO-027 | FIL-ID: admin/questions.html (inline JS)
     qa.push(...created);
     saveQA(qa);
 
-    setMsg("ok", `Skickat: ${lines.length} fråga/frågor till ${recipients.length} mottagare (${created.length} totalt).`);
+    setMsg("ok", `Skickat: ${lines.length} fråga/frågor till ${recipients.length} mottagare (${created.length} totalt). Anonymt svar: ${allowAnon ? "Tillåtet" : "Ej tillåtet"}.`);
     renderList();
     refreshKnownEmpNos();
   });
@@ -532,6 +558,7 @@ AO-027 | FIL-ID: admin/questions.html (inline JS)
   $("#btnClear").addEventListener("click", () => {
     $("#title").value = "";
     $("#questionsBatch").value = "";
+    $("#allowAnon").checked = false;
     setMsg("", "");
   });
 
