@@ -1,18 +1,19 @@
 <!-- ============================================================
-AO-030 | FIL-ID: employee/questions.html
+AO-039 | FIL-ID: employee/questions.html
 Projekt: HR-System
-Syfte: Medarbetare – Frågor (tilldelade) + svar + anonymt svar (endast om tillåtet) – UI-only v1
-Mål:
-- Visa endast frågor för inloggad employee (empNo)
-- Svara på fråga
-- "Svara anonymt" toggle visas endast om frågan har allowAnonymous === true
+Syfte: Medarbetare – Frågor (tilldelade) + svar – UI-only v1
+Krav:
+- Inga skapafunktioner här (admin/enhetschef skapar)
+- Visa tilldelade frågor
+- Svara + status
+- Stöd för anonymt svar om frågan tillåter (allowAnonymousAnswer=true)
 Policy:
 - Ingen backend
 - Ingen känslig data lagras
-- Guard + logout (employee)
+- Robust guard: sessionStorage först, fallback localStorage
 Lagring:
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
 - AO-015_QA_V1 (localStorage) – frågor/svar
-- AO-001_LOGIN_V1 (sessionStorage) – session
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -60,7 +61,6 @@ Lagring:
       background:#fff;
       text-align:center;
     }
-    .hint{ font-size:.9rem; color: var(--muted); margin-top:8px; }
     .toggle{
       display:flex;
       gap:10px;
@@ -73,7 +73,7 @@ Lagring:
       background:#fff;
     }
     .toggle input{ transform: scale(1.1); }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .hint{ font-size:.9rem; color: var(--muted); margin-top:8px; }
   </style>
 </head>
 
@@ -93,16 +93,13 @@ Lagring:
     <a href="./docs.html">Dokument</a>
     <a href="./report.html">Rapportera fel</a>
     <a href="./profile.html">Min sida</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
   </nav>
-
-  <div class="row-actions" style="margin-left:auto;">
-    <button id="btnLogout" class="secondary" type="button">Logga ut</button>
-  </div>
 </header>
 
 <main class="container">
   <h1 class="tight">Frågor</h1>
-  <p class="muted">Här ser du frågor som är tilldelade till dig. Svara direkt här.</p>
+  <p class="muted">Här ser du frågor du fått. Svara och spara.</p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
@@ -113,9 +110,9 @@ Lagring:
       <label style="margin:0; font-weight:800;">
         Filter
         <select id="filter" style="margin-top:6px; width:auto;">
-          <option value="needs">Svar krävs</option>
+          <option value="open">Väntar på svar</option>
           <option value="all">Alla</option>
-          <option value="answered">Svarade</option>
+          <option value="answered">Besvarade</option>
         </select>
       </label>
     </div>
@@ -135,22 +132,19 @@ Lagring:
           <p class="item-title" id="dTitle">—</p>
           <div class="item-meta">
             <span class="pill" id="dStatus">—</span>
-            <span class="pill" id="dFrom">Från: —</span>
+            <span class="pill" id="dAnonRule">Anonymt svar: —</span>
           </div>
 
           <div style="margin-top:10px;">
             <div class="muted small" style="font-weight:900;">Fråga</div>
-            <div id="dQ" class="muted" style="margin-top:6px;">—</div>
+            <div id="dBody" class="muted" style="margin-top:6px;">—</div>
           </div>
 
           <div id="anonWrap" style="display:none;">
             <label class="toggle">
               <input id="anonToggle" type="checkbox" />
-              <span><strong>Svara anonymt</strong> <span class="muted">(endast för denna fråga)</span></span>
+              <span><strong>Svara anonymt</strong> <span class="muted">(endast om tillåtet för denna fråga)</span></span>
             </label>
-            <div class="hint">
-              Obs: Frågan är tekniskt kopplad till ditt anställningsnummer för att kunna visas som “min fråga”.
-            </div>
           </div>
 
           <label style="margin-top:10px;">
@@ -159,17 +153,13 @@ Lagring:
           </label>
 
           <div class="row-actions" style="margin-top:10px;">
-            <button id="btnSave" type="button">Skicka svar</button>
+            <button id="btnSave" type="button">Spara svar</button>
             <button id="btnReset" class="secondary" type="button">Ångra</button>
           </div>
 
           <p id="msg" class="message" aria-live="polite"></p>
-
-          <div class="hint" style="margin-top:10px;">
-            Svar visas för admin i <span class="mono">admin/answers.html</span>.
-          </div>
+          <div class="hint">v1: Admin ser svaren på admin-sidan för svar (separat från frågor).</div>
         </div>
-
       </section>
     </div>
   </section>
@@ -177,7 +167,7 @@ Lagring:
 
 <script>
 /* ============================================================
-AO-030 | FIL-ID: employee/questions.html (inline JS)
+AO-039 | FIL-ID: employee/questions.html (inline JS)
 ============================================================ */
 (function(){
   "use strict";
@@ -189,28 +179,27 @@ AO-030 | FIL-ID: employee/questions.html (inline JS)
 
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
   function readAuth(){
     try{
-      const raw = sessionStorage.getItem(SESSION_KEY);
+      const raw = readRawSession();
       if(!raw) return null;
       const data = JSON.parse(raw);
       if(!data?.auth?.isAuthed) return null;
       if(data.auth.role !== "employee") return null;
-      if(!data.auth.expiresAt || data.auth.expiresAt < Date.now()) return null;
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
       return data.auth;
-    }catch{ return null; }
+    }catch{
+      return null;
+    }
   }
-
-  const auth = readAuth();
-  if(!auth){ redirectLogin(); return; }
-
-  $("#whoName").textContent = auth.displayName || "—";
-  $("#whoEmpNo").textContent = auth.empNo || "—";
-
-  $("#btnLogout").addEventListener("click", () => {
-    sessionStorage.removeItem(SESSION_KEY);
-    redirectLogin();
-  });
 
   function loadQA(){
     try{
@@ -222,19 +211,6 @@ AO-030 | FIL-ID: employee/questions.html (inline JS)
   }
   function saveQA(arr){ localStorage.setItem(QA_KEY, JSON.stringify(arr)); }
 
-  function answered(q){
-    return (q.status === "answered") || (!!q.answer && String(q.answer).trim().length);
-  }
-  function statusLabel(q){
-    return answered(q) ? "Svarat" : "Svar krävs";
-  }
-
-  function setMsg(kind, text){
-    const m = $("#msg");
-    m.className = "message" + (kind ? " " + kind : "");
-    m.textContent = text || "";
-  }
-
   function escapeHtml(s){
     return String(s ?? "")
       .replaceAll("&","&amp;")
@@ -244,16 +220,48 @@ AO-030 | FIL-ID: employee/questions.html (inline JS)
       .replaceAll("'","&#039;");
   }
 
+  function isAnswered(q){
+    const hasA = !!(q.answer && String(q.answer).trim().length);
+    return q.status === "answered" || hasA;
+  }
+
+  function statusLabel(q){
+    return isAnswered(q) ? "Besvarad" : "Svar krävs";
+  }
+
+  function anonRuleLabel(q){
+    return (q.allowAnonymousAnswer === true) ? "Tillåtet" : "Ej tillåtet";
+  }
+
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+
+  $("#whoName").textContent = auth.displayName || "—";
+  $("#whoEmpNo").textContent = auth.empNo || "—";
+
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
   const empNo = String(auth.empNo || "").trim();
 
-  let qa = loadQA();
+  let all = [];
   let my = [];
   let selectedId = null;
   let snapshot = null;
 
   function reload(){
-    qa = loadQA();
-    my = qa.filter(q => String(q.empNo || "").trim() === empNo);
+    all = loadQA();
+    my = all.filter(q => String(q.empNo || "").trim() === empNo);
   }
 
   function closeDetail(){
@@ -275,17 +283,15 @@ AO-030 | FIL-ID: employee/questions.html (inline JS)
     $("#detailEmpty").style.display = "none";
     $("#detail").style.display = "block";
 
-    $("#dTitle").textContent = q.title || "—";
+    $("#dTitle").textContent = q.title || "Fråga";
     $("#dStatus").textContent = statusLabel(q);
-    $("#dFrom").textContent = "Från: " + (q.fromRole || "admin");
-    $("#dQ").textContent = q.question || "—";
+    $("#dAnonRule").textContent = "Anonymt svar: " + anonRuleLabel(q);
+    $("#dBody").textContent = q.question || q.body || "—";
 
-    // Anonym toggle får bara visas om admin tillåter
-    const allowAnon = (q.allowAnonymous === true);
+    const allowAnon = (q.allowAnonymousAnswer === true);
     $("#anonWrap").style.display = allowAnon ? "block" : "none";
     $("#anonToggle").checked = !!q.answerAnonymous;
 
-    // Svar
     $("#answer").value = q.answer || "";
 
     setMsg("", "");
@@ -300,14 +306,15 @@ AO-030 | FIL-ID: employee/questions.html (inline JS)
 
     const arr = my.slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
     const shown = arr.filter(q => {
-      if(filter === "needs") return !answered(q);
-      if(filter === "answered") return answered(q);
+      const ans = isAnswered(q);
+      if(filter === "open") return !ans;
+      if(filter === "answered") return ans;
       return true;
     });
 
     if(!shown.length){
       listEl.innerHTML = `<div class="empty">Inga frågor för valt filter.</div>`;
-      if(selectedId && !my.find(q => q.id === selectedId)) closeDetail();
+      closeDetail();
       return;
     }
 
@@ -315,10 +322,10 @@ AO-030 | FIL-ID: employee/questions.html (inline JS)
       const el = document.createElement("div");
       el.className = "item" + (q.id === selectedId ? " active" : "");
       el.innerHTML = `
-        <p class="item-title">${escapeHtml(q.title || "—")}</p>
+        <p class="item-title">${escapeHtml(q.title || "Fråga")}</p>
         <div class="item-meta">
           <span class="pill">${escapeHtml(statusLabel(q))}</span>
-          <span class="pill">Anonymt svar: ${escapeHtml(q.allowAnonymous === true ? "Tillåtet" : "Ej tillåtet")}</span>
+          <span class="pill">Anonymt: ${escapeHtml(anonRuleLabel(q))}</span>
         </div>
       `;
       el.addEventListener("click", () => {
@@ -354,35 +361,30 @@ AO-030 | FIL-ID: employee/questions.html (inline JS)
 
     const rawAnswer = String($("#answer").value || "").trim();
     if(!rawAnswer){
-      setMsg("err", "Skriv ett svar först.");
+      setMsg("err", "Skriv ett svar innan du sparar.");
       return;
     }
 
-    // Läs global list (qa) så vi kan skriva tillbaka korrekt
-    qa = loadQA();
-    const idx = qa.findIndex(x => x.id === selectedId);
+    all = loadQA();
+    const idx = all.findIndex(x => x.id === selectedId);
     if(idx < 0){
       setMsg("err", "Kunde inte spara (frågan hittades inte).");
       return;
     }
 
-    const q = qa[idx];
-
-    // Respektera allowAnonymous: om false, tvinga answerAnonymous = false
-    const allowAnon = (q.allowAnonymous === true);
+    const q = all[idx];
+    const allowAnon = (q.allowAnonymousAnswer === true);
     const wantAnon = allowAnon ? !!$("#anonToggle").checked : false;
 
+    q.answer = rawAnswer;
     q.answerAnonymous = wantAnon ? true : false;
     q.status = "answered";
     q.answeredAt = Date.now();
     q.updatedAt = Date.now();
 
-    // Om anonym: prefix i text + flagga (för kompat)
-    q.answer = wantAnon ? ("(Anonymt) " + rawAnswer) : rawAnswer;
+    saveQA(all);
 
-    saveQA(qa);
-
-    setMsg("ok", "Svar skickat.");
+    setMsg("ok", "Sparat.");
     renderList();
     openDetail(selectedId);
   });
