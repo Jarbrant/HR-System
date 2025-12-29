@@ -1,10 +1,11 @@
 <!-- ============================================================
-AO-033 | FIL-ID: employee/home.html
+AO-034 | FIL-ID: employee/home.html
 Projekt: HR-System
 Syfte: Medarbetarens startsida (Dashboard) – UI-only v1
 Fixar:
 - Dagens uppgifter-panelen ska alltid visas (inte gömmas pga frågor-svar)
 - "X att göra idag" döljs om alla uppgifter är klara (0 öppna)
+- "X nya" (frågor) döljs om 0 och ersätts med "Inga nya"
 Policy:
 - Ingen backend
 - Ingen känslig data lagras
@@ -24,26 +25,10 @@ Lagring:
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
   <style>
-    .top-actions{
-      display:flex;
-      justify-content:flex-end;
-      gap:10px;
-      margin-bottom:10px;
-    }
-    .btn-logout{
-      opacity:0.85;
-    }
-    .btn-logout:hover{
-      opacity:1;
-    }
-    .bigcard.action{
-      border-style:dashed;
-    }
-    .countline{
-      display:inline-flex;
-      gap:6px;
-      align-items:center;
-    }
+    .btn-logout{ opacity:0.85; }
+    .btn-logout:hover{ opacity:1; }
+    .bigcard.action{ border-style:dashed; }
+    .countline{ display:inline-flex; gap:6px; align-items:center; }
     .hide{ display:none !important; }
   </style>
 </head>
@@ -103,8 +88,11 @@ Lagring:
       <a class="bigcard" href="./questions.html" aria-label="Frågor">
         <div class="bigcard-title">Frågor</div>
         <div class="muted">
-          <span id="questionsCountText">—</span>
-          <span class="tag">v1</span>
+          <span id="questionsCountLine" class="countline">
+            <span id="questionsCountText">—</span>
+            <span class="tag">v1</span>
+          </span>
+          <span id="questionsNoneText" class="hide">Inga nya</span>
         </div>
       </a>
 
@@ -132,7 +120,7 @@ Lagring:
     <!-- Dashboard-paneler -->
     <div class="dashgrid">
 
-      <!-- 1) Dagens uppgifter: ska ALLTID visas -->
+      <!-- Dagens uppgifter: ska ALLTID visas -->
       <section class="panel" aria-label="Dagens uppgifter">
         <div class="panel-title">Dagens uppgifter <span class="tag">v1</span></div>
         <ul class="list" id="tasksList">
@@ -141,7 +129,7 @@ Lagring:
         <a class="link" href="./tasks.html">Visa alla →</a>
       </section>
 
-      <!-- 2) Väntar på svar: kan visa 0 men ska inte påverka uppgifter-panelen -->
+      <!-- Väntar på svar -->
       <section class="panel" aria-label="Väntar på svar">
         <div class="panel-title">Väntar på svar <span class="tag">v1</span></div>
         <ul class="list" id="questionsList">
@@ -174,8 +162,7 @@ Lagring:
 
 <script>
 /* ============================================================
-AO-033 | FIL-ID: employee/home.html (inline JS)
-Syfte: Guard + UI-fill + logout + dynamiska counts
+AO-034 | FIL-ID: employee/home.html (inline JS)
 ============================================================ */
 (function () {
   "use strict";
@@ -213,14 +200,23 @@ Syfte: Guard + UI-fill + logout + dynamiska counts
     }
   }
 
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
   function statusLabelTask(t){
     const s = (t.status || "todo");
     if (s === "done") return "Klar";
     if (s === "doing") return "Pågår";
     return "Ej startad";
   }
-
   function isDone(t){ return (t.status || "todo") === "done"; }
+
   function isAnswered(q){
     const hasA = !!(q.answer && String(q.answer).trim().length);
     return q.status === "answered" || hasA;
@@ -233,10 +229,7 @@ Syfte: Guard + UI-fill + logout + dynamiska counts
 
   function init() {
     const auth = readSession();
-    if (!auth) {
-      redirectToLogin();
-      return;
-    }
+    if (!auth) { redirectToLogin(); return; }
 
     setText("whoName", auth.displayName || "—");
     setText("whoEmpNo", auth.empNo || "—");
@@ -245,25 +238,22 @@ Syfte: Guard + UI-fill + logout + dynamiska counts
       sessionStorage.removeItem(SESSION_KEY);
       redirectToLogin();
     };
-
     document.getElementById("btnLogout").addEventListener("click", doLogout);
     document.getElementById("navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
     const empNo = String(auth.empNo || "").trim();
 
-    // ---- TASKS: räkna + rendera "Dagens uppgifter" (visas alltid) ----
+    // ---- TASKS ----
     const allTasks = safeParse(TASKS_KEY, []);
     const myTasks = Array.isArray(allTasks) ? allTasks.filter(t => String(t.empNo || "").trim() === empNo) : [];
     const openTasks = myTasks.filter(t => !isDone(t));
     const openCount = openTasks.length;
 
-    // bigcard text: dölj "X att göra idag" om 0 öppna
     const tasksCountLine = document.getElementById("tasksCountLine");
     const tasksAllDoneText = document.getElementById("tasksAllDoneText");
     const tasksCountText = document.getElementById("tasksCountText");
 
     if (openCount === 0) {
-      // Döljer själva "X att göra idag"
       tasksCountLine.classList.add("hide");
       tasksAllDoneText.classList.remove("hide");
     } else {
@@ -272,21 +262,17 @@ Syfte: Guard + UI-fill + logout + dynamiska counts
       tasksCountText.textContent = `${openCount} att göra idag`;
     }
 
-    // Panel-lista (alltid synlig)
     const tasksList = document.getElementById("tasksList");
     tasksList.innerHTML = "";
-
     if (myTasks.length === 0) {
       tasksList.innerHTML = `<li><span>Inga uppgifter ännu</span><span class="pill">Info</span></li>`;
     } else {
-      // Visa upp till 5 senaste / mest relevanta (öppna först)
       const sorted = myTasks.slice().sort((a,b) => {
         const ad = isDone(a) ? 1 : 0;
         const bd = isDone(b) ? 1 : 0;
-        if (ad !== bd) return ad - bd; // öppna först
+        if (ad !== bd) return ad - bd;
         return (b.createdAt||0) - (a.createdAt||0);
       });
-
       sorted.slice(0, 5).forEach(t => {
         const li = document.createElement("li");
         li.innerHTML = `<span>${escapeHtml(t.body || t.title || "—")}</span><span class="pill">${escapeHtml(statusLabelTask(t))}</span>`;
@@ -294,17 +280,28 @@ Syfte: Guard + UI-fill + logout + dynamiska counts
       });
     }
 
-    // ---- QUESTIONS: räkna + rendera "Väntar på svar" (kan visa 0, men påverkar aldrig tasks) ----
+    // ---- QUESTIONS ----
     const allQA = safeParse(QA_KEY, []);
     const myQA = Array.isArray(allQA) ? allQA.filter(q => String(q.empNo || "").trim() === empNo) : [];
     const needs = myQA.filter(q => !isAnswered(q));
+    const needsCount = needs.length;
 
-    setText("questionsCountText", needs.length === 0 ? "Inga nya" : `${needs.length} nya`);
+    const questionsCountLine = document.getElementById("questionsCountLine");
+    const questionsNoneText = document.getElementById("questionsNoneText");
+    const questionsCountText = document.getElementById("questionsCountText");
+
+    if (needsCount === 0) {
+      questionsCountLine.classList.add("hide");     // döljer "X nya"
+      questionsNoneText.classList.remove("hide");   // visar "Inga nya"
+    } else {
+      questionsCountLine.classList.remove("hide");
+      questionsNoneText.classList.add("hide");
+      questionsCountText.textContent = `${needsCount} nya`;
+    }
 
     const qList = document.getElementById("questionsList");
     qList.innerHTML = "";
-
-    if (needs.length === 0) {
+    if (needsCount === 0) {
       qList.innerHTML = `<li><span>Inga frågor som väntar på svar</span><span class="pill">OK</span></li>`;
     } else {
       needs
@@ -317,15 +314,6 @@ Syfte: Guard + UI-fill + logout + dynamiska counts
           qList.appendChild(li);
         });
     }
-  }
-
-  function escapeHtml(s){
-    return String(s ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
   }
 
   init();
