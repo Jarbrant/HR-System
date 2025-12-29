@@ -437,6 +437,7 @@ Autopatch:
 - Dedupe-signatur ignorerar adminNote/prio (minskar “falska” dubletter)
 - Weekly default weekday = startdatum om inga valts
 - untilDate policy: INKLUSIVE + flagga (utan ny key)
+- Fail-closed save + input normalisering + defensiv rendering
 ============================================================ */
 (function(){
   "use strict";
@@ -479,7 +480,15 @@ Autopatch:
       return (v === null || v === undefined) ? fallback : v;
     }catch{ return fallback; }
   }
-  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
+
+  function saveFailClosed(key, value){
+    try{
+      localStorage.setItem(key, JSON.stringify(value));
+      return { ok:true };
+    }catch(e){
+      return { ok:false, err: e };
+    }
+  }
 
   function escapeHtml(s){
     return String(s ?? "")
@@ -532,12 +541,23 @@ Autopatch:
   }
 
   function weekdayFromISO(iso){
-    // Return 1..7 (Mon..Sun). JS getDay(): 0 Sun .. 6 Sat
     const t = parseISOToTime(iso);
     if(t === null) return null;
     const d = new Date(t);
     const js = d.getDay();
     return js === 0 ? 7 : js;
+  }
+
+  function clampText(s, max){
+    const str = String(s ?? "");
+    if(str.length <= max) return str;
+    return str.slice(0, max);
+  }
+
+  function normalizeLine(s, max){
+    // normalisera whitespace lite för stabil dedupe + robusthet
+    const x = String(s ?? "").replace(/\s+/g, " ").trim();
+    return clampText(x, max);
   }
 
   // --- Guard ---
@@ -609,6 +629,15 @@ Autopatch:
     return Array.isArray(arr) ? arr : [];
   }
 
+  function safeSaveTasks(all){
+    const res = saveFailClosed(TASKS_KEY, all);
+    if(!res.ok){
+      setMsg("err", "Kunde inte spara (localStorage fullt eller blockerad). Testa rensa cache eller minska antal rader.");
+      return false;
+    }
+    return true;
+  }
+
   function statusLabel(s){
     if(s === "done") return "Klar";
     if(s === "progress") return "Pågår";
@@ -661,7 +690,7 @@ Autopatch:
     if(set.size > 0) return Array.from(set);
 
     loadTasks().forEach(t => {
-      const v = validateEmpNo(t.empNo);
+      const v = validateEmpNo(t?.empNo);
       if(v.ok) set.add(v.empNo);
     });
     return Array.from(set);
@@ -684,12 +713,12 @@ Autopatch:
   }
 
   function signatureForDedupe(t){
-    // AUTOPATCH: ignorera adminNote + prio för att undvika “falska dubletter”
+    // AUTOPATCH: ignorera adminNote + prio
     const parts = [
       String(t.empNo||""),
       String(t.kind||"oneoff"),
-      String(t.title||""),
-      String(t.text||""),
+      normalizeLine(t.title||"", 240),
+      normalizeLine(t.text||"", 2000),
       String(t.startDate||""),
       String(t.endDate||""),
       t.kind === "recurring" ? String(t.recurring?.freq||"") : "",
@@ -725,8 +754,9 @@ Autopatch:
             untilDate: payload.untilDate || null,
             untilInclusive: true
           };
-          t.exceptionsDone = [];     // ["YYYY-MM-DD", ...]
-          t.exceptionsSnoozed = {};  // framtida
+          // OBS: dessa fält fanns redan i din kod – vi behåller dem.
+          t.exceptionsDone = [];
+          t.exceptionsSnoozed = {};
         }
 
         if(dedupeOn){
@@ -740,7 +770,7 @@ Autopatch:
       });
     });
 
-    save(TASKS_KEY, all);
+    if(!safeSaveTasks(all)) return 0;
     return count;
   }
 
@@ -789,7 +819,10 @@ Autopatch:
         updatedAt: now
       }
     ];
-    save(TEMPLATES_KEY, seeds);
+    const res = saveFailClosed(TEMPLATES_KEY, seeds);
+    if(!res.ok){
+      // tyst fail här – templates är “nice-to-have”
+    }
   }
 
   function loadTemplates(){
@@ -797,7 +830,7 @@ Autopatch:
     return Array.isArray(arr) ? arr : [];
   }
   function saveTemplates(arr){
-    save(TEMPLATES_KEY, Array.isArray(arr) ? arr : []);
+    saveFailClosed(TEMPLATES_KEY, Array.isArray(arr) ? arr : []);
   }
 
   function renderTemplateSelect(){
@@ -820,7 +853,7 @@ Autopatch:
 
     tpls
       .slice()
-      .sort((a,b) => String(a.name||"").localeCompare(String(b.name||""), "sv"))
+      .sort((a,b) => String(a?.name||"").localeCompare(String(b?.name||""), "sv"))
       .forEach(t => {
         const opt = document.createElement("option");
         opt.value = t.id;
@@ -830,7 +863,8 @@ Autopatch:
   }
 
   function getSelectedTemplate(){
-    const id = $("#tplSelect").value;
+    const sel = $("#tplSelect");
+    const id = sel ? sel.value : "";
     if(!id || id === "__none__") return null;
     return loadTemplates().find(t => t.id === id) || null;
   }
@@ -870,12 +904,12 @@ Autopatch:
   }
 
   function currentFormAsTemplateDraft(){
-    const title = String($("#title").value || "").trim();
+    const title = normalizeLine($("#title").value || "", 160);
     const prio = $("#prio").value;
-    const adminNote = String($("#adminNote").value || "").trim();
+    const adminNote = normalizeLine($("#adminNote").value || "", 200);
     const lines = String($("#tasks").value || "")
       .split("\n")
-      .map(x => String(x).trim())
+      .map(x => normalizeLine(x, 600))
       .filter(Boolean);
 
     const kind = $("#taskKind").value;
@@ -920,7 +954,7 @@ Autopatch:
     setMsg("ok", `Mall laddad: ${tpl.name || tpl.id}`);
   });
 
-  // ✅ FIX: Spara som mall skapar ALLTID en NY mall (ingen “uppdatera befintlig”-confirm)
+  // ✅ FIX: Spara som mall skapar ALLTID en NY mall
   $("#btnTplSave").addEventListener("click", () => {
     setMsg("", "");
 
@@ -943,7 +977,7 @@ Autopatch:
 
     const newTpl = {
       id: genId("tpl"),
-      name,
+      name: clampText(name, 80),
       title: draft.title || "Uppgift",
       prio: draft.prio || "normal",
       adminNote: draft.adminNote || "",
@@ -980,13 +1014,13 @@ Autopatch:
     setMsg("", "");
 
     const mode = $("#targetMode").value;
-    const title = String($("#title").value || "").trim();
+    const title = normalizeLine($("#title").value || "", 160);
     const prio = $("#prio").value;
-    const adminNote = String($("#adminNote").value || "").trim();
+    const adminNote = normalizeLine($("#adminNote").value || "", 200);
 
     const lines = String($("#tasks").value || "")
       .split("\n")
-      .map(x => String(x).trim())
+      .map(x => normalizeLine(x, 600))
       .filter(Boolean);
 
     if(lines.length === 0){
@@ -1029,7 +1063,6 @@ Autopatch:
         return;
       }
 
-      // AUTOPATCH: default weekly weekday om inga valts
       let byWeekday = [];
       if(freq === "weekly"){
         byWeekday = getSelectedWeekdays();
@@ -1121,8 +1154,10 @@ Autopatch:
     }
 
     const created = pushTasks(targets, payload);
-    setMsg("ok", `Skapat ${created} uppgift(er).`);
-    renderList();
+    if(created > 0){
+      setMsg("ok", `Skapat ${created} uppgift(er).`);
+      renderList();
+    }
   });
 
   $("#btnClear").addEventListener("click", () => {
@@ -1146,10 +1181,10 @@ Autopatch:
 
   // --- List ---
   function updateKpis(all){
-    const open = all.filter(x => (x.status||"open") === "open").length;
-    const prog = all.filter(x => (x.status||"open") === "progress").length;
-    const done = all.filter(x => (x.status||"open") === "done").length;
-    const rec  = all.filter(x => (x.kind||"oneoff") === "recurring").length;
+    const open = all.filter(x => (x?.status||"open") === "open").length;
+    const prog = all.filter(x => (x?.status||"open") === "progress").length;
+    const done = all.filter(x => (x?.status||"open") === "done").length;
+    const rec  = all.filter(x => (x?.kind||"oneoff") === "recurring").length;
     $("#kpiOpen").textContent = String(open);
     $("#kpiProg").textContent = String(prog);
     $("#kpiDone").textContent = String(done);
@@ -1158,7 +1193,7 @@ Autopatch:
 
   function endRecurring(id){
     const all = loadTasks();
-    const idx = all.findIndex(x => x.id === id);
+    const idx = all.findIndex(x => x?.id === id);
     if(idx < 0) return;
     const t = all[idx];
     if((t.kind||"oneoff") !== "recurring") return;
@@ -1169,8 +1204,7 @@ Autopatch:
     t.recurring.untilInclusive = true;
     t.updatedAt = Date.now();
     all[idx] = t;
-    save(TASKS_KEY, all);
-    renderList();
+    if(safeSaveTasks(all)) renderList();
   }
 
   function renderList(){
@@ -1180,19 +1214,19 @@ Autopatch:
     const filter = $("#listFilter").value;
     const q = String($("#search").value || "").trim().toLowerCase();
 
-    const all = loadTasks().slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    const all = loadTasks().slice().sort((a,b) => (b?.createdAt||0) - (a?.createdAt||0));
     updateKpis(all);
 
     let shown = all;
 
-    if(filter === "open") shown = shown.filter(x => (x.status||"open") !== "done");
-    if(filter === "done") shown = shown.filter(x => (x.status||"open") === "done");
-    if(filter === "progress") shown = shown.filter(x => (x.status||"open") === "progress");
-    if(filter === "recurring") shown = shown.filter(x => (x.kind||"oneoff") === "recurring");
+    if(filter === "open") shown = shown.filter(x => (x?.status||"open") !== "done");
+    if(filter === "done") shown = shown.filter(x => (x?.status||"open") === "done");
+    if(filter === "progress") shown = shown.filter(x => (x?.status||"open") === "progress");
+    if(filter === "recurring") shown = shown.filter(x => (x?.kind||"oneoff") === "recurring");
 
     if(q){
       shown = shown.filter(x => {
-        const blob = `${x.empNo||""} ${x.title||""} ${x.text||""} ${x.adminNote||""} ${x.employeeComment||""} ${x.startDate||""} ${x.endDate||""} ${(x.recurring?.untilDate)||""}`.toLowerCase();
+        const blob = `${x?.empNo||""} ${x?.title||""} ${x?.text||""} ${x?.adminNote||""} ${x?.employeeComment||""} ${x?.startDate||""} ${x?.endDate||""} ${(x?.recurring?.untilDate)||""}`.toLowerCase();
         return blob.includes(q);
       });
     }
@@ -1205,19 +1239,19 @@ Autopatch:
     }
 
     shown.forEach(x => {
-      const kind = x.kind || "oneoff";
-      const recLabel = (kind === "recurring") ? recurringRuleLabel(x.recurring) : "";
-      const dates = dateLabel(x);
+      const kind = x?.kind || "oneoff";
+      const recLabel = (kind === "recurring") ? recurringRuleLabel(x?.recurring) : "";
+      const dates = dateLabel(x || {});
 
       const el = document.createElement("div");
       el.className = "item";
       el.innerHTML = `
         <div style="min-width:260px;">
-          <p class="item-title">${escapeHtml(x.title || "Uppgift")}</p>
+          <p class="item-title">${escapeHtml(x?.title || "Uppgift")}</p>
           <div class="meta">
-            <span><strong>Anst.nr:</strong> ${escapeHtml(x.empNo || "—")}</span>
-            <span class="pill">${escapeHtml(statusLabel(x.status))}</span>
-            <span class="pill">Prio: ${escapeHtml(x.prio || "normal")}</span>
+            <span><strong>Anst.nr:</strong> ${escapeHtml(x?.empNo || "—")}</span>
+            <span class="pill">${escapeHtml(statusLabel(x?.status))}</span>
+            <span class="pill">Prio: ${escapeHtml(x?.prio || "normal")}</span>
             <span class="pill">${escapeHtml(kindLabel(kind))}</span>
           </div>
 
@@ -1226,14 +1260,14 @@ Autopatch:
             ${recLabel ? `<span><strong>Regel:</strong> ${escapeHtml(recLabel)}</span>` : ``}
           </div>
 
-          <div class="meta"><span><strong>Text:</strong> ${escapeHtml(x.text || "—")}</span></div>
-          ${x.adminNote ? `<div class="meta"><span><strong>Admin:</strong> ${escapeHtml(x.adminNote)}</span></div>` : ``}
-          ${x.employeeComment ? `<div class="meta"><span><strong>Medarbetare:</strong> ${escapeHtml(x.employeeComment)}</span></div>` : ``}
+          <div class="meta"><span><strong>Text:</strong> ${escapeHtml(x?.text || "—")}</span></div>
+          ${x?.adminNote ? `<div class="meta"><span><strong>Admin:</strong> ${escapeHtml(x.adminNote)}</span></div>` : ``}
+          ${x?.employeeComment ? `<div class="meta"><span><strong>Medarbetare:</strong> ${escapeHtml(x.employeeComment)}</span></div>` : ``}
         </div>
 
         <div class="row" style="gap:8px;">
-          ${kind === "recurring" ? `<button type="button" class="secondary" data-endrec="${escapeHtml(x.id)}">Avsluta</button>` : ``}
-          <button type="button" class="secondary" data-del="${escapeHtml(x.id)}" aria-label="Ta bort uppgift ${escapeHtml(x.title||"")} för ${escapeHtml(x.empNo||"")}">Ta bort</button>
+          ${kind === "recurring" ? `<button type="button" class="secondary" data-endrec="${escapeHtml(x?.id)}">Avsluta</button>` : ``}
+          <button type="button" class="secondary" data-del="${escapeHtml(x?.id)}" aria-label="Ta bort uppgift ${escapeHtml(x?.title||"")} för ${escapeHtml(x?.empNo||"")}">Ta bort</button>
         </div>
       `;
       list.appendChild(el);
@@ -1243,9 +1277,8 @@ Autopatch:
       btn.addEventListener("click", () => {
         const id = btn.getAttribute("data-del");
         if(!confirm("Ta bort uppgiften?")) return;
-        const next = loadTasks().filter(x => x.id !== id);
-        save(TASKS_KEY, next);
-        renderList();
+        const next = loadTasks().filter(x => x?.id !== id);
+        if(safeSaveTasks(next)) renderList();
       });
     });
 
