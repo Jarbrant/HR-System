@@ -254,6 +254,10 @@ Lagring:
 /* ============================================================
 AO-054 | FIL-ID: employee/tasks.html (inline JS)
 Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
+Autopatch:
+- Fail-closed save (kvot/blocked)
+- Recurring "klar idag" räknas som klar idag i filter/labels utan att sätta global status=done
+- todayDue gäller endast engång (endDate). Recurring använder untilDate, inte endDate.
 ============================================================ */
 (function(){
   "use strict";
@@ -281,7 +285,6 @@ Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
       if(!data?.auth?.isAuthed) return null;
       if(data.auth.role !== "employee") return null;
       if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-      // empNo kan vara tomt i demo – men då blir listan tom. Vi guardar ändå.
       return data.auth;
     }catch{
       return null;
@@ -294,7 +297,15 @@ Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
       return (v === null || v === undefined) ? fallback : v;
     }catch{ return fallback; }
   }
-  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
+
+  function saveFailClosed(key, value){
+    try{
+      localStorage.setItem(key, JSON.stringify(value));
+      return { ok:true };
+    }catch(e){
+      return { ok:false, err:e };
+    }
+  }
 
   function escapeHtml(s){
     return String(s ?? "")
@@ -370,6 +381,12 @@ Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
     return endT <= nowT;
   }
 
+  function isRecurringDoneToday(task){
+    if(!task || task.kind !== "recurring") return false;
+    const iso = todayISO();
+    return Array.isArray(task.exceptionsDone) && task.exceptionsDone.includes(iso);
+  }
+
   // --- Guard ---
   const auth = readAuth();
   if(!auth){ redirectLogin(); return; }
@@ -390,18 +407,32 @@ Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
     return Array.isArray(arr) ? arr : [];
   }
 
+  function safeSaveAllTasks(all){
+    const res = saveFailClosed(TASKS_KEY, all);
+    if(!res.ok){
+      setMsg("err", "Kunde inte spara (localStorage fullt eller blockerad). Testa rensa cache eller minska text.");
+      return false;
+    }
+    return true;
+  }
+
   function loadMyTasks(){
     const empNo = String(auth.empNo || "").trim();
     const all = loadAllTasks();
-    // Om empNo saknas blir listan tom (bättre än att visa allt).
-    return all.filter(t => String(t.empNo || "").trim() === empNo);
+    return all.filter(t => String(t?.empNo || "").trim() === empNo);
   }
 
   function updateKpis(items){
-    const open = items.filter(x => (x.status||"open") === "open").length;
-    const prog = items.filter(x => (x.status||"open") === "progress").length;
-    const done = items.filter(x => (x.status||"open") === "done").length;
-    const rec  = items.filter(x => (x.kind||"oneoff") === "recurring").length;
+    const open = items.filter(x => {
+      if((x?.status||"open") === "open") return true;
+      // recurring: räknas som "öppen" idag om den inte är klar idag och inte globalt done
+      if(x?.kind === "recurring" && (x?.status||"open") !== "done" && !isRecurringDoneToday(x)) return true;
+      return false;
+    }).length;
+
+    const prog = items.filter(x => (x?.status||"open") === "progress").length;
+    const done = items.filter(x => (x?.status||"open") === "done").length;
+    const rec  = items.filter(x => (x?.kind||"oneoff") === "recurring").length;
 
     $("#kpiOpen").textContent = String(open);
     $("#kpiProg").textContent = String(prog);
@@ -457,16 +488,15 @@ Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
 
   function upsertTask(updated){
     const all = loadAllTasks();
-    const idx = all.findIndex(x => String(x.id) === String(updated.id));
+    const idx = all.findIndex(x => String(x?.id) === String(updated.id));
     if(idx < 0) return false;
     all[idx] = updated;
-    save(TASKS_KEY, all);
-    return true;
+    return safeSaveAllTasks(all);
   }
 
   function getSelectedTask(){
     if(!selectedId) return null;
-    return loadMyTasks().find(t => String(t.id) === String(selectedId)) || null;
+    return loadMyTasks().find(t => String(t?.id) === String(selectedId)) || null;
   }
 
   $("#btnSave").addEventListener("click", () => {
@@ -485,14 +515,13 @@ Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
     next.updatedAt = Date.now();
 
     if(!upsertTask(next)){
-      setMsg("err", "Kunde inte spara (saknas i lagring).");
+      setMsg("err", "Kunde inte spara (lagring).");
       return;
     }
 
     setMsg("ok", "Sparat.");
     render();
-    // uppdatera detalj med senaste
-    const again = loadMyTasks().find(x => x.id === next.id);
+    const again = loadMyTasks().find(x => x?.id === next.id);
     if(again) openDetail(again);
   });
 
@@ -517,16 +546,14 @@ Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
     next.exceptionsDone = arr;
     next.updatedAt = Date.now();
 
-    // (valfritt) om man vill att status ska visas som "done" när den är klar idag:
-    // vi ändrar inte global status här för recurring, bara per datum.
     if(!upsertTask(next)){
-      setMsg("err", "Kunde inte spara.");
+      setMsg("err", "Kunde inte spara (lagring).");
       return;
     }
 
     setMsg("ok", `Markerad klar för idag (${iso}).`);
     render();
-    const again = loadMyTasks().find(x => x.id === next.id);
+    const again = loadMyTasks().find(x => x?.id === next.id);
     if(again) openDetail(again);
   });
 
@@ -537,29 +564,41 @@ Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
     const filter = $("#filter").value;
     const q = String($("#search").value || "").trim().toLowerCase();
 
-    const mine = loadMyTasks().slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    const mine = loadMyTasks().slice().sort((a,b) => (b?.createdAt||0) - (a?.createdAt||0));
     updateKpis(mine);
 
     let items = mine;
 
-    if(filter === "open") items = items.filter(x => (x.status||"open") !== "done");
-    if(filter === "progress") items = items.filter(x => (x.status||"open") === "progress");
-    if(filter === "done") items = items.filter(x => (x.status||"open") === "done");
-    if(filter === "recurring") items = items.filter(x => (x.kind||"oneoff") === "recurring");
+    if(filter === "open"){
+      items = items.filter(x => {
+        const st = (x?.status||"open");
+        if(st === "done") return false;
+        if(x?.kind === "recurring") return !isRecurringDoneToday(x);
+        return true;
+      });
+    }
+    if(filter === "progress") items = items.filter(x => (x?.status||"open") === "progress");
+    if(filter === "done") items = items.filter(x => (x?.status||"open") === "done");
+    if(filter === "recurring") items = items.filter(x => (x?.kind||"oneoff") === "recurring");
     if(filter === "todayDue"){
-      items = items.filter(x => x.endDate && isPastOrToday(x.endDate) && (x.status||"open") !== "done");
+      // Endast engång/uppgifter med endDate
+      items = items.filter(x =>
+        (x?.kind||"oneoff") !== "recurring" &&
+        x?.endDate &&
+        isPastOrToday(x.endDate) &&
+        (x?.status||"open") !== "done"
+      );
     }
 
     if(q){
       items = items.filter(x => {
-        const blob = `${x.title||""} ${x.text||""} ${x.adminNote||""} ${x.prio||""}`.toLowerCase();
+        const blob = `${x?.title||""} ${x?.text||""} ${x?.adminNote||""} ${x?.prio||""}`.toLowerCase();
         return blob.includes(q);
       });
     }
 
     if(items.length === 0){
       list.innerHTML = `<div class="empty">Inga uppgifter att visa.</div>`;
-      // om selected försvunnit
       const sel = getSelectedTask();
       if(!sel && selectedId) closeDetail();
       return;
@@ -568,36 +607,34 @@ Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
     items.slice(0, 80).forEach(x => {
       const el = document.createElement("div");
       el.className = "item";
-      const kind = x.kind || "oneoff";
-      const dates = dateLabel(x);
 
-      // deadline varning (endDate)
-      const warn = (x.endDate && isPastOrToday(x.endDate) && (x.status||"open") !== "done");
+      const kind = x?.kind || "oneoff";
+      const dates = dateLabel(x || {});
+      const warn = ((kind !== "recurring") && x?.endDate && isPastOrToday(x.endDate) && (x?.status||"open") !== "done");
       const tagClass = warn ? "pill tagwarn" : "pill tagok";
 
-      // recurring klar idag?
       let recToday = "";
       if(kind === "recurring"){
         const iso = todayISO();
-        const doneToday = Array.isArray(x.exceptionsDone) && x.exceptionsDone.includes(iso);
+        const doneToday = isRecurringDoneToday(x);
         recToday = doneToday ? ` • Klar idag (${iso})` : "";
       }
 
       el.innerHTML = `
         <div style="min-width:260px; flex: 1 1 520px;">
-          <p class="item-title">${escapeHtml(x.title || "Uppgift")}</p>
+          <p class="item-title">${escapeHtml(x?.title || "Uppgift")}</p>
           <div class="meta">
-            <span class="pill">${escapeHtml(statusLabel(x.status))}</span>
+            <span class="pill">${escapeHtml(statusLabel(x?.status))}</span>
             <span class="pill">${escapeHtml(kindLabel(kind))}${escapeHtml(recToday)}</span>
-            <span class="pill">Prio: ${escapeHtml(x.prio || "normal")}</span>
+            <span class="pill">Prio: ${escapeHtml(x?.prio || "normal")}</span>
             <span class="${tagClass}">Datum: ${escapeHtml(dates)}</span>
           </div>
-          <div class="meta"><span><strong>Text:</strong> ${escapeHtml(x.text || "—")}</span></div>
-          ${x.adminNote ? `<div class="meta"><span><strong>Admin:</strong> ${escapeHtml(x.adminNote)}</span></div>` : ``}
-          ${x.employeeComment ? `<div class="meta"><span><strong>Din kommentar:</strong> ${escapeHtml(x.employeeComment)}</span></div>` : ``}
+          <div class="meta"><span><strong>Text:</strong> ${escapeHtml(x?.text || "—")}</span></div>
+          ${x?.adminNote ? `<div class="meta"><span><strong>Admin:</strong> ${escapeHtml(x.adminNote)}</span></div>` : ``}
+          ${x?.employeeComment ? `<div class="meta"><span><strong>Din kommentar:</strong> ${escapeHtml(x.employeeComment)}</span></div>` : ``}
         </div>
         <div class="row" style="gap:8px;">
-          <button type="button" data-open="${escapeHtml(x.id)}">Öppna</button>
+          <button type="button" data-open="${escapeHtml(x?.id)}">Öppna</button>
         </div>
       `;
       list.appendChild(el);
@@ -606,12 +643,11 @@ Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
     list.querySelectorAll("button[data-open]").forEach(btn => {
       btn.addEventListener("click", () => {
         const id = btn.getAttribute("data-open");
-        const task = loadMyTasks().find(t => String(t.id) === String(id));
+        const task = loadMyTasks().find(t => String(t?.id) === String(id));
         if(task) openDetail(task);
       });
     });
 
-    // om selected finns kvar – håll detalj synkad
     const sel = getSelectedTask();
     if(sel) openDetail(sel);
     if(!sel && selectedId) closeDetail();
