@@ -14,6 +14,8 @@ Lagring (läser):
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
 - AO-015_QUESTIONS_V1 (localStorage) – frågor
 - AO-016_ANSWERS_V1 (localStorage) – svar (skapas av employee/questions.html)
+Kompatibilitet (fallback om äldre keys används i repo):
+- AO-015_QA_V1 (localStorage) – kombinerad frågor+svar (äldre)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -42,15 +44,6 @@ Lagring (läser):
       filter: brightness(1.01);
     }
     .panel.list{ background: rgba(191,219,254,.18); }
-
-    .row2{
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-    @media (max-width: 760px){
-      .row2{ grid-template-columns: 1fr; }
-    }
 
     .item{
       border:1px solid var(--line);
@@ -85,13 +78,19 @@ Lagring (läser):
       display:flex;
       gap:8px;
       flex-wrap:wrap;
-      align-items:center;
+      align-items:flex-start;
       justify-content:space-between;
       margin-bottom:10px;
     }
     .toolbar .left{
-      display:flex; gap:8px; flex-wrap:wrap; align-items:center;
+      display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;
+      flex: 1 1 520px;
     }
+    .toolbar .right{
+      display:flex; gap:8px; flex-wrap:wrap; align-items:center; justify-content:flex-end;
+      flex: 0 0 auto;
+    }
+
     .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
     code{ font-size:.95em; }
     .pill.warn{ border-color: rgba(244,63,94,.35); background: rgba(244,63,94,.10); }
@@ -150,18 +149,29 @@ Lagring (läser):
               Sök (anst.nr / text)
               <input id="search" type="text" placeholder="t.ex. 1234 eller toalett" />
             </label>
+
+            <label style="margin:0; min-width:220px;">
+              Sortera
+              <select id="sort">
+                <option value="new" selected>Nyast först</option>
+                <option value="old">Äldst först</option>
+              </select>
+            </label>
           </div>
 
-          <div class="row wrap" style="gap:8px;">
+          <div class="right">
             <button id="btnCopy" type="button" class="secondary">Kopiera sammanfattning</button>
             <button id="btnRefresh" type="button" class="secondary">Uppdatera</button>
           </div>
         </div>
 
+        <p id="msg" class="message" aria-live="polite" style="margin: 0 0 10px;"></p>
+
         <div id="list"></div>
 
         <div class="smallnote">
-          Svar lagras i <code>AO-016_ANSWERS_V1</code>. Om listan är tom: be employee svara i <code>employee/questions.html</code>.
+          Svar lagras i <code>AO-016_ANSWERS_V1</code> (v1). Om listan är tom: be employee svara i <code>employee/questions.html</code>.
+          <br/>Fallback: om repo råkar använda äldre kombinerad nyckel <code>AO-015_QA_V1</code> så läses svar därifrån.
         </div>
       </section>
     </div>
@@ -176,8 +186,13 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
   "use strict";
 
   const SESSION_KEY   = "AO-001_LOGIN_V1";
+
+  // Primär kontrakt (denna AO):
   const QUESTIONS_KEY = "AO-015_QUESTIONS_V1";
   const ANSWERS_KEY   = "AO-016_ANSWERS_V1";
+
+  // Kompatibilitet med äldre admin/home.html i repo (kombinerad Q/A):
+  const QA_FALLBACK_KEY = "AO-015_QA_V1";
 
   const $ = (s) => document.querySelector(s);
 
@@ -221,6 +236,12 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
       .replaceAll("'","&#039;");
   }
 
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
   function fmtTime(ts){
     const t = Number(ts);
     if(!Number.isFinite(t)) return "—";
@@ -236,8 +257,16 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
 
   function normalizeEmpNo(v){
     const s = String(v || "").trim();
-    const digits = s.replace(/[^\d]/g, "");
-    return digits;
+    return s.replace(/[^\d]/g, "");
+  }
+
+  function tryWriteClipboard(text){
+    // Fail-closed: om clipboard inte finns / blockeras, fall tillbaka.
+    if(!text) return Promise.reject(new Error("empty"));
+    if(navigator && navigator.clipboard && typeof navigator.clipboard.writeText === "function"){
+      return navigator.clipboard.writeText(text);
+    }
+    return Promise.reject(new Error("clipboard_unavailable"));
   }
 
   // --- Guard ---
@@ -253,12 +282,18 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
   // --- Data loaders ---
-  function loadQuestions(){
+  function loadQuestionsPrimary(){
     const arr = safeParse(QUESTIONS_KEY, []);
     return Array.isArray(arr) ? arr : [];
   }
-  function loadAnswers(){
+
+  function loadAnswersPrimary(){
     const arr = safeParse(ANSWERS_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function loadQaFallback(){
+    const arr = safeParse(QA_FALLBACK_KEY, []);
     return Array.isArray(arr) ? arr : [];
   }
 
@@ -269,14 +304,51 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
   }
 
   function buildRows(){
-    const questions = loadQuestions();
+    // 1) Försök läsa enligt AO-051 (separata keys)
+    const questions = loadQuestionsPrimary();
     const qById = indexQuestionsById(questions);
 
-    const answers = loadAnswers()
-      .slice()
-      .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    const primaryAnswers = loadAnswersPrimary();
 
-    return answers.map(a => {
+    // 2) Om inga svar finns i AO-016_ANSWERS_V1, försök fallback till AO-015_QA_V1 (kombinerat)
+    let answers = Array.isArray(primaryAnswers) ? primaryAnswers.slice() : [];
+
+    let source = "primary";
+    if(answers.length === 0){
+      const qa = loadQaFallback();
+
+      // Tolka “answered” frågor som svarsposter
+      answers = qa
+        .filter(q => {
+          const hasA = !!(q && q.answer && String(q.answer).trim().length);
+          return (q && (q.status === "answered" || hasA));
+        })
+        .map(q => {
+          // Normalisera till answers-shape
+          return {
+            id: q.id || ("qa_" + Math.random().toString(16).slice(2)),
+            questionId: q.id,
+            createdAt: q.answeredAt || q.updatedAt || q.createdAt || Date.now(),
+            answer: q.answer,
+            anonymous: (q.answerAnonymous === true),
+            empNo: q.empNo || "",
+            questionTitle: q.title || "Fråga",
+            prompt: q.prompt || "—"
+          };
+        });
+
+      source = "fallback";
+    }
+
+    // Sort
+    const sortMode = $("#sort").value;
+    answers.sort((a,b) => {
+      const ta = (a.createdAt || a.answeredAt || a.updatedAt || 0);
+      const tb = (b.createdAt || b.answeredAt || b.updatedAt || 0);
+      return sortMode === "old" ? (ta - tb) : (tb - ta);
+    });
+
+    const rows = answers.map(a => {
       const q = qById.get(String(a.questionId)) || null;
 
       const isAnon = (a.anonymous === true);
@@ -285,11 +357,11 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
 
       const title = q?.title || a.questionTitle || "Fråga";
       const prompt = q?.prompt || a.prompt || "—";
-      const allowAnon = (q?.allowAnonymous === true);
+      const allowAnon = (q?.allowAnonymous === true) || (a.allowAnonymous === true);
 
       return {
         id: String(a.id || ""),
-        createdAt: a.createdAt,
+        createdAt: (a.createdAt || a.answeredAt || a.updatedAt || 0),
         who,
         empNo,
         isAnon,
@@ -297,41 +369,69 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
         title,
         prompt,
         answerText: String(a.answer || ""),
+        _source: source
       };
     });
+
+    return rows;
   }
 
-  function render(){
-    const list = $("#list");
-    list.innerHTML = "";
-
+  function filterRows(rows){
     const filter = $("#filter").value;
     const q = String($("#search").value || "").trim().toLowerCase();
 
-    let rows = buildRows();
+    let out = rows;
 
-    if(filter === "anon") rows = rows.filter(r => r.isAnon);
-    if(filter === "named") rows = rows.filter(r => !r.isAnon);
+    if(filter === "anon") out = out.filter(r => r.isAnon);
+    if(filter === "named") out = out.filter(r => !r.isAnon);
 
     if(q){
-      rows = rows.filter(r => {
+      out = out.filter(r => {
         const blob = `${r.empNo||""} ${r.title||""} ${r.prompt||""} ${r.answerText||""}`.toLowerCase();
         return blob.includes(q);
       });
     }
 
-    rows = rows.slice(0, 100);
+    return out;
+  }
 
-    if(rows.length === 0){
+  function makeRowCopyText(row){
+    return (
+`[HR-System] Svar
+Titel: ${row.title}
+Fråga: ${row.prompt}
+Svar: ${row.answerText || "—"}
+Från: ${row.who}
+Tid: ${fmtTime(row.createdAt)}`
+    );
+  }
+
+  function render(){
+    const list = $("#list");
+    list.innerHTML = "";
+    setMsg("", "");
+
+    const allRows = buildRows();
+    const shown = filterRows(allRows).slice(0, 100);
+
+    // Hjälptext om vi kör fallback så admin förstår varför
+    if(allRows.length > 0 && allRows[0]._source === "fallback"){
+      setMsg("warn", "Obs: Visar svar från AO-015_QA_V1 (fallback). Om ni vill köra strikt AO-051: säkerställ att employee/questions.html skriver AO-016_ANSWERS_V1.");
+    }
+
+    if(shown.length === 0){
       list.innerHTML = `<div class="empty">Inga svar matchar filtret.</div>`;
       return;
     }
 
-    rows.forEach(r => {
+    const byId = new Map();
+    shown.forEach(r => byId.set(r.id, r));
+
+    shown.forEach(r => {
       const el = document.createElement("div");
       el.className = "item";
       el.innerHTML = `
-        <div style="min-width:260px;">
+        <div style="min-width:260px; flex: 1 1 640px;">
           <p class="item-title">${escapeHtml(r.title)}</p>
           <div class="meta">
             <span><strong>Från:</strong> ${escapeHtml(r.who)}</span>
@@ -352,22 +452,18 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
     list.querySelectorAll("button[data-copy]").forEach(btn => {
       btn.addEventListener("click", async () => {
         const id = btn.getAttribute("data-copy");
-        const row = buildRows().find(x => x.id === id);
+        const row = byId.get(String(id));
         if(!row) return;
 
-        const text =
-`[HR-System] Svar
-Titel: ${row.title}
-Fråga: ${row.prompt}
-Svar: ${row.answerText || "—"}
-Från: ${row.who}
-Tid: ${fmtTime(row.createdAt)}`;
+        const text = makeRowCopyText(row);
 
         try{
-          await navigator.clipboard.writeText(text);
+          await tryWriteClipboard(text);
+          const old = btn.textContent;
           btn.textContent = "Kopierat!";
-          setTimeout(() => btn.textContent = "Kopiera", 900);
+          setTimeout(() => { btn.textContent = old; }, 900);
         }catch{
+          // Fail-closed fallback: visa prompt i alert
           alert("Kunde inte kopiera automatiskt. Markera och kopiera manuellt:\n\n" + text);
         }
       });
@@ -375,29 +471,18 @@ Tid: ${fmtTime(row.createdAt)}`;
   }
 
   async function copySummary(){
-    const rows = buildRows();
+    setMsg("", "");
+
+    const rows = filterRows(buildRows()).slice(0, 50);
+
     const filter = $("#filter").value;
-    const q = String($("#search").value || "").trim().toLowerCase();
-
-    let shown = rows;
-
-    if(filter === "anon") shown = shown.filter(r => r.isAnon);
-    if(filter === "named") shown = shown.filter(r => !r.isAnon);
-
-    if(q){
-      shown = shown.filter(r => {
-        const blob = `${r.empNo||""} ${r.title||""} ${r.prompt||""} ${r.answerText||""}`.toLowerCase();
-        return blob.includes(q);
-      });
-    }
-
-    shown = shown.slice(0, 50);
+    const q = String($("#search").value || "").trim();
 
     const lines = [];
-    lines.push(`[HR-System] Svar-sammanfattning (${shown.length} st)`);
+    lines.push(`[HR-System] Svar-sammanfattning (${rows.length} st)`);
     lines.push(`Filter: ${filter} | Sök: ${q || "-"}`);
     lines.push(`---`);
-    shown.forEach((r, i) => {
+    rows.forEach((r, i) => {
       lines.push(`${i+1}. ${r.title}`);
       lines.push(`   Fråga: ${r.prompt}`);
       lines.push(`   Svar: ${r.answerText || "—"}`);
@@ -408,8 +493,8 @@ Tid: ${fmtTime(row.createdAt)}`;
     const text = lines.join("\n");
 
     try{
-      await navigator.clipboard.writeText(text);
-      alert("Sammanfattning kopierad.");
+      await tryWriteClipboard(text);
+      setMsg("ok", "Sammanfattning kopierad.");
     }catch{
       alert("Kunde inte kopiera automatiskt. Markera och kopiera manuellt:\n\n" + text);
     }
@@ -417,6 +502,7 @@ Tid: ${fmtTime(row.createdAt)}`;
 
   // events
   $("#filter").addEventListener("change", render);
+  $("#sort").addEventListener("change", render);
   $("#search").addEventListener("input", render);
   $("#btnRefresh").addEventListener("click", render);
   $("#btnCopy").addEventListener("click", copySummary);
