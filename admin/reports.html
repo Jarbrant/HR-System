@@ -1,11 +1,12 @@
 <!-- ============================================================
 AO-009 | FIL-ID: admin/reports.html
 Projekt: HR-System
-Syfte: Admin – Felrapporter (UI-only v1)
+Syfte: Admin – Felrapporter + åtgärdsplan (UI-only v1)
 Policy:
 - Ingen backend
-- Läser från sessionStorage / localStorage
-- Endast admin har åtkomst
+- Endast admin åtkomst
+- Läser/uppdaterar samma lagring som employee/report.html (AO-007_REPORTS_V1)
+- Ingen känslig data lagras
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -23,32 +24,129 @@ Policy:
       gap:10px;
       align-items:center;
     }
+    .toolbar{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:end;
+      margin: 12px 0 6px;
+    }
     .report{
       border:1px solid var(--line);
       border-radius:14px;
       padding:12px;
       margin-bottom:10px;
       background:#fff;
-      transition: box-shadow .15s ease, transform .15s ease;
+      transition: box-shadow .15s ease, transform .15s ease, filter .15s ease;
     }
     .report:hover{
-      box-shadow:0 8px 22px rgba(0,0,0,.12);
+      box-shadow:0 10px 28px rgba(0,0,0,.12);
       transform: translateY(-1px);
+      filter: brightness(1.01);
+    }
+    .report-head{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
     }
     .meta{
-      font-size:.85rem;
+      font-size:.88rem;
       color:var(--muted);
       display:flex;
       gap:10px;
       flex-wrap:wrap;
+      margin-top:6px;
     }
+    .pill2{
+      border:1px solid var(--line);
+      border-radius:999px;
+      padding:2px 8px;
+      font-size:.82rem;
+      color:var(--muted);
+      background:#fff;
+      white-space:nowrap;
+    }
+    .status-open{ background:#fff6e5; }
+    .status-progress{ background:#eef4ff; }
+    .status-done{ background:#eef9f1; }
+
+    .details{
+      margin-top:10px;
+      padding-top:10px;
+      border-top:1px solid var(--line);
+      display:none;
+    }
+    .details.show{ display:block; }
+
+    .grid2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .grid2{ grid-template-columns: 1fr; }
+    }
+
+    .box{
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:12px;
+      background:#fff;
+    }
+    .box-title{
+      font-weight:800;
+      margin:0 0 8px;
+    }
+
+    .mono{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+    }
+
     .empty{
       padding:20px;
       text-align:center;
       color:var(--muted);
       border:1px dashed var(--line);
       border-radius:14px;
+      margin-top:12px;
     }
+
+    .actions-row{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-top:10px;
+      align-items:center;
+    }
+
+    .taskline{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      padding:6px 0;
+      border-bottom:1px dashed rgba(0,0,0,0.06);
+    }
+    .taskline:last-child{ border-bottom:none; }
+    .taskline input[type="text"]{ flex:1; }
+
+    .toast{
+      position: fixed;
+      bottom: 16px;
+      left: 16px;
+      z-index: 60;
+      background:#111;
+      color:#fff;
+      border-radius: 12px;
+      padding: 10px 12px;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+      max-width: min(520px, calc(100vw - 32px));
+      pointer-events:none;
+    }
+    .toast.show{ opacity:0.95; transform: translateY(0); }
   </style>
 </head>
 
@@ -67,25 +165,61 @@ Policy:
 </header>
 
 <main class="container">
-
   <h1 class="tight">Felrapporter</h1>
   <p class="muted">
-    Inkomna rapporter från medarbetare. UI-only v1.
+    Klicka på en rapport för att läsa detaljer och skapa åtgärdsplan. UI-only v1.
   </p>
+
+  <div class="toolbar">
+    <label style="min-width:240px; flex:1;">
+      Sök
+      <input id="q" type="text" placeholder="Sök i rubrik/beskrivning/sida…" />
+    </label>
+
+    <label style="min-width:200px;">
+      Filter
+      <select id="filter">
+        <option value="all">Alla</option>
+        <option value="open">Öppen</option>
+        <option value="progress">Pågår</option>
+        <option value="done">Klar</option>
+      </select>
+    </label>
+
+    <label style="min-width:200px;">
+      Sortera
+      <select id="sort">
+        <option value="newest">Nyast först</option>
+        <option value="oldest">Äldst först</option>
+      </select>
+    </label>
+  </div>
 
   <section id="list"></section>
 
+  <div id="empty" class="empty" style="display:none;">Inga felrapporter matchar.</div>
 </main>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script>
 /* ============================================================
-AO-009 | admin/reports.html – Guard + list
+AO-009 | admin/reports.html – Guard + detail + action plan
 ============================================================ */
 (function(){
   "use strict";
 
   const SESSION_KEY = "AO-001_LOGIN_V1";
-  const REPORT_KEY  = "AO-007_REPORTS_V1"; // används av employee/report.html
+  const REPORT_KEY  = "AO-007_REPORTS_V1";
+
+  const $ = (s) => document.querySelector(s);
+
+  function toast(text){
+    const t = $("#toast");
+    t.textContent = text || "";
+    t.classList.add("show");
+    setTimeout(() => t.classList.remove("show"), 1600);
+  }
 
   function redirectLogin(){
     location.replace("../UI/UI-01-SKELETON.html");
@@ -96,55 +230,382 @@ AO-009 | admin/reports.html – Guard + list
       const s = JSON.parse(sessionStorage.getItem(SESSION_KEY));
       if(!s?.auth?.isAuthed) return null;
       if(s.auth.role !== "admin") return null;
-      if(s.auth.expiresAt < Date.now()) return null;
+      if(!s.auth.expiresAt || s.auth.expiresAt < Date.now()) return null;
       return s.auth;
     }catch{ return null; }
   }
 
   const auth = getAuth();
-  if(!auth){
-    redirectLogin();
-    return;
-  }
+  if(!auth){ redirectLogin(); return; }
 
-  document.getElementById("btnLogout").onclick = () => {
+  $("#btnLogout").onclick = () => {
     sessionStorage.removeItem(SESSION_KEY);
     redirectLogin();
   };
 
-  const listEl = document.getElementById("list");
-  const reports = JSON.parse(localStorage.getItem(REPORT_KEY) || "[]");
-
-  if(!reports.length){
-    listEl.innerHTML = `
-      <div class="empty">
-        Inga felrapporter ännu.
-      </div>
-    `;
-    return;
+  function loadReports(){
+    try{
+      const data = JSON.parse(localStorage.getItem(REPORT_KEY) || "[]");
+      return Array.isArray(data) ? data : [];
+    }catch{
+      return [];
+    }
   }
 
-  reports
-    .slice().reverse()
-    .forEach(r => {
-      const el = document.createElement("div");
-      el.className = "report";
-      el.innerHTML = `
-        <strong>${r.title || "Felrapport"}</strong>
-        <p>${r.message || "—"}</p>
-        <div class="meta">
-          <span>Roll: ${r.role}</span>
-          <span>Sida: ${r.page}</span>
-          <span>Språk: ${r.lang}</span>
-          <span>${new Date(r.createdAt).toLocaleString()}</span>
+  function saveReports(arr){
+    localStorage.setItem(REPORT_KEY, JSON.stringify(arr));
+  }
+
+  function ensureAdminFields(r){
+    // Lägger till adminfält om de saknas (utan att ändra employee-sidan)
+    if(!r.adminPlan) r.adminPlan = {};
+    if(!r.adminPlan.status) r.adminPlan.status = "open"; // open|progress|done
+    if(!Array.isArray(r.adminPlan.actions)) r.adminPlan.actions = [];
+    return r;
+  }
+
+  function fmt(ts){
+    if(!ts) return "—";
+    try{
+      return new Date(ts).toLocaleString("sv-SE", { year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
+    }catch{ return "—"; }
+  }
+
+  function statusLabel(s){
+    if(s === "open") return "Öppen";
+    if(s === "progress") return "Pågår";
+    if(s === "done") return "Klar";
+    return "Öppen";
+  }
+
+  function statusClass(s){
+    if(s === "progress") return "status-progress";
+    if(s === "done") return "status-done";
+    return "status-open";
+  }
+
+  function safeStr(x, max){
+    const s = String(x ?? "").trim();
+    return s.length > max ? s.slice(0, max) + "…" : s;
+  }
+
+  async function copyText(text){
+    try{
+      await navigator.clipboard.writeText(text);
+      return true;
+    }catch{
+      try{
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        return true;
+      }catch{ return false; }
+    }
+  }
+
+  function buildReadable(r){
+    const ap = r.adminPlan || {};
+    const actions = Array.isArray(ap.actions) ? ap.actions : [];
+    const lines = [
+      "=== HR-System • Felrapport ===",
+      `Titel: ${r.title || "—"}`,
+      `Tid: ${r.time || fmt(r.createdAt)}`,
+      `Roll: ${r.role || "employee"}`,
+      `Sida: ${r.url || r.page || "—"}`,
+      `Språk: ${r.lang || "—"}`,
+      `Viewport: ${r.viewport || "—"}`,
+      `Tidzon: ${r.timezone || "—"}`,
+      `UA: ${r.ua || "—"}`,
+      "",
+      "Beskrivning:",
+      r.desc || r.message || "—",
+      "",
+      "Steg att återskapa:",
+      r.steps || "—",
+      "",
+      "=== Åtgärdsplan (Admin) ===",
+      `Status: ${statusLabel(ap.status || "open")}`,
+      `Ansvarig: ${ap.owner || "—"}`,
+      `Deadline: ${ap.deadline || "—"}`,
+      `Rotorsak (kort): ${ap.rootCause || "—"}`,
+      "",
+      "Åtgärder:",
+      actions.length ? actions.map((a,i)=> `${i+1}) [${a.done ? "x":" "}] ${a.text || "—"}`).join("\n") : "—",
+      "",
+      "Anteckning:",
+      ap.note || "—",
+      "=== Slut ==="
+    ];
+    return lines.join("\n");
+  }
+
+  let reports = loadReports().map(ensureAdminFields);
+  // Spara tillbaka om vi just “seedade” adminfält
+  saveReports(reports);
+
+  const listEl = $("#list");
+  const emptyEl = $("#empty");
+
+  function getFiltered(){
+    const q = ($("#q").value || "").trim().toLowerCase();
+    const f = $("#filter").value;
+    const s = $("#sort").value;
+
+    let arr = reports.slice();
+
+    if(f !== "all"){
+      arr = arr.filter(r => (r.adminPlan?.status || "open") === f);
+    }
+
+    if(q){
+      arr = arr.filter(r => {
+        const blob = `${r.title||""} ${r.desc||r.message||""} ${r.url||r.page||""}`.toLowerCase();
+        return blob.includes(q);
+      });
+    }
+
+    if(s === "oldest"){
+      arr.sort((a,b) => (new Date(a.time||a.createdAt||0)).getTime() - (new Date(b.time||b.createdAt||0)).getTime());
+    }else{
+      arr.sort((a,b) => (new Date(b.time||b.createdAt||0)).getTime() - (new Date(a.time||a.createdAt||0)).getTime());
+    }
+
+    return arr;
+  }
+
+  function persist(){
+    saveReports(reports);
+  }
+
+  function findById(id){
+    return reports.find(r => r.id === id) || null;
+  }
+
+  function render(){
+    const arr = getFiltered();
+    listEl.innerHTML = "";
+    emptyEl.style.display = arr.length ? "none" : "block";
+
+    arr.forEach(r => {
+      const status = r.adminPlan?.status || "open";
+
+      const card = document.createElement("div");
+      card.className = "report";
+      card.setAttribute("data-id", r.id);
+
+      card.innerHTML = `
+        <div class="report-head">
+          <div>
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+              <strong>${safeStr(r.title || "Felrapport", 120)}</strong>
+              <span class="pill2 ${statusClass(status)}">${statusLabel(status)}</span>
+            </div>
+
+            <div class="meta">
+              <span class="pill2 mono">${safeStr(r.id, 40)}</span>
+              <span class="pill2">${fmt(r.time || r.createdAt)}</span>
+              <span class="pill2 mono">${safeStr(r.url || r.page || "—", 80)}</span>
+            </div>
+          </div>
+
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <button class="secondary btnToggle" type="button">Öppna</button>
+          </div>
+        </div>
+
+        <div class="details" id="d_${r.id}">
+          <div class="grid2">
+            <div class="box">
+              <div class="box-title">Rapport</div>
+              <p class="muted tight"><strong>Beskrivning</strong></p>
+              <p>${safeStr(r.desc || r.message || "—", 2000).replace(/</g,"&lt;")}</p>
+
+              <p class="muted tight"><strong>Steg att återskapa</strong></p>
+              <p>${safeStr(r.steps || "—", 2000).replace(/</g,"&lt;")}</p>
+
+              <div class="actions-row">
+                <button class="secondary btnCopy" type="button">Kopiera rapport</button>
+              </div>
+            </div>
+
+            <div class="box">
+              <div class="box-title">Åtgärdsplan</div>
+
+              <label>
+                Status
+                <select class="inpStatus">
+                  <option value="open">Öppen</option>
+                  <option value="progress">Pågår</option>
+                  <option value="done">Klar</option>
+                </select>
+              </label>
+
+              <label>
+                Ansvarig (namn)
+                <input class="inpOwner" type="text" placeholder="t.ex. Anders" />
+              </label>
+
+              <label>
+                Deadline (valfritt)
+                <input class="inpDeadline" type="text" placeholder="t.ex. 2026-01-10" />
+              </label>
+
+              <label>
+                Rotorsak (kort)
+                <input class="inpRoot" type="text" placeholder="t.ex. fel länk / state-guard / saknad fil" />
+              </label>
+
+              <div style="margin-top:10px;">
+                <div class="muted" style="margin-bottom:6px;"><strong>Åtgärder</strong></div>
+                <div class="actionsList"></div>
+                <button class="secondary btnAddAction" type="button" style="margin-top:8px;">+ Lägg till åtgärd</button>
+              </div>
+
+              <label style="margin-top:10px;">
+                Anteckning
+                <textarea class="inpNote" placeholder="Kort logg: vad som gjorts, nästa steg, beslut…"></textarea>
+              </label>
+
+              <div class="actions-row">
+                <button class="btnSave" type="button">Spara åtgärdsplan</button>
+                <button class="secondary btnCopyFull" type="button">Kopiera allt</button>
+              </div>
+
+              <p class="muted" style="margin-top:8px;">
+                v1: sparas lokalt i samma rapportpost.
+              </p>
+            </div>
+          </div>
         </div>
       `;
-      listEl.appendChild(el);
+
+      // Wire events
+      const btnToggle = card.querySelector(".btnToggle");
+      const details = card.querySelector(".details");
+      btnToggle.addEventListener("click", () => {
+        const open = details.classList.toggle("show");
+        btnToggle.textContent = open ? "Stäng" : "Öppna";
+      });
+
+      // Fill action plan inputs
+      const ap = r.adminPlan || { status:"open", actions:[] };
+      const inpStatus = card.querySelector(".inpStatus");
+      const inpOwner = card.querySelector(".inpOwner");
+      const inpDeadline = card.querySelector(".inpDeadline");
+      const inpRoot = card.querySelector(".inpRoot");
+      const inpNote = card.querySelector(".inpNote");
+      const actionsList = card.querySelector(".actionsList");
+
+      inpStatus.value = ap.status || "open";
+      inpOwner.value = ap.owner || "";
+      inpDeadline.value = ap.deadline || "";
+      inpRoot.value = ap.rootCause || "";
+      inpNote.value = ap.note || "";
+
+      function renderActions(){
+        actionsList.innerHTML = "";
+        const actions = Array.isArray(r.adminPlan.actions) ? r.adminPlan.actions : [];
+        if(!actions.length){
+          const d = document.createElement("div");
+          d.className = "muted";
+          d.textContent = "Inga åtgärder ännu.";
+          actionsList.appendChild(d);
+          return;
+        }
+
+        actions.forEach((a, idx) => {
+          const line = document.createElement("div");
+          line.className = "taskline";
+
+          line.innerHTML = `
+            <label style="display:flex; gap:8px; align-items:center; margin:0;">
+              <input class="chkDone" type="checkbox" />
+              <span class="muted">Klar</span>
+            </label>
+            <input class="inpActionText" type="text" placeholder="Åtgärd…" />
+            <button class="secondary btnDel" type="button">Ta bort</button>
+          `;
+
+          const chk = line.querySelector(".chkDone");
+          const txt = line.querySelector(".inpActionText");
+          const del = line.querySelector(".btnDel");
+
+          chk.checked = !!a.done;
+          txt.value = a.text || "";
+
+          chk.addEventListener("change", () => {
+            r.adminPlan.actions[idx].done = chk.checked;
+          });
+          txt.addEventListener("input", () => {
+            r.adminPlan.actions[idx].text = txt.value;
+          });
+          del.addEventListener("click", () => {
+            r.adminPlan.actions.splice(idx, 1);
+            renderActions();
+          });
+
+          actionsList.appendChild(line);
+        });
+      }
+
+      renderActions();
+
+      card.querySelector(".btnAddAction").addEventListener("click", () => {
+        if(!Array.isArray(r.adminPlan.actions)) r.adminPlan.actions = [];
+        r.adminPlan.actions.push({ text:"", done:false });
+        renderActions();
+      });
+
+      card.querySelector(".btnSave").addEventListener("click", () => {
+        // persist plan into report
+        r.adminPlan.status = inpStatus.value;
+        r.adminPlan.owner = inpOwner.value.trim();
+        r.adminPlan.deadline = inpDeadline.value.trim();
+        r.adminPlan.rootCause = inpRoot.value.trim();
+        r.adminPlan.note = inpNote.value.trim();
+
+        persist();
+        toast("Sparat");
+        // update badge label on card (quick rerender)
+        render();
+      });
+
+      card.querySelector(".btnCopy").addEventListener("click", async () => {
+        const text = buildReadable(r);
+        const ok = await copyText(text);
+        toast(ok ? "Kopierat" : "Kunde inte kopiera");
+      });
+
+      card.querySelector(".btnCopyFull").addEventListener("click", async () => {
+        // save first (so copy includes inputs)
+        r.adminPlan.status = inpStatus.value;
+        r.adminPlan.owner = inpOwner.value.trim();
+        r.adminPlan.deadline = inpDeadline.value.trim();
+        r.adminPlan.rootCause = inpRoot.value.trim();
+        r.adminPlan.note = inpNote.value.trim();
+        persist();
+
+        const text = buildReadable(r);
+        const ok = await copyText(text);
+        toast(ok ? "Kopierat" : "Kunde inte kopiera");
+      });
+
+      listEl.appendChild(card);
     });
+  }
+
+  // Bind search/filter/sort
+  $("#q").addEventListener("input", render);
+  $("#filter").addEventListener("change", render);
+  $("#sort").addEventListener("change", render);
+
+  render();
 
 })();
 </script>
 
 </body>
 </html>
-
