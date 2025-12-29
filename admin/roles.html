@@ -1,1 +1,1178 @@
+<!-- ============================================================
+AO-019 | FIL-ID: admin/roles.html
+Projekt: HR-System
+Syfte: Admin – Role Builder (skapa roller + arv + modulbehörigheter + tilldela till anst.nr)
+Krav (kontrakt):
+- UI-only v1 (ingen backend)
+- Robust guard: sessionStorage först, fallback localStorage (fail-closed)
+- Inga känsliga persondata
+- Roller byggs via modulval (scope: none/view/act/manage)
+- Arv (inherits) stöds, child overrides parent
+- Cykler i arv ska stoppas vid sparande
+- Warn om arv saknas eller kedja klipps (depth-limit)
+Lagring:
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-019_ROLES_V1 (localStorage) – roller
+- AO-020_ROLE_ASSIGNMENTS_V1 (localStorage) – tilldelning: empNo -> roleId
+Obs:
+- Routing i UI-03-APP.js kan senare läsa AO-020_ROLE_ASSIGNMENTS_V1 för att styra “gren”.
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Roller</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .layout{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .layout{ grid-template-columns: 1fr; }
+    }
+
+    .panel{
+      border: 1px solid var(--line);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .panel:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+
+    .panel.build{ background: rgba(167,243,208,.18); }
+    .panel.list { background: rgba(191,219,254,.18); }
+
+    .row2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 620px){
+      .row2{ grid-template-columns: 1fr; }
+    }
+
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+    code{ font-size:.95em; }
+
+    .subcard{
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.7);
+    }
+    .subcard .title{
+      font-weight: 850;
+      margin: 0 0 8px;
+    }
+
+    .gridMods{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .modRow{
+      display:grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 10px;
+      align-items:center;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+    }
+    .modLabel{
+      display:flex;
+      flex-direction:column;
+      gap:2px;
+      min-width: 220px;
+    }
+    .modLabel strong{ font-weight: 900; }
+    .modHint{ color: var(--muted); font-size: .9rem; }
+
+    .item{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background:#fff;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+    .item:hover{
+      transform: var(--lift);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.02);
+    }
+    .item.active{
+      outline: 3px solid rgba(17,17,17,0.10);
+      outline-offset: 2px;
+    }
+    .item-title{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+    }
+
+    .kpis{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin: 10px 0 2px;
+    }
+    .kpi{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.95rem;
+    }
+
+    .warnbox{
+      padding: 10px;
+      border-radius: var(--r14);
+      border: 1px solid var(--line);
+      background: rgba(254,243,199,.55);
+      color: #111;
+      margin-top: 10px;
+    }
+
+    .split{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    .assignRow{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:end;
+    }
+    .assignRow label{ flex: 1 1 220px; margin:0; }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin • Roller</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Uppgifter</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="./roles.html" aria-current="page">Roller</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Roller (Admin)</h1>
+  <p class="muted">Bygg roller med modul-scope och arv. Tilldela till anst.nr. UI-only v1.</p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+      </div>
+      <div class="row wrap">
+        <button id="btnNew" type="button" class="secondary">Ny roll</button>
+      </div>
+    </div>
+
+    <div class="layout">
+
+      <!-- BUILD -->
+      <section class="panel build" aria-label="Bygg roll">
+        <div class="panel-title">Role Builder</div>
+
+        <div class="subcard" aria-label="Grundinfo">
+          <p class="title">Grundinfo</p>
+
+          <div class="row2">
+            <label>
+              Rollnamn
+              <input id="roleName" type="text" placeholder="t.ex. Enhetschef" />
+            </label>
+
+            <label>
+              Ärver från (valfritt)
+              <select id="roleInherits"></select>
+            </label>
+          </div>
+
+          <label style="margin-top:10px;">
+            Beskrivning (valfri)
+            <input id="roleDesc" type="text" placeholder="Kort beskrivning..." />
+          </label>
+
+          <div id="inheritWarn" class="warnbox" style="display:none;" aria-live="polite"></div>
+        </div>
+
+        <div class="subcard" aria-label="Moduler">
+          <p class="title">Moduler & scope</p>
+          <div class="muted" style="margin-top:-2px;">
+            Scope: <code>none</code> (inget) • <code>view</code> (läsa) • <code>act</code> (göra) • <code>manage</code> (styra)
+          </div>
+
+          <div id="mods" class="gridMods" role="table" aria-label="Modullista"></div>
+
+          <div class="smallnote">
+            Regel: <code>manage</code> implicerar <code>act</code> + <code>view</code> (vi sparar scope som ett värde).
+          </div>
+        </div>
+
+        <div class="subcard" aria-label="Effektiv vy">
+          <p class="title">Effektiva behörigheter (inkl. arv)</p>
+          <div id="effectiveBox" class="muted">—</div>
+          <div id="depthWarn" class="warnbox" style="display:none;" aria-live="polite"></div>
+        </div>
+
+        <div class="row-actions" style="margin-top:10px;">
+          <button id="btnSave" type="button">Spara roll</button>
+          <button id="btnDelete" type="button" class="secondary">Ta bort roll</button>
+        </div>
+
+        <p id="msgRole" class="message" aria-live="polite"></p>
+
+        <div class="smallnote">
+          Lagring: <code>AO-019_ROLES_V1</code> + assignments <code>AO-020_ROLE_ASSIGNMENTS_V1</code>.
+        </div>
+      </section>
+
+      <!-- LIST -->
+      <section class="panel list" aria-label="Översikt">
+        <div class="panel-title">Översikt</div>
+
+        <div class="kpis" aria-label="Sammanfattning">
+          <div class="kpi">Roller: <strong id="kpiRoles">0</strong></div>
+          <div class="kpi">Admin-ish: <strong id="kpiAdmin">0</strong></div>
+          <div class="kpi">Tilldelningar: <strong id="kpiAssign">0</strong></div>
+        </div>
+
+        <div class="row2" style="margin-bottom:10px;">
+          <label>
+            Visa
+            <select id="filter">
+              <option value="all" selected>Alla roller</option>
+              <option value="adminish">Admin-ish</option>
+              <option value="system">Systemroller</option>
+              <option value="custom">Egna roller</option>
+            </select>
+          </label>
+
+          <label>
+            Sök
+            <input id="search" type="text" placeholder="t.ex. chef" />
+          </label>
+        </div>
+
+        <div id="list"></div>
+
+        <div class="subcard" aria-label="Tilldelning">
+          <p class="title">Tilldela roll</p>
+
+          <div class="assignRow">
+            <label>
+              Anst.nr
+              <input id="asgEmpNo" type="text" inputmode="numeric" placeholder="t.ex. 1234" />
+            </label>
+
+            <label>
+              Roll
+              <select id="asgRole"></select>
+            </label>
+
+            <button id="btnAssign" type="button">Tilldela</button>
+          </div>
+
+          <div class="muted" style="margin-top:8px;">
+            Tilldelning används av routing (senare): empNo → roleId.
+          </div>
+
+          <div id="asgList" style="margin-top:10px;"></div>
+          <p id="msgAssign" class="message" aria-live="polite"></p>
+        </div>
+      </section>
+
+    </div>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+AO-019 | FIL-ID: admin/roles.html (inline JS)
+Autopatch (baserat på BugHunt):
+- Tydlig merge-ordning: parent -> child (child overrides)
+- Stoppa arv-cykler vid save
+- Varning om missing inherits + om depth-limit/loop klipper kedja
+- Fix: “Roller” (inte “Rollar”)
+============================================================ */
+(function(){
+  "use strict";
+
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const ROLES_KEY   = "AO-019_ROLES_V1";
+  const ASG_KEY     = "AO-020_ROLE_ASSIGNMENTS_V1";
+
+  const SYSTEM_ROLE_IDS = new Set(["role_employee", "role_admin"]);
+  const MAX_DEPTH = 15;
+
+  const $  = (s) => document.querySelector(s);
+  const $$ = (s) => Array.from(document.querySelectorAll(s));
+
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
+  function readAuth(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+      if(data.auth.role !== "admin") return null;
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+      return data.auth;
+    }catch{
+      return null;
+    }
+  }
+
+  function safeParse(key, fallback){
+    try{
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{
+      return fallback;
+    }
+  }
+  function save(key, value){
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function setMsg(el, kind, text){
+    el.className = "message" + (kind ? " " + kind : "");
+    el.textContent = text || "";
+  }
+
+  function genId(prefix){
+    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function normalizeEmpNo(v){
+    return String(v || "").trim().replace(/[^\d]/g, "");
+  }
+  function validateEmpNo(v){
+    const empNo = normalizeEmpNo(v);
+    if(!empNo) return { ok:false, empNo:"" };
+    if(empNo.length > 10) return { ok:false, empNo };
+    return { ok:true, empNo };
+  }
+
+  // ----- Modules catalog (v1) -----
+  // scope: none | view | act | manage
+  const MODULES = [
+    { key:"EMP_HOME",      label:"Employee • Dashboard", hint:"employee/home.html", defaultScope:"view" },
+    { key:"EMP_TASKS",     label:"Employee • Uppgifter",  hint:"employee/tasks.html", defaultScope:"act" },
+    { key:"EMP_QUESTIONS", label:"Employee • Frågor",     hint:"employee/questions.html", defaultScope:"act" },
+    { key:"EMP_SCHEDULE",  label:"Employee • Schema",     hint:"employee/schedule.html", defaultScope:"view" },
+    { key:"EMP_DOCS",      label:"Employee • Dokument",   hint:"employee/docs.html", defaultScope:"act" },
+    { key:"EMP_REPORT",    label:"Employee • Felrapport", hint:"employee/report.html", defaultScope:"act" },
+    { key:"EMP_PROFILE",   label:"Employee • Min sida",   hint:"employee/profile.html", defaultScope:"view" },
+
+    { key:"ADMIN_HOME",        label:"Admin • Dashboard",   hint:"admin/home.html", defaultScope:"view" },
+    { key:"ADMIN_TASKS",       label:"Admin • Uppgifter",   hint:"admin/tasks.html", defaultScope:"manage" },
+    { key:"ADMIN_QUESTIONS",   label:"Admin • Frågor",      hint:"admin/questions.html", defaultScope:"manage" },
+    { key:"ADMIN_ANSWERS",     label:"Admin • Svar",        hint:"admin/answers.html", defaultScope:"manage" },
+    { key:"ADMIN_REPORTS",     label:"Admin • Felrapporter",hint:"admin/reports.html", defaultScope:"manage" },
+    { key:"ADMIN_INTEGRATIONS",label:"Admin • Integrationer",hint:"admin/integrations.html", defaultScope:"manage" },
+    { key:"ADMIN_DOCS",        label:"Admin • Dokument",    hint:"admin/docs.html (AO-018)", defaultScope:"manage" },
+    { key:"ADMIN_ROLES",       label:"Admin • Roller",      hint:"admin/roles.html", defaultScope:"manage" },
+  ];
+
+  const SCOPE_ORDER = ["none","view","act","manage"];
+
+  function normalizeScope(scope){
+    const s = String(scope || "none");
+    return SCOPE_ORDER.includes(s) ? s : "none";
+  }
+
+  function isAdminishEffective(effectiveModules){
+    // admin-ish om någon ADMIN_* har scope != none
+    return Object.keys(effectiveModules || {}).some(k => k.startsWith("ADMIN_") && normalizeScope(effectiveModules[k]) !== "none");
+  }
+
+  // ----- Roles store -----
+  function seedRolesIfEmpty(){
+    const raw = safeParse(ROLES_KEY, null);
+    if(Array.isArray(raw) && raw.length) return;
+
+    const now = Date.now();
+
+    const employee = {
+      id: "role_employee",
+      name: "Employee",
+      desc: "Standard medarbetare",
+      inherits: "",
+      isSystem: true,
+      modules: Object.fromEntries(MODULES.map(m => [m.key, (m.key.startsWith("EMP_") ? m.defaultScope : "none")])),
+      createdAt: now,
+      updatedAt: now
+    };
+
+    const admin = {
+      id: "role_admin",
+      name: "Admin",
+      desc: "Systemadmin (full access)",
+      inherits: "",
+      isSystem: true,
+      modules: Object.fromEntries(MODULES.map(m => [m.key, "manage"])),
+      createdAt: now,
+      updatedAt: now
+    };
+
+    save(ROLES_KEY, [employee, admin]);
+  }
+
+  function loadRoles(){
+    const arr = safeParse(ROLES_KEY, []);
+    if(!Array.isArray(arr)) return [];
+    return arr.map(r => normalizeRole(r)).filter(Boolean);
+  }
+
+  function saveRoles(arr){
+    save(ROLES_KEY, Array.isArray(arr) ? arr : []);
+  }
+
+  function normalizeRole(r){
+    if(!r || typeof r !== "object") return null;
+    const id = String(r.id || "").trim();
+    if(!id) return null;
+
+    const name = String(r.name || "").trim() || id;
+    const desc = String(r.desc || "").trim();
+    const inherits = String(r.inherits || "").trim();
+
+    const isSystem = !!r.isSystem || SYSTEM_ROLE_IDS.has(id);
+
+    const modules = (r.modules && typeof r.modules === "object") ? r.modules : {};
+    const cleanModules = {};
+    MODULES.forEach(m => {
+      if(Object.prototype.hasOwnProperty.call(modules, m.key)){
+        cleanModules[m.key] = normalizeScope(modules[m.key]);
+      }
+    });
+
+    const now = Date.now();
+
+    return {
+      id,
+      name,
+      desc,
+      inherits,
+      isSystem,
+      modules: cleanModules,
+      createdAt: Number(r.createdAt || now),
+      updatedAt: Number(r.updatedAt || now)
+    };
+  }
+
+  // ----- Assignments store -----
+  // shape: { "1234": { roleId:"role_x", updatedAt: 123 } }
+  function loadAssignments(){
+    const obj = safeParse(ASG_KEY, {});
+    return (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
+  }
+  function saveAssignments(obj){
+    save(ASG_KEY, obj && typeof obj === "object" ? obj : {});
+  }
+
+  // ----- Effective resolve -----
+  // Explicit merge: parent -> child, where child overrides.
+  // If a role doesn't specify a module key, it inherits parent's value.
+  function resolveRoleEffective(roleId){
+    const roles = loadRoles();
+    const map = new Map(roles.map(r => [r.id, r]));
+    const warnings = [];
+    const seen = new Set();
+
+    function walk(id, depth){
+      if(depth > MAX_DEPTH){
+        warnings.push("Arvkedjan är för lång (depth-limit). Visningen kan vara ofullständig.");
+        return { chain: [], modules: {} };
+      }
+      if(seen.has(id)){
+        warnings.push("Arv-cykel upptäckt. Visningen kan vara ofullständig.");
+        return { chain: [], modules: {} };
+      }
+      seen.add(id);
+
+      const role = map.get(id);
+      if(!role){
+        warnings.push("Saknad roll i arv-kedja (inherit pekar på något som inte finns).");
+        return { chain: [], modules: {} };
+      }
+
+      let base = { chain: [role], modules: {} };
+
+      const parentId = String(role.inherits || "").trim();
+      if(parentId){
+        const parent = map.get(parentId);
+        if(!parent){
+          warnings.push(`Rollen ärver från en roll som saknas: ${parentId}`);
+        }else{
+          const up = walk(parentId, depth + 1);
+          base.chain = up.chain.concat([role]);
+          base.modules = up.modules;
+        }
+      }
+
+      // Apply this role's overrides (child wins)
+      const next = Object.assign({}, base.modules);
+      Object.keys(role.modules || {}).forEach(k => {
+        next[k] = normalizeScope(role.modules[k]);
+      });
+
+      return { chain: base.chain, modules: next };
+    }
+
+    const res = walk(roleId, 0);
+
+    // Ensure all module keys exist in effective map
+    const effective = {};
+    MODULES.forEach(m => {
+      effective[m.key] = normalizeScope(res.modules[m.key] || "none");
+    });
+
+    return { effective, warnings, chain: res.chain };
+  }
+
+  // Cykelkontroll vid save: om newInherits leder tillbaka till roleId => stoppa
+  function wouldCreateCycle(roleId, newInherits){
+    const roles = loadRoles();
+    const map = new Map(roles.map(r => [r.id, r]));
+    const start = String(newInherits || "").trim();
+    if(!start) return false;
+    if(start === roleId) return true;
+
+    let cur = start;
+    const seen = new Set();
+    let depth = 0;
+
+    while(cur && depth <= MAX_DEPTH){
+      if(cur === roleId) return true;
+      if(seen.has(cur)) return true; // cykel i kedjan
+      seen.add(cur);
+      const r = map.get(cur);
+      if(!r) return false; // saknad -> ingen cykel, men varnas separat
+      cur = String(r.inherits || "").trim();
+      depth++;
+    }
+    // Om vi klipper pga depth, treat as unsafe => stoppa (bättre än trasigt)
+    return true;
+  }
+
+  // ----- UI state -----
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+  $("#whoName").textContent = auth.displayName || "Admin";
+
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  let editingRoleId = null; // null = new
+  let selectedRoleId = null;
+
+  function scopeOptionsHtml(current, ariaLabel){
+    const cur = normalizeScope(current);
+    return `
+      <select data-scope aria-label="${escapeHtml(ariaLabel)}">
+        <option value="none" ${cur==="none"?"selected":""}>none</option>
+        <option value="view" ${cur==="view"?"selected":""}>view</option>
+        <option value="act" ${cur==="act"?"selected":""}>act</option>
+        <option value="manage" ${cur==="manage"?"selected":""}>manage</option>
+      </select>
+    `;
+  }
+
+  function renderModulesGrid(role){
+    const box = $("#mods");
+    box.innerHTML = "";
+
+    MODULES.forEach(m => {
+      const current = role?.modules?.[m.key] ?? ""; // empty means inherit (if we want), but UI should show current selection:
+      // For clarity: UI shows explicit selection. If editing existing role and module not set => show "(inherit)"? We'll display "inherit (none/view/...)" in effective preview anyway.
+      // Here we show a select with current effective if new role, else role override or "none".
+      const initial = (editingRoleId ? (Object.prototype.hasOwnProperty.call(role.modules||{}, m.key) ? role.modules[m.key] : "none") : "none");
+
+      const row = document.createElement("div");
+      row.className = "modRow";
+      row.setAttribute("role","row");
+
+      row.innerHTML = `
+        <div class="modLabel">
+          <strong>${escapeHtml(m.label)}</strong>
+          <span class="modHint">${escapeHtml(m.hint)}</span>
+        </div>
+        <div>
+          ${scopeOptionsHtml(initial, `Scope för ${m.label}`)}
+        </div>
+      `;
+      row.querySelector("select[data-scope]").setAttribute("data-mod", m.key);
+      box.appendChild(row);
+    });
+  }
+
+  function collectModulesFromUI(){
+    const out = {};
+    $("#mods").querySelectorAll("select[data-scope]").forEach(sel => {
+      const k = sel.getAttribute("data-mod");
+      const v = normalizeScope(sel.value);
+      // Vi sparar bara det som inte är "none" för kompakthet? (men då blir override svårt)
+      // För enkelhet/tydlighet i v1: spara ALLA moduler explicit.
+      out[k] = v;
+    });
+    return out;
+  }
+
+  function renderInheritsSelect(roles, currentId){
+    const sel = $("#roleInherits");
+    sel.innerHTML = "";
+
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = "(Ingen)";
+    sel.appendChild(opt0);
+
+    roles
+      .slice()
+      .sort((a,b) => String(a.name||"").localeCompare(String(b.name||""), "sv"))
+      .forEach(r => {
+        if(currentId && r.id === currentId) return; // stop self-select
+        const opt = document.createElement("option");
+        opt.value = r.id;
+        opt.textContent = `${r.name} (${r.id})`;
+        sel.appendChild(opt);
+      });
+  }
+
+  function setEditingRole(roleId){
+    const roles = loadRoles();
+    const role = roleId ? roles.find(r => r.id === roleId) : null;
+
+    editingRoleId = role ? role.id : null;
+
+    $("#msgRole").textContent = "";
+    $("#inheritWarn").style.display = "none";
+    $("#depthWarn").style.display = "none";
+
+    renderInheritsSelect(roles, editingRoleId);
+
+    if(!role){
+      // new
+      $("#roleName").value = "";
+      $("#roleDesc").value = "";
+      $("#roleInherits").value = "";
+      renderModulesGrid({ modules:{} });
+      $("#btnDelete").disabled = true;
+      updateEffectivePreview();
+      return;
+    }
+
+    $("#roleName").value = role.name || "";
+    $("#roleDesc").value = role.desc || "";
+
+    // Missing-inherit warning (P0/P1)
+    const inherits = String(role.inherits || "").trim();
+    if(inherits){
+      const exists = roles.some(r => r.id === inherits);
+      if(!exists){
+        $("#inheritWarn").style.display = "block";
+        $("#inheritWarn").textContent = `Varning: Rollen ärver från "${inherits}" men den rollen finns inte längre. Välj en ny (eller sätt Ingen) innan du sparar.`;
+        // Sätt select till "" för att undvika tyst tapp — men vi visar varningen så admin fattar.
+        $("#roleInherits").value = "";
+      }else{
+        $("#roleInherits").value = inherits;
+      }
+    }else{
+      $("#roleInherits").value = "";
+    }
+
+    renderModulesGrid(role);
+    $("#btnDelete").disabled = role.isSystem === true || SYSTEM_ROLE_IDS.has(role.id);
+    updateEffectivePreview();
+  }
+
+  function updateEffectivePreview(){
+    const roleName = String($("#roleName").value || "").trim() || "(namnlös)";
+    const inherits = String($("#roleInherits").value || "").trim();
+
+    // Simulera effective för nuvarande inputs:
+    // - Om editingRoleId finns: vi räknar effective baserat på editingRoleId, men vi vill använda UI overrides + inherits-val.
+    // Vi gör en temp-resolve:
+    const roles = loadRoles();
+    const map = new Map(roles.map(r => [r.id, r]));
+
+    const tempId = editingRoleId || "__temp__";
+    const tempRole = {
+      id: tempId,
+      name: roleName,
+      desc: String($("#roleDesc").value || "").trim(),
+      inherits: inherits,
+      isSystem: false,
+      modules: collectModulesFromUI(),
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+
+    // Bygg temp map (ersätt om editing)
+    map.set(tempId, tempRole);
+
+    // custom resolve using temp map
+    const warnings = [];
+    const seen = new Set();
+
+    function walk(id, depth){
+      if(depth > MAX_DEPTH){
+        warnings.push("Arvkedjan är för lång (depth-limit). Visningen kan vara ofullständig.");
+        return { modules:{} };
+      }
+      if(seen.has(id)){
+        warnings.push("Arv-cykel upptäckt. Visningen kan vara ofullständig.");
+        return { modules:{} };
+      }
+      seen.add(id);
+
+      const role = map.get(id);
+      if(!role){
+        warnings.push("Saknad roll i arv-kedja (inherit pekar på något som inte finns).");
+        return { modules:{} };
+      }
+
+      let baseModules = {};
+
+      const parentId = String(role.inherits || "").trim();
+      if(parentId){
+        if(!map.get(parentId)){
+          warnings.push(`Rollen ärver från en roll som saknas: ${parentId}`);
+        }else{
+          const up = walk(parentId, depth+1);
+          baseModules = up.modules;
+        }
+      }
+
+      const next = Object.assign({}, baseModules);
+      Object.keys(role.modules || {}).forEach(k => { next[k] = normalizeScope(role.modules[k]); });
+      return { modules: next };
+    }
+
+    const res = walk(tempId, 0);
+    const eff = {};
+    MODULES.forEach(m => { eff[m.key] = normalizeScope(res.modules[m.key] || "none"); });
+
+    // Render effective summary
+    const parts = [];
+    MODULES.forEach(m => {
+      const s = eff[m.key];
+      if(s !== "none"){
+        parts.push(`${m.label}: ${s}`);
+      }
+    });
+
+    $("#effectiveBox").innerHTML = parts.length
+      ? `<div><strong>${escapeHtml(roleName)}</strong> • Effektiva moduler: <strong>${parts.length}</strong></div><div style="margin-top:8px;" class="muted">${escapeHtml(parts.join(" • "))}</div>`
+      : `<div><strong>${escapeHtml(roleName)}</strong></div><div class="muted" style="margin-top:8px;">Inga moduler aktiva (all scope = none).</div>`;
+
+    if(warnings.length){
+      $("#depthWarn").style.display = "block";
+      $("#depthWarn").textContent = warnings.join(" ");
+    }else{
+      $("#depthWarn").style.display = "none";
+      $("#depthWarn").textContent = "";
+    }
+  }
+
+  // ----- List + KPIs -----
+  function renderRoleSelectForAssign(){
+    const sel = $("#asgRole");
+    sel.innerHTML = "";
+    loadRoles()
+      .slice()
+      .sort((a,b) => String(a.name||"").localeCompare(String(b.name||""), "sv"))
+      .forEach(r => {
+        const opt = document.createElement("option");
+        opt.value = r.id;
+        opt.textContent = `${r.name} (${r.id})`;
+        sel.appendChild(opt);
+      });
+  }
+
+  function renderAssignments(){
+    const box = $("#asgList");
+    box.innerHTML = "";
+    const asg = loadAssignments();
+    const roles = loadRoles();
+    const map = new Map(roles.map(r => [r.id, r]));
+
+    const entries = Object.entries(asg || {}).sort((a,b) => String(a[0]).localeCompare(String(b[0])));
+
+    $("#kpiAssign").textContent = String(entries.length);
+
+    if(entries.length === 0){
+      box.innerHTML = `<div class="empty">Inga tilldelningar ännu.</div>`;
+      return;
+    }
+
+    entries.forEach(([empNo, rec]) => {
+      const roleId = String(rec?.roleId || "");
+      const role = map.get(roleId);
+      const name = role ? role.name : "(saknas)";
+
+      const row = document.createElement("div");
+      row.className = "item";
+      row.innerHTML = `
+        <div style="min-width:260px;">
+          <p class="item-title">Anst.nr ${escapeHtml(empNo)}</p>
+          <div class="meta">
+            <span class="pill">${escapeHtml(name)}</span>
+            <span class="pill">${escapeHtml(roleId || "—")}</span>
+          </div>
+        </div>
+        <div class="row" style="gap:8px;">
+          <button type="button" class="secondary" data-unassign="${escapeHtml(empNo)}">Ta bort</button>
+        </div>
+      `;
+      box.appendChild(row);
+    });
+
+    box.querySelectorAll("button[data-unassign]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const empNo = btn.getAttribute("data-unassign");
+        if(!confirm(`Ta bort roll för anst.nr ${empNo}?`)) return;
+        const asg2 = loadAssignments();
+        delete asg2[empNo];
+        saveAssignments(asg2);
+        setMsg($("#msgAssign"), "ok", "Tilldelning borttagen.");
+        renderAll();
+      });
+    });
+  }
+
+  function renderList(){
+    const list = $("#list");
+    list.innerHTML = "";
+
+    const filter = $("#filter").value;
+    const q = String($("#search").value || "").trim().toLowerCase();
+
+    const roles = loadRoles();
+
+    // KPIs
+    $("#kpiRoles").textContent = String(roles.length);
+
+    let adminishCount = 0;
+    roles.forEach(r => {
+      const { effective } = resolveRoleEffective(r.id);
+      if(isAdminishEffective(effective)) adminishCount++;
+    });
+    $("#kpiAdmin").textContent = String(adminishCount);
+
+    let shown = roles.slice();
+
+    if(filter === "system") shown = shown.filter(r => r.isSystem === true || SYSTEM_ROLE_IDS.has(r.id));
+    if(filter === "custom") shown = shown.filter(r => !(r.isSystem === true || SYSTEM_ROLE_IDS.has(r.id)));
+    if(filter === "adminish"){
+      shown = shown.filter(r => {
+        const { effective } = resolveRoleEffective(r.id);
+        return isAdminishEffective(effective);
+      });
+    }
+
+    if(q){
+      shown = shown.filter(r => {
+        const blob = `${r.name||""} ${r.id||""} ${r.desc||""} ${r.inherits||""}`.toLowerCase();
+        return blob.includes(q);
+      });
+    }
+
+    shown.sort((a,b) => String(a.name||"").localeCompare(String(b.name||""), "sv"));
+
+    if(shown.length === 0){
+      list.innerHTML = `<div class="empty">Inga roller för vald filter/sök.</div>`;
+      return;
+    }
+
+    shown.forEach(r => {
+      const { effective, warnings, chain } = resolveRoleEffective(r.id);
+      const activeMods = Object.values(effective).filter(s => normalizeScope(s) !== "none").length;
+      const isAdminish = isAdminishEffective(effective);
+
+      const el = document.createElement("div");
+      el.className = "item" + (r.id === selectedRoleId ? " active" : "");
+      el.innerHTML = `
+        <div style="min-width:260px; flex: 1 1 520px;">
+          <p class="item-title">${escapeHtml(r.name || r.id)}</p>
+          <div class="meta">
+            <span class="pill">${escapeHtml(r.id)}</span>
+            <span class="pill">${r.isSystem ? "System" : "Egen"}</span>
+            <span class="pill">${isAdminish ? "Admin-ish" : "—"}</span>
+            <span class="pill">Moduler: ${activeMods}</span>
+          </div>
+          ${r.desc ? `<div class="meta"><span>${escapeHtml(r.desc)}</span></div>` : ``}
+          ${warnings.length ? `<div class="meta"><span class="pill">⚠ ${escapeHtml(warnings.join(" "))}</span></div>` : ``}
+        </div>
+        <div class="row" style="gap:8px;">
+          <button type="button" class="secondary" data-edit="${escapeHtml(r.id)}">Öppna</button>
+        </div>
+      `;
+      list.appendChild(el);
+    });
+
+    list.querySelectorAll("button[data-edit]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-edit");
+        selectedRoleId = id;
+        setEditingRole(id);
+        renderList(); // highlight
+      });
+    });
+  }
+
+  function renderAll(){
+    renderRoleSelectForAssign();
+    renderAssignments();
+    renderList();
+    // refresh inherits select (in case roles changed) while preserving editing
+    const keep = editingRoleId;
+    setEditingRole(keep);
+  }
+
+  // ----- Save/Delete -----
+  $("#btnSave").addEventListener("click", () => {
+    const msg = $("#msgRole");
+    setMsg(msg, "", "");
+
+    const roles = loadRoles();
+    const name = String($("#roleName").value || "").trim();
+    const desc = String($("#roleDesc").value || "").trim();
+    const inherits = String($("#roleInherits").value || "").trim();
+
+    if(!name){
+      setMsg(msg, "err", "Rollnamn krävs.");
+      return;
+    }
+
+    // inherits exists?
+    if(inherits){
+      const exists = roles.some(r => r.id === inherits);
+      if(!exists){
+        setMsg(msg, "err", "Ärver från pekar på en roll som inte finns. Välj Ingen eller en giltig roll.");
+        return;
+      }
+    }
+
+    // Determine id
+    let id = editingRoleId;
+    const now = Date.now();
+
+    if(!id){
+      id = genId("role");
+    }
+
+    // Cycle detection (P1)
+    if(inherits && wouldCreateCycle(id, inherits)){
+      setMsg(msg, "err", "Ogiltigt arv: skulle skapa cykel eller för djup kedja. Välj en annan 'Ärver från'.");
+      return;
+    }
+
+    const modules = collectModulesFromUI();
+    const isSystem = SYSTEM_ROLE_IDS.has(id) ? true : false;
+
+    const nextRole = {
+      id,
+      name,
+      desc,
+      inherits: inherits || "",
+      isSystem: isSystem,
+      modules,
+      createdAt: (roles.find(r => r.id === id)?.createdAt) || now,
+      updatedAt: now
+    };
+
+    const idx = roles.findIndex(r => r.id === id);
+    if(idx >= 0){
+      if(roles[idx].isSystem === true || SYSTEM_ROLE_IDS.has(id)){
+        // allow updating name/desc/modules? In v1: låt admin justera systemroller? bättre att låsa (fail-closed).
+        setMsg(msg, "err", "Systemroller kan inte ändras i v1.");
+        return;
+      }
+      roles[idx] = nextRole;
+      setMsg(msg, "ok", "Roll uppdaterad.");
+    }else{
+      roles.push(nextRole);
+      setMsg(msg, "ok", "Ny roll skapad.");
+    }
+
+    saveRoles(roles);
+    editingRoleId = id;
+    selectedRoleId = id;
+
+    renderAll();
+  });
+
+  $("#btnDelete").addEventListener("click", () => {
+    const msg = $("#msgRole");
+    setMsg(msg, "", "");
+
+    if(!editingRoleId){
+      setMsg(msg, "err", "Ingen roll vald.");
+      return;
+    }
+    if(SYSTEM_ROLE_IDS.has(editingRoleId)){
+      setMsg(msg, "err", "Systemroller kan inte tas bort.");
+      return;
+    }
+
+    const roles = loadRoles();
+    const role = roles.find(r => r.id === editingRoleId);
+    if(!role){
+      setMsg(msg, "err", "Rollen hittades inte.");
+      return;
+    }
+
+    // If role is assigned, allow delete but remove assignments? (v1: vi tar bort assignments som pekar på rollen)
+    if(!confirm(`Ta bort rollen "${role.name}"? Detta rensar även tilldelningar som pekar på rollen.`)) return;
+
+    const nextRoles = roles.filter(r => r.id !== editingRoleId);
+    saveRoles(nextRoles);
+
+    // remove assignments that point to this role
+    const asg = loadAssignments();
+    Object.keys(asg).forEach(empNo => {
+      if(String(asg[empNo]?.roleId || "") === String(editingRoleId)){
+        delete asg[empNo];
+      }
+    });
+    saveAssignments(asg);
+
+    editingRoleId = null;
+    selectedRoleId = null;
+    setEditingRole(null);
+
+    setMsg(msg, "ok", "Rollen borttagen.");
+    renderAll();
+  });
+
+  // ----- Assign -----
+  $("#btnAssign").addEventListener("click", () => {
+    const msg = $("#msgAssign");
+    setMsg(msg, "", "");
+
+    const v = validateEmpNo($("#asgEmpNo").value);
+    if(!v.ok){
+      setMsg(msg, "err", "Skriv ett giltigt anst.nr (bara siffror, max 10).");
+      return;
+    }
+    const roleId = String($("#asgRole").value || "").trim();
+    const roles = loadRoles();
+    const exists = roles.some(r => r.id === roleId);
+    if(!exists){
+      setMsg(msg, "err", "Välj en giltig roll.");
+      return;
+    }
+
+    const asg = loadAssignments();
+    asg[v.empNo] = { roleId, updatedAt: Date.now() };
+    saveAssignments(asg);
+
+    setMsg(msg, "ok", `Tilldelad: ${v.empNo} → ${roleId}`);
+    $("#asgEmpNo").value = "";
+    renderAll();
+  });
+
+  // ----- Live preview updates -----
+  ["roleName","roleDesc","roleInherits"].forEach(id => {
+    $( "#" + id ).addEventListener("input", updateEffectivePreview);
+    $( "#" + id ).addEventListener("change", updateEffectivePreview);
+  });
+
+  $("#mods").addEventListener("change", (e) => {
+    const t = e.target;
+    if(t && t.matches("select[data-scope]")){
+      updateEffectivePreview();
+    }
+  });
+
+  $("#btnNew").addEventListener("click", () => {
+    editingRoleId = null;
+    selectedRoleId = null;
+    setEditingRole(null);
+    renderList();
+  });
+
+  $("#filter").addEventListener("change", renderList);
+  $("#search").addEventListener("input", renderList);
+
+  // init
+  seedRolesIfEmpty();
+  renderRoleSelectForAssign();
+  renderAssignments();
+  setEditingRole(null);
+  renderList();
+
+})();
+</script>
+
+</body>
+</html>
 
