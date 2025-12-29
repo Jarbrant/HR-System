@@ -1,27 +1,22 @@
 <!-- ============================================================
-AO-056 | FIL-ID: employee/docs.html
+AO-047 | FIL-ID: employee/docs.html
 Projekt: HR-System
-Syfte: Medarbetare – Dokument (läs + kvittera) – UI-only v1 (nivå 3)
-
-Krav (MUST-HAVE):
-- Visa endast dokument som är:
-  - published=true
-  - riktade till mig via target.mode: one/all/group
-- Öppna/läs i detaljvy
-- Kvittera “läst” per dokument per version:
-  Ack-key: "${docId}|${version}|${empNo}" -> { at: timestamp }
-- requireAck=false: knapp visas ej (men status “Ack: ej krävs”)
-
+Syfte: Medarbetare – Dokument (läs + kvittera) – UI-only v1
+Krav:
+- Lista dokument (endast publicerade + matchar målgrupp)
+- Öppna/läs (detail)
+- Kvittera “läst” per dokument
 Policy:
 - Ingen backend
-- Ingen känslig persondata lagras
+- Ingen känslig data lagras
 - Robust guard: sessionStorage först, fallback localStorage
-
 Lagring:
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
-- AO-017_GROUPS_V1 (localStorage) – grupper
-- AO-018_DOCS_V1 (localStorage) – dokument
-- AO-018_DOCS_ACK_V1 (localStorage) – kvittenser
+- AO-017_GROUPS_V1 (localStorage) – grupper (för target group)
+- AO-018_DOCS_V1 (localStorage) – dokument (admin)
+- AO-018_DOCS_ACK_V1 (localStorage) – kvittenser per empNo
+Autopatch v1:
+- Filtrerar: published===true + target one/all/group (fail-closed)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -92,9 +87,6 @@ Lagring:
       border: 1px solid var(--line);
       background: rgba(245,245,244,1);
     }
-
-    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
   </style>
 </head>
 
@@ -120,7 +112,7 @@ Lagring:
 
 <main class="container">
   <h1 class="tight">Dokument</h1>
-  <p class="muted">Läs dokument som admin har publicerat. Kvittens sparas per version.</p>
+  <p class="muted">Läs och kvittera dokument. v1 är UI-only.</p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
@@ -136,8 +128,8 @@ Lagring:
       <section class="panel list" aria-label="Lista">
         <div class="panel-title">Tillgängliga dokument</div>
         <div id="list"></div>
-        <div class="smallnote">
-          Källa: <code>AO-018_DOCS_V1</code> • Kvittens: <code>AO-018_DOCS_ACK_V1</code>
+        <div class="muted small" style="margin-top:8px;">
+          Källa v1: <code>AO-018_DOCS_V1</code> + kvittens <code>AO-018_DOCS_ACK_V1</code>.
         </div>
       </section>
 
@@ -148,19 +140,12 @@ Lagring:
 
         <div id="detail" style="display:none;">
           <p class="item-title" id="dTitle">—</p>
-
           <div class="meta">
             <span class="pill" id="dAck">—</span>
             <span class="pill" id="dVersion">—</span>
-            <span class="pill" id="dAttach">—</span>
           </div>
 
           <div class="docBody" id="dBody">—</div>
-
-          <div id="attachBox" style="margin-top:10px; display:none;">
-            <a id="dAttachLink" class="btn secondary" href="#" target="_blank" rel="noopener">Öppna bilaga</a>
-            <div class="smallnote" id="dAttachMeta"></div>
-          </div>
 
           <div class="row-actions" style="margin-top:10px;">
             <button id="btnAck" type="button">Kvittera “läst”</button>
@@ -168,8 +153,6 @@ Lagring:
           </div>
 
           <p id="msg" class="message" aria-live="polite"></p>
-
-          <div class="smallnote mono" id="dId">—</div>
         </div>
       </section>
     </div>
@@ -178,10 +161,10 @@ Lagring:
 
 <script>
 /* ============================================================
-AO-056 | FIL-ID: employee/docs.html (inline JS)
-- Filter published + target
-- Ack per docId|version|empNo
-- No demoDocs (fail-closed: inga docs -> tom lista)
+AO-047 | FIL-ID: employee/docs.html (inline JS)
+Autopatch:
+- Endast publicerade dokument (published===true)
+- Target-filter: all / group / one (fail-closed)
 ============================================================ */
 (function(){
   "use strict";
@@ -223,24 +206,7 @@ AO-056 | FIL-ID: employee/docs.html (inline JS)
       return (v === null || v === undefined) ? fallback : v;
     }catch{ return fallback; }
   }
-
-  function saveFailClosed(key, value){
-    try{
-      localStorage.setItem(key, JSON.stringify(value));
-      return { ok:true };
-    }catch(e){
-      return { ok:false, err:e };
-    }
-  }
-
-  function escapeHtml(s){
-    return String(s ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
-  }
+  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
 
   function setMsg(kind, text){
     const m = $("#msg");
@@ -248,18 +214,11 @@ AO-056 | FIL-ID: employee/docs.html (inline JS)
     m.textContent = text || "";
   }
 
-  function normalizeEmpNo(v){
-    const s = String(v || "").trim();
-    return s.replace(/[^\d]/g, "");
-  }
-
-  // --- Guard ---
   const auth = readAuth();
   if(!auth){ redirectLogin(); return; }
 
-  const empNo = normalizeEmpNo(auth.empNo || "");
   $("#whoName").textContent = auth.displayName || "—";
-  $("#whoEmpNo").textContent = empNo || "—";
+  $("#whoEmpNo").textContent = auth.empNo || "—";
 
   function doLogout(){
     sessionStorage.removeItem(SESSION_KEY);
@@ -268,106 +227,142 @@ AO-056 | FIL-ID: employee/docs.html (inline JS)
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  // --- Data loaders ---
+  function demoDocs(){
+    // Demo ska vara "publicerat" så employee ser något även utan admin/docs.
+    return [
+      {
+        id:"d1",
+        title:"Policy: Arbetsmiljö",
+        version: 1,
+        published: true,
+        body:"Kort policytext (demo).\n\n• Rapportera risker\n• Använd skydd\n• Pauser",
+        targetMode: "all",
+        targetEmpNo: "",
+        targetGroupId: ""
+      },
+      {
+        id:"d2",
+        title:"Rutin: Städcheck",
+        version: 1,
+        published: true,
+        body:"Rutin (demo):\n\n1) Kontrollera ytor\n2) Byt trasor\n3) Signera i lista",
+        targetMode: "all",
+        targetEmpNo: "",
+        targetGroupId: ""
+      },
+      {
+        id:"d3",
+        title:"Rutin: Hygien",
+        version: 1,
+        published: true,
+        body:"Hygien (demo):\n\n• Tvätta händer\n• Handskar vid behov\n• Ren arbetsyta",
+        targetMode: "all",
+        targetEmpNo: "",
+        targetGroupId: ""
+      },
+    ];
+  }
+
+  function normalizeEmpNo(v){
+    const s = String(v || "").trim();
+    return s.replace(/[^\d]/g, "");
+  }
+
   function loadGroups(){
     const arr = safeParse(GROUPS_KEY, []);
     return Array.isArray(arr) ? arr : [];
   }
 
-  function loadDocs(){
-    const arr = safeParse(DOCS_KEY, []);
-    return Array.isArray(arr) ? arr : [];
+  function isEmpInGroup(empNo, group){
+    const n = normalizeEmpNo(empNo);
+    if(!n) return false;
+    const members = (group && Array.isArray(group.members)) ? group.members : [];
+    return members.some(m => normalizeEmpNo(m) === n);
   }
 
-  function loadAck(){
-    const obj = safeParse(ACK_KEY, {});
-    return (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
-  }
+  function matchesTarget(doc, empNo){
+    // Fail-closed: om empNo saknas kan vi inte matcha "one"/"group"
+    const my = normalizeEmpNo(empNo);
+    const mode = String(doc?.targetMode || "all");
 
-  function ackKey(docId, version, empNo){
-    return `${String(docId)}|${String(version)}|${String(empNo)}`;
-  }
-
-  function isTargetedToMe(doc){
-    const t = doc?.target || { mode:"all" };
-    const mode = t.mode || "all";
+    if(mode === "all") return true;
 
     if(mode === "one"){
-      return String(t.empNo || "").trim() === empNo;
+      if(!my) return false;
+      return normalizeEmpNo(doc?.targetEmpNo) === my;
     }
 
     if(mode === "group"){
-      const gid = String(t.groupId || "");
+      if(!my) return false;
+      const gid = String(doc?.targetGroupId || "");
       if(!gid) return false;
       const g = loadGroups().find(x => String(x.id) === gid);
       if(!g) return false;
-      return (g.members||[]).some(m => normalizeEmpNo(m) === empNo);
+      return isEmpInGroup(my, g);
     }
 
-    // all
-    // "all" bygger på grupper i admin-sidan, men här tolkar vi det som "till alla" i data.
-    // Fail-safe: om empNo saknas -> visa inget.
-    return !!empNo;
+    // okända modes: fail-closed
+    return false;
   }
 
-  function attachInfo(doc){
-    const att = doc?.attachment || { mode:"none" };
-    const mode = att.mode || "none";
-    if(mode === "url"){
-      const url = String(att.fileUrl || "").trim();
-      if(!url) return { mode:"none" };
-      return { mode:"url", url, label:"URL-bilaga" };
-    }
-    if(mode === "upload"){
-      const dataUrl = String(att.fileDataUrl || "");
-      if(!dataUrl) return { mode:"none" };
-      const name = String(att.fileName || "bilaga");
-      const type = String(att.fileType || "application/octet-stream");
-      const size = Number(att.fileSize || 0);
-      return { mode:"upload", url:dataUrl, label:name, meta:`${type} • ${Math.round(size/1024)} KB` };
-    }
-    return { mode:"none" };
+  function loadDocsRaw(){
+    const arr = safeParse(DOCS_KEY, null);
+    if(Array.isArray(arr) && arr.length) return arr;
+    return demoDocs();
   }
 
-  // --- UI state ---
+  function loadDocsForMe(){
+    const empNo = String(auth.empNo || "").trim();
+    const raw = loadDocsRaw();
+
+    // Endast publicerade + matchande målgrupp (fail-closed för publicerad)
+    return raw.filter(d => d && d.published === true && matchesTarget(d, empNo));
+  }
+
+  function loadAck(){
+    const empNo = String(auth.empNo || "").trim();
+    const all = safeParse(ACK_KEY, {});
+    const map = (all && typeof all === "object") ? all : {};
+    const mine = map[empNo] && typeof map[empNo] === "object" ? map[empNo] : {};
+    return { all: map, empNo, mine };
+  }
+
+  function setAck(docId, isAck){
+    const { all, empNo, mine } = loadAck();
+    const nextMine = Object.assign({}, mine);
+
+    if(isAck){
+      nextMine[docId] = { ackedAt: Date.now() };
+    }else{
+      delete nextMine[docId];
+    }
+
+    const nextAll = Object.assign({}, all);
+    nextAll[empNo] = nextMine;
+    save(ACK_KEY, nextAll);
+  }
+
+  function versionLabel(v){
+    if(v === null || v === undefined || v === "") return "Version —";
+    const n = Number(v);
+    if(Number.isFinite(n) && n > 0) return `Version v${n}`;
+    const s = String(v);
+    return s.startsWith("v") ? `Version ${s}` : `Version ${s}`;
+  }
+
   let selectedId = null;
 
-  function showDetail(doc){
+  function updateDetail(doc){
     $("#detailEmpty").style.display = "none";
     $("#detail").style.display = "block";
 
     $("#dTitle").textContent = doc.title || "Dokument";
-    $("#dVersion").textContent = `v${doc.version || 1}`;
+    $("#dVersion").textContent = versionLabel(doc.version);
     $("#dBody").textContent = doc.body || "—";
-    $("#dId").textContent = `ID: ${doc.id || "—"}`;
 
-    const ack = loadAck();
-    const key = ackKey(doc.id, doc.version || 1, empNo);
-    const acked = !!ack[key];
-
-    if(doc.requireAck === false){
-      $("#dAck").textContent = "Ack: ej krävs";
-      $("#btnAck").style.display = "none";
-      $("#btnUnAck").style.display = "none";
-    }else{
-      $("#dAck").textContent = acked ? "Ack: kvitterad" : "Ack: ej kvitterad";
-      $("#btnAck").style.display = acked ? "none" : "inline-block";
-      $("#btnUnAck").style.display = acked ? "inline-block" : "none";
-    }
-
-    const ai = attachInfo(doc);
-    if(ai.mode === "none"){
-      $("#dAttach").textContent = "Bilaga: —";
-      $("#attachBox").style.display = "none";
-      $("#dAttachLink").href = "#";
-      $("#dAttachMeta").textContent = "";
-    }else{
-      $("#dAttach").textContent = "Bilaga: ja";
-      $("#attachBox").style.display = "block";
-      $("#dAttachLink").href = ai.url;
-      $("#dAttachLink").textContent = (ai.mode === "url") ? "Öppna bilaga (URL)" : ("Öppna bilaga: " + (ai.label || "fil"));
-      $("#dAttachMeta").textContent = ai.meta || "";
-    }
+    const { mine } = loadAck();
+    const ack = mine[selectedId];
+    $("#dAck").textContent = ack ? "Kvitterad" : "Ej kvitterad";
 
     setMsg("", "");
   }
@@ -379,105 +374,67 @@ AO-056 | FIL-ID: employee/docs.html (inline JS)
     setMsg("", "");
   }
 
-  function getVisibleDocs(){
-    // Fail-closed: om empNo saknas -> inga docs
-    if(!empNo) return [];
-    return loadDocs()
-      .filter(d => !!d && d.published === true)
-      .filter(d => isTargetedToMe(d))
-      .slice()
-      .sort((a,b) => (b.updatedAt||b.createdAt||0) - (a.updatedAt||a.createdAt||0));
-  }
-
   function render(){
     const list = $("#list");
     list.innerHTML = "";
 
-    const docs = getVisibleDocs();
+    const docs = loadDocsForMe();
+    const { mine } = loadAck();
 
     if(!docs.length){
-      list.innerHTML = `<div class="empty">Inga publicerade dokument till dig.</div>`;
+      // Om empNo saknas i demo kan detta hända (fail-closed).
+      const reason = auth.empNo ? "Inga dokument matchar dig ännu." : "Ingen anst.nr i session – kan inte matcha målgrupp.";
+      list.innerHTML = `<div class="empty">${reason}</div>`;
       closeDetail();
       return;
     }
 
-    const ack = loadAck();
-
     docs.forEach(doc => {
       const isActive = (doc.id === selectedId);
-      const key = ackKey(doc.id, doc.version || 1, empNo);
-      const isAcked = !!ack[key];
-
-      const att = attachInfo(doc);
-      const attPill = (att.mode === "none") ? "" : `<span class="pill">Bilaga</span>`;
+      const isAcked = !!mine[doc.id];
 
       const el = document.createElement("div");
       el.className = "item" + (isActive ? " active" : "");
       el.innerHTML = `
-        <p class="item-title">${escapeHtml(doc.title || "Dokument")}</p>
+        <p class="item-title">${String(doc.title || "Dokument")}</p>
         <div class="meta">
-          <span class="pill">${escapeHtml("v" + String(doc.version || 1))}</span>
-          <span class="pill">${doc.requireAck === false ? "Ack: ej krävs" : (isAcked ? "Kvitterad" : "Ej kvitterad")}</span>
-          ${attPill}
+          <span class="pill">${isAcked ? "Kvitterad" : "Ej kvitterad"}</span>
+          <span class="pill">${(Number.isFinite(Number(doc.version)) && Number(doc.version) > 0) ? ("v" + String(doc.version)) : (String(doc.version || "v1"))}</span>
         </div>
       `;
-
       el.addEventListener("click", () => {
         selectedId = doc.id;
         render();
-        showDetail(doc);
+        updateDetail(doc);
       });
-
       list.appendChild(el);
     });
 
-    if(!selectedId){
+    if(!selectedId || !docs.some(d => d.id === selectedId)){
       selectedId = docs[0].id;
       render();
-      showDetail(docs[0]);
-    }else{
-      const current = docs.find(d => d.id === selectedId) || null;
-      if(current) showDetail(current);
-      if(!current) { selectedId = docs[0].id; render(); showDetail(docs[0]); }
+      updateDetail(docs[0]);
     }
   }
 
-  function setAckForSelected(isAck){
+  $("#btnAck").addEventListener("click", () => {
     if(!selectedId) return;
-    const docs = getVisibleDocs();
-    const doc = docs.find(d => d.id === selectedId) || null;
-    if(!doc){
-      setMsg("err", "Dokumentet hittades inte.");
-      render();
-      return;
-    }
-    if(doc.requireAck === false){
-      setMsg("warn", "Kvittens krävs inte för detta dokument.");
-      return;
-    }
-
-    const key = ackKey(doc.id, doc.version || 1, empNo);
-    const ack = loadAck();
-    const next = { ...ack };
-
-    if(isAck){
-      next[key] = { at: Date.now() };
-    }else{
-      delete next[key];
-    }
-
-    const res = saveFailClosed(ACK_KEY, next);
-    if(!res.ok){
-      setMsg("err", "Kunde inte spara kvittens (localStorage fullt eller blockerad).");
-      return;
-    }
-
-    setMsg(isAck ? "ok" : "warn", isAck ? "Kvitterad." : "Kvittens borttagen.");
+    setAck(selectedId, true);
+    setMsg("ok", "Kvitterad.");
     render();
-  }
+    const doc = loadDocsForMe().find(d => d.id === selectedId);
+    if(doc) updateDetail(doc);
+  });
 
-  $("#btnAck").addEventListener("click", () => setAckForSelected(true));
-  $("#btnUnAck").addEventListener("click", () => setAckForSelected(false));
+  $("#btnUnAck").addEventListener("click", () => {
+    if(!selectedId) return;
+    setAck(selectedId, false);
+    setMsg("warn", "Kvittens borttagen.");
+    render();
+    const doc = loadDocsForMe().find(d => d.id === selectedId);
+    if(doc) updateDetail(doc);
+  });
+
   $("#btnReload").addEventListener("click", render);
 
   render();
