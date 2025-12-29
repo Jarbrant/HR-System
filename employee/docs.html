@@ -1,1 +1,379 @@
+<!-- ============================================================
+AO-017 | FIL-ID: employee/docs.html
+Projekt: HR-System
+Syfte: Medarbetare – Dokument (läsa + kvittera “läst”) – UI-only v1
+Mål:
+- Lista dokument (demo)
+- Öppna dokument (textvisning i panel)
+- Kvittera “läst” per dokument
+Policy:
+- Ingen backend
+- Ingen känslig data lagras
+- Guard + logout (employee)
+Lagring:
+- AO-017_DOCS_V1 (localStorage) – kvittens per empNo + docId
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Medarbetare • Dokument</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .layout{
+      display:grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .layout{ grid-template-columns: 1fr; }
+    }
+    .doc{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background:#fff;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      cursor:pointer;
+    }
+    .doc:hover{
+      transform: var(--lift);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.02);
+    }
+    .doc.active{
+      outline: 3px solid rgba(17,17,17,0.10);
+      outline-offset: 2px;
+    }
+    .doc-title{ font-weight: 900; margin:0; }
+    .doc-meta{ margin-top:6px; display:flex; gap:10px; flex-wrap:wrap; color:var(--muted); font-size:.9rem; }
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+    }
+    .viewer{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background:#fff;
+      min-height: 260px;
+    }
+    .viewer h2{ margin-top:0; }
+    .viewer pre{
+      margin:0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: inherit;
+      color: var(--ink);
+      line-height: 1.55;
+    }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Medarbetare • Dokument</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Uppgifter</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./schedule.html">Schema</a>
+    <a href="./docs.html" aria-current="page">Dokument</a>
+    <a href="./report.html">Rapportera fel</a>
+  </nav>
+
+  <div class="row-actions" style="margin-left:auto;">
+    <button id="btnLogout" class="secondary" type="button">Logga ut</button>
+  </div>
+</header>
+
+<main class="container">
+  <h1 class="tight">Dokument</h1>
+  <p class="muted">Öppna och kvittera när du läst. (UI-only v1.)</p>
+
+  <section class="card">
+    <div class="layout">
+
+      <!-- Lista -->
+      <section class="panel" aria-label="Lista">
+        <div class="row space-between wrap">
+          <div class="panel-title">Dokument <span class="tag">demo</span></div>
+          <label style="margin:0; font-weight:700;">
+            Filter
+            <select id="filter" style="margin-top:6px; width:auto;">
+              <option value="all">Alla</option>
+              <option value="unread">Ej kvitterade</option>
+              <option value="read">Kvitterade</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="list"></div>
+        <p class="muted small" style="margin-top:10px;">
+          Tips: Klicka ett dokument för att läsa.
+        </p>
+      </section>
+
+      <!-- Viewer -->
+      <section class="panel" aria-label="Läs dokument">
+        <div class="panel-title">Läs</div>
+
+        <div id="viewerEmpty" class="empty">Välj ett dokument i listan.</div>
+
+        <div id="viewer" class="viewer" style="display:none;">
+          <div class="row space-between wrap">
+            <div>
+              <h2 id="vTitle" class="tight">—</h2>
+              <div class="muted">
+                Version <span id="vVer">—</span> •
+                <span id="vTag" class="pill">—</span>
+              </div>
+            </div>
+
+            <div class="row wrap">
+              <span id="vStatus" class="pill">—</span>
+              <button id="btnAcknowledge" type="button">Kvittera “läst”</button>
+            </div>
+          </div>
+
+          <div style="margin-top:10px;">
+            <pre id="vBody">—</pre>
+          </div>
+
+          <p id="msg" class="message" aria-live="polite"></p>
+        </div>
+      </section>
+
+    </div>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+AO-017 | FIL-ID: employee/docs.html (inline JS)
+Syfte: Guard + docs list + read ack (UI-only)
+============================================================ */
+(function(){
+  "use strict";
+
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const DOCS_KEY    = "AO-017_DOCS_V1"; // kvittens per empNo/docId
+
+  const $ = (s) => document.querySelector(s);
+
+  function redirectLogin(){
+    window.location.replace("../UI/UI-01-SKELETON.html");
+  }
+
+  function readAuth(){
+    try{
+      const raw = sessionStorage.getItem(SESSION_KEY);
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+      if(data.auth.role !== "employee") return null;
+      if(!data.auth.expiresAt || data.auth.expiresAt < Date.now()) return null;
+      return data.auth;
+    }catch{ return null; }
+  }
+
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+
+  $("#btnLogout").addEventListener("click", () => {
+    sessionStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  });
+
+  function loadAck(){
+    try{
+      const obj = JSON.parse(localStorage.getItem(DOCS_KEY) || "{}");
+      return obj && typeof obj === "object" ? obj : {};
+    }catch{
+      return {};
+    }
+  }
+
+  function saveAck(obj){
+    localStorage.setItem(DOCS_KEY, JSON.stringify(obj));
+  }
+
+  function fmt(ts){
+    if(!ts) return "—";
+    try{
+      return new Date(ts).toLocaleString("sv-SE", { year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
+    }catch{ return "—"; }
+  }
+
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  // Demo docs (v1)
+  const docs = [
+    {
+      id: "doc_workenv_01",
+      title: "Policy: Arbetsmiljö",
+      version: "1.0",
+      tag: "Policy",
+      body:
+`Syfte
+- Skapa en trygg arbetsmiljö.
+
+Grundregler
+- Rapportera risker direkt.
+- Följ rutiner.
+- Be om hjälp vid osäkerhet.
+
+Kvittens
+- Markera “läst” när du tagit del av innehållet.`
+    },
+    {
+      id: "doc_hygiene_01",
+      title: "Rutin: Hygien",
+      version: "1.0",
+      tag: "Rutin",
+      body:
+`Syfte
+- Säker hygien i arbetet.
+
+Checklista
+- Tvätta händer enligt rutin.
+- Rena arbetsytor.
+- Hantera råvaror korrekt.`
+    },
+    {
+      id: "doc_clean_01",
+      title: "Rutin: Städcheck",
+      version: "1.0",
+      tag: "Rutin",
+      body:
+`Syfte
+- Hålla lokaler rena och säkra.
+
+Dagligt
+- Golv, ytor, sopor.
+- Kontroll av toalett och omklädning.
+
+Veckovis
+- Djupstäd enligt schema.`
+    }
+  ];
+
+  let ack = loadAck();
+  const empNo = auth.empNo || "1234";
+  const ackKey = "emp_" + empNo;
+  if(!ack[ackKey]) ack[ackKey] = {}; // docId -> { readAt }
+
+  let selectedId = null;
+
+  function isRead(docId){
+    return !!ack[ackKey]?.[docId]?.readAt;
+  }
+
+  function renderList(){
+    const filter = $("#filter").value;
+    const listEl = $("#list");
+    listEl.innerHTML = "";
+
+    const shown = docs.filter(d => {
+      const r = isRead(d.id);
+      if(filter === "read") return r;
+      if(filter === "unread") return !r;
+      return true;
+    });
+
+    if(!shown.length){
+      listEl.innerHTML = `<div class="empty">Inga dokument för valt filter.</div>`;
+      return;
+    }
+
+    shown.forEach(d => {
+      const read = isRead(d.id);
+      const el = document.createElement("div");
+      el.className = "doc" + (d.id === selectedId ? " active" : "");
+      el.innerHTML = `
+        <p class="doc-title">${d.title}</p>
+        <div class="doc-meta">
+          <span class="pill">${d.tag}</span>
+          <span class="pill">v${d.version}</span>
+          <span class="pill">${read ? "Kvitterad" : "Ej kvitterad"}</span>
+        </div>
+      `;
+      el.addEventListener("click", () => {
+        selectedId = d.id;
+        renderList();
+        openDoc(d.id);
+      });
+      listEl.appendChild(el);
+    });
+  }
+
+  function openDoc(docId){
+    const d = docs.find(x => x.id === docId) || null;
+    if(!d){
+      $("#viewer").style.display = "none";
+      $("#viewerEmpty").style.display = "block";
+      return;
+    }
+
+    $("#viewerEmpty").style.display = "none";
+    $("#viewer").style.display = "block";
+
+    $("#vTitle").textContent = d.title;
+    $("#vVer").textContent = d.version;
+    $("#vTag").textContent = d.tag;
+    $("#vBody").textContent = d.body;
+
+    const readAt = ack[ackKey]?.[docId]?.readAt || null;
+    $("#vStatus").textContent = readAt ? ("Kvitterad: " + fmt(readAt)) : "Ej kvitterad";
+    $("#btnAcknowledge").disabled = !!readAt;
+
+    setMsg("", "");
+  }
+
+  $("#btnAcknowledge").addEventListener("click", () => {
+    if(!selectedId){
+      setMsg("err", "Välj ett dokument först.");
+      return;
+    }
+
+    if(!ack[ackKey]) ack[ackKey] = {};
+    if(ack[ackKey][selectedId]?.readAt){
+      setMsg("warn", "Redan kvitterad.");
+      return;
+    }
+
+    ack[ackKey][selectedId] = { readAt: Date.now() };
+    saveAck(ack);
+
+    setMsg("ok", "Kvitterat som läst.");
+    renderList();
+    openDoc(selectedId);
+  });
+
+  $("#filter").addEventListener("change", renderList);
+
+  renderList();
+
+})();
+</script>
+
+</body>
+</html>
 
