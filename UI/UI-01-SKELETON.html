@@ -1,314 +1,247 @@
 <!-- ============================================================
 AO-001 | FIL-ID: UI/UI-01-SKELETON.html
 Projekt: HR-System
-Syfte: Stammens login + roll-routing (v1)
-Roller v1 (låst): admin, employee
-Krav:
-- En gemensam inloggning
-- Generiskt felmeddelande vid fel
-- Cooldown efter X misslyckade försök (UI-only)
-- URL-parametrar stöd (name, empNo, password) för snabbtest
-- pinRequired=false hook (ingen PIN implementeras)
-Policy:
-- Ingen backend (v1)
-- Ingen känslig persondata lagras
-- Session i sessionStorage (AO-001_LOGIN_V1)
-Rollback:
-- Om du har äldre version, lägg den i ARCHIVE/v0.1/UI/UI-01-SKELETON.html
+Syfte: Stammens login + roll-routing (admin/employee) – UI-only v1
+Fix (stabilitet):
+- Sparar session i sessionStorage (primär) + localStorage (fallback) med samma nyckel
+- Förhindrar "klick => logout" när någon sida råkar läsa från fel storage
+Policy/lås:
+- Roller v1: admin, employee
+- PIN implementeras inte (hook: pinRequired=false + TODO)
+- Inga känsliga data lagras
+- Rate-limit i klient (cooldown)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Inlogg</title>
-  <meta name="description" content="Stammens inlogg för HR-System. Router till rätt vy baserat på roll." />
+  <title>HR-System – Login</title>
+  <meta name="description" content="Stammens login. Routar till rätt vy baserat på roll." />
 
   <link rel="stylesheet" href="./UI-02-STYLES.css" />
-
-  <style>
-    /* Minimal lokalt om CSS saknar smådetaljer */
-    .login-wrap{ max-width: 560px; margin: 0 auto; }
-    .muted-small{ color: var(--muted); font-size: 0.92rem; }
-    .row-actions{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    .cooldown{
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px 12px;
-      background: #fff6e5;
-      margin-top: 10px;
-      display:none;
-    }
-    .cooldown.show{ display:block; }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; }
-  </style>
 </head>
-
 <body>
 
 <header class="top">
   <div class="brand">
     <strong>HR-System</strong>
-    <span class="muted">• Stamm (Login)</span>
+    <span class="muted">• Login</span>
   </div>
-  <nav class="nav" aria-label="Snabb">
-    <a href="../employee/home.html" title="Kräver inlogg">Employee</a>
-    <a href="../admin/home.html" title="Kräver inlogg">Admin</a>
-  </nav>
 </header>
 
-<main class="container login-wrap">
-  <section class="card" aria-label="Inloggning">
+<main class="container">
+  <section class="card">
     <h1 class="tight">Logga in</h1>
-    <p class="muted-small">
-      En ingång för alla. Efter lyckad inloggning skickas du till rätt vy baserat på roll.
-    </p>
+    <p class="muted">Gemensam ingång för alla roller (v1).</p>
 
-    <div class="dashgrid">
-      <section class="panel">
-        <div class="panel-title">Uppgifter</div>
-
-        <label>
-          Namn (valfritt)
-          <input id="inpName" type="text" placeholder="t.ex. Anders" autocomplete="name" />
+    <form id="loginForm" novalidate>
+      <div class="row wrap">
+        <label style="flex:1; min-width:240px;">
+          Namn
+          <input id="name" name="name" type="text" autocomplete="name" placeholder="t.ex. Anders" />
         </label>
 
-        <label>
-          Anställningsnummer / ID
-          <input id="inpEmpNo" type="text" placeholder="t.ex. 1234 eller admin" autocomplete="username" />
+        <label style="flex:1; min-width:240px;">
+          Anställningsnummer
+          <input id="empNo" name="empNo" type="text" inputmode="numeric" autocomplete="username" placeholder="t.ex. 1234" />
         </label>
+      </div>
 
-        <label>
-          Lösenord
-          <input id="inpPass" type="password" placeholder="••••••••" autocomplete="current-password" />
-        </label>
+      <label style="margin-top:10px;">
+        Lösenord
+        <input id="password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" />
+      </label>
 
-        <div class="row-actions" style="margin-top:10px;">
-          <button id="btnLogin" type="button">Logga in</button>
-          <button id="btnClear" type="button" class="secondary">Rensa</button>
-        </div>
+      <div class="row-actions" style="margin-top:12px;">
+        <button id="btnLogin" type="submit">Logga in</button>
+        <button id="btnClear" class="secondary" type="button">Rensa</button>
+      </div>
 
-        <p id="msg" class="message" aria-live="polite"></p>
+      <p id="msg" class="message" aria-live="polite"></p>
+      <p id="cooldownMsg" class="muted small" style="margin-top:8px; display:none;"></p>
 
-        <div id="cooldownBox" class="cooldown" role="status" aria-live="polite">
-          För många försök. Vänta <strong id="cooldownLeft">30</strong> sekunder och försök igen.
-        </div>
-
-        <p class="muted-small" style="margin-top:10px;">
-          Ingen “glömt lösen” i v1. Kontakta admin.
-        </p>
-      </section>
-
-      <section class="panel">
-        <div class="panel-title">Snabbtest (v1)</div>
-        <ul class="list">
-          <li><span>Employee</span><span class="pill mono">empNo=1234 / pass=employee</span></li>
-          <li><span>Admin</span><span class="pill mono">empNo=admin / pass=admin</span></li>
-        </ul>
-
-        <p class="muted-small">
-          Du kan även testa via URL:
-          <span class="mono">?name=Anders&empNo=1234&password=employee</span>
-        </p>
-      </section>
-    </div>
+      <p class="muted small" style="margin-top:12px;">
+        v1: Ingen “glömt lösen”. Kontakta admin vid problem.
+      </p>
+    </form>
   </section>
 </main>
 
 <script>
 /* ============================================================
 AO-001 | FIL-ID: UI/UI-01-SKELETON.html (inline JS)
-Syfte:
-- Auth (demo) + role routing
-- Generic error
-- Cooldown after X failed attempts
-- URL param support
-- pinRequired=false hook (TODO)
 ============================================================ */
-(function () {
+(function(){
   "use strict";
 
-  // ---- Config (v1) ----
-  const SESSION_KEY = "AO-001_LOGIN_V1";
+  // ---- Storage keys (låsta) ----
+  const SESSION_KEY   = "AO-001_LOGIN_V1";
+  const COOLDOWN_KEY  = "AO-001_COOLDOWN_V1";
 
+  // ---- Rate-limit / cooldown (light) ----
   const MAX_FAILS = 5;
-  const COOLDOWN_SECONDS = 30;
+  const COOLDOWN_MS = 30 * 1000;
 
-  // Demo-credentials (v1)
-  // NOTE: Generiskt felmeddelande vid fel (ingen info om konto finns)
-  const DEMO = {
-    employee: { empNo: "1234", password: "employee" },
-    admin: { empNo: "admin", password: "admin" }
-  };
-
-  // PIN hook (no implementation)
-  // TODO (AO-001): pinRequired=false i routing-regel, implementera inte PIN i v1.
-  const pinRequired = false;
-
-  // ---- DOM ----
-  const inpName = document.getElementById("inpName");
-  const inpEmpNo = document.getElementById("inpEmpNo");
-  const inpPass = document.getElementById("inpPass");
-  const btnLogin = document.getElementById("btnLogin");
-  const btnClear = document.getElementById("btnClear");
-  const msg = document.getElementById("msg");
-
-  const cooldownBox = document.getElementById("cooldownBox");
-  const cooldownLeft = document.getElementById("cooldownLeft");
-
-  // ---- State (UI-only) ----
-  let failCount = 0;
-  let cooldownUntil = 0;
-  let cooldownTimer = null;
+  const $ = (s) => document.querySelector(s);
 
   function setMsg(kind, text){
-    msg.className = "message" + (kind ? " " + kind : "");
-    msg.textContent = text || "";
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
   }
 
-  function now(){ return Date.now(); }
+  function setCooldownUI(untilTs){
+    const el = $("#cooldownMsg");
+    if(!untilTs || untilTs <= Date.now()){
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    const left = Math.max(0, untilTs - Date.now());
+    const sec = Math.ceil(left / 1000);
+    el.style.display = "block";
+    el.textContent = `För många försök. Vänta ${sec} sek.`;
+  }
 
-  function parseParams(){
+  function readCooldown(){
     try{
-      const u = new URL(window.location.href);
-      const name = u.searchParams.get("name") || "";
-      const empNo = u.searchParams.get("empNo") || "";
-      const password = u.searchParams.get("password") || "";
-      return { name, empNo, password };
+      const raw = localStorage.getItem(COOLDOWN_KEY);
+      if(!raw) return { fails: 0, until: 0 };
+      const v = JSON.parse(raw);
+      return {
+        fails: Number(v?.fails || 0),
+        until: Number(v?.until || 0)
+      };
     }catch{
-      return { name:"", empNo:"", password:"" };
+      return { fails: 0, until: 0 };
     }
   }
 
-  function setInputsFromParams(){
-    const p = parseParams();
-    if (p.name) inpName.value = p.name;
-    if (p.empNo) inpEmpNo.value = p.empNo;
-    if (p.password) inpPass.value = p.password;
+  function writeCooldown(obj){
+    localStorage.setItem(COOLDOWN_KEY, JSON.stringify(obj));
   }
 
-  function roleFromCreds(empNo, password){
-    if (empNo === DEMO.admin.empNo && password === DEMO.admin.password) return "admin";
-    if (empNo === DEMO.employee.empNo && password === DEMO.employee.password) return "employee";
+  function resetCooldown(){
+    writeCooldown({ fails: 0, until: 0 });
+    setCooldownUI(0);
+  }
+
+  // ---- Auth demo (v1 utan backend) ----
+  // OBS: Dessa credentials är demo. Byt när du vill, men håll rollerna låsta (admin/employee).
+  function checkCredentials(name, empNo, password){
+    const n = String(name||"").trim().toLowerCase();
+    const e = String(empNo||"").trim();
+    const p = String(password||"").trim();
+
+    // Admin: lösenord "admin" (enkelt demo)
+    if(p === "admin"){
+      return { role: "admin", displayName: name || "Admin", empNo: e || "—" };
+    }
+
+    // Employee: lösenord "employee" (enkelt demo)
+    if(p === "employee"){
+      return { role: "employee", displayName: name || "Medarbetare", empNo: e || "—" };
+    }
+
     return null;
   }
 
-  function targetUrlForRole(role){
-    // IMPORTANT: relative from /UI/
-    if (role === "admin") return "../admin/home.html";
-    if (role === "employee") return "../employee/home.html";
-    return "../UI/UI-01-SKELETON.html";
+  function routeByRole(role){
+    // PIN hook (inte implementerat)
+    const pinRequired = false;
+    // TODO (AO-001): Om pinRequired==true, routa till pin-vy (inte i v1)
+
+    if(role === "admin") return "../admin/home.html";
+    return "../employee/home.html";
   }
 
+  // ---- Session write: primär + fallback ----
   function writeSession(auth){
     const payload = {
       auth: {
         isAuthed: true,
         role: auth.role,
-        empNo: auth.empNo || "",
         displayName: auth.displayName || "",
-        createdAt: now(),
-        expiresAt: now() + (2 * 60 * 60 * 1000), // 2h demo-session
-        pinRequired: false // hook value
+        empNo: auth.empNo || "",
+        issuedAt: Date.now(),
+        expiresAt: Date.now() + (8 * 60 * 60 * 1000) // 8h
       }
     };
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(payload));
+
+    const raw = JSON.stringify(payload);
+
+    // Primär
+    sessionStorage.setItem(SESSION_KEY, raw);
+
+    // Fallback: vissa sidor/buggar kan råka läsa localStorage
+    localStorage.setItem(SESSION_KEY, raw);
   }
 
-  function isInCooldown(){
-    return cooldownUntil && now() < cooldownUntil;
+  function applyUrlParams(){
+    // Stöd för URL-parametrar (enkel)
+    const u = new URL(window.location.href);
+    const name = u.searchParams.get("name");
+    const empNo = u.searchParams.get("empNo");
+    const password = u.searchParams.get("password");
+
+    if(name !== null) $("#name").value = name;
+    if(empNo !== null) $("#empNo").value = empNo;
+    if(password !== null) $("#password").value = password;
   }
 
-  function startCooldown(){
-    cooldownUntil = now() + (COOLDOWN_SECONDS * 1000);
-    renderCooldown();
-    if (cooldownTimer) window.clearInterval(cooldownTimer);
-    cooldownTimer = window.setInterval(renderCooldown, 250);
-  }
+  // ---- init ----
+  applyUrlParams();
 
-  function renderCooldown(){
-    const leftMs = Math.max(0, cooldownUntil - now());
-    const left = Math.ceil(leftMs / 1000);
-    if (left > 0){
-      cooldownBox.classList.add("show");
-      cooldownLeft.textContent = String(left);
-      btnLogin.disabled = true;
-    }else{
-      cooldownBox.classList.remove("show");
-      btnLogin.disabled = false;
-      cooldownUntil = 0;
-      if (cooldownTimer) window.clearInterval(cooldownTimer);
-      cooldownTimer = null;
-      failCount = 0; // reset after cooldown
-    }
-  }
+  // cooldown ticker
+  setInterval(() => {
+    const cd = readCooldown();
+    setCooldownUI(cd.until);
+  }, 300);
 
-  function genericFail(){
-    setMsg("err", "Ogiltig inloggning.");
-  }
+  $("#btnClear").addEventListener("click", () => {
+    $("#name").value = "";
+    $("#empNo").value = "";
+    $("#password").value = "";
+    setMsg("", "");
+  });
 
-  function attemptLogin(){
+  $("#loginForm").addEventListener("submit", (e) => {
+    e.preventDefault();
     setMsg("", "");
 
-    if (isInCooldown()){
-      renderCooldown();
+    const cd = readCooldown();
+    if(cd.until && cd.until > Date.now()){
+      setMsg("err", "För många försök. Vänta en stund och försök igen.");
+      setCooldownUI(cd.until);
       return;
     }
 
-    const displayName = String(inpName.value || "").trim();
-    const empNo = String(inpEmpNo.value || "").trim();
-    const password = String(inpPass.value || "").trim();
+    const name = $("#name").value;
+    const empNo = $("#empNo").value;
+    const password = $("#password").value;
 
-    // empty -> generic
-    if (!empNo || !password){
-      failCount++;
-      genericFail();
-      if (failCount >= MAX_FAILS) startCooldown();
+    const auth = checkCredentials(name, empNo, password);
+    if(!auth){
+      // generiskt fel (läcker inte)
+      const nextFails = (cd.fails || 0) + 1;
+      if(nextFails >= MAX_FAILS){
+        const until = Date.now() + COOLDOWN_MS;
+        writeCooldown({ fails: nextFails, until });
+        setMsg("err", "Fel inloggning. För många försök.");
+        setCooldownUI(until);
+      }else{
+        writeCooldown({ fails: nextFails, until: 0 });
+        setMsg("err", "Fel inloggning.");
+      }
       return;
-    }
-
-    const role = roleFromCreds(empNo, password);
-    if (!role){
-      failCount++;
-      genericFail();
-      if (failCount >= MAX_FAILS) startCooldown();
-      return;
-    }
-
-    // Pin hook exists but not used
-    if (pinRequired === true){
-      // Not implemented by policy
-      // TODO (AO-001): if pinRequired ever true, route to PIN step (future)
     }
 
     // success
-    writeSession({ role, empNo, displayName });
-
-    const target = targetUrlForRole(role);
+    resetCooldown();
+    writeSession(auth);
+    const target = routeByRole(auth.role);
     window.location.replace(target);
-  }
-
-  function clearForm(){
-    inpName.value = "";
-    inpEmpNo.value = "";
-    inpPass.value = "";
-    setMsg("", "");
-  }
-
-  // Init
-  setInputsFromParams();
-
-  btnLogin.addEventListener("click", attemptLogin);
-  btnClear.addEventListener("click", clearForm);
-
-  // Enter submits
-  [inpName, inpEmpNo, inpPass].forEach(el => {
-    el.addEventListener("keydown", (e) => {
-      if (e.key === "Enter"){
-        e.preventDefault();
-        attemptLogin();
-      }
-    });
   });
 
 })();
