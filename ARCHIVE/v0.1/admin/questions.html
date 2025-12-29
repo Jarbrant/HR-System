@@ -1,1 +1,605 @@
 
+<!-- ============================================================
+AO-045 | FIL-ID: admin/questions.html
+Projekt: HR-System
+Syfte: Admin – Frågor (skapa/tilldela) – UI-only v1 (nivå 3)
+Krav:
+- Admin kan skapa fler frågor åt gången (batch)
+- Admin kan välja mottagare: en employee, alla, eller grupp
+- Admin kan skapa/hantera grupper (enkel v1)
+- Admin styr om frågan får besvaras anonymt (allowAnonymousAnswer)
+- Svar ska INTE visas här (se admin/answers.html)
+Policy:
+- Ingen backend
+- Ingen känslig data lagras
+- Robust guard: sessionStorage först, fallback localStorage
+Lagring:
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-015_QA_V1 (localStorage) – frågor/svar
+- AO-017_GROUPS_V1 (localStorage) – grupper (demo/v1)
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Frågor</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .layout{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .layout{ grid-template-columns: 1fr; }
+    }
+
+    .panel{
+      border: 1px solid var(--line);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .panel:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+    .panel.create{ background: rgba(254,202,202,.18); }
+    .panel.groups{ background: rgba(167,243,208,.18); }
+    .panel.list{ background: rgba(191,219,254,.18); }
+
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+    .row2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 620px){
+      .row2{ grid-template-columns: 1fr; }
+    }
+
+    .item{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background:#fff;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+    }
+    .item:hover{
+      transform: var(--lift);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.02);
+    }
+    .item-title{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+    }
+
+    .chips{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+    .chip{
+      border:1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 10px;
+      background:#fff;
+      font-size:.9rem;
+      display:flex;
+      gap:8px;
+      align-items:center;
+    }
+    .chip button{
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background:#fff;
+      cursor:pointer;
+    }
+    .chip button:hover{ transform: translateY(-1px); box-shadow: var(--shadow-soft); }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin • Frågor</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Uppgifter</a>
+    <a href="./questions.html" aria-current="page">Frågor</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Frågor (Admin)</h1>
+  <p class="muted">Skapa och tilldela frågor. Svar visas på sidan <a class="link" href="./answers.html">Svar</a>.</p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+      </div>
+      <div class="row wrap">
+        <a class="btn secondary" href="./answers.html">Öppna svar</a>
+      </div>
+    </div>
+
+    <div class="layout">
+
+      <!-- SKAPA -->
+      <section class="panel create" aria-label="Skapa frågor">
+        <div class="panel-title">Skapa frågor (batch)</div>
+
+        <div class="row2">
+          <label>
+            Mottagare
+            <select id="targetMode">
+              <option value="one">En medarbetare</option>
+              <option value="all">Alla medarbetare</option>
+              <option value="group">Grupp</option>
+            </select>
+          </label>
+
+          <label id="oneWrap">
+            Anst.nr (employee)
+            <input id="targetEmpNo" type="text" placeholder="t.ex. 1234" />
+          </label>
+
+          <label id="groupWrap" style="display:none;">
+            Grupp
+            <select id="targetGroup"></select>
+          </label>
+
+          <label>
+            Anonymt svar?
+            <select id="allowAnon">
+              <option value="no">Nej</option>
+              <option value="yes">Ja</option>
+            </select>
+          </label>
+        </div>
+
+        <label style="margin-top:10px;">
+          Titel (valfri)
+          <input id="title" type="text" placeholder="t.ex. Check-in vecka 1" />
+        </label>
+
+        <label style="margin-top:10px;">
+          Frågor (en per rad)
+          <textarea id="questions" placeholder="Skriv en fråga per rad..."></textarea>
+        </label>
+
+        <div class="row-actions" style="margin-top:10px;">
+          <button id="btnCreate" type="button">Skapa & tilldela</button>
+          <button id="btnClear" class="secondary" type="button">Rensa</button>
+        </div>
+
+        <p id="msg" class="message" aria-live="polite"></p>
+
+        <div class="smallnote">
+          Tips: skriv flera frågor, en per rad. Systemet skapar en post per fråga.
+        </div>
+      </section>
+
+      <!-- GRUPPER -->
+      <section class="panel groups" aria-label="Grupper">
+        <div class="panel-title">Grupper (v1)</div>
+
+        <label>
+          Skapa ny grupp
+          <input id="newGroupName" type="text" placeholder="t.ex. Kök, Servering, Butik A" />
+        </label>
+
+        <label style="margin-top:10px;">
+          Medlemmar (anst.nr, komma-separerat)
+          <input id="newGroupMembers" type="text" placeholder="1234, 5555, 7777" />
+        </label>
+
+        <div class="row-actions" style="margin-top:10px;">
+          <button id="btnAddGroup" type="button">Skapa grupp</button>
+        </div>
+
+        <div class="smallnote">Grupper sparas lokalt (v1). Senare kan detta kopplas till riktiga användare.</div>
+
+        <div style="margin-top:12px;">
+          <div class="muted small" style="font-weight:900;">Befintliga grupper</div>
+          <div id="groups" class="chips"></div>
+        </div>
+      </section>
+
+      <!-- LISTA -->
+      <section class="panel list" aria-label="Senaste frågor" style="grid-column:1 / -1;">
+        <div class="panel-title">Senaste frågor (översikt)</div>
+        <div class="row2" style="margin-bottom:10px;">
+          <label>
+            Visa
+            <select id="listFilter">
+              <option value="last50">Senaste 50</option>
+              <option value="open">Väntar på svar</option>
+              <option value="answered">Besvarade</option>
+              <option value="anon">Anonyma (tillåtna)</option>
+            </select>
+          </label>
+
+          <label>
+            Sök (titel/fråga/anst.nr)
+            <input id="search" type="text" placeholder="t.ex. hygien eller 1234" />
+          </label>
+        </div>
+
+        <div id="list"></div>
+
+        <div class="smallnote">
+          Svar hanteras på <a class="link" href="./answers.html">Svar</a> (separat sida).
+        </div>
+      </section>
+
+    </div>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+AO-045 | FIL-ID: admin/questions.html (inline JS)
+============================================================ */
+(function(){
+  "use strict";
+
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const QA_KEY      = "AO-015_QA_V1";
+  const GROUPS_KEY  = "AO-017_GROUPS_V1";
+
+  const $ = (s) => document.querySelector(s);
+
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
+  function readAuth(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+      if(data.auth.role !== "admin") return null;
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+      return data.auth;
+    }catch{
+      return null;
+    }
+  }
+
+  function safeParse(key, fallback){
+    try{
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function genId(prefix){
+    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function isAnswered(q){
+    const hasA = !!(q.answer && String(q.answer).trim().length);
+    return q.status === "answered" || hasA;
+  }
+
+  // --- Guard ---
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+  $("#whoName").textContent = auth.displayName || "Admin";
+
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  // --- Groups ---
+  function normalizeGroup(g){
+    const obj = Object.assign({}, g);
+    obj.id = obj.id || genId("g");
+    obj.name = String(obj.name || "").trim() || "Grupp";
+    const members = Array.isArray(obj.members) ? obj.members : [];
+    obj.members = members.map(x => String(x).trim()).filter(Boolean);
+    return obj;
+  }
+
+  function loadGroups(){
+    const arr = safeParse(GROUPS_KEY, []);
+    const groups = Array.isArray(arr) ? arr.map(normalizeGroup) : [];
+    save(GROUPS_KEY, groups);
+    return groups;
+  }
+
+  function renderGroups(){
+    const wrap = $("#groups");
+    wrap.innerHTML = "";
+
+    const groups = loadGroups();
+    const sel = $("#targetGroup");
+    sel.innerHTML = "";
+
+    if(!groups.length){
+      wrap.innerHTML = `<div class="empty" style="width:100%;">Inga grupper ännu.</div>`;
+      sel.innerHTML = `<option value="">(Skapa en grupp först)</option>`;
+      return;
+    }
+
+    groups.forEach(g => {
+      const opt = document.createElement("option");
+      opt.value = g.id;
+      opt.textContent = `${g.name} (${g.members.length})`;
+      sel.appendChild(opt);
+
+      const chip = document.createElement("div");
+      chip.className = "chip";
+      chip.innerHTML = `
+        <span><strong>${escapeHtml(g.name)}</strong> <span class="muted">(${g.members.length})</span></span>
+        <button type="button" data-del="${escapeHtml(g.id)}">Ta bort</button>
+      `;
+      wrap.appendChild(chip);
+    });
+
+    wrap.querySelectorAll("button[data-del]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-del");
+        const next = loadGroups().filter(x => x.id !== id);
+        save(GROUPS_KEY, next);
+        renderGroups();
+      });
+    });
+  }
+
+  $("#btnAddGroup").addEventListener("click", () => {
+    const name = String($("#newGroupName").value || "").trim();
+    const membersRaw = String($("#newGroupMembers").value || "").trim();
+    if(!name){
+      alert("Skriv ett gruppnamn.");
+      return;
+    }
+    const members = membersRaw
+      ? membersRaw.split(",").map(x => String(x).trim()).filter(Boolean)
+      : [];
+
+    const groups = loadGroups();
+    groups.push({ id: genId("g"), name, members });
+    save(GROUPS_KEY, groups);
+
+    $("#newGroupName").value = "";
+    $("#newGroupMembers").value = "";
+    renderGroups();
+  });
+
+  // --- Target mode UI ---
+  function syncTargetUI(){
+    const mode = $("#targetMode").value;
+    $("#oneWrap").style.display = (mode === "one") ? "block" : "none";
+    $("#groupWrap").style.display = (mode === "group") ? "block" : "none";
+  }
+  $("#targetMode").addEventListener("change", syncTargetUI);
+
+  // --- Create questions ---
+  function loadQA(){
+    const arr = safeParse(QA_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function pushQuestions(targetEmpNos, title, qLines, allowAnon){
+    const now = Date.now();
+    const all = loadQA();
+
+    let count = 0;
+    targetEmpNos.forEach(empNo => {
+      qLines.forEach(qText => {
+        all.push({
+          id: genId("q"),
+          empNo: String(empNo).trim(),
+          title: title || "Fråga",
+          question: qText,
+          allowAnonymousAnswer: allowAnon === true,
+          // svarfält init
+          status: "open",
+          answer: "",
+          answerAnonymous: false,
+          createdAt: now,
+          updatedAt: now
+        });
+        count++;
+      });
+    });
+
+    save(QA_KEY, all);
+    return count;
+  }
+
+  $("#btnCreate").addEventListener("click", () => {
+    setMsg("", "");
+
+    const mode = $("#targetMode").value;
+    const title = String($("#title").value || "").trim();
+
+    const allowAnon = ($("#allowAnon").value === "yes");
+
+    const rawLines = String($("#questions").value || "")
+      .split("\n")
+      .map(x => String(x).trim())
+      .filter(Boolean);
+
+    if(rawLines.length === 0){
+      setMsg("err", "Skriv minst en fråga (en per rad).");
+      return;
+    }
+
+    let targets = [];
+
+    if(mode === "one"){
+      const empNo = String($("#targetEmpNo").value || "").trim();
+      if(!empNo){
+        setMsg("err", "Skriv anst.nr för mottagaren.");
+        return;
+      }
+      targets = [empNo];
+    }
+
+    if(mode === "all"){
+      // UI-only v1: vi kan inte veta alla riktiga users → kräver att admin anger en lista via grupper eller manuellt.
+      // Men för att admin ska kunna använda “Alla” ändå: vi använder ALLA empNo som redan förekommer i QA eller Tasks.
+      const allQA = loadQA();
+      const set = new Set(allQA.map(q => String(q.empNo||"").trim()).filter(Boolean));
+      const groups = loadGroups();
+      groups.forEach(g => g.members.forEach(m => set.add(String(m).trim())));
+      targets = Array.from(set);
+      if(targets.length === 0){
+        setMsg("err", "‘Alla’ kräver att minst en medarbetare finns i grupper eller redan har fått en fråga tidigare.");
+        return;
+      }
+    }
+
+    if(mode === "group"){
+      const gid = $("#targetGroup").value;
+      const groups = loadGroups();
+      const g = groups.find(x => x.id === gid);
+      if(!g){
+        setMsg("err", "Välj en grupp.");
+        return;
+      }
+      targets = g.members.slice();
+      if(targets.length === 0){
+        setMsg("err", "Gruppen har inga medlemmar (anst.nr).");
+        return;
+      }
+    }
+
+    const created = pushQuestions(targets, title, rawLines, allowAnon);
+    setMsg("ok", `Skapat ${created} fråga(or).`);
+
+    renderList();
+  });
+
+  $("#btnClear").addEventListener("click", () => {
+    $("#title").value = "";
+    $("#questions").value = "";
+    setMsg("", "");
+  });
+
+  // --- List ---
+  function renderList(){
+    const list = $("#list");
+    list.innerHTML = "";
+
+    const filter = $("#listFilter").value;
+    const q = String($("#search").value || "").trim().toLowerCase();
+
+    const all = loadQA().slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+
+    let shown = all;
+
+    if(filter === "open") shown = shown.filter(x => !isAnswered(x));
+    if(filter === "answered") shown = shown.filter(x => isAnswered(x));
+    if(filter === "anon") shown = shown.filter(x => x.allowAnonymousAnswer === true);
+
+    if(q){
+      shown = shown.filter(x => {
+        const blob = `${x.empNo||""} ${x.title||""} ${x.question||""}`.toLowerCase();
+        return blob.includes(q);
+      });
+    }
+
+    shown = shown.slice(0, 50);
+
+    if(shown.length === 0){
+      list.innerHTML = `<div class="empty">Inga frågor för vald filter/sök.</div>`;
+      return;
+    }
+
+    shown.forEach(x => {
+      const el = document.createElement("div");
+      el.className = "item";
+      el.innerHTML = `
+        <div style="min-width:260px;">
+          <p class="item-title">${escapeHtml(x.title || "Fråga")}</p>
+          <div class="meta">
+            <span><strong>Anst.nr:</strong> ${escapeHtml(x.empNo || "—")}</span>
+            <span class="pill">${escapeHtml(isAnswered(x) ? "Besvarad" : "Svar krävs")}</span>
+            <span class="pill">Anonymt tillåtet: ${x.allowAnonymousAnswer === true ? "Ja" : "Nej"}</span>
+          </div>
+          <div class="meta"><span><strong>Fråga:</strong> ${escapeHtml(x.question || "—")}</span></div>
+        </div>
+        <div class="row" style="gap:8px;">
+          <a class="btn secondary" href="./answers.html">Se svar</a>
+          <button type="button" class="secondary" data-del="${escapeHtml(x.id)}">Ta bort</button>
+        </div>
+      `;
+      list.appendChild(el);
+    });
+
+    list.querySelectorAll("button[data-del]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-del");
+        if(!confirm("Ta bort frågan?")) return;
+        const next = loadQA().filter(x => x.id !== id);
+        save(QA_KEY, next);
+        renderList();
+      });
+    });
+  }
+
+  $("#listFilter").addEventListener("change", renderList);
+  $("#search").addEventListener("input", renderList);
+
+  // init
+  renderGroups();
+  syncTargetUI();
+  renderList();
+
+})();
+</script>
+
+</body>
+</html>
+
