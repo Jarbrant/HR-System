@@ -1,1 +1,1169 @@
+<!-- ============================================================
+AO-021 | FIL-ID: admin/access.html
+Projekt: HR-System
+Syfte: Admin – Access Matrix (Roller × Org × Tilldelningar) – UI-only v1 (nivå 3)
+Mål:
+- Se “vem får se vad” (rollens effektiva moduler + scope/subtree)
+- Tilldela roll + scope till anställd (empNo) (UI-only)
+- Riskpanel: saknade roller/scope, korrupt data, loop-varning, dublett-ID
+Policy:
+- Ingen backend
+- Ingen känslig persondata lagras
+- Robust guard: sessionStorage först, fallback localStorage (fail-closed)
+Lagring:
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-019_ROLES_V1 (localStorage) – roller (role-builder)
+- AO-020_ORG_V1 (localStorage) – org-träd (org-builder)
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – role assignments { [empNo]: { roleId, scopeId, updatedAt } }
+Kontrakt:
+- Subtree-scope: scope gäller för vald nod + alla dess barn
+- Access ska INTE skapa egna “alternativa” roller med andra modulnycklar
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Access</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .layout{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .layout{ grid-template-columns: 1fr; }
+    }
+
+    .panel{
+      border: 1px solid var(--line);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .panel:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+    .panel.assign{ background: rgba(191,219,254,.18); }
+    .panel.overview{ background: rgba(167,243,208,.18); }
+
+    .row2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 620px){
+      .row2{ grid-template-columns: 1fr; }
+    }
+
+    .summarybar{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.7);
+      margin-bottom: 10px;
+    }
+    .kpi{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.95rem;
+    }
+
+    .item{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background:#fff;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+    .item:hover{
+      transform: var(--lift);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.02);
+    }
+    .item-title{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+      margin-top:10px;
+    }
+
+    .chips{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+    .chip{
+      display:inline-flex;
+      gap:6px;
+      align-items:center;
+      border:1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 10px;
+      background:#fff;
+      font-size:.92rem;
+    }
+    code{ font-size:.95em; }
+
+    .subcard{
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.7);
+    }
+    .subcard .title{
+      font-weight: 850;
+      margin: 0 0 8px;
+    }
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+
+    .warnbox{
+      margin-top:10px;
+      padding:10px;
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(254,243,199,.45);
+    }
+    .warnbox .title{ font-weight:850; margin:0 0 6px; }
+    .warnlist{ margin:0; padding-left:18px; color: var(--muted); }
+    .warnlist li{ margin:4px 0; }
+
+    .previewWarn{
+      margin-top:10px;
+      padding:10px;
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(254,243,199,.35);
+      color: var(--muted);
+      display:none;
+    }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin • Access</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Uppgifter</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="./roles.html">Roller</a>
+    <a href="./org.html">Org</a>
+    <a href="./access.html" aria-current="page">Access</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Access Matrix</h1>
+  <p class="muted">Tilldela roll + scope (org). Förhandsvisa effektiva moduler och vilka noder scope täcker. UI-only v1.</p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+      </div>
+      <div class="row wrap">
+        <a class="btn secondary" href="./roles.html">Öppna roller</a>
+        <a class="btn secondary" href="./org.html">Öppna org</a>
+      </div>
+    </div>
+
+    <div class="layout">
+
+      <!-- TILLDELNING -->
+      <section class="panel assign" aria-label="Tilldela access">
+        <div class="panel-title">Tilldela (roll + scope)</div>
+
+        <div class="row2">
+          <label>
+            Anst.nr
+            <input id="empNo" type="text" inputmode="numeric" placeholder="t.ex. 1234" />
+          </label>
+          <label>
+            Roll
+            <select id="roleSelect"></select>
+          </label>
+        </div>
+
+        <label style="margin-top:10px;">
+          Scope (org-nod)
+          <select id="scopeSelect"></select>
+        </label>
+
+        <div class="subcard" aria-label="Preview">
+          <p class="title">Preview</p>
+          <div class="meta">
+            <span class="pill" id="pvRole">Roll: —</span>
+            <span class="pill" id="pvScope">Scope: —</span>
+            <span class="pill" id="pvCovers">Täcker: —</span>
+          </div>
+
+          <div style="margin-top:8px;">
+            <div class="muted" style="font-size:.95rem; margin-bottom:6px;">Effektiva moduler:</div>
+            <div id="pvModules" class="chips"></div>
+          </div>
+
+          <div style="margin-top:10px;">
+            <div class="muted" style="font-size:.95rem; margin-bottom:6px;">Scope-subtree (förhandsvisning):</div>
+            <div id="pvNodes" class="muted" style="font-size:.95rem;">—</div>
+          </div>
+
+          <div id="pvWarn" class="previewWarn" aria-live="polite"></div>
+        </div>
+
+        <div class="row-actions" style="margin-top:10px;">
+          <button id="btnAssign" type="button">Spara tilldelning</button>
+          <button id="btnClear" type="button" class="secondary">Rensa</button>
+        </div>
+
+        <p id="msg" class="message" aria-live="polite"></p>
+
+        <div class="smallnote">
+          Lagring: <code>AO-020_ROLE_ASSIGNMENTS_V2</code>. Scope gäller nod + alla barn (subtree).
+        </div>
+      </section>
+
+      <!-- ÖVERSIKT -->
+      <section class="panel overview" aria-label="Översikt">
+        <div class="panel-title">Översikt</div>
+
+        <div class="summarybar" aria-label="Sammanfattning">
+          <div class="kpi">Roller: <strong id="kpiRoles">0</strong></div>
+          <div class="kpi">Org-noder: <strong id="kpiNodes">0</strong></div>
+          <div class="kpi">Tilldelningar: <strong id="kpiAsg">0</strong></div>
+          <div class="kpi">Risker: <strong id="kpiRisks">0</strong></div>
+        </div>
+
+        <div class="row2" style="margin-bottom:10px;">
+          <label>
+            Visa
+            <select id="filter">
+              <option value="assignments" selected>Tilldelningar</option>
+              <option value="roles">Roller (effektiv)</option>
+              <option value="risks">Riskpanel</option>
+            </select>
+          </label>
+
+          <label>
+            Sök (empNo/roll/scope)
+            <input id="search" type="text" placeholder="t.ex. 1234 eller admin eller kök" />
+          </label>
+        </div>
+
+        <div id="view"></div>
+      </section>
+
+    </div>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+AO-021 | FIL-ID: admin/access.html (inline JS)
+============================================================ */
+(function(){
+  "use strict";
+
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const ROLES_KEY   = "AO-019_ROLES_V1";
+  const ORG_KEY     = "AO-020_ORG_V1";
+  const ASG_KEY     = "AO-020_ROLE_ASSIGNMENTS_V2";
+
+  // Harmonisering mot org-builder: stöd flera möjliga root-id
+  const ROOT_ID_PRIMARY = "org_root_v1";
+  const ROOT_ID_FALLBACK = "org_root";
+
+  const $  = (s) => document.querySelector(s);
+
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
+  function readAuth(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+      if(data.auth.role !== "admin") return null;
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+      return data.auth;
+    }catch{
+      return null;
+    }
+  }
+
+  function safeParse(key, fallback){
+    try{
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{
+      return fallback;
+    }
+  }
+  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function setActionMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function setPreviewWarn(text){
+    const el = $("#pvWarn");
+    if(!text){
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.style.display = "block";
+    el.textContent = text;
+  }
+
+  function normalizeEmpNo(v){
+    const s = String(v || "").trim();
+    return s.replace(/[^\d]/g, "");
+  }
+  function validateEmpNo(v){
+    const emp = normalizeEmpNo(v);
+    if(!emp) return { ok:false, empNo:"" };
+    if(emp.length > 10) return { ok:false, empNo: emp };
+    return { ok:true, empNo: emp };
+  }
+
+  // --- Guard ---
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+  $("#whoName").textContent = auth.displayName || "Admin";
+
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  // --- Seed (endast minimal, utan att splittra sanningen) ---
+  function seedOrgIfEmpty(){
+    const raw = safeParse(ORG_KEY, null);
+    if(Array.isArray(raw) && raw.length) return;
+    const now = Date.now();
+    const root = { id: ROOT_ID_PRIMARY, name: "Root (Koncern)", type: "root", parentId: null, createdAt: now, updatedAt: now };
+    save(ORG_KEY, [root]);
+  }
+  function seedAssignmentsIfEmpty(){
+    const raw = safeParse(ASG_KEY, null);
+    if(raw && typeof raw === "object" && !Array.isArray(raw)) return;
+    save(ASG_KEY, {});
+  }
+
+  // Access ska inte skapa egna roller här. Roller ska skapas i admin/roles.html
+  seedOrgIfEmpty();
+  seedAssignmentsIfEmpty();
+
+  // --- Data loaders + meta ---
+  function loadRoles(){
+    const arr = safeParse(ROLES_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function loadOrgEx(){
+    const raw = safeParse(ORG_KEY, []);
+    const arr = Array.isArray(raw) ? raw : [];
+    const idCounts = new Map();
+    arr.forEach(n => {
+      const id = n && typeof n === "object" && n.id ? String(n.id) : "";
+      if(!id) return;
+      idCounts.set(id, (idCounts.get(id) || 0) + 1);
+    });
+    const duplicates = Array.from(idCounts.entries()).filter(([,c]) => c > 1).map(([id]) => id);
+
+    // ById dedupe (sista vinner), men vi varnar via duplicates
+    const byId = new Map();
+    arr.forEach(n => {
+      if(n && typeof n === "object" && n.id) byId.set(String(n.id), n);
+    });
+
+    // Root-detektion
+    const ids = Array.from(byId.keys());
+    const hasPrimary = byId.has(ROOT_ID_PRIMARY);
+    const hasFallback = byId.has(ROOT_ID_FALLBACK);
+
+    // Hitta “faktisk root”
+    let bestRootId = null;
+    if(hasPrimary) bestRootId = ROOT_ID_PRIMARY;
+    else if(hasFallback) bestRootId = ROOT_ID_FALLBACK;
+    else{
+      // försök hitta node med parentId null
+      const anyRoot = ids.find(id => {
+        const n = byId.get(id);
+        return n && (n.parentId === null || n.parentId === undefined || String(n.parentId).trim() === "");
+      });
+      bestRootId = anyRoot || (ids[0] || ROOT_ID_PRIMARY);
+    }
+
+    // parent-fix: okända parents -> bestRootId (utom root)
+    const out = Array.from(byId.values()).map(n => {
+      const id = String(n.id);
+      let parentId = (n.parentId === null || n.parentId === undefined) ? null : String(n.parentId);
+      if(id === bestRootId){
+        parentId = null;
+      }else{
+        if(!parentId) parentId = bestRootId;
+        if(parentId && !byId.has(parentId)) parentId = bestRootId;
+      }
+      return { ...n, id, parentId };
+    });
+
+    return { nodes: out, meta: { duplicates, bestRootId, hasPrimary, hasFallback } };
+  }
+
+  function loadAssignments(){
+    const raw = safeParse(ASG_KEY, {});
+    return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
+  }
+  function saveAssignments(map){
+    save(ASG_KEY, (map && typeof map === "object" && !Array.isArray(map)) ? map : {});
+  }
+
+  // --- Org helpers (tree + labels + loop detect) ---
+  function buildOrgIndex(nodes){
+    const byId = new Map(nodes.map(n => [String(n.id), n]));
+    const children = new Map();
+    nodes.forEach(n => {
+      const pid = (n.parentId === null) ? null : String(n.parentId);
+      if(pid){
+        if(!children.has(pid)) children.set(pid, []);
+        children.get(pid).push(String(n.id));
+      }
+    });
+    // stable sort by name
+    children.forEach((arr, pid) => {
+      arr.sort((a,b) => String(byId.get(a)?.name||"").localeCompare(String(byId.get(b)?.name||""), "sv"));
+      children.set(pid, arr);
+    });
+    return { byId, children };
+  }
+
+  function buildPathLabelCache(nodes){
+    const { byId } = buildOrgIndex(nodes);
+    const cache = new Map();
+
+    function labelFor(id){
+      const key = String(id || "");
+      if(cache.has(key)) return cache.get(key);
+      const parts = [];
+      const seen = new Set();
+      let cur = key;
+
+      while(cur && byId.has(cur) && !seen.has(cur)){
+        seen.add(cur);
+        const n = byId.get(cur);
+        parts.push(String(n.name || cur));
+        cur = (n.parentId === null) ? "" : String(n.parentId || "");
+      }
+      const lab = parts.reverse().join(" → ") || "—";
+      cache.set(key, lab);
+      return lab;
+    }
+
+    // prefill for stability
+    Array.from(byId.keys()).forEach(id => labelFor(id));
+    return { labelFor };
+  }
+
+  function detectOrgParentCycles(nodes){
+    const { byId } = buildOrgIndex(nodes);
+    const seen = new Set();
+    const inStack = new Set();
+    let hint = "";
+
+    function dfs(id){
+      if(inStack.has(id)){ hint = id; return true; }
+      if(seen.has(id)) return false;
+      seen.add(id);
+      inStack.add(id);
+      const n = byId.get(id);
+      const pid = n ? (n.parentId === null ? null : String(n.parentId)) : null;
+      if(pid){
+        if(dfs(pid)) return true;
+      }
+      inStack.delete(id);
+      return false;
+    }
+
+    for(const id of byId.keys()){
+      if(dfs(id)) return { hasCycle:true, cycleHint: hint || id };
+    }
+    return { hasCycle:false, cycleHint:"" };
+  }
+
+  function getSubtreeIds(scopeId, nodes){
+    const { children } = buildOrgIndex(nodes);
+    const start = String(scopeId || "");
+    const out = [];
+    const seen = new Set();
+    const stack = [start];
+    while(stack.length){
+      const cur = stack.pop();
+      if(!cur || seen.has(cur)) continue;
+      seen.add(cur);
+      out.push(cur);
+      const kids = children.get(cur) || [];
+      for(let i=kids.length-1;i>=0;i--) stack.push(kids[i]);
+    }
+    return out;
+  }
+
+  // --- Role resolve (inherit + merge, loop-safe) ---
+  function normalizeModules(mods){
+    const m = (mods && typeof mods === "object") ? mods : {};
+    const out = {};
+    Object.keys(m).forEach(k => {
+      const v = m[k] || {};
+      out[k] = { view: !!v.view, act: !!v.act, manage: !!v.manage };
+    });
+    return out;
+  }
+
+  function mergeModules(base, add){
+    // Additiv union (OR): passar “arv = lägg till rättigheter”
+    const b = normalizeModules(base);
+    const a = normalizeModules(add);
+    const out = { ...b };
+
+    Object.keys(a).forEach(modKey => {
+      const bv = out[modKey] || { view:false, act:false, manage:false };
+      const av = a[modKey] || { view:false, act:false, manage:false };
+      out[modKey] = {
+        view:  !!(bv.view || av.view),
+        act:   !!(bv.act || av.act),
+        manage: !!(bv.manage || av.manage)
+      };
+    });
+
+    // enforce manage => act+view, act => view
+    Object.keys(out).forEach(k => {
+      if(out[k].manage){ out[k].act = true; out[k].view = true; }
+      if(out[k].act){ out[k].view = true; }
+    });
+
+    return out;
+  }
+
+  function resolveRoleEffective(roleId, roles){
+    const byId = new Map(roles.map(r => [String(r.id), r]));
+    const seen = new Set();
+    let curId = String(roleId || "");
+    let acc = {};
+    let depth = 0;
+    let depthClipped = false;
+    let loop = false;
+
+    // Depth limit: flexibel men skyddar mot trasig storage
+    const MAX_DEPTH = 80;
+
+    while(curId && byId.has(curId)){
+      if(seen.has(curId)){ loop = true; break; }
+      seen.add(curId);
+
+      const cur = byId.get(curId);
+      acc = mergeModules(acc, cur.modules || {});
+
+      curId = String(cur.inherits || "").trim();
+      depth++;
+      if(depth > MAX_DEPTH){ depthClipped = true; break; }
+    }
+
+    return { modules: acc, loop, depthClipped };
+  }
+
+  function roleModulesToChips(mods){
+    const keys = Object.keys(mods || {});
+    if(keys.length === 0) return [];
+    keys.sort((a,b) => String(a).localeCompare(String(b), "sv"));
+    return keys.map(k => {
+      const v = mods[k] || {};
+      const lvl = v.manage ? "manage" : (v.act ? "act" : (v.view ? "view" : "none"));
+      return { key:k, lvl };
+    }).filter(x => x.lvl !== "none");
+  }
+
+  // --- UI: selects ---
+  function renderRoleSelect(){
+    const sel = $("#roleSelect");
+    sel.innerHTML = "";
+
+    const roles = loadRoles().slice().sort((a,b) => String(a.name||a.id||"").localeCompare(String(b.name||b.id||""), "sv"));
+
+    if(roles.length === 0){
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "(Inga roller – skapa i Roller)";
+      sel.appendChild(opt);
+      sel.disabled = true;
+      return;
+    }
+
+    sel.disabled = false;
+    roles.forEach(r => {
+      const opt = document.createElement("option");
+      opt.value = String(r.id);
+      opt.textContent = r.name ? `${r.name} (${r.id})` : String(r.id);
+      sel.appendChild(opt);
+    });
+  }
+
+  function renderScopeSelect(){
+    const sel = $("#scopeSelect");
+    sel.innerHTML = "";
+
+    const { nodes, meta } = loadOrgEx();
+    const { byId } = buildOrgIndex(nodes);
+    const { labelFor } = buildPathLabelCache(nodes);
+
+    const ids = Array.from(byId.keys());
+    ids.sort((a,b) => labelFor(a).localeCompare(labelFor(b), "sv"));
+
+    ids.forEach(id => {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = labelFor(id);
+      sel.appendChild(opt);
+    });
+
+    // default: bestRootId om möjligt
+    const bestRoot = meta.bestRootId;
+    sel.value = byId.has(bestRoot) ? bestRoot : (ids[0] || "");
+  }
+
+  // --- Preview (separat varning, rör inte action-msg) ---
+  function updatePreview(){
+    setPreviewWarn("");
+
+    const roles = loadRoles();
+    const { nodes, meta } = loadOrgEx();
+    const { byId } = buildOrgIndex(nodes);
+    const { labelFor } = buildPathLabelCache(nodes);
+
+    const roleId = $("#roleSelect").value;
+    const scopeId = $("#scopeSelect").value || meta.bestRootId;
+
+    const role = roles.find(r => String(r.id) === String(roleId)) || null;
+    const scopeNode = byId.get(String(scopeId)) || null;
+
+    $("#pvRole").textContent = "Roll: " + (role ? (role.name || role.id) : "—");
+    $("#pvScope").textContent = "Scope: " + (scopeNode ? (scopeNode.name || scopeNode.id) : "—");
+
+    const subtree = scopeNode ? getSubtreeIds(scopeNode.id, nodes) : [];
+    $("#pvCovers").textContent = "Täcker: " + (subtree.length ? `${subtree.length} nod(er)` : "—");
+
+    const eff = role ? resolveRoleEffective(role.id, roles) : { modules:{}, loop:false, depthClipped:false };
+    const chips = role ? roleModulesToChips(eff.modules) : [];
+
+    const pvModules = $("#pvModules");
+    pvModules.innerHTML = "";
+    if(!role){
+      pvModules.innerHTML = `<span class="muted">—</span>`;
+    }else if(chips.length === 0){
+      pvModules.innerHTML = `<span class="muted">Inga moduler i rollen</span>`;
+    }else{
+      chips.forEach(c => {
+        const el = document.createElement("span");
+        el.className = "chip";
+        el.innerHTML = `<strong>${escapeHtml(c.key)}</strong> <span class="muted">${escapeHtml(c.lvl)}</span>`;
+        pvModules.appendChild(el);
+      });
+    }
+
+    const nodeNames = subtree.slice(0, 14).map(id => escapeHtml(labelFor(id).split(" → ").slice(-1)[0] || id));
+    const more = subtree.length > 14 ? ` +${subtree.length-14} till` : "";
+    $("#pvNodes").innerHTML = subtree.length ? (nodeNames.join(", ") + escapeHtml(more)) : "—";
+
+    // preview-warnings
+    const warns = [];
+    if(!roles.length) warns.push("Inga roller finns ännu. Skapa roller i admin/roles.html.");
+    if(!nodes.length) warns.push("Org saknas. Skapa org i admin/org.html.");
+    if(meta.duplicates && meta.duplicates.length) warns.push(`Org har dublett-ID (${meta.duplicates.slice(0,3).join(", ")}${meta.duplicates.length>3 ? "…" : ""}). Noder kan döljas.`);
+    if(!meta.hasPrimary && meta.hasFallback) warns.push(`Root-id avviker (hittade "${ROOT_ID_FALLBACK}" men förväntar "${ROOT_ID_PRIMARY}"). Det är OK, men harmonisera gärna i org-builder.`);
+    if(role && (eff.loop || eff.depthClipped)){
+      const parts = [];
+      if(eff.loop) parts.push("arv-loop");
+      if(eff.depthClipped) parts.push("arv för lång (klippt)");
+      warns.push(`Rollen har problem (${parts.join(", ")}). Preview kan vara ofullständig.`);
+    }
+
+    if(warns.length) setPreviewWarn(warns.join(" "));
+  }
+
+  // --- Assignments CRUD ---
+  function upsertAssignment(empNo, roleId, scopeId){
+    const map = loadAssignments();
+    const next = { ...map };
+
+    const existing = next[empNo] && typeof next[empNo] === "object" ? next[empNo] : {};
+    next[empNo] = {
+      ...existing,
+      roleId: String(roleId),
+      scopeId: String(scopeId),
+      updatedAt: Date.now()
+    };
+    saveAssignments(next);
+  }
+
+  function deleteAssignment(empNo){
+    const map = loadAssignments();
+    const next = { ...map };
+    delete next[empNo];
+    saveAssignments(next);
+  }
+
+  function fmtDate(ts){
+    try{
+      if(!ts) return "—";
+      const d = new Date(ts);
+      if(Number.isNaN(d.getTime())) return "—";
+      return d.toLocaleDateString("sv-SE");
+    }catch{
+      return "—";
+    }
+  }
+
+  // --- Risks ---
+  function computeRisks(roles, orgEx, asg){
+    const nodes = orgEx.nodes;
+    const meta = orgEx.meta;
+
+    const roleById = new Map(roles.map(r => [String(r.id), r]));
+    const nodeById = new Map(nodes.map(n => [String(n.id), n]));
+
+    const risks = [];
+
+    // dataset
+    if(!roles.length) risks.push("Inga roller finns. Skapa i admin/roles.html (AO-019).");
+    if(!nodes.length) risks.push("Org-data saknas. Skapa i admin/org.html (AO-020).");
+
+    // org duplicates
+    if(meta.duplicates && meta.duplicates.length){
+      risks.push(`Org har dublett-ID: ${meta.duplicates.join(", ")}. En nod kan “försvinna” (sista vinner).`);
+    }
+
+    // org cycles (parent-cykler)
+    const cyc = detectOrgParentCycles(nodes);
+    if(cyc.hasCycle){
+      risks.push(`Org-data innehåller parent-loop/cykel (hint: ${cyc.cycleHint}). Vissa noder kan döljas i vyer.`);
+    }
+
+    // root mismatch info
+    if(!meta.hasPrimary && meta.hasFallback){
+      risks.push(`Root-id mismatch: hittade "${ROOT_ID_FALLBACK}" men inte "${ROOT_ID_PRIMARY}". Harmonisering rekommenderas.`);
+    }
+
+    // assignments validation
+    Object.keys(asg || {}).forEach(empNo => {
+      const a = asg[empNo] || {};
+      const rid = String(a.roleId || "");
+      const sid = String(a.scopeId || "");
+      if(!rid || !roleById.has(rid)){
+        risks.push(`Tilldelning anst.nr ${empNo}: roll saknas/ogiltig (${rid || "—"}).`);
+      }
+      if(!sid || !nodeById.has(sid)){
+        risks.push(`Tilldelning anst.nr ${empNo}: scope saknas/ogiltig (${sid || "—"}).`);
+      }
+    });
+
+    // role inheritance issues
+    roles.forEach(r => {
+      const eff = resolveRoleEffective(r.id, roles);
+      if(eff.loop) risks.push(`Roll "${r.name || r.id}" har arv-loop. Åtgärda i admin/roles.html.`);
+      if(eff.depthClipped) risks.push(`Roll "${r.name || r.id}" har för lång arvkedja (klippt).`);
+      const inh = String(r.inherits || "").trim();
+      if(inh && !roleById.has(inh)){
+        risks.push(`Roll "${r.name || r.id}" ärver från roll som inte finns (${inh}).`);
+      }
+    });
+
+    return risks;
+  }
+
+  // --- Views ---
+  function renderAssignmentsView(q){
+    const view = $("#view");
+    view.innerHTML = "";
+
+    const roles = loadRoles();
+    const orgEx = loadOrgEx();
+    const nodes = orgEx.nodes;
+    const meta = orgEx.meta;
+
+    const { byId } = buildOrgIndex(nodes);
+    const { labelFor } = buildPathLabelCache(nodes);
+
+    const asg = loadAssignments();
+    const roleById = new Map(roles.map(r => [String(r.id), r]));
+
+    const rows = Object.keys(asg || {})
+      .map(empNo => {
+        const a = asg[empNo] || {};
+        const role = roleById.get(String(a.roleId||"")) || null;
+        const scope = byId.get(String(a.scopeId||"")) || null;
+        return {
+          empNo: String(empNo),
+          roleId: String(a.roleId||""),
+          scopeId: String(a.scopeId||""),
+          roleName: role ? (role.name || role.id) : "(saknas)",
+          scopeName: scope ? labelFor(scope.id) : "(saknas)",
+          updatedAt: a.updatedAt || 0
+        };
+      })
+      .sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+
+    const query = String(q||"").trim().toLowerCase();
+    const filtered = query ? rows.filter(r => {
+      const blob = `${r.empNo} ${r.roleName} ${r.roleId} ${r.scopeName} ${r.scopeId}`.toLowerCase();
+      return blob.includes(query);
+    }) : rows;
+
+    if(filtered.length === 0){
+      view.innerHTML = `<div class="empty">Inga tilldelningar att visa.</div>`;
+      return;
+    }
+
+    filtered.slice(0, 80).forEach(r => {
+      const role = roleById.get(r.roleId) || null;
+      const scopeNode = byId.get(r.scopeId) || null;
+
+      const eff = role ? resolveRoleEffective(role.id, roles) : { modules:{}, loop:false, depthClipped:false };
+      const chips = role ? roleModulesToChips(eff.modules) : [];
+
+      const subtree = scopeNode ? getSubtreeIds(scopeNode.id, nodes) : [];
+      const subtreeHint = subtree.length ? `${subtree.length} nod(er)` : "—";
+
+      const el = document.createElement("div");
+      el.className = "item";
+      el.innerHTML = `
+        <div style="min-width:260px; flex:1 1 520px;">
+          <p class="item-title">Anst.nr ${escapeHtml(r.empNo)}</p>
+          <div class="meta">
+            <span class="pill"><strong>Roll:</strong> ${escapeHtml(r.roleName)} <span class="muted">(${escapeHtml(r.roleId || "—")})</span></span>
+            <span class="pill"><strong>Scope:</strong> ${escapeHtml(r.scopeName)} <span class="muted">(${escapeHtml(r.scopeId || "—")})</span></span>
+            <span class="pill"><strong>Täcker:</strong> ${escapeHtml(subtreeHint)}</span>
+            <span class="pill"><strong>Uppdat:</strong> ${escapeHtml(fmtDate(r.updatedAt))}</span>
+          </div>
+
+          <div class="chips" style="margin-top:8px;">
+            ${chips.length ? chips.map(c => `<span class="chip"><strong>${escapeHtml(c.key)}</strong> <span class="muted">${escapeHtml(c.lvl)}</span></span>`).join("") : `<span class="muted">${role ? "Inga moduler" : "Roll saknas"}</span>`}
+          </div>
+
+          ${(role && (eff.loop || eff.depthClipped)) ? `
+            <div class="warnbox" style="margin-top:10px;">
+              <div class="title">Varning</div>
+              <div class="muted" style="font-size:.95rem;">
+                ${eff.loop ? "Arv-loop. " : ""}${eff.depthClipped ? "Arv för lång (klippt). " : ""}
+                Kontrollera i <code>admin/roles.html</code>.
+              </div>
+            </div>
+          ` : ``}
+
+        </div>
+
+        <div class="row" style="gap:8px;">
+          <button type="button" class="secondary" data-edit="${escapeHtml(r.empNo)}">Ladda i formulär</button>
+          <button type="button" class="secondary" data-del="${escapeHtml(r.empNo)}">Ta bort</button>
+        </div>
+      `;
+      view.appendChild(el);
+    });
+
+    view.querySelectorAll("button[data-del]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const empNo = btn.getAttribute("data-del");
+        if(!confirm(`Ta bort tilldelning för anst.nr ${empNo}?`)) return;
+        deleteAssignment(empNo);
+        renderAll({ reason: "action" });
+      });
+    });
+
+    view.querySelectorAll("button[data-edit]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const empNo = btn.getAttribute("data-edit");
+        const asg = loadAssignments();
+        const a = asg[empNo];
+        if(!a) return;
+
+        $("#empNo").value = empNo;
+        if(a.roleId) $("#roleSelect").value = String(a.roleId);
+        if(a.scopeId) $("#scopeSelect").value = String(a.scopeId);
+
+        updatePreview();
+        setActionMsg("ok", `Laddad tilldelning för anst.nr ${empNo}.`);
+
+        try{ window.scrollTo({ top: 0, behavior: "smooth" }); }catch{ /* ignore */ }
+      });
+    });
+  }
+
+  function renderRolesView(q){
+    const view = $("#view");
+    view.innerHTML = "";
+
+    const roles = loadRoles();
+    const query = String(q||"").trim().toLowerCase();
+    const list = roles
+      .slice()
+      .sort((a,b) => String(a.name||a.id||"").localeCompare(String(b.name||b.id||""), "sv"))
+      .filter(r => {
+        if(!query) return true;
+        const blob = `${r.id||""} ${r.name||""} ${r.inherits||""}`.toLowerCase();
+        return blob.includes(query);
+      });
+
+    if(list.length === 0){
+      view.innerHTML = `<div class="empty">Inga roller att visa.</div>`;
+      return;
+    }
+
+    list.slice(0, 60).forEach(r => {
+      const eff = resolveRoleEffective(r.id, roles);
+      const chips = roleModulesToChips(eff.modules);
+      const el = document.createElement("div");
+      el.className = "item";
+      el.innerHTML = `
+        <div style="min-width:260px; flex:1 1 520px;">
+          <p class="item-title">${escapeHtml(r.name || r.id)}</p>
+          <div class="meta">
+            <span class="pill"><strong>ID:</strong> ${escapeHtml(r.id)}</span>
+            <span class="pill"><strong>Ärver:</strong> ${escapeHtml(String(r.inherits||"") || "—")}</span>
+          </div>
+
+          <div class="chips" style="margin-top:8px;">
+            ${chips.length ? chips.map(c => `<span class="chip"><strong>${escapeHtml(c.key)}</strong> <span class="muted">${escapeHtml(c.lvl)}</span></span>`).join("") : `<span class="muted">Inga moduler</span>`}
+          </div>
+
+          ${(eff.loop || eff.depthClipped) ? `
+            <div class="warnbox" style="margin-top:10px;">
+              <div class="title">Varning</div>
+              <div class="muted" style="font-size:.95rem;">
+                ${eff.loop ? "Arv-loop. " : ""}${eff.depthClipped ? "Arv för lång (klippt). " : ""}
+                Kontrollera i <code>admin/roles.html</code>.
+              </div>
+            </div>
+          ` : ``}
+        </div>
+        <div class="row" style="gap:8px;">
+          <a class="btn secondary" href="./roles.html">Öppna roller</a>
+        </div>
+      `;
+      view.appendChild(el);
+    });
+  }
+
+  function renderRisksView(q){
+    const view = $("#view");
+    view.innerHTML = "";
+
+    const roles = loadRoles();
+    const orgEx = loadOrgEx();
+    const asg   = loadAssignments();
+
+    const risks = computeRisks(roles, orgEx, asg);
+    const query = String(q||"").trim().toLowerCase();
+    const filtered = query ? risks.filter(x => String(x).toLowerCase().includes(query)) : risks;
+
+    if(filtered.length === 0){
+      view.innerHTML = `<div class="empty">Inga risker att visa.</div>`;
+      return;
+    }
+
+    const box = document.createElement("div");
+    box.className = "warnbox";
+    box.innerHTML = `
+      <div class="title">Riskpanel</div>
+      <ul class="warnlist" id="riskList"></ul>
+      <div class="smallnote">Obs: detta är varningar (read-only). Åtgärda i <code>admin/roles.html</code> och <code>admin/org.html</code>.</div>
+    `;
+    view.appendChild(box);
+
+    const ul = box.querySelector("#riskList");
+    filtered.slice(0, 80).forEach(r => {
+      const li = document.createElement("li");
+      li.textContent = r;
+      ul.appendChild(li);
+    });
+  }
+
+  function updateKpis(){
+    const roles = loadRoles();
+    const orgEx = loadOrgEx();
+    const asg   = loadAssignments();
+    const risks = computeRisks(roles, orgEx, asg);
+
+    $("#kpiRoles").textContent = String(roles.length);
+    $("#kpiNodes").textContent = String(orgEx.nodes.length);
+    $("#kpiAsg").textContent   = String(Object.keys(asg||{}).length);
+    $("#kpiRisks").textContent = String(risks.length);
+  }
+
+  function renderViewOnly(){
+    updateKpis();
+    const mode = $("#filter").value;
+    const q = $("#search").value;
+
+    if(mode === "roles") renderRolesView(q);
+    else if(mode === "risks") renderRisksView(q);
+    else renderAssignmentsView(q);
+  }
+
+  function renderAll(opts){
+    const reason = (opts && opts.reason) ? String(opts.reason) : "";
+
+    // Re-render selects if needed (org/roles can change between sessions)
+    renderRoleSelect();
+    renderScopeSelect();
+
+    // Assign button disable if roles missing or scope missing
+    const roles = loadRoles();
+    const orgEx = loadOrgEx();
+    const hasRoles = roles.length > 0;
+    const hasOrg = orgEx.nodes.length > 0;
+
+    $("#btnAssign").disabled = !(hasRoles && hasOrg);
+    if(!hasRoles || !hasOrg){
+      setPreviewWarn("För att spara tilldelning krävs både roller (AO-019) och org (AO-020).");
+    }
+
+    // Keep selection stable if possible
+    if(hasRoles){
+      const sel = $("#roleSelect");
+      if(!sel.value && roles[0]) sel.value = String(roles[0].id);
+    }
+    const scopeSel = $("#scopeSelect");
+    if(hasOrg && !scopeSel.value){
+      scopeSel.value = orgEx.meta.bestRootId || scopeSel.options?.[0]?.value || "";
+    }
+
+    // Preview should update on non-search reasons
+    if(reason !== "search"){
+      updatePreview();
+    }
+
+    renderViewOnly();
+  }
+
+  // --- Events ---
+  $("#roleSelect").addEventListener("change", () => { updatePreview(); });
+  $("#scopeSelect").addEventListener("change", () => { updatePreview(); });
+
+  $("#filter").addEventListener("change", () => { renderViewOnly(); });
+  $("#search").addEventListener("input", () => { renderAll({ reason: "search" }); });
+
+  $("#btnAssign").addEventListener("click", () => {
+    setActionMsg("", "");
+
+    const roles = loadRoles();
+    const orgEx = loadOrgEx();
+    const nodes = orgEx.nodes;
+    const { byId } = buildOrgIndex(nodes);
+
+    if(!roles.length){
+      setActionMsg("err", "Inga roller finns. Skapa roller i admin/roles.html först.");
+      return;
+    }
+    if(!nodes.length){
+      setActionMsg("err", "Org saknas. Skapa org i admin/org.html först.");
+      return;
+    }
+
+    const v = validateEmpNo($("#empNo").value);
+    if(!v.ok){
+      setActionMsg("err", "Skriv ett giltigt anst.nr (bara siffror, max 10).");
+      return;
+    }
+
+    const roleId = $("#roleSelect").value;
+    if(!roleId){
+      setActionMsg("err", "Välj en roll.");
+      return;
+    }
+
+    const scopeId = $("#scopeSelect").value || orgEx.meta.bestRootId;
+    if(!scopeId){
+      setActionMsg("err", "Välj ett scope.");
+      return;
+    }
+
+    const r = roles.find(x => String(x.id) === String(roleId));
+    if(!r){
+      setActionMsg("err", "Rollen finns inte i lagring (uppdatera roller).");
+      return;
+    }
+    if(!byId.has(String(scopeId))){
+      setActionMsg("err", "Scope finns inte i lagring (uppdatera org).");
+      return;
+    }
+
+    upsertAssignment(v.empNo, roleId, scopeId);
+    setActionMsg("ok", `Tilldelning sparad för anst.nr ${v.empNo}.`);
+    renderAll({ reason: "action" });
+  });
+
+  $("#btnClear").addEventListener("click", () => {
+    $("#empNo").value = "";
+    setActionMsg("", "");
+  });
+
+  // --- Init ---
+  setActionMsg("", "");
+  renderAll({ reason: "init" });
+
+})();
+</script>
+
+</body>
+</html>
 
