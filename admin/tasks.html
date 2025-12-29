@@ -7,6 +7,10 @@ Krav:
 - Mottagare: en employee, alla, eller grupp
 - Status + kommentar (admin-notis)
 - Inga skapafunktioner på employee-sidan (employee markerar bara status + kommentar)
+Nytt i denna version:
+- Mallar (spara/ladda/ta bort)
+- Datum (start + slut/deadline)
+- Återkommande uppgifter (tillsvidare eller till slutdatum)
 Policy:
 - Ingen backend
 - Ingen känslig data lagras
@@ -14,7 +18,12 @@ Policy:
 Lagring:
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
 - AO-017_GROUPS_V1 (localStorage) – grupper
-- AO-014_TASKS_V1 (localStorage) – uppgifter
+- AO-014_TASKS_V1 (localStorage) – uppgifter (utökade fält, ingen ny key)
+- AO-047_TASK_TEMPLATES_V1 (localStorage) – mallar (admin-metadata)
+Obs:
+- “Klar bara den dagen” för återkommande kräver att employee/tasks.html
+  markerar undantag per datum (t.ex. exceptionsDone). Admin-sidan sparar
+  fälten som behövs.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -86,6 +95,79 @@ Lagring:
       background:#fff;
       text-align:center;
     }
+
+    /* Mallar */
+    .tplbar{
+      display:flex;
+      gap:8px;
+      align-items:end;
+      flex-wrap:wrap;
+      margin: 10px 0 10px;
+      padding: 10px;
+      background: rgba(255,255,255,.7);
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+    }
+    .tplbar label{ margin:0; min-width: 220px; flex: 1 1 260px; }
+    .tplactions{ display:flex; gap:8px; flex-wrap:wrap; }
+    .tplhint{ font-size:.9rem; color: var(--muted); margin-top:6px; width:100%; }
+
+    /* Datum/återkommande */
+    .subcard{
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.7);
+    }
+    .subcard .title{
+      font-weight: 850;
+      margin: 0 0 8px;
+    }
+    .radios{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top: 6px;
+    }
+    .radios label{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin:0;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      cursor:pointer;
+      user-select:none;
+    }
+    .radios input{ transform: translateY(0.5px); }
+    .inline-help{ font-size:.9rem; color: var(--muted); margin-top:6px; }
+
+    .summarybar{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.7);
+      margin-bottom: 10px;
+    }
+    .kpi{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.95rem;
+    }
+    code{ font-size:.95em; }
   </style>
 </head>
 
@@ -128,19 +210,35 @@ Lagring:
       <section class="panel create" aria-label="Skapa uppgifter">
         <div class="panel-title">Skapa uppgifter (batch)</div>
 
+        <!-- Mallar -->
+        <div class="tplbar" aria-label="Mallar">
+          <label>
+            Mall
+            <select id="tplSelect"></select>
+          </label>
+          <div class="tplactions">
+            <button id="btnTplLoad" type="button" class="secondary">Ladda mall</button>
+            <button id="btnTplSave" type="button">Spara som mall</button>
+            <button id="btnTplDelete" type="button" class="secondary">Ta bort mall</button>
+          </div>
+          <div class="tplhint">
+            Mallar fyller i Titel/Uppgifter/Admin-notis/Prioritet + Datum/Återkommande. Mottagare påverkas inte.
+          </div>
+        </div>
+
         <div class="row2">
           <label>
             Mottagare
             <select id="targetMode">
               <option value="one">En medarbetare</option>
-              <option value="all">Alla medarbetare</option>
+              <option value="all">Alla (från grupper)</option>
               <option value="group">Grupp</option>
             </select>
           </label>
 
           <label id="oneWrap">
             Anst.nr (employee)
-            <input id="targetEmpNo" type="text" placeholder="t.ex. 1234" />
+            <input id="targetEmpNo" type="text" inputmode="numeric" placeholder="t.ex. 1234" />
           </label>
 
           <label id="groupWrap" style="display:none;">
@@ -173,6 +271,112 @@ Lagring:
           <input id="adminNote" type="text" placeholder="t.ex. Klart senast fredag" />
         </label>
 
+        <!-- Datum / Återkommande -->
+        <div class="subcard" aria-label="Datum och återkommande">
+          <p class="title">Datum & återkommande</p>
+
+          <div class="row2">
+            <label>
+              Typ
+              <select id="taskKind">
+                <option value="oneoff">Engångsuppgift</option>
+                <option value="recurring">Återkommande</option>
+              </select>
+            </label>
+
+            <label>
+              Startdatum
+              <input id="startDate" type="date" />
+            </label>
+          </div>
+
+          <!-- Engång -->
+          <div id="oneoffBox" style="margin-top:10px;">
+            <div class="row2">
+              <label>
+                Slutdatum / Deadline (valfri)
+                <input id="endDate" type="date" />
+              </label>
+
+              <label>
+                Undvik dubletter (rekommenderas)
+                <select id="dedupeMode">
+                  <option value="on" selected>På</option>
+                  <option value="off">Av</option>
+                </select>
+              </label>
+            </div>
+            <div class="inline-help">
+              Tips: lämna datum tomt om uppgiften inte har deadline.
+            </div>
+          </div>
+
+          <!-- Återkommande -->
+          <div id="recurringBox" style="margin-top:10px; display:none;">
+            <div class="row2">
+              <label>
+                Frekvens
+                <select id="freq">
+                  <option value="daily">Dagligen</option>
+                  <option value="weekly">Veckovis</option>
+                  <option value="monthly">Månadsvis</option>
+                </select>
+              </label>
+
+              <label>
+                Intervall
+                <select id="interval">
+                  <option value="1">Var 1</option>
+                  <option value="2">Var 2</option>
+                  <option value="3">Var 3</option>
+                  <option value="4">Var 4</option>
+                </select>
+              </label>
+            </div>
+
+            <div id="weeklyDays" style="margin-top:10px;">
+              <label>
+                Veckodagar (valfritt, annars “samma veckodag som startdatum”)
+                <select id="byWeekday" multiple size="7">
+                  <option value="1">Mån</option>
+                  <option value="2">Tis</option>
+                  <option value="3">Ons</option>
+                  <option value="4">Tor</option>
+                  <option value="5">Fre</option>
+                  <option value="6">Lör</option>
+                  <option value="7">Sön</option>
+                </select>
+              </label>
+              <div class="inline-help">Håll Ctrl/Cmd för att välja flera.</div>
+            </div>
+
+            <div class="radios" aria-label="Slut">
+              <label><input type="radio" name="untilMode" value="forever" checked /> Tillsvidare</label>
+              <label><input type="radio" name="untilMode" value="until" /> Till datum</label>
+            </div>
+
+            <div class="row2" style="margin-top:10px;">
+              <label id="untilWrap" style="display:none;">
+                Slutdatum (för återkommande)
+                <input id="untilDate" type="date" />
+              </label>
+
+              <label>
+                Undvik dubletter (rekommenderas)
+                <select id="dedupeModeR">
+                  <option value="on" selected>På</option>
+                  <option value="off">Av</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="inline-help">
+              Medarbetaren ska kunna markera “Klar” för en specifik dag (per datum). Det stöds via <code>exceptionsDone</code>.
+              <br/>Policy: <strong>untilDate är inklusive</strong> (gäller t.o.m. angivet datum).
+            </div>
+          </div>
+        </div>
+
         <div class="row-actions" style="margin-top:10px;">
           <button id="btnCreate" type="button">Skapa & tilldela</button>
           <button id="btnClear" class="secondary" type="button">Rensa</button>
@@ -189,6 +393,13 @@ Lagring:
       <section class="panel list" aria-label="Översikt">
         <div class="panel-title">Översikt</div>
 
+        <div class="summarybar" aria-label="Sammanfattning">
+          <div class="kpi">Öppna: <strong id="kpiOpen">0</strong></div>
+          <div class="kpi">Pågår: <strong id="kpiProg">0</strong></div>
+          <div class="kpi">Klara: <strong id="kpiDone">0</strong></div>
+          <div class="kpi">Återkommande: <strong id="kpiRec">0</strong></div>
+        </div>
+
         <div class="row2" style="margin-bottom:10px;">
           <label>
             Visa
@@ -197,6 +408,7 @@ Lagring:
               <option value="open">Ej klara</option>
               <option value="done">Klara</option>
               <option value="progress">Pågår</option>
+              <option value="recurring">Återkommande</option>
             </select>
           </label>
 
@@ -220,15 +432,21 @@ Lagring:
 <script>
 /* ============================================================
 AO-046 | FIL-ID: admin/tasks.html (inline JS)
+Autopatch:
+- Dedupe-signatur ignorerar adminNote/prio (minskar “falska” dubletter)
+- Weekly default weekday = startdatum om inga valts
+- untilDate policy: INKLUSIVE + flagga (utan ny key)
 ============================================================ */
 (function(){
   "use strict";
 
-  const SESSION_KEY = "AO-001_LOGIN_V1";
-  const TASKS_KEY   = "AO-014_TASKS_V1";
-  const GROUPS_KEY  = "AO-017_GROUPS_V1";
+  const SESSION_KEY   = "AO-001_LOGIN_V1";
+  const TASKS_KEY     = "AO-014_TASKS_V1";
+  const GROUPS_KEY    = "AO-017_GROUPS_V1";
+  const TEMPLATES_KEY = "AO-047_TASK_TEMPLATES_V1";
 
   const $ = (s) => document.querySelector(s);
+  const $$ = (s) => Array.from(document.querySelectorAll(s));
 
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
@@ -281,6 +499,46 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
     return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
   }
 
+  function todayISO(){
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const day = String(d.getDate()).padStart(2,"0");
+    return `${y}-${m}-${day}`;
+  }
+
+  function isISODate(s){
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(s||""));
+  }
+
+  function parseISOToTime(iso){
+    if(!isISODate(iso)) return null;
+    const t = Date.parse(iso + "T00:00:00");
+    return Number.isFinite(t) ? t : null;
+  }
+
+  function normalizeEmpNo(v){
+    const s = String(v || "").trim();
+    const digits = s.replace(/[^\d]/g, "");
+    return digits;
+  }
+
+  function validateEmpNo(v){
+    const emp = normalizeEmpNo(v);
+    if(!emp) return { ok:false, empNo:"" };
+    if(emp.length > 10) return { ok:false, empNo: emp };
+    return { ok:true, empNo: emp };
+  }
+
+  function weekdayFromISO(iso){
+    // Return 1..7 (Mon..Sun). JS getDay(): 0 Sun .. 6 Sat
+    const t = parseISOToTime(iso);
+    if(t === null) return null;
+    const d = new Date(t);
+    const js = d.getDay();
+    return js === 0 ? 7 : js;
+  }
+
   // --- Guard ---
   const auth = readAuth();
   if(!auth){ redirectLogin(); return; }
@@ -293,7 +551,7 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  // --- Groups (read only here, created in admin/questions.html) ---
+  // --- Groups ---
   function loadGroups(){
     const arr = safeParse(GROUPS_KEY, []);
     return Array.isArray(arr) ? arr : [];
@@ -325,6 +583,25 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
   }
   $("#targetMode").addEventListener("change", syncTargetUI);
 
+  // --- Kind UI ---
+  function syncKindUI(){
+    const kind = $("#taskKind").value;
+    $("#oneoffBox").style.display = (kind === "oneoff") ? "block" : "none";
+    $("#recurringBox").style.display = (kind === "recurring") ? "block" : "none";
+    $("#weeklyDays").style.display = ($("#freq").value === "weekly") ? "block" : "none";
+    syncUntilUI();
+  }
+  function syncUntilUI(){
+    const kind = $("#taskKind").value;
+    const mode = ($$("input[name='untilMode']").find(x => x.checked)?.value) || "forever";
+    const show = (kind === "recurring" && mode === "until");
+    $("#untilWrap").style.display = show ? "block" : "none";
+  }
+
+  $("#taskKind").addEventListener("change", syncKindUI);
+  $("#freq").addEventListener("change", syncKindUI);
+  $$("input[name='untilMode']").forEach(r => r.addEventListener("change", syncUntilUI));
+
   // --- Tasks store ---
   function loadTasks(){
     const arr = safeParse(TASKS_KEY, []);
@@ -337,27 +614,129 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
     return "Ej startad";
   }
 
-  function pushTasks(targetEmpNos, title, lines, prio, adminNote){
+  function kindLabel(k){
+    if(k === "recurring") return "Återkommande";
+    return "Engång";
+  }
+
+  function recurringRuleLabel(rec){
+    if(!rec || rec.kind !== "recurring") return "";
+    const freq = rec.freq || "daily";
+    const interval = Number(rec.interval || 1);
+    const freqSv = (freq === "weekly") ? "vecka" : (freq === "monthly" ? "månad" : "dag");
+    const iv = interval === 1 ? "" : ` var ${interval}e`;
+    let days = "";
+    if(freq === "weekly" && Array.isArray(rec.byWeekday) && rec.byWeekday.length){
+      const map = {1:"mån",2:"tis",3:"ons",4:"tor",5:"fre",6:"lör",7:"sön"};
+      days = " (" + rec.byWeekday.map(d => map[String(d)] || "").filter(Boolean).join(", ") + ")";
+    }
+    const until = rec.untilDate ? ` t.o.m. ${rec.untilDate}` : " tillsvidare";
+    return `Varje${iv} ${freqSv}${days}${until}`;
+  }
+
+  function dateLabel(task){
+    const kind = task.kind || "oneoff";
+    const s = task.startDate || "";
+    const e = task.endDate || "";
+    if(kind === "recurring"){
+      const u = task.recurring?.untilDate || "";
+      if(s && u) return `${s} → t.o.m. ${u}`;
+      if(s) return `${s} → tillsvidare`;
+      return "—";
+    }
+    if(s && e) return `${s}–${e}`;
+    if(s) return `${s}`;
+    if(e) return `t.o.m. ${e}`;
+    return "—";
+  }
+
+  function computeAllTargets(mode){
+    if(mode !== "all") return [];
+    const set = new Set();
+    loadGroups().forEach(g => (g.members||[]).forEach(m => {
+      const v = validateEmpNo(m);
+      if(v.ok) set.add(v.empNo);
+    }));
+    if(set.size > 0) return Array.from(set);
+
+    loadTasks().forEach(t => {
+      const v = validateEmpNo(t.empNo);
+      if(v.ok) set.add(v.empNo);
+    });
+    return Array.from(set);
+  }
+
+  function makeBaseTask(empNo, title, text, prio, adminNote){
     const now = Date.now();
+    return {
+      id: genId("t"),
+      empNo: String(empNo).trim(),
+      title: title || "Uppgift",
+      text: text || "",
+      prio: prio || "normal",
+      adminNote: adminNote || "",
+      status: "open",
+      employeeComment: "",
+      createdAt: now,
+      updatedAt: now
+    };
+  }
+
+  function signatureForDedupe(t){
+    // AUTOPATCH: ignorera adminNote + prio för att undvika “falska dubletter”
+    // Dedupe ska stoppa samma uppgift/schedule, även om notis/prio råkar ändras.
+    const parts = [
+      String(t.empNo||""),
+      String(t.kind||"oneoff"),
+      String(t.title||""),
+      String(t.text||""),
+      String(t.startDate||""),
+      String(t.endDate||""),
+      t.kind === "recurring" ? String(t.recurring?.freq||"") : "",
+      t.kind === "recurring" ? String(t.recurring?.interval||"") : "",
+      t.kind === "recurring" ? String(t.recurring?.untilDate||"") : "",
+      t.kind === "recurring" ? JSON.stringify(t.recurring?.byWeekday||[]) : ""
+    ];
+    return parts.join("|").toLowerCase();
+  }
+
+  function pushTasks(targetEmpNos, payload){
     const all = loadTasks();
+    const existingSig = new Set(all.map(signatureForDedupe));
     let count = 0;
 
+    const dedupeOn = payload.dedupe === true;
+
     targetEmpNos.forEach(empNo => {
-      lines.forEach(text => {
-        all.push({
-          id: genId("t"),
-          empNo: String(empNo).trim(),
-          title: title || "Uppgift",
-          text,
-          prio: prio || "normal",
-          adminNote: adminNote || "",
-          // employee-respons
-          status: "open",
-          employeeComment: "",
-          // timestamps
-          createdAt: now,
-          updatedAt: now
-        });
+      payload.lines.forEach(text => {
+        const t = makeBaseTask(empNo, payload.title, text, payload.prio, payload.adminNote);
+
+        if(payload.startDate) t.startDate = payload.startDate;
+        if(payload.endDate) t.endDate = payload.endDate;
+
+        t.kind = payload.kind;
+
+        if(payload.kind === "recurring"){
+          t.recurring = {
+            kind: "recurring",
+            freq: payload.freq,
+            interval: payload.interval,
+            byWeekday: payload.byWeekday || [],
+            // Policy: untilDate är INKLUSIVE (t.o.m. angivet datum)
+            untilDate: payload.untilDate || null,
+            untilInclusive: true
+          };
+          t.exceptionsDone = [];     // ["YYYY-MM-DD", ...]
+          t.exceptionsSnoozed = {};  // framtida
+        }
+
+        if(dedupeOn){
+          const sig = signatureForDedupe(t);
+          if(existingSig.has(sig)) return;
+          existingSig.add(sig);
+        }
+
+        all.push(t);
         count++;
       });
     });
@@ -366,6 +745,262 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
     return count;
   }
 
+  // --- Templates ---
+  function seedTemplatesIfEmpty(){
+    const raw = safeParse(TEMPLATES_KEY, null);
+    if(Array.isArray(raw) && raw.length) return;
+
+    const now = Date.now();
+    const seeds = [
+      {
+        id: "tpl_intro_v1",
+        name: "Introduktion (Dag 1)",
+        title: "Introduktion",
+        prio: "normal",
+        adminNote: "Gör detta dag 1.",
+        tasks: [
+          "Läs hygienrutiner",
+          "Gå igenom säkerhetsgenomgång",
+          "Prata med arbetsledare (10 min)"
+        ],
+        schedule: { kind:"oneoff", startDate:"", endDate:"" },
+        createdAt: now,
+        updatedAt: now
+      },
+      {
+        id: "tpl_hygien_weekly_v1",
+        name: "Hygien (Veckovis)",
+        title: "Hygienrutin",
+        prio: "high",
+        adminNote: "Bekräfta när klart.",
+        tasks: [
+          "Kontrollera arbetsstation (rent/ordning)",
+          "Rapportera avvikelse om något saknas"
+        ],
+        schedule: {
+          kind:"recurring",
+          startDate:"",
+          freq:"weekly",
+          interval: 1,
+          byWeekday: [1],
+          untilMode: "forever",
+          untilDate: ""
+        },
+        createdAt: now,
+        updatedAt: now
+      }
+    ];
+    save(TEMPLATES_KEY, seeds);
+  }
+
+  function loadTemplates(){
+    const arr = safeParse(TEMPLATES_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+  function saveTemplates(arr){
+    save(TEMPLATES_KEY, Array.isArray(arr) ? arr : []);
+  }
+
+  function renderTemplateSelect(){
+    const sel = $("#tplSelect");
+    sel.innerHTML = "";
+
+    const tpls = loadTemplates();
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = "(Välj mall)";
+    sel.appendChild(opt0);
+
+    if(!tpls.length){
+      const opt = document.createElement("option");
+      opt.value = "__none__";
+      opt.textContent = "(Inga mallar ännu)";
+      sel.appendChild(opt);
+      return;
+    }
+
+    tpls
+      .slice()
+      .sort((a,b) => String(a.name||"").localeCompare(String(b.name||""), "sv"))
+      .forEach(t => {
+        const opt = document.createElement("option");
+        opt.value = t.id;
+        opt.textContent = t.name || t.id;
+        sel.appendChild(opt);
+      });
+  }
+
+  function getSelectedTemplate(){
+    const id = $("#tplSelect").value;
+    if(!id || id === "__none__") return null;
+    return loadTemplates().find(t => t.id === id) || null;
+  }
+
+  function getSelectedWeekdays(){
+    const sel = $("#byWeekday");
+    return Array.from(sel.selectedOptions).map(o => Number(o.value)).filter(n => Number.isFinite(n));
+  }
+
+  function setSelectedWeekdays(days){
+    const set = new Set((days||[]).map(x => String(x)));
+    Array.from($("#byWeekday").options).forEach(o => { o.selected = set.has(String(o.value)); });
+  }
+
+  function applyTemplateToForm(tpl){
+    if(!tpl) return;
+
+    $("#title").value = String(tpl.title || "");
+    $("#prio").value = String(tpl.prio || "normal");
+    $("#adminNote").value = String(tpl.adminNote || "");
+    $("#tasks").value = Array.isArray(tpl.tasks) ? tpl.tasks.join("\n") : "";
+
+    const sch = tpl.schedule || { kind:"oneoff" };
+    $("#taskKind").value = (sch.kind === "recurring") ? "recurring" : "oneoff";
+    $("#startDate").value = String(sch.startDate || "");
+    $("#endDate").value = String(sch.endDate || "");
+
+    $("#freq").value = String(sch.freq || "daily");
+    $("#interval").value = String(sch.interval || "1");
+    setSelectedWeekdays(sch.byWeekday || []);
+
+    const untilMode = (sch.untilMode === "until") ? "until" : "forever";
+    $$("input[name='untilMode']").forEach(r => r.checked = (r.value === untilMode));
+    $("#untilDate").value = String(sch.untilDate || "");
+
+    syncKindUI();
+  }
+
+  function currentFormAsTemplateDraft(){
+    const title = String($("#title").value || "").trim();
+    const prio = $("#prio").value;
+    const adminNote = String($("#adminNote").value || "").trim();
+    const lines = String($("#tasks").value || "")
+      .split("\n")
+      .map(x => String(x).trim())
+      .filter(Boolean);
+
+    const kind = $("#taskKind").value;
+    const startDate = String($("#startDate").value || "").trim();
+    const endDate = String($("#endDate").value || "").trim();
+
+    const schedule = { kind, startDate };
+
+    if(kind === "oneoff"){
+      schedule.endDate = endDate || "";
+    }else{
+      const freq = $("#freq").value;
+      const interval = Number($("#interval").value || 1);
+      const byWeekday = (freq === "weekly") ? getSelectedWeekdays() : [];
+      const untilMode = ($$("input[name='untilMode']").find(x => x.checked)?.value) || "forever";
+      const untilDate = String($("#untilDate").value || "").trim();
+
+      schedule.freq = freq;
+      schedule.interval = Number.isFinite(interval) ? interval : 1;
+      schedule.byWeekday = byWeekday;
+      schedule.untilMode = untilMode;
+      schedule.untilDate = (untilMode === "until") ? (untilDate || "") : "";
+    }
+
+    return { title, prio, adminNote, tasks: lines, schedule };
+  }
+
+  function promptTemplateName(defaultName){
+    const name = prompt("Namn på mall:", defaultName || "");
+    if(name === null) return null;
+    return String(name).trim();
+  }
+
+  $("#btnTplLoad").addEventListener("click", () => {
+    setMsg("", "");
+    const tpl = getSelectedTemplate();
+    if(!tpl){
+      setMsg("err", "Välj en mall att ladda.");
+      return;
+    }
+    applyTemplateToForm(tpl);
+    setMsg("ok", `Mall laddad: ${tpl.name || tpl.id}`);
+  });
+
+  $("#btnTplSave").addEventListener("click", () => {
+    setMsg("", "");
+
+    const draft = currentFormAsTemplateDraft();
+    if(draft.tasks.length === 0){
+      setMsg("err", "Skriv minst en uppgift innan du sparar som mall.");
+      return;
+    }
+
+    const selected = getSelectedTemplate();
+    const defaultName = selected?.name || draft.title || "Ny mall";
+    const name = promptTemplateName(defaultName);
+    if(name === null) return;
+    if(!name){
+      setMsg("err", "Mallnamn krävs.");
+      return;
+    }
+
+    const now = Date.now();
+    const tpls = loadTemplates();
+
+    if(selected){
+      const ok = confirm(`Uppdatera befintlig mall "${selected.name || selected.id}"?\nOK = uppdatera\nAvbryt = skapa ny mall`);
+      if(ok){
+        const next = tpls.map(t => {
+          if(t.id !== selected.id) return t;
+          return {
+            ...t,
+            name,
+            title: draft.title || (t.title || ""),
+            prio: draft.prio || (t.prio || "normal"),
+            adminNote: draft.adminNote || "",
+            tasks: draft.tasks,
+            schedule: draft.schedule,
+            updatedAt: now
+          };
+        });
+        saveTemplates(next);
+        renderTemplateSelect();
+        $("#tplSelect").value = selected.id;
+        setMsg("ok", "Mall uppdaterad.");
+        return;
+      }
+    }
+
+    const newTpl = {
+      id: genId("tpl"),
+      name,
+      title: draft.title || "Uppgift",
+      prio: draft.prio || "normal",
+      adminNote: draft.adminNote || "",
+      tasks: draft.tasks,
+      schedule: draft.schedule,
+      createdAt: now,
+      updatedAt: now
+    };
+
+    tpls.push(newTpl);
+    saveTemplates(tpls);
+    renderTemplateSelect();
+    $("#tplSelect").value = newTpl.id;
+    setMsg("ok", "Ny mall sparad.");
+  });
+
+  $("#btnTplDelete").addEventListener("click", () => {
+    setMsg("", "");
+    const tpl = getSelectedTemplate();
+    if(!tpl){
+      setMsg("err", "Välj en mall att ta bort.");
+      return;
+    }
+    if(!confirm(`Ta bort mall "${tpl.name || tpl.id}"?`)) return;
+    const next = loadTemplates().filter(t => t.id !== tpl.id);
+    saveTemplates(next);
+    renderTemplateSelect();
+    $("#tplSelect").value = "";
+    setMsg("ok", "Mall borttagen.");
+  });
+
+  // --- Create ---
   $("#btnCreate").addEventListener("click", () => {
     setMsg("", "");
 
@@ -384,24 +1019,91 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
       return;
     }
 
+    const kind = $("#taskKind").value;
+    const startDate = String($("#startDate").value || "").trim();
+    const endDate = String($("#endDate").value || "").trim();
+
+    if(startDate && !isISODate(startDate)){
+      setMsg("err", "Startdatum är ogiltigt.");
+      return;
+    }
+    if(endDate && !isISODate(endDate)){
+      setMsg("err", "Slutdatum/Deadline är ogiltigt.");
+      return;
+    }
+    if(startDate && endDate){
+      const a = parseISOToTime(startDate);
+      const b = parseISOToTime(endDate);
+      if(a !== null && b !== null && b < a){
+        setMsg("err", "Slutdatum kan inte vara före startdatum.");
+        return;
+      }
+    }
+
+    let recurringMeta = null;
+    let dedupe = true;
+
+    if(kind === "recurring"){
+      const freq = $("#freq").value;
+      const interval = Number($("#interval").value || 1);
+      const untilMode = ($$("input[name='untilMode']").find(x => x.checked)?.value) || "forever";
+      const untilDate = String($("#untilDate").value || "").trim();
+
+      if(!startDate){
+        setMsg("err", "Återkommande kräver startdatum.");
+        return;
+      }
+
+      // AUTOPATCH: default weekly weekday om inga valts
+      let byWeekday = [];
+      if(freq === "weekly"){
+        byWeekday = getSelectedWeekdays();
+        if(byWeekday.length === 0){
+          const wd = weekdayFromISO(startDate);
+          if(wd) byWeekday = [wd];
+        }
+      }
+
+      if(untilMode === "until"){
+        if(!untilDate || !isISODate(untilDate)){
+          setMsg("err", "Välj ett giltigt slutdatum (till datum).");
+          return;
+        }
+        const a = parseISOToTime(startDate);
+        const b = parseISOToTime(untilDate);
+        if(a !== null && b !== null && b < a){
+          setMsg("err", "Slutdatum kan inte vara före startdatum.");
+          return;
+        }
+      }
+
+      dedupe = ($("#dedupeModeR").value === "on");
+
+      recurringMeta = {
+        freq,
+        interval: Number.isFinite(interval) && interval > 0 ? interval : 1,
+        byWeekday,
+        untilDate: (untilMode === "until") ? untilDate : null
+      };
+    }else{
+      dedupe = ($("#dedupeMode").value === "on");
+    }
+
     let targets = [];
 
     if(mode === "one"){
-      const empNo = String($("#targetEmpNo").value || "").trim();
-      if(!empNo){
-        setMsg("err", "Skriv anst.nr för mottagaren.");
+      const v = validateEmpNo($("#targetEmpNo").value);
+      if(!v.ok){
+        setMsg("err", "Skriv ett giltigt anst.nr (bara siffror, max 10).");
         return;
       }
-      targets = [empNo];
+      targets = [v.empNo];
     }
 
     if(mode === "all"){
-      // UI-only v1: “alla” = union av empNo i grupper + empNo i befintliga tasks
-      const set = new Set(loadTasks().map(t => String(t.empNo||"").trim()).filter(Boolean));
-      loadGroups().forEach(g => (g.members||[]).forEach(m => set.add(String(m).trim())));
-      targets = Array.from(set);
+      targets = computeAllTargets("all");
       if(targets.length === 0){
-        setMsg("err", "‘Alla’ kräver att minst en medarbetare finns i grupper eller redan har uppgifter.");
+        setMsg("err", "‘Alla’ kräver att minst en medarbetare finns i grupper (eller redan i uppgifter).");
         return;
       }
     }
@@ -413,14 +1115,37 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
         setMsg("err", "Välj en grupp.");
         return;
       }
-      targets = (g.members||[]).map(x => String(x).trim()).filter(Boolean);
+      const set = new Set();
+      (g.members||[]).forEach(m => {
+        const v = validateEmpNo(m);
+        if(v.ok) set.add(v.empNo);
+      });
+      targets = Array.from(set);
       if(targets.length === 0){
-        setMsg("err", "Gruppen har inga medlemmar (anst.nr).");
+        setMsg("err", "Gruppen har inga giltiga medlemmar (anst.nr).");
         return;
       }
     }
 
-    const created = pushTasks(targets, title, lines, prio, adminNote);
+    const payload = {
+      kind,
+      title,
+      prio,
+      adminNote,
+      lines,
+      startDate: startDate || "",
+      endDate: (kind === "oneoff") ? (endDate || "") : "",
+      dedupe
+    };
+
+    if(kind === "recurring"){
+      payload.freq = recurringMeta.freq;
+      payload.interval = recurringMeta.interval;
+      payload.byWeekday = recurringMeta.byWeekday;
+      payload.untilDate = recurringMeta.untilDate;
+    }
+
+    const created = pushTasks(targets, payload);
     setMsg("ok", `Skapat ${created} uppgift(er).`);
     renderList();
   });
@@ -429,10 +1154,51 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
     $("#title").value = "";
     $("#tasks").value = "";
     $("#adminNote").value = "";
+    $("#targetEmpNo").value = "";
+    $("#startDate").value = "";
+    $("#endDate").value = "";
+    $("#taskKind").value = "oneoff";
+    $("#freq").value = "daily";
+    $("#interval").value = "1";
+    setSelectedWeekdays([]);
+    $$("input[name='untilMode']").forEach(r => r.checked = (r.value === "forever"));
+    $("#untilDate").value = "";
+    $("#dedupeMode").value = "on";
+    $("#dedupeModeR").value = "on";
     setMsg("", "");
+    syncKindUI();
   });
 
   // --- List ---
+  function updateKpis(all){
+    const open = all.filter(x => (x.status||"open") === "open").length;
+    const prog = all.filter(x => (x.status||"open") === "progress").length;
+    const done = all.filter(x => (x.status||"open") === "done").length;
+    const rec  = all.filter(x => (x.kind||"oneoff") === "recurring").length;
+    $("#kpiOpen").textContent = String(open);
+    $("#kpiProg").textContent = String(prog);
+    $("#kpiDone").textContent = String(done);
+    $("#kpiRec").textContent  = String(rec);
+  }
+
+  function endRecurring(id){
+    const all = loadTasks();
+    const idx = all.findIndex(x => x.id === id);
+    if(idx < 0) return;
+    const t = all[idx];
+    if((t.kind||"oneoff") !== "recurring") return;
+
+    // AUTOPATCH: tills vidare -> sätt untilDate = idag (inklusive)
+    if(!confirm("Avsluta återkommande (sätt slutdatum = idag, inkl.)?")) return;
+    t.recurring = t.recurring || {};
+    t.recurring.untilDate = todayISO();
+    t.recurring.untilInclusive = true;
+    t.updatedAt = Date.now();
+    all[idx] = t;
+    save(TASKS_KEY, all);
+    renderList();
+  }
+
   function renderList(){
     const list = $("#list");
     list.innerHTML = "";
@@ -441,16 +1207,18 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
     const q = String($("#search").value || "").trim().toLowerCase();
 
     const all = loadTasks().slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    updateKpis(all);
 
     let shown = all;
 
     if(filter === "open") shown = shown.filter(x => (x.status||"open") !== "done");
     if(filter === "done") shown = shown.filter(x => (x.status||"open") === "done");
     if(filter === "progress") shown = shown.filter(x => (x.status||"open") === "progress");
+    if(filter === "recurring") shown = shown.filter(x => (x.kind||"oneoff") === "recurring");
 
     if(q){
       shown = shown.filter(x => {
-        const blob = `${x.empNo||""} ${x.title||""} ${x.text||""} ${x.adminNote||""} ${x.employeeComment||""}`.toLowerCase();
+        const blob = `${x.empNo||""} ${x.title||""} ${x.text||""} ${x.adminNote||""} ${x.employeeComment||""} ${x.startDate||""} ${x.endDate||""} ${(x.recurring?.untilDate)||""}`.toLowerCase();
         return blob.includes(q);
       });
     }
@@ -463,6 +1231,10 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
     }
 
     shown.forEach(x => {
+      const kind = x.kind || "oneoff";
+      const recLabel = (kind === "recurring") ? recurringRuleLabel(x.recurring) : "";
+      const dates = dateLabel(x);
+
       const el = document.createElement("div");
       el.className = "item";
       el.innerHTML = `
@@ -472,13 +1244,22 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
             <span><strong>Anst.nr:</strong> ${escapeHtml(x.empNo || "—")}</span>
             <span class="pill">${escapeHtml(statusLabel(x.status))}</span>
             <span class="pill">Prio: ${escapeHtml(x.prio || "normal")}</span>
+            <span class="pill">${escapeHtml(kindLabel(kind))}</span>
           </div>
+
+          <div class="meta">
+            <span><strong>Datum:</strong> ${escapeHtml(dates)}</span>
+            ${recLabel ? `<span><strong>Regel:</strong> ${escapeHtml(recLabel)}</span>` : ``}
+          </div>
+
           <div class="meta"><span><strong>Text:</strong> ${escapeHtml(x.text || "—")}</span></div>
           ${x.adminNote ? `<div class="meta"><span><strong>Admin:</strong> ${escapeHtml(x.adminNote)}</span></div>` : ``}
           ${x.employeeComment ? `<div class="meta"><span><strong>Medarbetare:</strong> ${escapeHtml(x.employeeComment)}</span></div>` : ``}
         </div>
+
         <div class="row" style="gap:8px;">
-          <button type="button" class="secondary" data-del="${escapeHtml(x.id)}">Ta bort</button>
+          ${kind === "recurring" ? `<button type="button" class="secondary" data-endrec="${escapeHtml(x.id)}">Avsluta</button>` : ``}
+          <button type="button" class="secondary" data-del="${escapeHtml(x.id)}" aria-label="Ta bort uppgift ${escapeHtml(x.title||"")} för ${escapeHtml(x.empNo||"")}">Ta bort</button>
         </div>
       `;
       list.appendChild(el);
@@ -493,14 +1274,24 @@ AO-046 | FIL-ID: admin/tasks.html (inline JS)
         renderList();
       });
     });
+
+    list.querySelectorAll("button[data-endrec]").forEach(btn => {
+      btn.addEventListener("click", () => endRecurring(btn.getAttribute("data-endrec")));
+    });
   }
 
   $("#listFilter").addEventListener("change", renderList);
   $("#search").addEventListener("input", renderList);
 
   // init
+  seedTemplatesIfEmpty();
+  renderTemplateSelect();
   renderGroupSelect();
   syncTargetUI();
+
+  // bra default: startdatum = idag (bara UI, påverkar inte om du lämnar tomt)
+  if(!$("#startDate").value) $("#startDate").value = "";
+  syncKindUI();
   renderList();
 
 })();
