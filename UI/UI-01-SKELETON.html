@@ -1,73 +1,318 @@
 <!-- ============================================================
 AO-001 | FIL-ID: UI/UI-01-SKELETON.html
 Projekt: HR-System
-Syfte: Stam-login (gemensam ingång för alla roller)
+Syfte: Stammens login + roll-routing (v1)
+Roller v1 (låst): admin, employee
+Krav:
+- En gemensam inloggning
+- Generiskt felmeddelande vid fel
+- Cooldown efter X misslyckade försök (UI-only)
+- URL-parametrar stöd (name, empNo, password) för snabbtest
+- pinRequired=false hook (ingen PIN implementeras)
 Policy:
-- Ingen backend
-- Ingen PIN i v1
-- Ingen rollstyrning här (sker i JS)
+- Ingen backend (v1)
+- Ingen känslig persondata lagras
+- Session i sessionStorage (AO-001_LOGIN_V1)
+Rollback:
+- Om du har äldre version, lägg den i ARCHIVE/v0.1/UI/UI-01-SKELETON.html
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Logga in</title>
+  <title>HR-System – Inlogg</title>
+  <meta name="description" content="Stammens inlogg för HR-System. Router till rätt vy baserat på roll." />
 
   <link rel="stylesheet" href="./UI-02-STYLES.css" />
+
+  <style>
+    /* Minimal lokalt om CSS saknar smådetaljer */
+    .login-wrap{ max-width: 560px; margin: 0 auto; }
+    .muted-small{ color: var(--muted); font-size: 0.92rem; }
+    .row-actions{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .cooldown{
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: #fff6e5;
+      margin-top: 10px;
+      display:none;
+    }
+    .cooldown.show{ display:block; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; }
+  </style>
 </head>
+
 <body>
 
-  <main class="login-wrap">
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Stamm (Login)</span>
+  </div>
+  <nav class="nav" aria-label="Snabb">
+    <a href="../employee/home.html" title="Kräver inlogg">Employee</a>
+    <a href="../admin/home.html" title="Kräver inlogg">Admin</a>
+  </nav>
+</header>
 
-    <section class="login-card" id="view-login">
-      <h1>Logga in</h1>
+<main class="container login-wrap">
+  <section class="card" aria-label="Inloggning">
+    <h1 class="tight">Logga in</h1>
+    <p class="muted-small">
+      En ingång för alla. Efter lyckad inloggning skickas du till rätt vy baserat på roll.
+    </p>
 
-      <form id="loginForm" novalidate>
+    <div class="dashgrid">
+      <section class="panel">
+        <div class="panel-title">Uppgifter</div>
+
         <label>
-          Namn
-          <input id="inpName" type="text" autocomplete="name" />
+          Namn (valfritt)
+          <input id="inpName" type="text" placeholder="t.ex. Anders" autocomplete="name" />
         </label>
 
         <label>
-          Anställningsnummer
-          <input id="inpEmpNo" type="text" inputmode="numeric" />
+          Anställningsnummer / ID
+          <input id="inpEmpNo" type="text" placeholder="t.ex. 1234 eller admin" autocomplete="username" />
         </label>
 
         <label>
           Lösenord
-          <input id="inpPassword" type="password" />
+          <input id="inpPass" type="password" placeholder="••••••••" autocomplete="current-password" />
         </label>
 
-        <div class="actions">
-          <button id="btnLogin" type="submit">Logga in</button>
-          <button id="btnReset" type="button" class="secondary">Rensa</button>
+        <div class="row-actions" style="margin-top:10px;">
+          <button id="btnLogin" type="button">Logga in</button>
+          <button id="btnClear" type="button" class="secondary">Rensa</button>
         </div>
 
-        <p id="loginMessage" class="message" aria-live="polite"></p>
-      </form>
+        <p id="msg" class="message" aria-live="polite"></p>
 
-      <p class="muted small">
-        Problem med inlogg? Kontakta administratör.
-      </p>
-    </section>
+        <div id="cooldownBox" class="cooldown" role="status" aria-live="polite">
+          För många försök. Vänta <strong id="cooldownLeft">30</strong> sekunder och försök igen.
+        </div>
 
-    <!-- Admin-vy (minimal placeholder i v1) -->
-    <section id="view-admin" hidden>
-      <h1>Admin</h1>
-      <p>Inloggad som <strong id="adminWho">—</strong></p>
-      <p>Roll: <span id="adminRole">—</span></p>
-      <button id="btnLogoutAdmin" class="secondary">Logga ut</button>
-    </section>
+        <p class="muted-small" style="margin-top:10px;">
+          Ingen “glömt lösen” i v1. Kontakta admin.
+        </p>
+      </section>
 
-    <!-- Employee placeholder (ska inte visas, redirect sker) -->
-    <section id="view-employee" hidden>
-      <p>Redirectar…</p>
-    </section>
+      <section class="panel">
+        <div class="panel-title">Snabbtest (v1)</div>
+        <ul class="list">
+          <li><span>Employee</span><span class="pill mono">empNo=1234 / pass=employee</span></li>
+          <li><span>Admin</span><span class="pill mono">empNo=admin / pass=admin</span></li>
+        </ul>
 
-  </main>
+        <p class="muted-small">
+          Du kan även testa via URL:
+          <span class="mono">?name=Anders&empNo=1234&password=employee</span>
+        </p>
+      </section>
+    </div>
+  </section>
+</main>
 
-  <!-- AO-001 | FIL-ID: UI/UI-03-APP.js -->
-  <script src="./UI-03-APP.js"></script>
+<script>
+/* ============================================================
+AO-001 | FIL-ID: UI/UI-01-SKELETON.html (inline JS)
+Syfte:
+- Auth (demo) + role routing
+- Generic error
+- Cooldown after X failed attempts
+- URL param support
+- pinRequired=false hook (TODO)
+============================================================ */
+(function () {
+  "use strict";
+
+  // ---- Config (v1) ----
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+
+  const MAX_FAILS = 5;
+  const COOLDOWN_SECONDS = 30;
+
+  // Demo-credentials (v1)
+  // NOTE: Generiskt felmeddelande vid fel (ingen info om konto finns)
+  const DEMO = {
+    employee: { empNo: "1234", password: "employee" },
+    admin: { empNo: "admin", password: "admin" }
+  };
+
+  // PIN hook (no implementation)
+  // TODO (AO-001): pinRequired=false i routing-regel, implementera inte PIN i v1.
+  const pinRequired = false;
+
+  // ---- DOM ----
+  const inpName = document.getElementById("inpName");
+  const inpEmpNo = document.getElementById("inpEmpNo");
+  const inpPass = document.getElementById("inpPass");
+  const btnLogin = document.getElementById("btnLogin");
+  const btnClear = document.getElementById("btnClear");
+  const msg = document.getElementById("msg");
+
+  const cooldownBox = document.getElementById("cooldownBox");
+  const cooldownLeft = document.getElementById("cooldownLeft");
+
+  // ---- State (UI-only) ----
+  let failCount = 0;
+  let cooldownUntil = 0;
+  let cooldownTimer = null;
+
+  function setMsg(kind, text){
+    msg.className = "message" + (kind ? " " + kind : "");
+    msg.textContent = text || "";
+  }
+
+  function now(){ return Date.now(); }
+
+  function parseParams(){
+    try{
+      const u = new URL(window.location.href);
+      const name = u.searchParams.get("name") || "";
+      const empNo = u.searchParams.get("empNo") || "";
+      const password = u.searchParams.get("password") || "";
+      return { name, empNo, password };
+    }catch{
+      return { name:"", empNo:"", password:"" };
+    }
+  }
+
+  function setInputsFromParams(){
+    const p = parseParams();
+    if (p.name) inpName.value = p.name;
+    if (p.empNo) inpEmpNo.value = p.empNo;
+    if (p.password) inpPass.value = p.password;
+  }
+
+  function roleFromCreds(empNo, password){
+    if (empNo === DEMO.admin.empNo && password === DEMO.admin.password) return "admin";
+    if (empNo === DEMO.employee.empNo && password === DEMO.employee.password) return "employee";
+    return null;
+  }
+
+  function targetUrlForRole(role){
+    // IMPORTANT: relative from /UI/
+    if (role === "admin") return "../admin/home.html";
+    if (role === "employee") return "../employee/home.html";
+    return "../UI/UI-01-SKELETON.html";
+  }
+
+  function writeSession(auth){
+    const payload = {
+      auth: {
+        isAuthed: true,
+        role: auth.role,
+        empNo: auth.empNo || "",
+        displayName: auth.displayName || "",
+        createdAt: now(),
+        expiresAt: now() + (2 * 60 * 60 * 1000), // 2h demo-session
+        pinRequired: false // hook value
+      }
+    };
+    sessionStorage.setItem(SESSION_KEY, JSON.stringify(payload));
+  }
+
+  function isInCooldown(){
+    return cooldownUntil && now() < cooldownUntil;
+  }
+
+  function startCooldown(){
+    cooldownUntil = now() + (COOLDOWN_SECONDS * 1000);
+    renderCooldown();
+    if (cooldownTimer) window.clearInterval(cooldownTimer);
+    cooldownTimer = window.setInterval(renderCooldown, 250);
+  }
+
+  function renderCooldown(){
+    const leftMs = Math.max(0, cooldownUntil - now());
+    const left = Math.ceil(leftMs / 1000);
+    if (left > 0){
+      cooldownBox.classList.add("show");
+      cooldownLeft.textContent = String(left);
+      btnLogin.disabled = true;
+    }else{
+      cooldownBox.classList.remove("show");
+      btnLogin.disabled = false;
+      cooldownUntil = 0;
+      if (cooldownTimer) window.clearInterval(cooldownTimer);
+      cooldownTimer = null;
+      failCount = 0; // reset after cooldown
+    }
+  }
+
+  function genericFail(){
+    setMsg("err", "Ogiltig inloggning.");
+  }
+
+  function attemptLogin(){
+    setMsg("", "");
+
+    if (isInCooldown()){
+      renderCooldown();
+      return;
+    }
+
+    const displayName = String(inpName.value || "").trim();
+    const empNo = String(inpEmpNo.value || "").trim();
+    const password = String(inpPass.value || "").trim();
+
+    // empty -> generic
+    if (!empNo || !password){
+      failCount++;
+      genericFail();
+      if (failCount >= MAX_FAILS) startCooldown();
+      return;
+    }
+
+    const role = roleFromCreds(empNo, password);
+    if (!role){
+      failCount++;
+      genericFail();
+      if (failCount >= MAX_FAILS) startCooldown();
+      return;
+    }
+
+    // Pin hook exists but not used
+    if (pinRequired === true){
+      // Not implemented by policy
+      // TODO (AO-001): if pinRequired ever true, route to PIN step (future)
+    }
+
+    // success
+    writeSession({ role, empNo, displayName });
+
+    const target = targetUrlForRole(role);
+    window.location.replace(target);
+  }
+
+  function clearForm(){
+    inpName.value = "";
+    inpEmpNo.value = "";
+    inpPass.value = "";
+    setMsg("", "");
+  }
+
+  // Init
+  setInputsFromParams();
+
+  btnLogin.addEventListener("click", attemptLogin);
+  btnClear.addEventListener("click", clearForm);
+
+  // Enter submits
+  [inpName, inpEmpNo, inpPass].forEach(el => {
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter"){
+        e.preventDefault();
+        attemptLogin();
+      }
+    });
+  });
+
+})();
+</script>
+
 </body>
 </html>
