@@ -1,1 +1,1026 @@
+<!-- ============================================================
+AO-020 | FIL-ID: admin/org.html
+Projekt: HR-System
+Syfte: Admin – Org Builder (koncern-träd) – UI-only v1 (nivå 3)
+Kontrakt (LÅST i v1):
+- Exakt 1 Root-nod (ROOT_ID). Alla andra noder ligger under root.
+- Trädet har obegränsade nivåer (parentId pekar på valfri nod).
+- Scope-regel (subtree): scopeId gäller för noden + alla dess barn (subtree).
+Radering stoppas om:
+- noden har barn, eller
+- noden är scope i assignments, eller
+- noden ligger under en scope (ancestor-scope)  ✅ (säkrast för systemet)
+Policy:
+- Ingen backend
+- Ingen känslig persondata lagras
+- Robust guard: sessionStorage först, fallback localStorage (fail-closed)
+Lagring:
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-020_ORG_V1 (localStorage) – org-träd (nodes)
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – assignments (empNo -> { roleId, scopeId })
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Org Builder</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .layout{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .layout{ grid-template-columns: 1fr; }
+    }
+
+    .panel{
+      border: 1px solid var(--line);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .panel:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+    .panel.create{ background: rgba(167,243,208,.18); }
+    .panel.list{ background: rgba(191,219,254,.18); }
+
+    .row2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 620px){
+      .row2{ grid-template-columns: 1fr; }
+    }
+
+    .item{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background:#fff;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+    .item:hover{
+      transform: var(--lift);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.02);
+    }
+    .item-title{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+      margin-top:10px;
+    }
+
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+    code{ font-size:.95em; }
+
+    .kpis{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin: 10px 0 2px;
+    }
+    .kpi{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.95rem;
+    }
+
+    .treeName{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+      min-width: 260px;
+      flex: 1 1 560px;
+    }
+
+    .warnpill{
+      background: rgba(254,226,226,.9);
+    }
+
+    .health{
+      margin-top:10px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      padding: 10px 12px;
+      background:#fff;
+    }
+    .health .title{
+      font-weight: 800;
+      margin:0 0 4px;
+    }
+    .health .row{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:space-between;
+    }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin • Org Builder</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Uppgifter</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./org.html" aria-current="page">Org</a>
+    <a href="./roles.html">Roller</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Org Builder</h1>
+  <p class="muted">Bygg koncernens struktur (obegränsade nivåer). Root är alltid 1 och allt ligger under den.</p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+      </div>
+      <div class="row wrap">
+        <a class="btn secondary" href="./roles.html">Öppna Roller (demo)</a>
+      </div>
+    </div>
+
+    <div class="layout">
+
+      <!-- SKAPA/REDIGERA -->
+      <section class="panel create" aria-label="Skapa org-nod">
+        <div class="panel-title">Skapa / Redigera nod</div>
+
+        <div class="kpis" aria-label="Sammanfattning">
+          <div class="kpi">Noder: <strong id="kpiNodes">0</strong></div>
+          <div class="kpi">Top-nivå: <strong id="kpiTop">0</strong></div>
+          <div class="kpi">Maxdjup: <strong id="kpiDepth">0</strong></div>
+        </div>
+
+        <div id="healthBox" class="health" style="display:none;">
+          <p class="title">Datahälsa</p>
+          <div class="row">
+            <div class="muted" id="healthText">—</div>
+            <div class="row" style="gap:8px;">
+              <button id="btnRepair" type="button" class="secondary">Reparera (fail-safe)</button>
+              <button id="btnHideHealth" type="button" class="secondary">Dölj</button>
+            </div>
+          </div>
+          <div class="smallnote">
+            Reparera = bryt loopar + återställ orphans till root. (Sparar om <code>AO-020_ORG_V1</code>.)
+          </div>
+        </div>
+
+        <div class="row2" style="margin-top:10px;">
+          <label>
+            Namn
+            <input id="orgName" type="text" placeholder="t.ex. Bolag A / Enhet Kök / Team X" />
+          </label>
+
+          <label>
+            (Valfritt) Typ
+            <input id="orgType" type="text" placeholder="t.ex. Koncern / Bolag / Enhet / Team" />
+          </label>
+        </div>
+
+        <div class="row2" style="margin-top:10px;">
+          <label>
+            Parent (överordnad)
+            <select id="orgParent"></select>
+          </label>
+
+          <label>
+            Id (auto)
+            <input id="orgId" type="text" disabled />
+          </label>
+        </div>
+
+        <div class="row-actions" style="margin-top:10px;">
+          <button id="btnSave" type="button">Spara nod</button>
+          <button id="btnNew" type="button" class="secondary">Ny nod</button>
+        </div>
+
+        <p id="msg" class="message" aria-live="polite"></p>
+
+        <div class="smallnote">
+          Kontrakt: Root = 1. Scope gäller för nod + subtree. Radering blockeras om noden ligger inom aktiv scope.
+          <br/>Lagring: <code>AO-020_ORG_V1</code> + assignments: <code>AO-020_ROLE_ASSIGNMENTS_V2</code>.
+        </div>
+      </section>
+
+      <!-- LISTA/TRÄD -->
+      <section class="panel list" aria-label="Org-träd">
+        <div class="panel-title">Org-träd</div>
+
+        <div class="row2" style="margin-bottom:10px;">
+          <label>
+            Sök
+            <input id="search" type="text" placeholder="sök på namn/typ/id" />
+          </label>
+
+          <label>
+            Visa
+            <select id="filter">
+              <option value="all" selected>Alla</option>
+              <option value="top">Top-nivå (barn till root)</option>
+              <option value="leaf">Endast löv (utan barn)</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="list" role="tree" aria-label="Org-träd"></div>
+
+        <div class="smallnote">
+          Tips: “Ta bort” stoppas om noden har barn eller ligger inom aktiv scope.
+        </div>
+      </section>
+
+    </div>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+AO-020 | FIL-ID: admin/org.html (inline JS)
+============================================================ */
+(function(){
+  "use strict";
+
+  const SESSION_KEY   = "AO-001_LOGIN_V1";
+  const ORG_KEY       = "AO-020_ORG_V1";
+  const ASSIGN_V2_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
+
+  const ROOT_ID = "org_root_v1";
+  const MAX_CHAIN_GUARD = 200; // fail-closed mot korrupta kedjor
+
+  const $  = (s) => document.querySelector(s);
+
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
+  function readAuth(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+      if(data.auth.role !== "admin") return null;
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+      return data.auth;
+    }catch{
+      return null;
+    }
+  }
+
+  function safeParse(key, fallback){
+    try{
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function genId(prefix){
+    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  // --- Guard ---
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+  $("#whoName").textContent = auth.displayName || "Admin";
+  $("#navLogout").addEventListener("click", (e) => {
+    e.preventDefault();
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  });
+
+  // --- Org model ---
+  function normalizeNode(n){
+    const id = String(n?.id || "").trim();
+    const name = String(n?.name || "").trim();
+    const type = String(n?.type || "").trim();
+    const createdAt = Number.isFinite(n?.createdAt) ? n.createdAt : Date.now();
+    const updatedAt = Number.isFinite(n?.updatedAt) ? n.updatedAt : Date.now();
+
+    if(!id || !name) return null;
+
+    if(id === ROOT_ID){
+      return { id: ROOT_ID, name: name || "Koncern (Root)", type: type || "Root", parentId: null, createdAt, updatedAt };
+    }
+
+    // Kontrakt: allt ligger under root
+    const parentIdRaw = (n?.parentId === null || n?.parentId === undefined) ? ROOT_ID : String(n.parentId).trim();
+    const parentId = parentIdRaw ? parentIdRaw : ROOT_ID;
+
+    return { id, name, type, parentId, createdAt, updatedAt };
+  }
+
+  function seedRootIfMissing(nodes){
+    const arr = Array.isArray(nodes) ? nodes.slice() : [];
+    const hasRoot = arr.some(x => x && x.id === ROOT_ID);
+    if(hasRoot) return arr;
+
+    const now = Date.now();
+    arr.unshift({
+      id: ROOT_ID,
+      name: "Koncern (Root)",
+      type: "Root",
+      parentId: null,
+      createdAt: now,
+      updatedAt: now
+    });
+    return arr;
+  }
+
+  function buildById(nodes){
+    const byId = new Map();
+    const dupes = [];
+    for(const n of nodes){
+      if(byId.has(n.id)) dupes.push(n.id);
+      else byId.set(n.id, n);
+    }
+    return { byId, dupes: Array.from(new Set(dupes)) };
+  }
+
+  function buildChildrenMap(nodes){
+    const map = new Map();
+    nodes.forEach(n => { map.set(n.id, []); });
+    nodes.forEach(n => {
+      const pid = (n.parentId === null || n.parentId === undefined) ? null : n.parentId;
+      if(pid && map.has(pid)) map.get(pid).push(n.id);
+    });
+    return map;
+  }
+
+  function flattenTree(nodes){
+    const { byId } = buildById(nodes);
+    const children = buildChildrenMap(nodes);
+
+    const out = [];
+    function walk(id, depth, path){
+      const n = byId.get(id);
+      if(!n) return;
+      out.push({ id: n.id, name: n.name, type: n.type, parentId: n.parentId, depth });
+      const kids = (children.get(id) || []).slice().sort((a,b) => {
+        const na = byId.get(a)?.name || "";
+        const nb = byId.get(b)?.name || "";
+        return na.localeCompare(nb, "sv");
+      });
+      for(const k of kids){
+        if(path.has(k)) continue;
+        path.add(k);
+        walk(k, depth + 1, path);
+        path.delete(k);
+      }
+    }
+    walk(ROOT_ID, 1, new Set([ROOT_ID]));
+    return out;
+  }
+
+  function computeDepth(nodes){
+    const children = buildChildrenMap(nodes);
+    let maxDepth = 0;
+    function dfs(id, depth, path){
+      maxDepth = Math.max(maxDepth, depth);
+      const kids = children.get(id) || [];
+      for(const k of kids){
+        if(path.has(k)) continue;
+        path.add(k);
+        dfs(k, depth + 1, path);
+        path.delete(k);
+      }
+    }
+    dfs(ROOT_ID, 1, new Set([ROOT_ID]));
+    return maxDepth;
+  }
+
+  // --- Data health checks + repair ---
+  function validateAndFix(nodes){
+    // returns { nodes, issues: string[], needsRepair: boolean }
+    let arr = Array.isArray(nodes) ? nodes.slice() : [];
+    const issues = [];
+    let needsRepair = false;
+
+    // Normalize & drop invalid
+    const norm = [];
+    for(const it of arr){
+      const n = normalizeNode(it);
+      if(n) norm.push(n);
+    }
+    arr = seedRootIfMissing(norm);
+
+    // Dedup IDs (keep first)
+    const { byId, dupes } = buildById(arr);
+    if(dupes.length){
+      issues.push(`Dublett-ID upptäckt: ${dupes.slice(0,6).join(", ")}${dupes.length>6?"…":""}.`);
+      needsRepair = true;
+      const seen = new Set();
+      arr = arr.filter(n => {
+        if(seen.has(n.id)) return false;
+        seen.add(n.id);
+        return true;
+      });
+    }
+
+    // Ensure parent exists (orphans -> root)
+    const ids = new Set(arr.map(x => x.id));
+    const fixedParents = arr.map(n => {
+      if(n.id === ROOT_ID) return n;
+      if(!n.parentId || !ids.has(n.parentId)){
+        issues.push(`Orphan parent för ${n.id} → flyttas till root vid reparation.`);
+        needsRepair = true;
+        return { ...n, parentId: ROOT_ID };
+      }
+      if(n.parentId === null){
+        issues.push(`Nod ${n.id} hade parent=null → tvingas under root (kontrakt).`);
+        needsRepair = true;
+        return { ...n, parentId: ROOT_ID };
+      }
+      return n;
+    });
+    arr = fixedParents;
+
+    // Detect cycles via parent-chain per node (fail-closed)
+    const parentOf = new Map(arr.map(n => [n.id, n.parentId]));
+    function chainHasCycle(startId){
+      const seen = new Set();
+      let cur = startId;
+      let steps = 0;
+      while(cur && steps < MAX_CHAIN_GUARD){
+        if(cur === ROOT_ID) return false;
+        if(seen.has(cur)) return true;
+        seen.add(cur);
+        const p = parentOf.get(cur);
+        cur = p || ROOT_ID;
+        steps++;
+      }
+      // If we hit guard, treat as corruption risk
+      return true;
+    }
+
+    const cycleNodes = arr.filter(n => n.id !== ROOT_ID && chainHasCycle(n.id)).map(n => n.id);
+    if(cycleNodes.length){
+      issues.push(`Loop/cykel upptäckt i org-data. Vissa noder kan döljas tills reparation körs.`);
+      needsRepair = true;
+    }
+
+    return { nodes: arr, issues, needsRepair, cycleNodes };
+  }
+
+  function repairOrg(){
+    const raw = safeParse(ORG_KEY, []);
+    const { nodes, cycleNodes } = validateAndFix(raw);
+
+    // Bryt cykler: flytta markerade cykel-noder direkt under root (fail-safe)
+    if(Array.isArray(cycleNodes) && cycleNodes.length){
+      const cycleSet = new Set(cycleNodes);
+      for(let i=0;i<nodes.length;i++){
+        const n = nodes[i];
+        if(n.id !== ROOT_ID && cycleSet.has(n.id)){
+          nodes[i] = { ...n, parentId: ROOT_ID, updatedAt: Date.now() };
+        }
+      }
+    }
+
+    save(ORG_KEY, nodes);
+  }
+
+  // --- Assignments + subtree blocking ---
+  function loadAssignmentsV2(){
+    const raw = safeParse(ASSIGN_V2_KEY, {});
+    return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
+  }
+
+  function extractScopeIds(assignments){
+    const set = new Set();
+    for(const empNo of Object.keys(assignments || {})){
+      const v = assignments[empNo];
+      const sid = String(v?.scopeId || "").trim();
+      if(sid) set.add(sid);
+    }
+    return Array.from(set);
+  }
+
+  function computeBlockedByScopes(nodes, scopeIds){
+    // Block if:
+    // - nodeId is an exact scopeId, OR
+    // - some scopeId is an ancestor of nodeId (subtree scope safety)
+    const scopes = new Set(scopeIds.map(String));
+    const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
+
+    const memo = new Map(); // nodeId -> boolean
+    function isBlocked(nodeId){
+      const id = String(nodeId);
+      if(memo.has(id)) return memo.get(id);
+
+      if(id === ROOT_ID){
+        const v = scopes.has(ROOT_ID);
+        memo.set(id, v);
+        return v;
+      }
+
+      if(scopes.has(id)){
+        memo.set(id, true);
+        return true;
+      }
+
+      // walk up
+      let cur = id;
+      let steps = 0;
+      const seen = new Set([cur]);
+      while(cur && steps < MAX_CHAIN_GUARD){
+        const p = parentOf.get(cur) || ROOT_ID;
+        if(!p) break;
+        if(scopes.has(p)){
+          memo.set(id, true);
+          return true;
+        }
+        if(p === ROOT_ID){
+          memo.set(id, scopes.has(ROOT_ID));
+          return memo.get(id);
+        }
+        if(seen.has(p)){
+          // corruption -> fail-closed: treat as blocked
+          memo.set(id, true);
+          return true;
+        }
+        seen.add(p);
+        cur = p;
+        steps++;
+      }
+      // guard hit -> fail-closed
+      memo.set(id, true);
+      return true;
+    }
+
+    const blocked = new Set();
+    nodes.forEach(n => { if(isBlocked(n.id)) blocked.add(n.id); });
+    return blocked;
+  }
+
+  // --- UI state ---
+  let editingId = null;
+
+  function validateName(name){
+    const s = String(name || "").trim();
+    if(!s) return { ok:false, val:s };
+    if(s.length > 80) return { ok:false, val:s };
+    return { ok:true, val:s };
+  }
+
+  function resetForm(){
+    editingId = null;
+    $("#orgName").value = "";
+    $("#orgType").value = "";
+    $("#orgId").value = "";
+    $("#orgParent").disabled = false;
+    $("#orgParent").value = ROOT_ID;
+    setMsg("", "");
+  }
+
+  function setEditing(node){
+    editingId = node.id;
+    $("#orgId").value = node.id;
+    $("#orgName").value = node.name || "";
+    $("#orgType").value = node.type || "";
+
+    if(node.id === ROOT_ID){
+      $("#orgParent").disabled = true;
+      $("#orgParent").value = ROOT_ID;
+    }else{
+      $("#orgParent").disabled = false;
+      $("#orgParent").value = node.parentId || ROOT_ID;
+    }
+    setMsg("", "");
+  }
+
+  function getDescendants(nodes, startId){
+    const children = buildChildrenMap(nodes);
+    const seen = new Set();
+    const stack = [startId];
+    while(stack.length){
+      const cur = stack.pop();
+      const kids = children.get(cur) || [];
+      for(const k of kids){
+        if(seen.has(k)) continue;
+        seen.add(k);
+        stack.push(k);
+      }
+    }
+    return seen; // excludes startId
+  }
+
+  function renderHealth(health){
+    const box = $("#healthBox");
+    if(!health || !health.needsRepair){
+      box.style.display = "none";
+      return;
+    }
+    box.style.display = "block";
+    const msg = health.issues.length ? health.issues.join(" ") : "Org-data ser korrupt ut och kan behöva reparation.";
+    $("#healthText").textContent = msg;
+  }
+
+  $("#btnHideHealth").addEventListener("click", () => {
+    $("#healthBox").style.display = "none";
+  });
+
+  $("#btnRepair").addEventListener("click", () => {
+    if(!confirm("Reparera org-data? (Bryter loopar + flyttar orphans till root)")) return;
+    repairOrg();
+    setMsg("ok", "Reparerat och sparat org-data.");
+    renderList();
+  });
+
+  function renderParentSelect(nodes){
+    const sel = $("#orgParent");
+    sel.innerHTML = "";
+
+    // Root option (standard parent)
+    const optRoot = document.createElement("option");
+    optRoot.value = ROOT_ID;
+    optRoot.textContent = "Root (högst upp)";
+    sel.appendChild(optRoot);
+
+    const flat = flattenTree(nodes);
+    const descendants = (editingId && editingId !== ROOT_ID) ? getDescendants(nodes, editingId) : new Set();
+
+    flat.forEach(row => {
+      if(row.id === ROOT_ID) return;
+      const opt = document.createElement("option");
+      opt.value = row.id;
+
+      const indent = "—".repeat(Math.min(row.depth - 1, 10));
+      opt.textContent = `${indent} ${row.name}${row.type ? " • " + row.type : ""}`;
+
+      // Disable invalid parents (self + descendants) ✅
+      if(editingId && (row.id === editingId || descendants.has(row.id))){
+        opt.disabled = true;
+      }
+
+      sel.appendChild(opt);
+    });
+
+    if(editingId === ROOT_ID){
+      sel.disabled = true;
+      sel.value = ROOT_ID;
+    }else{
+      sel.disabled = false;
+    }
+  }
+
+  function updateKpis(nodes){
+    const maxDepth = computeDepth(nodes);
+    const children = buildChildrenMap(nodes);
+    const top = (children.get(ROOT_ID) || []).length;
+
+    $("#kpiNodes").textContent = String(nodes.length);
+    $("#kpiTop").textContent = String(top);
+    $("#kpiDepth").textContent = String(maxDepth);
+  }
+
+  function renderList(){
+    const list = $("#list");
+    list.innerHTML = "";
+
+    const raw = safeParse(ORG_KEY, []);
+    const health = validateAndFix(raw);
+
+    // Vi visar varning om korrupt data (loop/dupes/orphans) ✅
+    renderHealth(health);
+
+    // För render: använd validerad/fail-closed data, men spara INTE automatiskt (bara på Repair)
+    const nodes = health.nodes;
+
+    // Parent-select ska bygga på det vi faktiskt renderar
+    renderParentSelect(nodes);
+    updateKpis(nodes);
+
+    const flat = flattenTree(nodes);
+
+    const q = String($("#search").value || "").trim().toLowerCase();
+    const filter = $("#filter").value;
+
+    const children = buildChildrenMap(nodes);
+    const childCount = (id) => (children.get(id) || []).length;
+
+    const assignments = loadAssignmentsV2();
+    const scopeIds = extractScopeIds(assignments);
+    const blockedByScope = computeBlockedByScopes(nodes, scopeIds);
+
+    let rows = flat;
+
+    if(filter === "top"){
+      rows = rows.filter(r => r.parentId === ROOT_ID);
+      // Top: exkludera root själv
+      rows = rows.filter(r => r.id !== ROOT_ID);
+    }
+    if(filter === "leaf"){
+      rows = rows.filter(r => r.id !== ROOT_ID && childCount(r.id) === 0);
+    }
+
+    if(q){
+      rows = rows.filter(r => {
+        const blob = `${r.id} ${r.name} ${r.type || ""} ${(r.parentId || "")}`.toLowerCase();
+        return blob.includes(q);
+      });
+    }
+
+    if(rows.length === 0){
+      list.innerHTML = `<div class="empty">Inga noder matchar filter/sök.</div>`;
+      return;
+    }
+
+    rows.forEach(r => {
+      const isRoot = (r.id === ROOT_ID);
+      const isEditing = (editingId && r.id === editingId);
+      const kids = childCount(r.id);
+
+      // Block delete rules:
+      // - root never
+      // - has children
+      // - within-scope safety (exact scope OR under scope) ✅
+      const blocked = isRoot || (kids > 0) || blockedByScope.has(r.id);
+
+      const indentPx = Math.min((r.depth - 1) * 14, 140);
+      const withinScope = (!isRoot && blockedByScope.has(r.id));
+
+      const el = document.createElement("div");
+      el.className = "item";
+      el.setAttribute("role", "treeitem");
+      el.setAttribute("aria-level", String(r.depth));
+      el.innerHTML = `
+        <div class="treeName">
+          <span aria-hidden="true" style="display:inline-block;width:${indentPx}px;"></span>
+          <div>
+            <p class="item-title">${escapeHtml(r.name || "—")}</p>
+            <div class="meta">
+              <span class="pill">ID: ${escapeHtml(r.id)}</span>
+              ${r.type ? `<span class="pill">${escapeHtml(r.type)}</span>` : ``}
+              <span class="pill">Barn: ${kids}</span>
+              ${withinScope ? `<span class="pill warnpill">Scope-skydd</span>` : ``}
+              ${isRoot ? `<span class="pill">Root</span>` : ``}
+              ${isEditing ? `<span class="pill">Redigeras</span>` : ``}
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="gap:8px;">
+          <button type="button" class="secondary" data-edit="${escapeHtml(r.id)}">Redigera</button>
+          <button type="button" class="secondary" data-del="${escapeHtml(r.id)}" ${blocked ? "disabled" : ""}>
+            Ta bort
+          </button>
+        </div>
+      `;
+      list.appendChild(el);
+    });
+
+    list.querySelectorAll("button[data-edit]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-edit");
+        const node = nodes.find(x => x.id === id);
+        if(!node) return;
+        setEditing(node);
+        renderParentSelect(nodes);
+
+        // sync parent value
+        if(editingId === ROOT_ID){
+          $("#orgParent").disabled = true;
+          $("#orgParent").value = ROOT_ID;
+        }else{
+          $("#orgParent").disabled = false;
+          $("#orgParent").value = node.parentId || ROOT_ID;
+        }
+      });
+    });
+
+    list.querySelectorAll("button[data-del]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-del");
+        if(!id) return;
+
+        const node = nodes.find(x => x.id === id);
+        if(!node) return;
+
+        if(id === ROOT_ID){
+          setMsg("err", "Root kan inte tas bort.");
+          return;
+        }
+
+        const kids = (children.get(id) || []).length;
+        if(kids > 0){
+          setMsg("err", "Noden har barn. Flytta/ta bort barn först.");
+          return;
+        }
+
+        if(blockedByScope.has(id)){
+          setMsg("err", "Radering stoppas: noden ligger inom en aktiv scope (subtree-skydd). Ändra assignments först.");
+          return;
+        }
+
+        if(!confirm(`Ta bort nod "${node.name}"?`)) return;
+
+        const next = nodes.filter(x => x.id !== id);
+        save(ORG_KEY, next);
+
+        if(editingId === id) resetForm();
+
+        setMsg("ok", "Nod borttagen.");
+        renderList();
+      });
+    });
+
+    // Ensure form parent select has reasonable default when not editing
+    if(!editingId){
+      $("#orgParent").disabled = false;
+      $("#orgParent").value = ROOT_ID;
+    }
+  }
+
+  // --- Save ---
+  function wouldCreateLoop(nodes, nodeId, newParentId){
+    if(nodeId === ROOT_ID) return true; // root cannot be reparented
+    const pid = newParentId || ROOT_ID;
+    if(pid === nodeId) return true;
+
+    // prevent selecting descendant (should be prevented already in UI)
+    const desc = getDescendants(nodes, nodeId);
+    if(desc.has(pid)) return true;
+    return false;
+  }
+
+  $("#btnSave").addEventListener("click", () => {
+    setMsg("", "");
+
+    const raw = safeParse(ORG_KEY, []);
+    const health = validateAndFix(raw);
+    const nodes = health.nodes;
+
+    const vName = validateName($("#orgName").value);
+    if(!vName.ok){
+      setMsg("err", "Namn krävs (max 80 tecken).");
+      return;
+    }
+
+    const type = String($("#orgType").value || "").trim();
+    const now = Date.now();
+
+    const parentId = (editingId === ROOT_ID) ? null : String($("#orgParent").value || ROOT_ID);
+
+    if(!editingId){
+      const id = genId("org");
+      const newNode = normalizeNode({
+        id,
+        name: vName.val,
+        type,
+        parentId: parentId || ROOT_ID,
+        createdAt: now,
+        updatedAt: now
+      });
+
+      if(!newNode){
+        setMsg("err", "Kunde inte skapa nod (ogiltig data).");
+        return;
+      }
+
+      // Loop-check (should always be ok for new)
+      if(wouldCreateLoop(nodes, newNode.id, newNode.parentId)){
+        setMsg("err", "Ogiltig parent (skulle skapa loop).");
+        return;
+      }
+
+      const next = nodes.concat([newNode]);
+      save(ORG_KEY, next);
+
+      setMsg("ok", "Nod skapad.");
+      resetForm();
+      renderList();
+      return;
+    }
+
+    // Update
+    const idx = nodes.findIndex(x => x.id === editingId);
+    if(idx < 0){
+      setMsg("err", "Vald nod hittades inte.");
+      resetForm();
+      renderList();
+      return;
+    }
+
+    if(editingId === ROOT_ID){
+      // Root: parent locked null
+      const cur = nodes[idx];
+      nodes[idx] = { ...cur, name: vName.val, type: type || cur.type, parentId: null, updatedAt: now };
+      save(ORG_KEY, nodes);
+      setMsg("ok", "Root uppdaterad.");
+      renderList();
+      setEditing(nodes[idx]);
+      return;
+    }
+
+    const cur = nodes[idx];
+    const nextNode = normalizeNode({
+      ...cur,
+      name: vName.val,
+      type,
+      parentId: parentId || ROOT_ID,
+      updatedAt: now
+    });
+
+    if(!nextNode){
+      setMsg("err", "Kunde inte spara (ogiltig data).");
+      return;
+    }
+
+    if(wouldCreateLoop(nodes, nextNode.id, nextNode.parentId)){
+      setMsg("err", "Ogiltig parent (skulle skapa loop).");
+      return;
+    }
+
+    nodes[idx] = nextNode;
+    save(ORG_KEY, nodes);
+
+    setMsg("ok", "Nod sparad.");
+    renderList();
+    setEditing(nextNode);
+
+    // keep select options correct
+    renderParentSelect(validateAndFix(safeParse(ORG_KEY, [])).nodes);
+  });
+
+  $("#btnNew").addEventListener("click", () => {
+    resetForm();
+    renderList();
+  });
+
+  $("#search").addEventListener("input", renderList);
+  $("#filter").addEventListener("change", renderList);
+
+  // init
+  resetForm();
+  renderList();
+
+})();
+</script>
+
+</body>
+</html>
 
