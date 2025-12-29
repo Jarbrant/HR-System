@@ -1,1 +1,275 @@
 
+<!-- ============================================================
+AO-040 | FIL-ID: admin/answers.html
+Projekt: HR-System
+Syfte: Admin – Svar (separat från frågor) – UI-only v1
+Krav:
+- Svar ska ligga på egen sida (blanda inte med frågorna)
+- Visa svar + metadata + anonymt/ej anonymt
+- Ingen backend (v1)
+Policy:
+- Ingen känslig data lagras
+- Robust guard: sessionStorage först, fallback localStorage
+Lagring:
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-015_QA_V1 (localStorage) – frågor/svar (vi läser bara svar här)
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Svar</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .grid{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+    }
+    .cardline{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      padding: 12px;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .cardline:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+    .title{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+    .qtitle{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size: .9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .answer{
+      margin-top:10px;
+      padding: 10px;
+      border-radius: 12px;
+      background: rgba(245,245,244,1);
+      border: 1px solid var(--line);
+      white-space: pre-wrap;
+    }
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+    }
+    .row-controls{
+      display:flex;
+      gap:10px;
+      align-items:end;
+      justify-content:space-between;
+      flex-wrap:wrap;
+      margin-bottom:10px;
+    }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin • Svar</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html" aria-current="page">Svar</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Svar</h1>
+  <p class="muted">Inkomna svar från medarbetare. Den här sidan visar bara svar (inte frågeeditor).</p>
+
+  <section class="card">
+    <div class="row-controls">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">admin</span>
+      </div>
+
+      <label style="margin:0; font-weight:900;">
+        Filter
+        <select id="filter" style="margin-top:6px; width:auto;">
+          <option value="all">Alla svar</option>
+          <option value="anon">Endast anonyma</option>
+          <option value="named">Endast icke-anonyma</option>
+          <option value="7d">Senaste 7 dagar</option>
+        </select>
+      </label>
+    </div>
+
+    <div id="list" class="grid"></div>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+AO-040 | FIL-ID: admin/answers.html (inline JS)
+============================================================ */
+(function(){
+  "use strict";
+
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const QA_KEY      = "AO-015_QA_V1";
+
+  const $ = (s) => document.querySelector(s);
+
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
+  function readAuth(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+      if(data.auth.role !== "admin") return null;
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+      return data.auth;
+    }catch{
+      return null;
+    }
+  }
+
+  function loadQA(){
+    try{
+      const arr = JSON.parse(localStorage.getItem(QA_KEY) || "[]");
+      return Array.isArray(arr) ? arr : [];
+    }catch{
+      return [];
+    }
+  }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function fmtDate(ts){
+    try{
+      if(!ts) return "—";
+      const d = new Date(ts);
+      if(Number.isNaN(d.getTime())) return "—";
+      return d.toLocaleString("sv-SE");
+    }catch{
+      return "—";
+    }
+  }
+
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+
+  $("#whoName").textContent = auth.displayName || "Admin";
+  $("#whoRole").textContent = auth.role || "admin";
+
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  function getAnswers(){
+    const all = loadQA();
+
+    // endast de som har svar
+    const answered = all.filter(q => {
+      const hasA = !!(q.answer && String(q.answer).trim().length);
+      return q.status === "answered" || hasA;
+    });
+
+    // sort: senaste först
+    answered.sort((a,b) => (b.answeredAt||b.updatedAt||0) - (a.answeredAt||a.updatedAt||0));
+    return answered;
+  }
+
+  function applyFilter(arr){
+    const f = $("#filter").value;
+    const now = Date.now();
+
+    if(f === "anon"){
+      return arr.filter(x => x.answerAnonymous === true);
+    }
+    if(f === "named"){
+      return arr.filter(x => x.answerAnonymous !== true);
+    }
+    if(f === "7d"){
+      const limit = now - (7*24*60*60*1000);
+      return arr.filter(x => (x.answeredAt||x.updatedAt||0) >= limit);
+    }
+    return arr;
+  }
+
+  function render(){
+    const list = $("#list");
+    list.innerHTML = "";
+
+    const answers = applyFilter(getAnswers());
+
+    if(!answers.length){
+      list.innerHTML = `<div class="empty">Inga svar för valt filter.</div>`;
+      return;
+    }
+
+    answers.forEach(q => {
+      const who = (q.answerAnonymous === true) ? "Anonym" : (q.empNo ? `Anst.nr ${escapeHtml(q.empNo)}` : "—");
+      const title = escapeHtml(q.title || "Fråga");
+      const question = escapeHtml(q.question || q.body || "");
+      const answer = escapeHtml(q.answer || "");
+      const when = fmtDate(q.answeredAt || q.updatedAt || 0);
+
+      const el = document.createElement("div");
+      el.className = "cardline";
+      el.innerHTML = `
+        <div class="title">
+          <p class="qtitle">${title}</p>
+          <span class="pill">${q.answerAnonymous === true ? "Anonymt" : "Icke-anonymt"}</span>
+        </div>
+        <div class="meta">
+          <span><strong>Från:</strong> ${who}</span>
+          <span><strong>Tid:</strong> ${when}</span>
+        </div>
+        ${question ? `<div class="meta"><span><strong>Fråga:</strong> ${question}</span></div>` : ``}
+        <div class="answer">${answer || "—"}</div>
+      `;
+      list.appendChild(el);
+    });
+  }
+
+  $("#filter").addEventListener("change", render);
+  render();
+
+})();
+</script>
+
+</body>
+</html>
+
