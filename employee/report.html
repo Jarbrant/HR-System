@@ -1,226 +1,535 @@
 <!-- ============================================================
-AO-002 | FIL-ID: employee/report.html
+AO-007 | FIL-ID: employee/report.html
 Projekt: HR-System
-Syfte: Rapportera fel (v1) – UI-only, kopierbar rapport
+Syfte: Medarbetare – Rapportera fel (UI-only v1)
+Krav (din standard):
+- Samlar sida (url), språk, roll, teknisk info (UA, viewport, tid, timezone)
+- Text från användaren
 Policy:
-- Ingen backend
-- Ingen känslig data lagras
-- Samlar teknisk info + fri text
+- Ingen backend (v1)
+- Ingen känslig data lagras (inga personnummer, inga mail/sms)
+- Guard + logout
+- 1 storage-key för felrapporter (lokalt)
+Output:
+- Skapar en lokal rapportpost + kopierbar "rapporttext"
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Rapportera fel</title>
+  <title>HR-System – Medarbetare • Rapportera fel</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
   <style>
+    /* ===== Layout (Nivå 3) ===== */
+    .app-shell{
+      display:grid;
+      grid-template-columns: 280px 1fr;
+      min-height: 100vh;
+    }
+    .side{
+      border-right: 1px solid var(--line);
+      padding: 14px 12px;
+      background:#fff;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow:auto;
+    }
+    .content{ padding: 18px 22px; }
+
+    @media (max-width: 980px){
+      .app-shell{ grid-template-columns: 1fr; }
+      .side{
+        position: fixed;
+        left: 0;
+        top: 0;
+        width: min(320px, 88vw);
+        transform: translateX(-105%);
+        transition: transform 0.18s ease;
+        z-index: 50;
+        box-shadow: 0 18px 48px rgba(0,0,0,0.18);
+      }
+      .side.open{ transform: translateX(0); }
+      .overlay{
+        display:none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0,0,0,0.28);
+        z-index: 40;
+      }
+      .overlay.show{ display:block; }
+      .btn-menu{ display:inline-flex; }
+      .content{ padding: 14px 14px; }
+    }
+
+    /* ===== Top ===== */
     .top{ align-items:center; }
+    .btn-menu{ display:none; background:#fff; color:#111; }
     .top-actions{
       margin-left:auto;
       display:flex;
-      align-items:center;
       gap:10px;
       white-space:nowrap;
+      align-items:center;
     }
     .btn-logout{ opacity:0.85; }
     .btn-logout:hover{ opacity:1; }
 
-    textarea{ min-height: 120px; resize: vertical; }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-    .outbox{
+    /* ===== Sidebar ===== */
+    .side-header{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      margin-bottom:10px;
+    }
+    .side-title{ font-weight:800; font-size:1.02rem; }
+    .side-sub{ margin-top:2px; font-size:0.9rem; color:var(--muted); }
+    .side-badge{
+      font-size: 0.78rem;
       border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 2px 8px;
+      color: var(--muted);
+      white-space:nowrap;
+    }
+    .side-group{
+      margin-top: 12px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+    }
+    .side-group:first-of-type{ border-top:none; padding-top:0; }
+    .side-group-title{
+      font-weight:800;
+      font-size:0.92rem;
+      margin:0 0 8px;
+      color:#111;
+    }
+    .side-link{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
+      padding: 10px 10px;
       border-radius: 12px;
+      border: 1px solid transparent;
+      color:#111;
+      text-decoration:none;
+      margin-bottom:6px;
+    }
+    .side-link:hover{
+      background: rgba(0,0,0,0.03);
+      border-color: rgba(0,0,0,0.04);
+      text-decoration:none;
+    }
+    .side-link[aria-current="page"]{
+      background:#f9fafb;
+      border-color: var(--line);
+    }
+
+    /* ===== UI ===== */
+    .hint{
+      color: var(--muted);
+      font-size: 0.92rem;
+      margin-top: 6px;
+    }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; }
+    .reportbox{
+      border:1px solid var(--line);
+      border-radius: 14px;
       padding: 12px;
       background: #fff;
+    }
+    .reportbox pre{
+      margin: 0;
       white-space: pre-wrap;
       word-break: break-word;
+      font-size: 0.92rem;
+      line-height: 1.35;
     }
+
+    /* Pastell */
+    .card.soft{
+      background:#fdeff2;
+      border-color: transparent;
+    }
+    .card.soft:hover{
+      filter: brightness(1.01);
+    }
+
+    /* Toast */
+    .toast{
+      position: fixed;
+      bottom: 16px;
+      left: 16px;
+      z-index: 60;
+      background:#111;
+      color:#fff;
+      border-radius: 12px;
+      padding: 10px 12px;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.18s ease, transform 0.18s ease;
+      max-width: min(520px, calc(100vw - 32px));
+      pointer-events:none;
+    }
+    .toast.show{ opacity:0.95; transform: translateY(0); }
   </style>
 </head>
+
 <body>
 
 <header class="top">
   <div class="brand">
-    <strong>HR-System</strong>
-    <span class="muted">• Medarbetare</span>
+    <button id="btnMenu" class="btn secondary btn-menu" type="button" aria-label="Öppna meny">☰ Meny</button>
+    <div>
+      <strong>HR-System</strong>
+      <span class="muted">• Medarbetare</span>
+    </div>
   </div>
 
-  <nav class="nav" aria-label="Meny">
-    <a href="./home.html">Hem</a>
-    <a href="./report.html" aria-current="page">Rapportera fel</a>
-  </nav>
-
   <div class="top-actions">
+    <a class="btn secondary" href="./home.html">Hem</a>
     <button id="btnLogout" class="secondary btn-logout" type="button">Logga ut</button>
   </div>
 </header>
 
-<main class="container">
+<div id="overlay" class="overlay" aria-hidden="true"></div>
 
-  <section class="card">
-    <h1 class="tight">Rapportera fel</h1>
-    <p class="muted">
-      Skriv vad som blev fel. Den här v1-versionen skickar inget (ingen backend) –
-      du får en rapport som du kan kopiera och skicka till admin.
-    </p>
-
-    <div class="dashgrid" style="margin-top:12px;">
-      <section class="panel">
-        <div class="panel-title">Din information</div>
-
-        <label>
-          Namn
-          <input id="whoName" type="text" disabled />
-        </label>
-
-        <label>
-          Anställningsnummer
-          <input id="whoEmpNo" type="text" disabled />
-        </label>
-
-        <label>
-          Roll
-          <input id="whoRole" type="text" disabled />
-        </label>
-      </section>
-
-      <section class="panel">
-        <div class="panel-title">Felbeskrivning</div>
-
-        <label>
-          Vad hände?
-          <textarea id="inpMessage" placeholder="Beskriv kort vad du gjorde och vad som blev fel…"></textarea>
-        </label>
-
-        <div class="actions" style="margin-top:10px;">
-          <button id="btnBuild" type="button">Skapa rapport</button>
-          <button id="btnCopy" type="button" class="secondary">Kopiera</button>
-          <a class="btn secondary" href="./home.html">Tillbaka</a>
-        </div>
-
-        <p id="msg" class="message" aria-live="polite"></p>
-      </section>
+<div class="app-shell">
+  <!-- Sidebar -->
+  <aside id="side" class="side" aria-label="Moduler">
+    <div class="side-header">
+      <div>
+        <div class="side-title">Moduler</div>
+        <div class="side-sub">Medarbetare</div>
+      </div>
+      <span class="side-badge">v1</span>
     </div>
 
-    <section class="panel" style="margin-top:12px;">
-      <div class="panel-title">Rapport (kopiera)</div>
-      <div id="out" class="outbox mono" aria-label="Rapport-utdata">—</div>
-    </section>
-  </section>
+    <div class="side-group">
+      <div class="side-group-title">Kärna</div>
+      <a class="side-link" href="./home.html"><span>Hem</span><span class="side-badge">start</span></a>
+      <a class="side-link" href="./tasks.html"><span>Uppgifter</span><span class="side-badge">v1</span></a>
+      <a class="side-link" href="./questions.html"><span>Frågor & svar</span><span class="side-badge">v1</span></a>
+      <a class="side-link" href="./schedule.html"><span>Schema</span><span class="side-badge">sen</span></a>
+      <a class="side-link" href="./docs.html"><span>Dokument</span><span class="side-badge">sen</span></a>
+      <a class="side-link" href="./report.html" aria-current="page"><span>Rapportera fel</span><span class="side-badge">v1</span></a>
+    </div>
 
-</main>
+    <div class="side-group">
+      <div class="side-group-title">Inloggad som</div>
+      <div class="muted small">Namn: <strong id="whoNameSide">—</strong></div>
+      <div class="muted small">Anst.nr: <strong id="whoEmpNoSide">—</strong></div>
+      <div class="muted small">Roll: <strong>employee</strong></div>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="content">
+    <h1 style="margin:0 0 6px;">Rapportera fel</h1>
+    <div class="muted" style="margin-bottom:12px;">
+      Hej <strong id="whoName">—</strong> • Anst.nr <span id="whoEmpNo">—</span> • Roll <span>employee</span>
+    </div>
+
+    <section class="card soft">
+      <div class="panel-title">Beskriv felet</div>
+
+      <div class="dashgrid">
+        <section class="panel">
+          <div class="panel-title">Vad hände?</div>
+
+          <label>
+            Rubrik
+            <input id="inpTitle" type="text" placeholder="Kort titel, t.ex. 'Kan inte spara uppgift'" />
+          </label>
+
+          <label>
+            Beskrivning
+            <textarea id="inpDesc" placeholder="Vad gjorde du? Vad förväntade du dig? Vad hände istället?"></textarea>
+          </label>
+
+          <label>
+            Steg att återskapa (valfritt)
+            <textarea id="inpSteps" placeholder="1) … 2) … 3) …"></textarea>
+          </label>
+
+          <div class="row-actions" style="margin-top:10px;">
+            <button id="btnCreate" type="button">Skapa rapport</button>
+            <button id="btnCopy" type="button" class="secondary">Kopiera rapport</button>
+            <button id="btnClear" type="button" class="secondary">Rensa</button>
+          </div>
+
+          <p id="msg" class="message" aria-live="polite"></p>
+
+          <p class="hint">
+            v1: sparas lokalt. Senare skickas till Systemansvarig/Admin.
+          </p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">Teknisk info (auto)</div>
+          <ul class="list">
+            <li><span>Sida</span><span id="metaUrl" class="pill mono">—</span></li>
+            <li><span>Språk</span><span id="metaLang" class="pill">—</span></li>
+            <li><span>Roll</span><span id="metaRole" class="pill">—</span></li>
+            <li><span>Tid</span><span id="metaTime" class="pill mono">—</span></li>
+            <li><span>Tidzon</span><span id="metaTz" class="pill mono">—</span></li>
+            <li><span>Viewport</span><span id="metaVp" class="pill mono">—</span></li>
+            <li><span>User-Agent</span><span id="metaUa" class="pill mono">—</span></li>
+          </ul>
+          <p class="hint">Ingen känslig data samlas in. Bara tekniska metadata.</p>
+        </section>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:14px;">
+      <div class="panel-title">Rapporttext (kopierbar)</div>
+      <div class="reportbox" aria-label="Rapporttext">
+        <pre id="out">Skapa en rapport så visas texten här.</pre>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script>
 /* ============================================================
-AO-002 | FIL-ID: employee/report.html (inline JS)
-Syfte: Guard + rapportbyggare + kopiera
+AO-007 | FIL-ID: employee/report.html (inline JS)
+Syfte:
+- Guard (employee)
+- Samla metadata
+- Skapa lokal felrapport (1 key)
+- Kopierbar rapporttext
 ============================================================ */
 (function () {
   "use strict";
 
-  const STORAGE_KEY = "AO-001_LOGIN_V1";
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const REPORT_KEY = "AO-007_REPORTS_V1";
 
   const $ = (sel) => document.querySelector(sel);
 
-  function redirectToLogin() {
-    window.location.replace("../UI/UI-01-SKELETON.html#login");
+  function redirectToLogin(){
+    window.location.replace("../UI/UI-01-SKELETON.html");
   }
 
-  function readSession() {
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (!raw) return null;
-      const data = JSON.parse(raw);
-      if (!data?.auth?.isAuthed) return null;
-      if (data.auth.role !== "employee") return null;
-      if (!data.auth.expiresAt || data.auth.expiresAt < Date.now()) return null;
-      return data.auth;
-    } catch {
-      return null;
-    }
+  function readSession(){
+    try{
+      const raw = sessionStorage.getItem(SESSION_KEY);
+      if(!raw) return null;
+      const s = JSON.parse(raw);
+      if(!s?.auth?.isAuthed) return null;
+      if(s.auth.role !== "employee") return null;
+      if(!s.auth.expiresAt || s.auth.expiresAt < Date.now()) return null;
+      return s.auth;
+    }catch{ return null; }
   }
 
-  function setMsg(kind, text) {
+  function toast(text){
+    const t = $("#toast");
+    if(!t) return;
+    t.textContent = text || "";
+    t.classList.add("show");
+    window.setTimeout(() => t.classList.remove("show"), 1700);
+  }
+
+  function setMsg(kind, text){
     const el = $("#msg");
-    if (!el) return;
     el.className = "message" + (kind ? " " + kind : "");
     el.textContent = text || "";
   }
 
-  function buildReport(auth) {
-    const message = String($("#inpMessage")?.value || "").trim();
+  function fmtNow(){
+    try{
+      return new Date().toLocaleString("sv-SE", { year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit", second:"2-digit" });
+    }catch{ return String(Date.now()); }
+  }
 
-    // minimikrav: text
-    if (!message) {
-      setMsg("err", "Skriv en kort felbeskrivning först.");
-      return null;
+  function tz(){
+    try{ return Intl.DateTimeFormat().resolvedOptions().timeZone || "—"; }
+    catch{ return "—"; }
+  }
+
+  function viewport(){
+    return `${window.innerWidth}x${window.innerHeight} (dpr ${window.devicePixelRatio || 1})`;
+  }
+
+  function safeStr(s, maxLen){
+    const x = String(s ?? "").replace(/\s+/g," ").trim();
+    return x.length > maxLen ? x.slice(0, maxLen) + "…" : x;
+  }
+
+  function uid(){
+    return "r_" + Math.random().toString(36).slice(2, 10) + "_" + Date.now().toString(36);
+  }
+
+  function loadReports(){
+    try{
+      const raw = localStorage.getItem(REPORT_KEY);
+      if(!raw) return [];
+      const data = JSON.parse(raw);
+      return Array.isArray(data) ? data : [];
+    }catch{ return []; }
+  }
+
+  function saveReports(arr){
+    localStorage.setItem(REPORT_KEY, JSON.stringify(arr));
+  }
+
+  function buildReportText(r){
+    return [
+      "=== HR-System • Felrapport (v1) ===",
+      `ID: ${r.id}`,
+      `Tid: ${r.time}`,
+      `Roll: ${r.role}`,
+      `Språk: ${r.lang}`,
+      `Sida: ${r.url}`,
+      `Viewport: ${r.viewport}`,
+      `Tidzon: ${r.timezone}`,
+      `UA: ${r.ua}`,
+      "",
+      `Rubrik: ${r.title}`,
+      "Beskrivning:",
+      r.desc || "—",
+      "",
+      "Steg att återskapa:",
+      r.steps || "—",
+      "",
+      "=== Slut ==="
+    ].join("\n");
+  }
+
+  async function copyToClipboard(text){
+    try{
+      await navigator.clipboard.writeText(text);
+      return true;
+    }catch{
+      // fallback
+      try{
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        return true;
+      }catch{
+        return false;
+      }
+    }
+  }
+
+  function openSide(){
+    $("#side").classList.add("open");
+    $("#overlay").classList.add("show");
+    $("#overlay").setAttribute("aria-hidden","false");
+  }
+
+  function closeSide(){
+    $("#side").classList.remove("open");
+    $("#overlay").classList.remove("show");
+    $("#overlay").setAttribute("aria-hidden","true");
+  }
+
+  // ===== Init =====
+  const auth = readSession();
+  if(!auth){ redirectToLogin(); return; }
+
+  $("#whoNameSide").textContent = auth.displayName || "—";
+  $("#whoEmpNoSide").textContent = auth.empNo || "—";
+  $("#whoName").textContent = auth.displayName || "—";
+  $("#whoEmpNo").textContent = auth.empNo || "—";
+
+  $("#btnLogout").addEventListener("click", () => {
+    sessionStorage.removeItem(SESSION_KEY);
+    redirectToLogin();
+  });
+
+  $("#btnMenu").addEventListener("click", openSide);
+  $("#overlay").addEventListener("click", closeSide);
+
+  // Metadata fill
+  $("#metaUrl").textContent = safeStr(window.location.href, 120);
+  $("#metaLang").textContent = document.documentElement.lang || navigator.language || "—";
+  $("#metaRole").textContent = "employee";
+  $("#metaTime").textContent = fmtNow();
+  $("#metaTz").textContent = tz();
+  $("#metaVp").textContent = viewport();
+  $("#metaUa").textContent = safeStr(navigator.userAgent || "—", 110);
+
+  window.addEventListener("resize", () => {
+    $("#metaVp").textContent = viewport();
+  });
+
+  // Actions
+  let lastReportText = "";
+
+  $("#btnCreate").addEventListener("click", () => {
+    setMsg("", "");
+
+    const title = safeStr($("#inpTitle").value, 120);
+    const desc = String($("#inpDesc").value || "").trim();
+    const steps = String($("#inpSteps").value || "").trim();
+
+    if(!title || !desc){
+      setMsg("err", "Fyll i rubrik + beskrivning.");
+      return;
     }
 
     const report = {
-      v: 1,
-      createdAt: new Date().toISOString(),
-      role: auth.role,
-      empNo: auth.empNo,
-      displayName: auth.displayName,
-      pageUrl: window.location.href,
-      pagePath: window.location.pathname,
-      language: document.documentElement.lang || "sv",
-      tech: {
-        userAgent: navigator.userAgent,
-        viewport: { w: window.innerWidth, h: window.innerHeight },
-        platform: navigator.platform || "",
-        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || ""
-      },
-      message
+      id: uid(),
+      time: fmtNow(),
+      role: "employee",
+      lang: document.documentElement.lang || navigator.language || "—",
+      url: window.location.href,
+      timezone: tz(),
+      viewport: viewport(),
+      ua: navigator.userAgent || "—",
+      title,
+      desc,
+      steps
     };
 
-    return report;
-  }
+    const reports = loadReports();
+    reports.unshift(report);
+    saveReports(reports);
 
-  function init() {
-    const auth = readSession();
-    if (!auth) { redirectToLogin(); return; }
+    lastReportText = buildReportText(report);
+    $("#out").textContent = lastReportText;
 
-    // Fill identity
-    $("#whoName").value = auth.displayName || "";
-    $("#whoEmpNo").value = auth.empNo || "";
-    $("#whoRole").value = auth.role || "employee";
+    setMsg("", "Rapport skapad lokalt (v1).");
+    toast("Rapport skapad");
+  });
 
-    // Logout
-    $("#btnLogout").addEventListener("click", () => {
-      sessionStorage.removeItem(STORAGE_KEY);
-      redirectToLogin();
-    });
+  $("#btnCopy").addEventListener("click", async () => {
+    if(!lastReportText){
+      setMsg("warn", "Skapa en rapport först.");
+      return;
+    }
+    const ok = await copyToClipboard(lastReportText);
+    if(ok){
+      toast("Kopierat");
+      setMsg("", "Kopierat.");
+    }else{
+      setMsg("err", "Kunde inte kopiera i denna webbläsare.");
+    }
+  });
 
-    // Build
-    $("#btnBuild").addEventListener("click", () => {
-      setMsg("", "");
-      const rep = buildReport(auth);
-      if (!rep) return;
-      $("#out").textContent = JSON.stringify(rep, null, 2);
-      setMsg("warn", "Rapport skapad (demo). Kopiera och skicka till admin.");
-    });
-
-    // Copy
-    $("#btnCopy").addEventListener("click", async () => {
-      const text = $("#out").textContent || "";
-      if (!text || text === "—") { setMsg("err", "Skapa rapport först."); return; }
-      try {
-        await navigator.clipboard.writeText(text);
-        setMsg("", "Kopierad.");
-      } catch {
-        setMsg("err", "Kunde inte kopiera automatiskt. Markera texten och kopiera manuellt.");
-      }
-    });
-  }
-
-  init();
+  $("#btnClear").addEventListener("click", () => {
+    $("#inpTitle").value = "";
+    $("#inpDesc").value = "";
+    $("#inpSteps").value = "";
+    setMsg("", "");
+    toast("Rensat");
+  });
 })();
 </script>
 
 </body>
 </html>
-
