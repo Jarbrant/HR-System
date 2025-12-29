@@ -1,38 +1,47 @@
 <!-- ============================================================
-AO-025 | FIL-ID: employee/tasks.html
+AO-032 | FIL-ID: admin/tasks.html
 Projekt: HR-System
-Syfte: Medarbetare – Uppgifter (tilldelade) + status + kommentar + anonymt svar (UI-only v1)
+Syfte: Admin – Uppgifter (tilldelning + lista) + anonym kommentar-policy per uppgift – UI-only v1
+Ny funktion:
+- Admin kan välja "Tillåt anonym kommentar" (per batch) => sparas som allowAnonymousComment
 Mål:
-- Visa endast uppgifter för inloggad employee (empNo)
-- Ändra status: todo/doing/done
-- Skriv kommentar (sparas på uppgiften)
-- Toggle “Svara anonymt” => kommentaren lagras anonymt (utan namn/anst.nr i kommentarsfältet)
+- Skapa uppgifter till en / alla / grupp
+- Batch: flera uppgifter (en per rad)
+- Lista: tilldelade uppgifter + status (todo/doing/done) + anonym-regel
 Policy:
 - Ingen backend
 - Ingen känslig data lagras
-- Guard + logout (employee)
+- Guard + logout (admin)
 Lagring:
 - AO-014_TASKS_V1 (localStorage) – uppgifter
-- AO-001_LOGIN_V1 (sessionStorage) – session
+- AO-023_GROUPS_V1 (localStorage) – grupper
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Medarbetare • Uppgifter</title>
+  <title>HR-System – Admin • Uppgifter</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
   <style>
     .layout{
       display:grid;
-      grid-template-columns: 0.95fr 1.05fr;
+      grid-template-columns: 1.05fr 0.95fr;
       gap: 12px;
       align-items:start;
     }
     @media (max-width: 980px){
       .layout{ grid-template-columns: 1fr; }
+    }
+    .split{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 980px){
+      .split{ grid-template-columns: 1fr; }
     }
     .item{
       border:1px solid var(--line);
@@ -61,19 +70,19 @@ Lagring:
       background:#fff;
       text-align:center;
     }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-    .hint{
-      font-size:.9rem;
-      color: var(--muted);
-      margin-top: 8px;
-    }
     .toggle{
       display:flex;
       gap:10px;
       align-items:center;
       user-select:none;
+      margin-top: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
     }
     .toggle input{ transform: scale(1.1); }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
   </style>
 </head>
 
@@ -82,17 +91,17 @@ Lagring:
 <header class="top">
   <div class="brand">
     <strong>HR-System</strong>
-    <span class="muted">• Medarbetare • Uppgifter</span>
+    <span class="muted">• Admin • Uppgifter</span>
   </div>
 
   <nav class="nav" aria-label="Meny">
     <a href="./home.html">Hem</a>
-    <a href="./tasks.html" aria-current="page">Uppgifter</a>
+    <a href="./reports.html">Felrapporter</a>
     <a href="./questions.html">Frågor</a>
-    <a href="./schedule.html">Schema</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./tasks.html" aria-current="page">Uppgifter</a>
     <a href="./docs.html">Dokument</a>
-    <a href="./report.html">Rapportera fel</a>
-    <a href="./profile.html">Min sida</a>
+    <a href="./integrations.html">Integrationer</a>
   </nav>
 
   <div class="row-actions" style="margin-left:auto;">
@@ -102,97 +111,144 @@ Lagring:
 
 <main class="container">
   <h1 class="tight">Uppgifter</h1>
-  <p class="muted">Här ser du uppgifter som är tilldelade till dig.</p>
+  <p class="muted">Tilldela uppgifter (batch, en/alla/grupp). Medarbetaren kan kommentera (anonymt om tillåtet).</p>
 
   <section class="card">
-    <div class="row space-between wrap" style="margin-bottom:10px;">
-      <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Anst.nr <span id="whoEmpNo">—</span>
-      </div>
-
-      <label style="margin:0; font-weight:800;">
-        Filter
-        <select id="filter" style="margin-top:6px; width:auto;">
-          <option value="all">Alla</option>
-          <option value="todo">Ej startad</option>
-          <option value="doing">Pågår</option>
-          <option value="done">Klara</option>
-        </select>
-      </label>
-    </div>
-
     <div class="layout">
-      <section class="panel" aria-label="Lista">
-        <div class="panel-title">Mina uppgifter</div>
-        <div id="list"></div>
-      </section>
 
-      <section class="panel" aria-label="Detalj">
-        <div class="panel-title">Detalj</div>
+      <!-- Skapa / batch -->
+      <section class="panel" aria-label="Skapa uppgifter">
+        <div class="panel-title">Skapa uppgifter <span class="tag">batch</span></div>
 
-        <div id="detailEmpty" class="empty">Välj en uppgift för att se detaljer.</div>
-
-        <div id="detail" style="display:none;">
-          <p class="item-title" id="dTitle">—</p>
-          <div class="item-meta">
-            <span class="pill" id="dStatus">—</span>
-            <span class="pill" id="dDue">Deadline: —</span>
-          </div>
-
-          <p class="muted" id="dDesc" style="margin:10px 0 0;">—</p>
-
-          <hr style="margin:14px 0; border:none; border-top:1px solid var(--line);" />
-
-          <label class="toggle">
-            <input id="anonToggle" type="checkbox" />
-            <span><strong>Svara anonymt</strong> <span class="muted">(döljer namn i kommentaren)</span></span>
+        <div class="split">
+          <label>
+            Titel (gemensam)
+            <input id="title" type="text" placeholder="t.ex. Dagens rutiner" maxlength="140" />
           </label>
-          <div class="hint">
-            Obs: Uppgiften är fortfarande kopplad till din anställning för att kunna visas som “mina uppgifter”.
-          </div>
 
-          <label style="margin-top:10px;">
-            Status
-            <select id="statusPick">
-              <option value="todo">Ej startad</option>
-              <option value="doing">Pågår</option>
-              <option value="done">Klar</option>
+          <label>
+            Mottagare
+            <select id="targetMode">
+              <option value="one">En medarbetare</option>
+              <option value="all">Alla medarbetare</option>
+              <option value="group">En grupp</option>
             </select>
           </label>
+        </div>
 
-          <label style="margin-top:10px;">
-            Kommentar / svar
-            <textarea id="comment" placeholder="Skriv en kort kommentar…"></textarea>
+        <div id="targetOne" class="split" style="margin-top:8px;">
+          <label>
+            Anställningsnummer (mål)
+            <input id="empNo" type="text" placeholder="t.ex. 1234" inputmode="numeric" />
           </label>
 
-          <div class="row-actions" style="margin-top:10px;">
-            <button id="btnSave" type="button">Spara</button>
-            <button id="btnReset" class="secondary" type="button">Ångra</button>
-          </div>
+          <label>
+            Snabbval (kända anst.nr)
+            <select id="empPick">
+              <option value="">—</option>
+            </select>
+          </label>
+        </div>
 
-          <p id="msg" class="message" aria-live="polite"></p>
+        <div id="targetGroup" style="display:none; margin-top:8px;">
+          <label>
+            Välj grupp
+            <select id="groupPick">
+              <option value="">—</option>
+            </select>
+          </label>
+          <div class="muted small" id="groupInfo" style="margin-top:6px;">—</div>
+        </div>
+
+        <label style="margin-top:8px;">
+          Uppgifter (en per rad)
+          <textarea id="tasksBatch" placeholder="En uppgift per rad…&#10;Ex: Läs rutin: Hygien&#10;Ex: Bekräfta leverans"></textarea>
+        </label>
+
+        <!-- Adminstyrd anonym kommentar-policy -->
+        <label class="toggle">
+          <input id="allowAnonComment" type="checkbox" />
+          <span><strong>Tillåt anonym kommentar</strong> <span class="muted">(medarbetaren får välja anonymt vid kommentar)</span></span>
+        </label>
+        <div class="muted small" style="margin-top:6px;">
+          Om avstängd: kommentarer kopplas alltid öppet till uppgiften (ingen anonym toggle).
+        </div>
+
+        <div class="row-actions" style="margin-top:10px;">
+          <button id="btnSend" type="button">Tilldela</button>
+          <button id="btnClear" class="secondary" type="button">Rensa</button>
+        </div>
+
+        <p id="msg" class="message" aria-live="polite"></p>
+
+        <p class="muted small" style="margin-top:10px;">
+          “Alla” utan backend = alla anst.nr som systemet känner till via tidigare uppgifter, frågor eller grupper.
+        </p>
+      </section>
+
+      <!-- Lista / detalj -->
+      <section class="panel" aria-label="Tilldelade uppgifter">
+        <div class="row space-between wrap">
+          <div class="panel-title">Tilldelade uppgifter</div>
+
+          <label style="margin:0; font-weight:700;">
+            Filter
+            <select id="filter" style="margin-top:6px; width:auto;">
+              <option value="all">Alla</option>
+              <option value="open">Ej klara</option>
+              <option value="done">Klara</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="list"></div>
+
+        <div id="detail" style="margin-top:10px; display:none;">
+          <div class="panel-title">Detalj</div>
+          <div class="item" style="cursor:default;">
+            <p class="item-title" id="dTitle">—</p>
+            <div class="item-meta">
+              <span class="pill" id="dEmp">Anst.nr: —</span>
+              <span class="pill" id="dStatus">—</span>
+              <span class="pill" id="dAnonRule">Anonym kommentar: —</span>
+            </div>
+
+            <div style="margin-top:10px;">
+              <div class="muted small" style="font-weight:900;">Uppgift</div>
+              <div id="dBody" class="muted" style="margin-top:6px;">—</div>
+            </div>
+
+            <div class="row-actions" style="margin-top:10px;">
+              <button id="btnDelete" class="secondary" type="button">Ta bort (v1)</button>
+            </div>
+
+            <p class="muted small" style="margin-top:10px;">
+              Kommentarer skrivs av medarbetare i <span class="mono">employee/tasks.html</span> (nästa steg).
+            </p>
+          </div>
         </div>
 
       </section>
+
     </div>
   </section>
 </main>
 
 <script>
 /* ============================================================
-AO-025 | FIL-ID: employee/tasks.html (inline JS)
+AO-032 | FIL-ID: admin/tasks.html (inline JS)
 ============================================================ */
 (function(){
   "use strict";
 
   const SESSION_KEY = "AO-001_LOGIN_V1";
   const TASKS_KEY   = "AO-014_TASKS_V1";
+  const QA_KEY      = "AO-015_QA_V1";
+  const GROUP_KEY   = "AO-023_GROUPS_V1";
 
   const $ = (s) => document.querySelector(s);
 
-  function redirectLogin(){
-    window.location.replace("../UI/UI-01-SKELETON.html");
-  }
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
   function readAuth(){
     try{
@@ -200,7 +256,7 @@ AO-025 | FIL-ID: employee/tasks.html (inline JS)
       if(!raw) return null;
       const data = JSON.parse(raw);
       if(!data?.auth?.isAuthed) return null;
-      if(data.auth.role !== "employee") return null;
+      if(data.auth.role !== "admin") return null;
       if(!data.auth.expiresAt || data.auth.expiresAt < Date.now()) return null;
       return data.auth;
     }catch{ return null; }
@@ -209,42 +265,40 @@ AO-025 | FIL-ID: employee/tasks.html (inline JS)
   const auth = readAuth();
   if(!auth){ redirectLogin(); return; }
 
-  $("#whoName").textContent = auth.displayName || "—";
-  $("#whoEmpNo").textContent = auth.empNo || "—";
-
   $("#btnLogout").addEventListener("click", () => {
     sessionStorage.removeItem(SESSION_KEY);
     redirectLogin();
   });
 
-  function safeLoadTasks(){
+  function uid(){
+    return "t_" + Math.random().toString(36).slice(2,10) + "_" + Date.now().toString(36);
+  }
+
+  function safeParse(key, fallback){
     try{
-      const arr = JSON.parse(localStorage.getItem(TASKS_KEY) || "[]");
-      return Array.isArray(arr) ? arr : [];
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
     }catch{
-      return [];
+      return fallback;
     }
   }
 
-  function saveTasks(arr){
-    localStorage.setItem(TASKS_KEY, JSON.stringify(arr));
+  function loadTasks(){
+    const arr = safeParse(TASKS_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+  function saveTasks(arr){ localStorage.setItem(TASKS_KEY, JSON.stringify(arr)); }
+
+  function loadQA(){
+    const arr = safeParse(QA_KEY, []);
+    return Array.isArray(arr) ? arr : [];
   }
 
-  function statusLabel(s){
-    if(s === "doing") return "Pågår";
-    if(s === "done") return "Klar";
-    return "Ej startad";
-  }
-
-  function fmtDate(ts){
-    if(!ts) return "—";
-    try{
-      const d = new Date(ts);
-      const y = d.getFullYear();
-      const m = String(d.getMonth()+1).padStart(2,"0");
-      const da = String(d.getDate()).padStart(2,"0");
-      return `${y}-${m}-${da}`;
-    }catch{ return "—"; }
+  function loadGroups(){
+    const g = safeParse(GROUP_KEY, { groups: [] });
+    if(!g || typeof g !== "object") return { groups: [] };
+    if(!Array.isArray(g.groups)) g.groups = [];
+    return g;
   }
 
   function setMsg(kind, text){
@@ -253,35 +307,114 @@ AO-025 | FIL-ID: employee/tasks.html (inline JS)
     m.textContent = text || "";
   }
 
-  const empNo = String(auth.empNo || "").trim();
+  function normalizeEmpNo(s){ return String(s || "").trim(); }
+  function uniq(arr){ return Array.from(new Set(arr.filter(Boolean))); }
 
-  let allTasks = safeLoadTasks();
-  let myTasks = [];
+  function parseBatchLines(txt){
+    return String(txt || "")
+      .split(/\r?\n/g)
+      .map(l => l.trim())
+      .filter(l => l.length > 0);
+  }
+
+  function anonRuleLabel(t){
+    return (t.allowAnonymousComment === true) ? "Tillåtet" : "Ej tillåtet";
+  }
+
+  let tasks = loadTasks();
   let selectedId = null;
-  let snapshot = null; // för ångra
 
-  function reload(){
-    allTasks = safeLoadTasks();
-    myTasks = allTasks.filter(t => String(t.empNo || "").trim() === empNo);
+  // ---- recipients ----
+  function refreshKnownEmpNos(){
+    const fromTasks = uniq(loadTasks().map(t => normalizeEmpNo(t.empNo)));
+    const fromQA = uniq(loadQA().map(q => normalizeEmpNo(q.empNo)));
+    const fromGroups = uniq(loadGroups().groups.flatMap(gr => (gr.members || []).map(normalizeEmpNo)));
+
+    const empNos = uniq([...fromTasks, ...fromQA, ...fromGroups]).sort();
+
+    const sel = $("#empPick");
+    sel.innerHTML = `<option value="">—</option>` + empNos.map(e => `<option value="${e}">${e}</option>`).join("");
+  }
+
+  function refreshGroupsUI(){
+    const g = loadGroups();
+    const pick = $("#groupPick");
+    pick.innerHTML = `<option value="">—</option>` + g.groups.map(gr => `<option value="${gr.id}">${escapeHtml(gr.name)}</option>`).join("");
+    updateGroupInfo();
+  }
+
+  function updateGroupInfo(){
+    const gid = $("#groupPick").value;
+    const g = loadGroups();
+    const found = g.groups.find(x => x.id === gid) || null;
+    $("#groupInfo").textContent = found ? `Medlemmar: ${found.members.join(", ")}` : "—";
+  }
+
+  function updateTargetMode(){
+    const mode = $("#targetMode").value;
+    $("#targetOne").style.display = (mode === "one") ? "grid" : "none";
+    $("#targetGroup").style.display = (mode === "group") ? "block" : "none";
+  }
+
+  $("#targetMode").addEventListener("change", updateTargetMode);
+  $("#empPick").addEventListener("change", () => {
+    const v = $("#empPick").value;
+    if(v) $("#empNo").value = v;
+  });
+  $("#groupPick").addEventListener("change", updateGroupInfo);
+
+  function getRecipients(){
+    const mode = $("#targetMode").value;
+
+    if(mode === "one"){
+      const empNo = normalizeEmpNo($("#empNo").value);
+      return empNo ? [empNo] : [];
+    }
+
+    if(mode === "group"){
+      const gid = $("#groupPick").value;
+      if(!gid) return [];
+      const g = loadGroups();
+      const found = g.groups.find(x => x.id === gid) || null;
+      return found ? found.members.slice() : [];
+    }
+
+    if(mode === "all"){
+      const fromTasks = uniq(loadTasks().map(t => normalizeEmpNo(t.empNo)));
+      const fromQA = uniq(loadQA().map(q => normalizeEmpNo(q.empNo)));
+      const fromGroups = uniq(loadGroups().groups.flatMap(gr => (gr.members || []).map(normalizeEmpNo)));
+      return uniq([...fromTasks, ...fromQA, ...fromGroups]).sort();
+    }
+
+    return [];
+  }
+
+  // ---- list/detail ----
+  function isDone(t){ return (t.status || "todo") === "done"; }
+  function statusLabel(t){
+    const s = (t.status || "todo");
+    if(s === "done") return "Klar";
+    if(s === "doing") return "Pågår";
+    return "Ej startad";
   }
 
   function renderList(){
-    reload();
+    tasks = loadTasks();
 
     const filter = $("#filter").value;
     const listEl = $("#list");
-
-    const arr = myTasks.slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
-    const shown = filter === "all" ? arr : arr.filter(t => (t.status || "todo") === filter);
-
     listEl.innerHTML = "";
+
+    const arr = tasks.slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    const shown = arr.filter(t => {
+      if(filter === "open") return !isDone(t);
+      if(filter === "done") return isDone(t);
+      return true;
+    });
 
     if(!shown.length){
       listEl.innerHTML = `<div class="empty">Inga uppgifter för valt filter.</div>`;
-      // stäng detalj om vald inte finns
-      if(selectedId && !myTasks.find(t => t.id === selectedId)){
-        closeDetail();
-      }
+      $("#detail").style.display = "none";
       return;
     }
 
@@ -291,8 +424,9 @@ AO-025 | FIL-ID: employee/tasks.html (inline JS)
       el.innerHTML = `
         <p class="item-title">${escapeHtml(t.title || "—")}</p>
         <div class="item-meta">
-          <span class="pill">${escapeHtml(statusLabel(t.status || "todo"))}</span>
-          <span class="pill">Deadline: ${escapeHtml(fmtDate(t.dueAt))}</span>
+          <span class="pill">Anst.nr: ${escapeHtml(t.empNo || "—")}</span>
+          <span class="pill">${escapeHtml(statusLabel(t))}</span>
+          <span class="pill">Anonym kommentar: ${escapeHtml(anonRuleLabel(t))}</span>
         </div>
       `;
       el.addEventListener("click", () => {
@@ -303,91 +437,102 @@ AO-025 | FIL-ID: employee/tasks.html (inline JS)
       listEl.appendChild(el);
     });
 
-    // auto-select
     if(!selectedId && shown[0]){
+      selectedId = shown[0].id;
+      openDetail(selectedId);
+      renderList();
+    }else if(selectedId && !shown.find(x => x.id === selectedId)){
       selectedId = shown[0].id;
       openDetail(selectedId);
       renderList();
     }
   }
 
-  function closeDetail(){
-    $("#detail").style.display = "none";
-    $("#detailEmpty").style.display = "block";
-    selectedId = null;
-    snapshot = null;
-    setMsg("", "");
-  }
-
   function openDetail(id){
-    const t = myTasks.find(x => x.id === id) || null;
-    if(!t){
-      closeDetail();
-      return;
-    }
+    tasks = loadTasks();
+    const t = tasks.find(x => x.id === id) || null;
+    if(!t){ $("#detail").style.display = "none"; return; }
 
-    snapshot = JSON.parse(JSON.stringify(t)); // deep clone for reset
-
-    $("#detailEmpty").style.display = "none";
     $("#detail").style.display = "block";
-
     $("#dTitle").textContent = t.title || "—";
-    $("#dStatus").textContent = statusLabel(t.status || "todo");
-    $("#dDue").textContent = "Deadline: " + fmtDate(t.dueAt);
-    $("#dDesc").textContent = t.desc || "—";
-
-    $("#statusPick").value = t.status || "todo";
-    $("#comment").value = t.comment || "";
-    $("#anonToggle").checked = !!t.commentAnonymous;
-
-    setMsg("", "");
+    $("#dEmp").textContent = "Anst.nr: " + (t.empNo || "—");
+    $("#dStatus").textContent = statusLabel(t);
+    $("#dAnonRule").textContent = "Anonym kommentar: " + anonRuleLabel(t);
+    $("#dBody").textContent = t.body || "—";
   }
 
   $("#filter").addEventListener("change", renderList);
 
-  $("#btnReset").addEventListener("click", () => {
-    if(!snapshot || !selectedId) return;
-    $("#statusPick").value = snapshot.status || "todo";
-    $("#comment").value = snapshot.comment || "";
-    $("#anonToggle").checked = !!snapshot.commentAnonymous;
-    setMsg("warn", "Ångrat (inte sparat).");
+  $("#btnDelete").addEventListener("click", () => {
+    if(!selectedId) return;
+    tasks = loadTasks();
+    const idx = tasks.findIndex(x => x.id === selectedId);
+    if(idx < 0) return;
+    tasks.splice(idx, 1);
+    saveTasks(tasks);
+    selectedId = null;
+    renderList();
+    refreshKnownEmpNos();
   });
 
-  $("#btnSave").addEventListener("click", () => {
-    if(!selectedId) return;
+  // ---- create tasks ----
+  $("#btnSend").addEventListener("click", () => {
+    setMsg("", "");
 
-    const newStatus = $("#statusPick").value || "todo";
-    const anon = !!$("#anonToggle").checked;
+    const title = String($("#title").value || "").trim();
+    const lines = parseBatchLines($("#tasksBatch").value);
+    const allowAnonComment = !!$("#allowAnonComment").checked;
 
-    // Kommentar policy:
-    // - vi sparar inte namn/anst.nr i kommentaren om anon = true
-    // - om anon = false: kommentaren är ändå bara text; ingen automatik som lägger in empNo
-    const rawComment = String($("#comment").value || "").trim();
-
-    // Spara i den “globala” tasks-listan så admin ser uppdateringen
-    const idx = allTasks.findIndex(x => x.id === selectedId);
-    if(idx < 0){
-      setMsg("err", "Kunde inte spara (uppgiften hittades inte).");
+    if(!title){
+      setMsg("err", "Fyll i en gemensam titel.");
+      return;
+    }
+    if(!lines.length){
+      setMsg("err", "Skriv minst en uppgift (en per rad).");
       return;
     }
 
-    allTasks[idx].status = newStatus;
-    allTasks[idx].commentAnonymous = anon ? true : false;
-
-    if(anon){
-      // lägg in en neutral prefix för att signalera anonymt (valfritt men tydligt)
-      allTasks[idx].comment = rawComment ? ("(Anonymt) " + rawComment) : "";
-    }else{
-      allTasks[idx].comment = rawComment;
+    const recipients = getRecipients();
+    if(!recipients.length){
+      if($("#targetMode").value === "all"){
+        setMsg("err", "‘Alla’ kräver att systemet känner till minst en anst.nr (via tidigare uppgifter/frågor eller grupper). Skapa en grupp först eller välj en specifik medarbetare.");
+      }else{
+        setMsg("err", "Välj mottagare (anst.nr / grupp).");
+      }
+      return;
     }
 
-    saveTasks(allTasks);
+    const created = [];
+    recipients.forEach(empNo => {
+      lines.forEach(body => {
+        created.push({
+          id: uid(),
+          empNo,
+          title,
+          body,
+          status: "todo",
+          comment: "",
+          commentAnonymous: false,
+          allowAnonymousComment: allowAnonComment,
+          createdAt: Date.now()
+        });
+      });
+    });
 
-    setMsg("ok", "Sparat.");
+    tasks = loadTasks();
+    tasks.push(...created);
+    saveTasks(tasks);
 
-    // uppdatera detail snapshot
+    setMsg("ok", `Tilldelat: ${lines.length} uppgift(er) till ${recipients.length} mottagare (${created.length} totalt). Anonym kommentar: ${allowAnonComment ? "Tillåtet" : "Ej tillåtet"}.`);
     renderList();
-    openDetail(selectedId);
+    refreshKnownEmpNos();
+  });
+
+  $("#btnClear").addEventListener("click", () => {
+    $("#title").value = "";
+    $("#tasksBatch").value = "";
+    $("#allowAnonComment").checked = false;
+    setMsg("", "");
   });
 
   function escapeHtml(s){
@@ -399,6 +544,10 @@ AO-025 | FIL-ID: employee/tasks.html (inline JS)
       .replaceAll("'","&#039;");
   }
 
+  // init
+  updateTargetMode();
+  refreshKnownEmpNos();
+  refreshGroupsUI();
   renderList();
 
 })();
