@@ -339,17 +339,15 @@ Keys (LÅST):
 <script>
 /* ============================================================
 AO-019 2/8 | admin/roles.html (inline JS)
-- Assignments V2 primär + migration V1->V2 fail-safe
-- Autoseed systemroller: SYSTEM_ADMIN / ADMIN / MANAGER / EMPLOYEE (om saknas)
-- Scope-dropdown från AO-020_ORG_V1 (fail-closed om saknas/korrupt)
-- Respektera modulbehörighet: ADMIN_ROLES manage krävs för att skriva (roll/assign)
-- XSS-escape på allt från storage
-Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020_ROLE_ASSIGNMENTS_V1
+FIX-01 (Core-API alignment + secure roleId + org-format)
+- Endast HRApp.requireAuth(...) används för auth/access när core finns
+- roleId härleds från requireAuth-return (access.roleId). Aldrig från session
+- Om core saknas/fel => fail-closed: lockbox + robust redirect
+- Org-format: array eller { nodes:[...] } (okänt => fail-closed)
 ============================================================ */
 (function(){
   "use strict";
 
-  const SESSION_KEY = "AO-001_LOGIN_V1";
   const ROLES_KEY   = "AO-019_ROLES_V1";
   const ORG_KEY     = "AO-020_ORG_V1";
   const ASG_V2_KEY  = "AO-020_ROLE_ASSIGNMENTS_V2";
@@ -374,79 +372,51 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
     el.textContent = text || "";
   }
 
-  function redirectLogin(){
-    // Prefer core routing if present; fallback to existing skeleton
-    try{
-      if(window.HRApp && typeof window.HRApp.redirectToLogin === "function"){
-        window.HRApp.redirectToLogin();
-        return;
-      }
-    }catch{}
-    window.location.replace("../UI/UI-01-SKELETON.html");
+  function computeLoginUrl(){
+    // Robust för /admin/*, /employee/*, /UI/* och root (/index.html)
+    const p = String(window.location.pathname || "");
+    if(p.includes("/admin/") || p.includes("/employee/")) return "../UI/UI-01-SKELETON.html";
+    if(p.includes("/UI/")) return "./UI-01-SKELETON.html";
+    return "./UI/UI-01-SKELETON.html";
   }
 
-  function readRawSession(){
-    const s1 = sessionStorage.getItem(SESSION_KEY);
-    if (s1) return s1;
-    const s2 = localStorage.getItem(SESSION_KEY);
-    if (s2) return s2;
-    return null;
+  function showLock(reason){
+    $("#lockbox").style.display = "block";
+    $("#lockmsg").textContent = reason || "Låst läge.";
   }
 
-  function safeParseLocal(key, fallback){
-    try{
-      const v = JSON.parse(localStorage.getItem(key) || "null");
-      return (v === null || v === undefined) ? fallback : v;
-    }catch{
-      return fallback;
-    }
-  }
-  function saveLocal(key, value){
-    localStorage.setItem(key, JSON.stringify(value));
+  function hardFailClosed(reason){
+    showLock(reason);
+    const url = computeLoginUrl();
+    // Visa lockbox kort, sen redirect (fail-closed).
+    setTimeout(() => { window.location.replace(url); }, 60);
   }
 
-  // ---- Auth/Guard (core-first) ----
-  function requireAdminAccess(){
-    try{
-      if(window.HRApp && typeof window.HRApp.requireAuth === "function"){
-        // AO-019 policy: admin pages must call requireAuth({ pageRole:"admin" })
-        const ok = window.HRApp.requireAuth({ pageRole: "admin" });
-        if(ok === false) return null;
-        // Try to read session from core if exposed
-        if(typeof window.HRApp.getSession === "function"){
-          const ses = window.HRApp.getSession();
-          return ses?.auth || null;
-        }
-      }
-    }catch{
-      // fallthrough to local guard
-    }
-
-    // Fallback: fail-closed
-    try{
-      const raw = readRawSession();
-      if(!raw) return null;
-      const data = JSON.parse(raw);
-      if(!data?.auth?.isAuthed) return null;
-      // Back-compat: old roles "admin"/"systemadmin" still allowed to enter page
-      if(data.auth.role !== "admin" && data.auth.role !== "systemadmin") return null;
-      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-      return data.auth;
-    }catch{
-      return null;
-    }
+  // ---- Core required (LÅST för denna FIX): ingen smart fallback ----
+  if(!window.HRApp || typeof window.HRApp.requireAuth !== "function"){
+    hardFailClosed("Core (UI-03-APP.js) saknas eller kunde inte laddas. Kan inte verifiera access (fail-closed).");
+    return;
   }
 
-  const auth = requireAdminAccess();
-  if(!auth){ redirectLogin(); return; }
+  const loginUrl = computeLoginUrl();
+  const access = window.HRApp.requireAuth({ pageRole: "admin", loginUrl });
+  if(!access){
+    // requireAuth sköter redirect; vi stannar fail-closed.
+    return;
+  }
 
-  $("#whoName").textContent = auth.displayName || "Admin";
-  $("#whoRole").textContent = auth.role || "admin";
+  // UI header
+  $("#whoName").textContent = access.auth?.displayName || "Admin";
+  $("#whoRole").textContent = access.roleClass || access.auth?.role || "admin";
 
   function doLogout(){
-    sessionStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
-    redirectLogin();
+    // Core äger logout (robust redirect ingår i core-fix 5/8)
+    if(window.HRApp && typeof window.HRApp.logout === "function"){
+      window.HRApp.logout();
+      return;
+    }
+    // Skulle inte hända i core-läge, men fail-closed:
+    window.location.replace(loginUrl);
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
@@ -472,6 +442,7 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
     { key:"ADMIN_ORG",          label:"Admin • Org",          hint:"admin/org.html", defaultScope:"manage" },
     { key:"ADMIN_ACCESS",       label:"Admin • Access",       hint:"admin/access.html (AO-021)", defaultScope:"manage" },
   ];
+
   const SCOPE_ORDER = ["none","view","act","manage"];
   function normalizeScope(scope){
     const s = String(scope || "none");
@@ -484,12 +455,36 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
     return Object.keys(effectiveModules || {}).some(k => k.startsWith("ADMIN_") && normalizeScope(effectiveModules[k]) !== "none");
   }
 
-  // ---- Org load + scope dropdown ----
+  function safeParseLocal(key, fallback){
+    try{
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{
+      return fallback;
+    }
+  }
+  function saveLocal(key, value){
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  // ---- Org load + scope dropdown (STRICT + compat array | {nodes}) ----
   function loadOrgStrict(){
     const raw = safeParseLocal(ORG_KEY, null);
-    if(!Array.isArray(raw) || raw.length === 0) return { ok:false, nodes:[], reason:"Org-data saknas eller är felaktig. Du måste skapa org i admin/org.html (AO-020) innan du kan tilldela scope." };
 
-    const nodes = raw
+    // Compat: array eller wrapper {nodes:[...]}
+    let rawNodes = null;
+    if(Array.isArray(raw)) rawNodes = raw;
+    else if(raw && typeof raw === "object" && Array.isArray(raw.nodes)) rawNodes = raw.nodes;
+
+    if(!Array.isArray(rawNodes) || rawNodes.length === 0){
+      return {
+        ok:false,
+        nodes:[],
+        reason:"Org-data saknas eller är felaktig. Du måste skapa org i admin/org.html (AO-020) innan du kan tilldela scope."
+      };
+    }
+
+    const nodes = rawNodes
       .filter(n => n && typeof n === "object")
       .map(n => ({
         id: String(n.id || "").trim(),
@@ -498,13 +493,13 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
       }))
       .filter(n => !!n.id);
 
-    if(nodes.length === 0) return { ok:false, nodes:[], reason:"Org-data saknar giltiga noder (id). Kan inte tilldela scope." };
+    if(nodes.length === 0){
+      return { ok:false, nodes:[], reason:"Org-data saknar giltiga noder (id). Kan inte tilldela scope." };
+    }
 
-    // choose best root
     const ids = new Set(nodes.map(n => n.id));
     let rootId = null;
 
-    // Prefer common root ids if present
     if(ids.has("org_root_v1")) rootId = "org_root_v1";
     else if(ids.has("org_root")) rootId = "org_root";
     else{
@@ -604,7 +599,6 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
       if(Object.prototype.hasOwnProperty.call(modules, m.key)){
         cleanModules[m.key] = normalizeScope(modules[m.key]);
       }else{
-        // keep missing as none in normalized output
         cleanModules[m.key] = "none";
       }
     });
@@ -615,7 +609,7 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
       name,
       desc,
       inherits,
-      isSystem: !!r.isSystem, // systemflag only advisory (do not enforce by id)
+      isSystem: !!r.isSystem,
       locale: String(r.locale || "").trim() || DEFAULT_LOCALE,
       modules: cleanModules,
       createdAt: Number(r.createdAt || now),
@@ -640,105 +634,58 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
     const now = Date.now();
 
     function mkBaseModules(allScope){
-      // allScope: "none"/"view"/"act"/"manage" applied to all known modules
       const o = {};
       MODULES.forEach(m => { o[m.key] = normalizeScope(allScope); });
       return o;
     }
 
-    // Role definitions per AO (do not edit if already exists)
     const want = [
+      { id:"SYSTEM_ADMIN", name:"SYSTEM_ADMIN", desc:"Systemansvarig: kan hantera roller/org/access.", isSystem:true, modules: mkBaseModules("manage") },
       {
-        id: "SYSTEM_ADMIN",
-        name: "SYSTEM_ADMIN",
-        desc: "Systemansvarig: kan hantera roller/org/access.",
-        isSystem: true,
-        modules: mkBaseModules("manage") // full
-      },
-      {
-        id: "ADMIN",
-        name: "ADMIN",
-        desc: "Operativ admin: kan driva adminflöden men ej roller/org/access.",
-        isSystem: true,
-        modules: (function(){
+        id:"ADMIN", name:"ADMIN", desc:"Operativ admin: kan driva adminflöden men ej roller/org/access.", isSystem:true,
+        modules:(function(){
           const m = mkBaseModules("none");
-          // Admin operational modules
-          m.ADMIN_HOME = "view";
-          m.ADMIN_TASKS = "manage";
-          m.ADMIN_QUESTIONS = "manage";
-          m.ADMIN_ANSWERS = "manage";
-          m.ADMIN_REPORTS = "manage";
-          m.ADMIN_INTEGRATIONS = "manage";
-          m.ADMIN_DOCS = "manage";
-          // Explicitly deny governance modules
-          m.ADMIN_ROLES = "none";
-          m.ADMIN_ORG = "none";
-          m.ADMIN_ACCESS = "none";
+          m.ADMIN_HOME="view"; m.ADMIN_TASKS="manage"; m.ADMIN_QUESTIONS="manage"; m.ADMIN_ANSWERS="manage";
+          m.ADMIN_REPORTS="manage"; m.ADMIN_INTEGRATIONS="manage"; m.ADMIN_DOCS="manage";
+          m.ADMIN_ROLES="none"; m.ADMIN_ORG="none"; m.ADMIN_ACCESS="none";
           return m;
         })()
       },
       {
-        id: "MANAGER",
-        name: "MANAGER",
-        desc: "Enhetschef: admin-ish inom scope-subtree. Ej roller/org/access.",
-        isSystem: true,
-        modules: (function(){
+        id:"MANAGER", name:"MANAGER", desc:"Enhetschef: admin-ish inom scope-subtree. Ej roller/org/access.", isSystem:true,
+        modules:(function(){
           const m = mkBaseModules("none");
-          // Manager needs operational power in their branch; UI views may come later, but role must exist now
-          m.ADMIN_HOME = "view";
-          m.ADMIN_TASKS = "manage";
-          m.ADMIN_QUESTIONS = "manage";
-          m.ADMIN_ANSWERS = "manage";
-          m.ADMIN_REPORTS = "manage";
-          m.ADMIN_DOCS = "manage";
-          // Deny governance
-          m.ADMIN_ROLES = "none";
-          m.ADMIN_ORG = "none";
-          m.ADMIN_ACCESS = "none";
+          m.ADMIN_HOME="view"; m.ADMIN_TASKS="manage"; m.ADMIN_QUESTIONS="manage"; m.ADMIN_ANSWERS="manage";
+          m.ADMIN_REPORTS="manage"; m.ADMIN_DOCS="manage";
+          m.ADMIN_ROLES="none"; m.ADMIN_ORG="none"; m.ADMIN_ACCESS="none";
           return m;
         })()
       },
       {
-        id: "EMPLOYEE",
-        name: "EMPLOYEE",
-        desc: "Medarbetare: utförare.",
-        isSystem: true,
-        modules: (function(){
+        id:"EMPLOYEE", name:"EMPLOYEE", desc:"Medarbetare: utförare.", isSystem:true,
+        modules:(function(){
           const m = mkBaseModules("none");
-          MODULES.forEach(mod => {
-            if(mod.key.startsWith("EMP_")){
-              m[mod.key] = normalizeScope(mod.defaultScope);
-            }
-          });
+          MODULES.forEach(mod => { if(mod.key.startsWith("EMP_")) m[mod.key] = normalizeScope(mod.defaultScope); });
           return m;
         })()
       }
     ];
 
     let changed = false;
-
     want.forEach(w => {
-      if(byId.has(w.id)) return; // do not touch if exists
+      if(byId.has(w.id)) return;
       roles.push({
-        id: w.id,
-        name: w.name,
-        desc: w.desc,
-        inherits: "",
-        isSystem: true,
-        locale: DEFAULT_LOCALE,
-        modules: w.modules,
-        createdAt: now,
-        updatedAt: now
+        id:w.id, name:w.name, desc:w.desc, inherits:"",
+        isSystem:true, locale:DEFAULT_LOCALE, modules:w.modules,
+        createdAt: now, updatedAt: now
       });
       changed = true;
     });
 
-    if(changed){
-      saveRoles(roles);
-    }
+    if(changed) saveRoles(roles);
   }
 
-  // ---- Assignments V2 + migration (K2, K3) ----
+  // ---- Assignments V2 + migration ----
   function loadAssignmentsV2(){
     const obj = safeParseLocal(ASG_V2_KEY, {});
     return (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
@@ -746,12 +693,10 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
   function saveAssignmentsV2(obj){
     saveLocal(ASG_V2_KEY, (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {});
   }
-
   function loadAssignmentsV1(){
     const obj = safeParseLocal(ASG_V1_KEY, {});
     return (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
   }
-
   function isEmptyObject(o){
     return !o || typeof o !== "object" || Array.isArray(o) ? true : (Object.keys(o).length === 0);
   }
@@ -767,7 +712,6 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
   }
 
   function migrateV1toV2IfNeeded(org){
-    // If org invalid => fail-closed: block writes and do not migrate.
     if(!org.ok){
       return { ok:false, migrated:false, reason: org.reason };
     }
@@ -779,12 +723,10 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
 
     const v1 = loadAssignmentsV1();
     if(isEmptyObject(v1)){
-      // nothing to migrate, but ensure v2 exists as object (safe)
       saveAssignmentsV2({});
       return { ok:true, migrated:false, reason:"" };
     }
 
-    // Determine scopeId for migration
     const scopeId = org.rootId || (org.nodes[0] ? org.nodes[0].id : "");
     if(!scopeId){
       return { ok:false, migrated:false, reason:"Org saknar giltig root/nod. Kan inte migrera assignments." };
@@ -842,12 +784,8 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
         }
       }
 
-      // Child overrides parent
       const next = Object.assign({}, base.modules);
-      Object.keys(role.modules || {}).forEach(k => {
-        next[k] = normalizeScope(role.modules[k]);
-      });
-
+      Object.keys(role.modules || {}).forEach(k => { next[k] = normalizeScope(role.modules[k]); });
       return { chain: base.chain, modules: next };
     }
 
@@ -862,25 +800,21 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
   }
 
   // ---- Permission model for this page (K5) ----
-  // This page must respect module permission if present in session/HRApp.
-  // Rule: writing changes requires ADMIN_ROLES = manage (effective).
-  function deriveCurrentRoleId(){
-    // Prefer explicit roleId if core/session provides it
-    const rid = String(auth.roleId || auth.role_id || "").trim();
-    if(rid) return rid;
-
-    // Back-compat: if auth.role is systemadmin/admin, allow mapping
-    const r = String(auth.role || "").trim();
-    if(r === "systemadmin") return "SYSTEM_ADMIN";
-    if(r === "admin") return "ADMIN";
-    return "";
+  // FIX: Source of truth = core access.roleId + core effectiveModules (inte session)
+  function deriveCurrentRoleIdFromAccess(){
+    const rid = String(access.roleId || "").trim();
+    return rid; // om saknas => fail-closed
   }
 
   function canManageRoles(){
-    const roleId = deriveCurrentRoleId();
+    const roleId = deriveCurrentRoleIdFromAccess();
     if(!roleId) return false;
-    const { effective } = resolveRoleEffective(roleId);
-    return scopeRank(effective.ADMIN_ROLES) >= scopeRank("manage");
+
+    // Prefer core effectiveModules (kommer från assignments+roles i core)
+    const eff = (access && access.effectiveModules && typeof access.effectiveModules === "object") ? access.effectiveModules : null;
+    if(!eff) return false;
+
+    return scopeRank(eff.ADMIN_ROLES) >= scopeRank("manage");
   }
 
   // ---- UI state ----
@@ -888,8 +822,7 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
   let selectedRoleId = null;
 
   function setLocked(message){
-    $("#lockbox").style.display = "block";
-    $("#lockmsg").textContent = message || "Låst läge.";
+    showLock(message || "Låst läge.");
   }
   function clearLocked(){
     $("#lockbox").style.display = "none";
@@ -1045,7 +978,6 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
     }
 
     renderModulesGrid(role);
-    // Allow deleting even system-flag roles if user created them; but do not delete our seeded system roles by id:
     const protectedIds = new Set(["SYSTEM_ADMIN","ADMIN","MANAGER","EMPLOYEE"]);
     $("#btnDelete").disabled = protectedIds.has(role.id);
 
@@ -1291,14 +1223,11 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
   function renderAll(){
     const org = loadOrgStrict();
 
-    // Migration: V1 -> V2 (fail-safe)
     const mig = migrateV1toV2IfNeeded(org);
     if(!mig.ok){
-      // Hard fail-closed: lock writing and show why
       setWriteEnabled(false, mig.reason || "Org-data saknas/korrupt. Sidan är låst (fail-closed).");
     }
 
-    // Always render
     renderRoleSelectForAssign();
     renderScopeSelect(org);
     renderAssignmentsV2(org);
@@ -1307,19 +1236,21 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
     const keep = editingRoleId;
     setEditingRole(keep);
 
-    // Write permission (K5)
+    // Fail-closed: roleId måste komma från access
+    const currentRoleId = deriveCurrentRoleIdFromAccess();
     const orgOk = org.ok;
-    const canWrite = orgOk && canManageRoles();
+
+    const canWrite = orgOk && !!currentRoleId && canManageRoles();
     if(!canWrite){
       const why = !orgOk
         ? (org.reason || "Org-data saknas/korrupt. Kan inte skriva.")
-        : "Du saknar behörighet: kräver ADMIN_ROLES = manage för att skapa/ändra roller eller spara tilldelningar.";
+        : (!currentRoleId
+            ? "Kan inte verifiera din rollId via core/assignments (access.roleId saknas). Skrivning låst (fail-closed)."
+            : "Du saknar behörighet: kräver ADMIN_ROLES = manage för att skapa/ändra roller eller spara tilldelningar.");
       setWriteEnabled(false, why);
     }else{
       setWriteEnabled(true, "");
     }
-
-    // Note: even in locked mode, list rendering stays available.
   }
 
   // ---- Save/Delete (write guarded by setWriteEnabled) ----
@@ -1383,7 +1314,6 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
 
     const idx = roles.findIndex(r => r.id === id);
     if(idx >= 0){
-      // prevent editing seeded system roles by id
       if(protectedIds.has(roles[idx].id)){
         setMsg(msg, "err", "Systemroller kan inte ändras.");
         return;
@@ -1449,7 +1379,7 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
     renderAll();
   });
 
-  // ---- Assign (K2, K4) ----
+  // ---- Assign ----
   $("#btnAssign").addEventListener("click", () => {
     const msg = $("#msgAssign");
     setMsg(msg, "", "");
@@ -1490,7 +1420,7 @@ Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020
     v2[v.empNo] = {
       roleId,
       scopeId,
-      updatedAt: Date.now() // epoch ms (konsekvent)
+      updatedAt: Date.now()
     };
     saveAssignmentsV2(v2);
 
