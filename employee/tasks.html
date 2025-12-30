@@ -1,22 +1,24 @@
 <!-- ============================================================
-AO-019 6/8-FIX-02 | FIL-ID: employee/tasks.html
+AO-008/22 | FIL-ID: employee/tasks.html
 Projekt: HR-System
 Syfte: Employee – Uppgifter (tilldelade) – UI-only v1 (nivå 3)
-PATCH: v1.3 (AO-019 6/8-FIX-02: XSS-härdning hintNoScope + KPI entydig + recurring detalj-indikator + byWeekday normalisering)
-Krav:
-- Visa endast uppgifter tilldelade till inloggad employee (empNo)
-- Status: open/progress/done
-- Employee-kommentar
-- Stöd för datum: startDate/endDate (engång)
-- Stöd för återkommande: kind="recurring" + recurring-meta + exceptionsDone per datum
-Policy:
-- Ingen backend
-- Ingen känslig data lagras
-- Robust guard: sessionStorage först, fallback localStorage
-- Fail-closed: tasks utan scopeId visas inte (hint visas)
-Lagring:
+Senaste sanning: PATCH (AO-008/22) – IMPLEMENTERAD enligt spec (fail-closed + scope + state machine)
+Policy (LÅST):
+- UI-only (GitHub Pages) • Ingen backend
+- Fail-closed • sessionStorage först (session) • fallback localStorage
+- Ingen känslig persondata (endast empNo)
+- Inga nya storage-keys • Datamodell ändras inte förutom tillåten mutation
+- XSS-escape på all rendering
+Beroenden (LÅSTA):
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
-- AO-014_TASKS_V1 (localStorage) – uppgifter (från admin/tasks)
+- AO-020_ORG_V1 (localStorage) – org-träd
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – empNo → scopeId
+- Tasks-key: AO-014_TASKS_V1 (EXAKT som i “senaste sanning” du klistrade)
+Tillåten mutation (enda fält employee får ändra):
+- status (open→progress→done)
+- employeeComment (string)
+- updatedAt (timestamp)
+- updatedBy (empNo)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -26,6 +28,7 @@ Lagring:
   <title>HR-System – Medarbetare • Uppgifter</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  <script src="../UI/UI-03-APP.js"></script>
 
   <style>
     .layout{
@@ -113,19 +116,15 @@ Lagring:
       font-size:.95rem;
     }
 
-    .tagwarn{ background: rgba(254,226,226,.9); }
-    .tagok{ background: rgba(220,252,231,.9); }
-
-    .hint{
-      margin-top:10px;
+    .lockbox{
+      margin: 10px 0;
       padding: 10px 12px;
-      border: 1px solid var(--line);
+      border: 1px dashed var(--line);
       border-radius: var(--r14);
-      background: rgba(255,255,255,.75);
+      background:#fff;
       color: var(--muted);
-      font-size: .95rem;
     }
-    .hint strong{ color:#111; }
+    .lockbox strong{ color:#111; }
   </style>
 </head>
 
@@ -162,6 +161,8 @@ Lagring:
       </div>
     </div>
 
+    <div id="lockBox" class="lockbox" style="display:none;"></div>
+
     <div class="layout">
 
       <!-- LISTA -->
@@ -172,7 +173,6 @@ Lagring:
           <div class="kpi">Öppna: <strong id="kpiOpen">0</strong></div>
           <div class="kpi">Pågår: <strong id="kpiProg">0</strong></div>
           <div class="kpi">Klara: <strong id="kpiDone">0</strong></div>
-          <div class="kpi">Återkommande: <strong id="kpiRec">0</strong></div>
         </div>
 
         <div class="row" style="gap:10px; margin-top:10px;">
@@ -180,11 +180,9 @@ Lagring:
             Visa
             <select id="filter">
               <option value="open" selected>Ej klara</option>
-              <option value="all">Alla</option>
               <option value="progress">Pågår</option>
               <option value="done">Klara</option>
-              <option value="recurring">Återkommande</option>
-              <option value="todayDue">Deadline idag/innan</option>
+              <option value="all">Alla</option>
             </select>
           </label>
 
@@ -193,8 +191,6 @@ Lagring:
             <input id="search" type="text" placeholder="t.ex. hygien" />
           </label>
         </div>
-
-        <div id="hintNoScope" class="hint" style="display:none;"></div>
 
         <div id="list"></div>
 
@@ -213,8 +209,7 @@ Lagring:
           <h2 class="tight" id="dTitle">—</h2>
 
           <div class="meta">
-            <span class="pill" id="dKind">—</span>
-            <span class="pill" id="dPrio">—</span>
+            <span class="pill" id="dStatusPill">—</span>
             <span class="pill" id="dDates">—</span>
           </div>
 
@@ -242,21 +237,8 @@ Lagring:
             <textarea id="dComment" placeholder="Skriv en kort kommentar..."></textarea>
           </label>
 
-          <div id="recurringBox" style="display:none; margin-top:10px;">
-            <div class="muted2">
-              <strong>Återkommande:</strong> <span id="dRecurringRule">—</span>
-            </div>
-            <div class="muted2" style="margin-top:6px;">
-              <strong>Klar idag:</strong> <span id="dDoneToday">—</span>
-            </div>
-            <div class="muted2" style="margin-top:6px;">
-              För återkommande gäller “Klar idag” (sparas per datum).
-            </div>
-          </div>
-
           <div class="btnrow">
             <button id="btnSave" type="button">Spara</button>
-            <button id="btnMarkToday" type="button" class="secondary" style="display:none;">Klar idag</button>
             <button id="btnClearSel" type="button" class="secondary">Stäng</button>
           </div>
 
@@ -270,90 +252,203 @@ Lagring:
 
 <script>
 /* ============================================================
-AO-054 | FIL-ID: employee/tasks.html (inline JS)
-PATCH v1.3 (AO-019 6/8-FIX-02):
-- XSS-härdning: hintNoScope byggs utan innerHTML (DOM/textContent)
-- KPI: entydig räkning (Open/Progress räknas bara om !doneForUi)
-- Recurring detalj: tydlig indikator "Klar idag: Ja/Nej"
-- Normaliserar byWeekday (unique + sort) i recurringRuleLabel (legacy-data)
+AO-008/22 | employee/tasks.html (inline JS) – IMPLEMENTATION v1.4 (AUTOPATCH)
+GUARD:
+- EMPLOYEE-only
+- Kräver: session(auth) + empNo + assignments(scopeId) + org + tasks
+- Fail-closed vid saknat/korrupt -> lås list + disable writes
+SCOPE:
+- Employee ser endast tasks:
+  - empNo matchar
+  - task.scopeId finns och är inom employee viewerScopeId subtree (inkl samma)
+STORAGE:
+- Session: sessionStorage -> localStorage (AO-001_LOGIN_V1)
+- Org/Assignments/Tasks: localStorage (keys låsta)
+XSS:
+- All rendering via textContent / DOM-bygg (ingen innerHTML för listkort/empty/locked)
+DEBUG:
+- lockReasons visas i lockBox (utan att exponera känslig data)
+PATCH NOTE (AUTOPATCH):
+- P0: updatedAt guard (aldrig NaN).
+- P1: Stabil sortering på createdAt med Number(...)||0.
+- P1: Clamp av visad employeeComment (UI-skydd, datamodell/keys oförändrade).
 ============================================================ */
 (function(){
   "use strict";
 
+  // --- LOCKED KEYS ---
   const SESSION_KEY = "AO-001_LOGIN_V1";
+  const ORG_KEY     = "AO-020_ORG_V1";
+  const ASG_V2_KEY  = "AO-020_ROLE_ASSIGNMENTS_V2";
   const TASKS_KEY   = "AO-014_TASKS_V1";
+
+  const MAX_CHAIN_GUARD = 200;
+  const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+  // P0/P1 hardening (no new storage keys; only validation)
+  const ALLOWED_STATUS = new Set(["open","progress","done"]);
+  const MAX_COMMENT_LEN = 500;
 
   const $  = (s) => document.querySelector(s);
 
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function showLockBox(lines){
+    const box = $("#lockBox");
+    if(!lines || !lines.length){
+      box.style.display = "none";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "block";
+    box.textContent = "";
+    const strong = document.createElement("strong");
+    strong.textContent = "Låst (fail-closed):";
+    box.appendChild(strong);
+    box.appendChild(document.createTextNode(" " + lines.join(" ")));
+  }
+
+  function disableInteractive(disabled){
+    $("#filter").disabled = !!disabled;
+    $("#search").disabled = !!disabled;
+    $("#btnSave").disabled = !!disabled;
+    $("#dStatus").disabled = !!disabled;
+    $("#dComment").disabled = !!disabled;
+  }
+
+  function normalizeStatus(s){
+    const v = String(s || "").trim().toLowerCase();
+    return ALLOWED_STATUS.has(v) ? v : "";
+  }
+
+  function sanitizeComment(s){
+    const v = String(s ?? "").trim();
+    if(!v) return "";
+    return v.length > MAX_COMMENT_LEN ? v.slice(0, MAX_COMMENT_LEN) : v;
+  }
+
+  // ----------------------------
+  // Session/auth (HRApp first)
+  // ----------------------------
   function readRawSession(){
-    const s1 = sessionStorage.getItem(SESSION_KEY);
-    if (s1) return s1;
-    const s2 = localStorage.getItem(SESSION_KEY);
-    if (s2) return s2;
+    try{
+      const s1 = sessionStorage.getItem(SESSION_KEY);
+      if (s1) return s1;
+    }catch{}
+    try{
+      const s2 = localStorage.getItem(SESSION_KEY);
+      if (s2) return s2;
+    }catch{}
     return null;
+  }
+
+  function safeParseJson(raw, fallback){
+    try{
+      const v = JSON.parse(raw);
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
   }
 
   function normalizeRole(role){
     return String(role || "").trim().toLowerCase();
   }
 
-  function getEmpNoFromAuth(auth){
+  function pickEmpNoFromAuth(auth){
     const candidates = [
-      auth?.empNo,
-      auth?.employeeNo,
-      auth?.empno,
-      auth?.userId,
-      auth?.username,
-      auth?.login,
-      auth?.identifier,
+      auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier
     ];
-    for (const c of candidates) {
+    for(const c of candidates){
       const s = String(c || "").trim();
-      if (!s) continue;
+      if(!s) continue;
       const digits = s.replace(/[^\d]/g, "");
-      if (digits) return digits.slice(0, 10);
+      if(digits) return digits.slice(0, 10);
     }
     return "";
   }
 
-  function readAuth(){
-    try{
-      const raw = readRawSession();
-      if(!raw) return null;
-
-      const data = JSON.parse(raw);
-      if(!data?.auth?.isAuthed) return null;
-
-      const auth = data.auth;
-      if (auth.expiresAt && Number(auth.expiresAt) < Date.now()) return null;
-
-      // P0-fix: role-normalisering
-      const r = normalizeRole(auth.role);
-      if(r !== "employee") return null;
-
-      // Se till att vi har empNo (policy: endast anst.nr)
-      const empNo = getEmpNoFromAuth(auth);
-      if(!empNo) return null;
-
-      // Normalisera tillbaka empNo in i auth för konsekvent rendering
-      auth.empNo = empNo;
-
-      return auth;
-    }catch{
-      return null;
+  function getAccessCtx(){
+    if(window.HRApp && typeof window.HRApp.getCurrentAccess === "function"){
+      try{
+        const acc = window.HRApp.getCurrentAccess();
+        if(acc && acc.ok && acc.auth){
+          const role = normalizeRole(acc.auth.role);
+          const empNo = String(acc.empNo || pickEmpNoFromAuth(acc.auth) || "").trim();
+          return {
+            source: "HRApp",
+            role,
+            empNo,
+            displayName: acc.auth.displayName || "",
+            viewerScopeId: String(acc.scopeId || "").trim(),
+            auth: acc.auth
+          };
+        }
+      }catch{}
     }
+
+    const raw = readRawSession();
+    if(!raw) return null;
+
+    const data = safeParseJson(raw, null);
+    if(!data?.auth?.isAuthed) return null;
+
+    const auth = data.auth;
+    if(auth.expiresAt && Number(auth.expiresAt) < Date.now()) return null;
+
+    const role = normalizeRole(auth.role);
+    const empNo = pickEmpNoFromAuth(auth);
+    if(!role || !empNo) return null;
+
+    return {
+      source: "fallback",
+      role,
+      empNo,
+      displayName: auth.displayName || "",
+      viewerScopeId: "",
+      auth
+    };
   }
 
-  function safeParse(key, fallback){
+  const access = getAccessCtx();
+  if(!access) { redirectLogin(); return; }
+  if(access.role !== "employee"){ redirectLogin(); return; }
+
+  $("#whoName").textContent = access.displayName || "—";
+  $("#whoEmpNo").textContent = access.empNo || "—";
+
+  function doLogout(){
+    if(window.HRApp && typeof window.HRApp.logout === "function"){
+      try{
+        window.HRApp.logout();
+        return;
+      }catch{}
+    }
+    try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
+    try{ localStorage.removeItem(SESSION_KEY); }catch{}
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  // ----------------------------
+  // Storage helpers (local)
+  // ----------------------------
+  function hasLocalKey(key){
+    try{ return localStorage.getItem(key) !== null; }catch{ return false; }
+  }
+
+  function safeParseLocal(key, fallback){
     try{
       const v = JSON.parse(localStorage.getItem(key) || "null");
       return (v === null || v === undefined) ? fallback : v;
     }catch{ return fallback; }
   }
 
-  function saveFailClosed(key, value){
+  function saveFailClosedLocal(key, value){
     try{
       localStorage.setItem(key, JSON.stringify(value));
       return { ok:true };
@@ -362,197 +457,270 @@ PATCH v1.3 (AO-019 6/8-FIX-02):
     }
   }
 
-  function escapeHtml(s){
-    return String(s ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
+  // ----------------------------
+  // Assignments hardening (fail-closed)
+  // ----------------------------
+  function normalizeAssignmentsV2(raw){
+    if(!hasLocalKey(ASG_V2_KEY)){
+      return { ok:false, map: Object.create(null), issues: ["Assignments saknas (key finns inte)."] };
+    }
+    if(raw === null || raw === undefined){
+      return { ok:false, map: Object.create(null), issues: ["Assignments är korrupt (null/undefined)."] };
+    }
+    if(typeof raw !== "object" || Array.isArray(raw)){
+      return { ok:false, map: Object.create(null), issues: ["Assignments korrupt (förväntar objekt)."] };
+    }
+
+    const out = Object.create(null);
+    let blocked = false;
+
+    for(const k of Object.keys(raw)){
+      const key = String(k);
+      if(SPECIAL_KEYS.has(key)){
+        blocked = true;
+        continue;
+      }
+      out[key] = raw[key];
+    }
+
+    if(blocked){
+      return { ok:false, map: out, issues: ["Assignments innehåller blockerade special-keys (__proto__/constructor/prototype)."] };
+    }
+
+    return { ok:true, map: out, issues: [] };
   }
 
-  function setMsg(kind, text){
-    const m = $("#msg");
-    m.className = "message" + (kind ? " " + kind : "");
-    m.textContent = text || "";
+  // ----------------------------
+  // Org helpers + integrity (fail-closed)
+  // ----------------------------
+  function normalizeOrgNodes(raw){
+    const arr = Array.isArray(raw) ? raw : [];
+    const out = [];
+    for(const n of arr){
+      const id = String(n?.id || "").trim();
+      const name = String(n?.name || "").trim();
+      const parentId = (n?.parentId === null || n?.parentId === undefined) ? null : String(n.parentId).trim();
+      if(!id || !name) continue;
+      out.push({ id, name, parentId });
+    }
+    return out;
   }
 
-  function todayISO(){
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth()+1).padStart(2,"0");
-    const day = String(d.getDate()).padStart(2,"0");
-    return `${y}-${m}-${day}`;
+  function buildOrgIndex(nodes){
+    const byId = new Map();
+    for(const n of nodes){ if(!byId.has(n.id)) byId.set(n.id, n); }
+
+    const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
+    const children = new Map();
+    nodes.forEach(n => children.set(n.id, []));
+    nodes.forEach(n => {
+      if(n.parentId && children.has(n.parentId)) children.get(n.parentId).push(n.id);
+    });
+    return { byId, parentOf, children };
   }
 
-  function isISODate(s){
-    return /^\d{4}-\d{2}-\d{2}$/.test(String(s||""));
+  function validateOrgIntegrity(nodes, orgIndex){
+    const issues = [];
+    if(!Array.isArray(nodes) || nodes.length === 0){
+      return { ok:false, issues:["Org saknas/korrupt (tom eller fel format)."] };
+    }
+
+    const ids = new Set(nodes.map(n => n.id));
+    const rootIds = nodes.filter(n => n.parentId === null).map(n => n.id);
+
+    if(rootIds.length === 0) issues.push("Org saknar root (ingen nod med parentId=null).");
+    if(rootIds.length > 1) issues.push("Org har flera root-noder (förväntar exakt 1).");
+
+    for(const n of nodes){
+      if(n.parentId === null) continue;
+      if(!n.parentId || !ids.has(n.parentId)){
+        issues.push("Org har orphan-noder (parentId pekar på saknad nod).");
+        break;
+      }
+    }
+
+    let hasLoop = false;
+    for(const n of nodes){
+      let cur = n.id;
+      let steps = 0;
+      const seen = new Set([cur]);
+
+      while(steps < MAX_CHAIN_GUARD){
+        const p = orgIndex.parentOf.get(cur);
+        if(p === null) break;
+        if(!p || !orgIndex.byId.has(p)) break;
+        if(seen.has(p)){ hasLoop = true; break; }
+        seen.add(p);
+        cur = p;
+        steps++;
+      }
+      if(hasLoop || steps >= MAX_CHAIN_GUARD){ hasLoop = true; break; }
+    }
+    if(hasLoop) issues.push("Org har loop i parent-kedjan (återbesök upptäckt).");
+
+    return { ok: issues.length === 0, issues };
   }
 
-  function parseISOToTime(iso){
-    if(!isISODate(iso)) return null;
-    const t = Date.parse(iso + "T00:00:00");
-    return Number.isFinite(t) ? t : null;
+  function isInScope(viewerScopeId, itemScopeId, orgIndex){
+    const v = String(viewerScopeId || "").trim();
+    const s = String(itemScopeId || "").trim();
+    if(!v || !s) return false;
+
+    if(!orgIndex.byId.has(v)) return false;
+    if(!orgIndex.byId.has(s)) return false;
+    if(v === s) return true;
+
+    let cur = s;
+    let steps = 0;
+    const seen = new Set([cur]);
+
+    while(steps < MAX_CHAIN_GUARD){
+      const p = orgIndex.parentOf.get(cur);
+      if(p === null) return false;
+      if(!p || !orgIndex.byId.has(p)) return false;
+      if(p === v) return true;
+
+      if(seen.has(p)) return false;
+      seen.add(p);
+
+      cur = p;
+      steps++;
+    }
+    return false;
   }
 
-  function kindLabel(k){
-    return (k === "recurring") ? "Återkommande" : "Engång";
+  // ----------------------------
+  // Load deps (AO-008: must exist)
+  // ----------------------------
+  const lockReasons = [];
+
+  if(!hasLocalKey(ORG_KEY)){
+    lockReasons.push("Org saknas (key finns inte).");
+  }
+  const orgRaw = safeParseLocal(ORG_KEY, null);
+  const orgNodes = normalizeOrgNodes(orgRaw);
+  const orgIndex = buildOrgIndex(orgNodes);
+  const orgIntegrity = validateOrgIntegrity(orgNodes, orgIndex);
+  if(!orgIntegrity.ok) lockReasons.push(...orgIntegrity.issues);
+
+  const asgParsed = safeParseLocal(ASG_V2_KEY, null);
+  const asgV2 = normalizeAssignmentsV2(asgParsed);
+  if(!asgV2.ok) lockReasons.push(...asgV2.issues);
+
+  let viewerScopeId = "";
+  if(asgV2.ok){
+    const rec = asgV2.map[String(access.empNo)] || null;
+    viewerScopeId = String(rec?.scopeId || "").trim();
+    if(!viewerScopeId) lockReasons.push("Ditt viewerScopeId saknas (assignment saknar scopeId).");
+    if(viewerScopeId && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("Ditt viewerScopeId finns inte i org.");
   }
 
+  if(!hasLocalKey(TASKS_KEY)){
+    lockReasons.push("Tasks saknas (key finns inte).");
+  }
+  const tasksRaw = safeParseLocal(TASKS_KEY, null);
+  if(!Array.isArray(tasksRaw)){
+    lockReasons.push("Tasks är korrupt (förväntar array).");
+  }
+
+  const isLocked = lockReasons.length > 0;
+  showLockBox(lockReasons);
+  disableInteractive(isLocked);
+
+  // ----------------------------
+  // UI state
+  // ----------------------------
+  let selectedId = null;
+
+  function closeDetail(){
+    selectedId = null;
+    $("#detail").style.display = "none";
+    $("#detailEmpty").style.display = "block";
+    setMsg("", "");
+  }
+  $("#btnClearSel").addEventListener("click", closeDetail);
+
+  // ----------------------------
+  // Task helpers
+  // ----------------------------
   function statusLabel(s){
     if(s === "done") return "Klar";
     if(s === "progress") return "Pågår";
     return "Ej startad";
   }
 
-  function normalizeWeekdaysInput(byWeekday){
-    if(!Array.isArray(byWeekday)) return [];
-    const nums = [];
-    for (const v of byWeekday){
-      const n = Number(String(v).trim());
-      if(Number.isFinite(n)) nums.push(n);
-    }
-    const uniq = Array.from(new Set(nums.filter(n => n >= 1 && n <= 7)));
-    uniq.sort((a,b) => a - b);
-    return uniq;
-  }
-
-  function recurringRuleLabel(rec){
-    if(!rec) return "—";
-    const freq = rec.freq || "daily";
-    const interval = Number(rec.interval || 1);
-    const freqSv = (freq === "weekly") ? "vecka" : (freq === "monthly" ? "månad" : "dag");
-    const iv = interval === 1 ? "" : ` var ${interval}e`;
-    let days = "";
-    if(freq === "weekly"){
-      const normalized = normalizeWeekdaysInput(rec.byWeekday);
-      if(normalized.length){
-        const map = {1:"mån",2:"tis",3:"ons",4:"tor",5:"fre",6:"lör",7:"sön"};
-        days = " (" + normalized.map(d => map[String(d)] || "").filter(Boolean).join(", ") + ")";
-      }
-    }
-    const until = rec.untilDate ? ` till ${rec.untilDate}` : " tillsvidare";
-    return `Varje${iv} ${freqSv}${days}${until}`;
-  }
-
   function dateLabel(task){
-    const s = task.startDate || "";
-    const e = task.endDate || "";
+    const s = String(task?.startDate || "").trim();
+    const e = String(task?.endDate || "").trim();
     if(s && e) return `${s}–${e}`;
     if(s) return `${s}`;
     if(e) return `t.o.m. ${e}`;
     return "—";
   }
 
-  function isPastOrToday(endDateISO){
-    const endT = parseISOToTime(endDateISO);
-    const nowT = parseISOToTime(todayISO());
-    if(endT === null || nowT === null) return false;
-    return endT <= nowT;
-  }
-
-  function isRecurringDoneToday(task){
-    if(!task || task.kind !== "recurring") return false;
-    const iso = todayISO();
-    return Array.isArray(task.exceptionsDone) && task.exceptionsDone.includes(iso);
-  }
-
-  // UI "done" policy:
-  // - Engång: status === done
-  // - Återkommande: status === done OR doneToday
-  function isDoneForUi(task){
-    const st = (task?.status || "open");
-    if(st === "done") return true;
-    if(task?.kind === "recurring") return isRecurringDoneToday(task);
-    return false;
-  }
-
-  // --- Guard ---
-  const auth = readAuth();
-  if(!auth){ redirectLogin(); return; }
-
-  $("#whoName").textContent = auth.displayName || "—";
-  $("#whoEmpNo").textContent = auth.empNo || "—";
-
-  function doLogout(){
-    sessionStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
-    redirectLogin();
-  }
-  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
-
-  // --- Store ---
   function loadAllTasks(){
-    const arr = safeParse(TASKS_KEY, []);
+    const arr = safeParseLocal(TASKS_KEY, []);
     return Array.isArray(arr) ? arr : [];
   }
 
   function safeSaveAllTasks(all){
-    const res = saveFailClosed(TASKS_KEY, all);
+    const res = saveFailClosedLocal(TASKS_KEY, all);
     if(!res.ok){
-      setMsg("err", "Kunde inte spara (localStorage fullt eller blockerad). Testa rensa cache eller minska text.");
+      setMsg("err", "Kunde inte spara (localStorage fullt eller blockerad).");
       return false;
     }
     return true;
   }
 
-  function loadMyTasksRaw(){
-    const empNo = String(auth.empNo || "").trim();
+  function isTaskCorrupt(t){
+    const id = String(t?.id || "").trim();
+    const empNo = String(t?.empNo || "").trim();
+    const scopeId = String(t?.scopeId || "").trim();
+    if(!id || !empNo || !scopeId) return true;
+    if(!orgIndex.byId.has(scopeId)) return true;
+    return false;
+  }
+
+  function canSeeTask(t){
+    if(isTaskCorrupt(t)) return false;
+    if(String(t.empNo).trim() !== String(access.empNo).trim()) return false;
+    return isInScope(viewerScopeId, String(t.scopeId).trim(), orgIndex);
+  }
+
+  function computeMineVisible(){
     const all = loadAllTasks();
-    return all.filter(t => String(t?.empNo || "").trim() === empNo);
+    return all
+      .filter(canSeeTask)
+      .slice()
+      .sort((a,b) => (Number(b?.createdAt) || 0) - (Number(a?.createdAt) || 0));
   }
 
-  function computeVisibleAndHidden(){
-    const mine = loadMyTasksRaw();
-    const hiddenNoScope = mine.filter(t => !String(t?.scopeId || "").trim()).length;
-
-    // Fail-closed: visa inte tasks utan scopeId
-    const visible = mine.filter(t => String(t?.scopeId || "").trim());
-
-    return { visible, hiddenNoScope, totalMine: mine.length };
-  }
-
-  // AO-019 6/8-FIX-02: ingen innerHTML här, bygg DOM/textnoder
-  function updateHintNoScope(hiddenNoScope){
-    const box = $("#hintNoScope");
-    if(!box) return;
-
-    if(hiddenNoScope > 0){
-      box.style.display = "block";
-      while (box.firstChild) box.removeChild(box.firstChild);
-
-      const strong = document.createElement("strong");
-      strong.textContent = "Info:";
-      box.appendChild(strong);
-
-      box.appendChild(document.createTextNode(` ${hiddenNoScope} uppgift(er) är dolda eftersom de saknar `));
-
-      const code = document.createElement("code");
-      code.textContent = "scopeId";
-      box.appendChild(code);
-
-      box.appendChild(document.createTextNode(". Kontakta admin så att uppgifterna kan uppdateras."));
-    }else{
-      box.style.display = "none";
-      box.textContent = "";
-    }
-  }
-
-  // AO-019 6/8-FIX-02: entydig KPI-räkning utan dubbelräkning/död kod
   function updateKpis(items){
-    const done = items.filter(x => isDoneForUi(x)).length;
-    const prog = items.filter(x => (x?.status||"open") === "progress" && !isDoneForUi(x)).length;
-    const open = items.filter(x => (x?.status||"open") === "open" && !isDoneForUi(x)).length;
-    const rec  = items.filter(x => (x?.kind||"oneoff") === "recurring").length;
-
+    const done = items.filter(x => (normalizeStatus(x?.status) || "open") === "done").length;
+    const prog = items.filter(x => (normalizeStatus(x?.status) || "open") === "progress").length;
+    const open = items.filter(x => (normalizeStatus(x?.status) || "open") === "open").length;
     $("#kpiOpen").textContent = String(open);
     $("#kpiProg").textContent = String(prog);
     $("#kpiDone").textContent = String(done);
-    $("#kpiRec").textContent  = String(rec);
   }
 
-  // selection
-  let selectedId = null;
+  function getSelectedFrom(items){
+    if(!selectedId) return null;
+    return items.find(t => String(t?.id) === String(selectedId)) || null;
+  }
+
+  // ----------------------------
+  // State machine
+  // ----------------------------
+  function isValidTransition(prev, next){
+    const p = normalizeStatus(prev) || "open";
+    const n = normalizeStatus(next) || "";
+    if(!n) return false;
+    if(p === n) return true;
+    if(p === "open" && n === "progress") return true;
+    if(p === "progress" && n === "done") return true;
+    return false;
+  }
 
   function openDetail(task){
     selectedId = task.id;
@@ -561,64 +729,105 @@ PATCH v1.3 (AO-019 6/8-FIX-02):
     $("#detail").style.display = "block";
     setMsg("", "");
 
-    $("#dTitle").textContent = task.title || "Uppgift";
-    $("#dText").textContent = task.text || "—";
-    $("#dKind").textContent = kindLabel(task.kind || "oneoff");
-    $("#dPrio").textContent = "Prio: " + (task.prio || "normal");
+    $("#dTitle").textContent = String(task.title || "Uppgift");
+    $("#dText").textContent = String(task.text || "—");
     $("#dDates").textContent = "Datum: " + dateLabel(task);
+
+    const st = normalizeStatus(task.status) || "open";
+    $("#dStatusPill").textContent = statusLabel(st);
 
     if(task.adminNote){
       $("#dAdminNoteWrap").style.display = "block";
-      $("#dAdminNote").textContent = task.adminNote;
+      $("#dAdminNote").textContent = String(task.adminNote);
     }else{
       $("#dAdminNoteWrap").style.display = "none";
       $("#dAdminNote").textContent = "";
     }
 
-    // Recurring: status-select visar fortsatt task.status (open/progress/done),
-    // men vi visar också "Klar idag" separat för konsekvens med listan.
-    $("#dStatus").value = (task.status || "open");
+    $("#dStatus").value = st;
     $("#dComment").value = String(task.employeeComment || "");
 
-    const isRec = (task.kind === "recurring");
-    $("#recurringBox").style.display = isRec ? "block" : "none";
-    $("#btnMarkToday").style.display = isRec ? "inline-block" : "none";
-    if(isRec){
-      $("#dRecurringRule").textContent = recurringRuleLabel(task.recurring || {});
-      const doneToday = isRecurringDoneToday(task);
-      $("#dDoneToday").textContent = doneToday ? "Ja" : "Nej";
-    }else{
-      $("#dRecurringRule").textContent = "";
-      $("#dDoneToday").textContent = "—";
+    const isDone = (st === "done");
+    $("#dStatus").disabled = isLocked || isDone;
+    $("#btnSave").disabled = isLocked;
+    $("#dComment").disabled = isLocked;
+
+    for(const opt of $("#dStatus").options){
+      opt.disabled = false;
+    }
+    if(st === "open"){
+      const oDone = Array.from($("#dStatus").options).find(o => o.value === "done");
+      if(oDone) oDone.disabled = true;
+    }
+    if(st === "progress"){
+      const oOpen = Array.from($("#dStatus").options).find(o => o.value === "open");
+      if(oOpen) oOpen.disabled = true;
     }
   }
 
-  function closeDetail(){
-    selectedId = null;
-    $("#detail").style.display = "none";
-    $("#detailEmpty").style.display = "block";
-    setMsg("", "");
-  }
-
-  $("#btnClearSel").addEventListener("click", closeDetail);
-
-  function upsertTask(updated){
+  function upsertAllowedMutation(next){
     const all = loadAllTasks();
-    const idx = all.findIndex(x => String(x?.id) === String(updated.id));
-    if(idx < 0) return false;
-    all[idx] = updated;
-    return safeSaveAllTasks(all);
-  }
+    const idx = all.findIndex(x => String(x?.id) === String(next.id));
+    if(idx < 0) return { ok:false, err:"Uppgift hittades inte." };
 
-  function getSelectedTaskFromVisible(visible){
-    if(!selectedId) return null;
-    return visible.find(t => String(t?.id) === String(selectedId)) || null;
+    const cur = all[idx];
+
+    if(String(cur?.empNo||"").trim() !== String(access.empNo).trim()){
+      return { ok:false, err:"Åtkomst nekad (inte din uppgift)." };
+    }
+
+    if(String(cur?.scopeId||"").trim() !== String(next?.scopeId||"").trim()){
+      return { ok:false, err:"Policy-bugg: scopeId får inte ändras." };
+    }
+    if(!canSeeTask(cur)){
+      return { ok:false, err:"Åtkomst nekad (scope)." };
+    }
+
+    const patched = { ...cur };
+
+    const prevStatus = normalizeStatus(cur?.status) || "open";
+    const nextStatus = normalizeStatus(next?.status) || "";
+    if(!nextStatus){
+      return { ok:false, err:"Ogiltig status (okänt värde)." };
+    }
+
+    if(prevStatus === "done" && nextStatus !== "done"){
+      return { ok:false, err:"DONE är slutläge (status kan inte ändras)." };
+    }
+    if(!isValidTransition(prevStatus, nextStatus)){
+      return { ok:false, err:"Ogiltig status-övergång (endast OPEN→IN_PROGRESS→DONE)." };
+    }
+
+    patched.status = nextStatus;
+    patched.employeeComment = sanitizeComment(next?.employeeComment || "");
+
+    // P0: updatedAt guard (aldrig NaN)
+    const ts = Number(next?.updatedAt);
+    patched.updatedAt = Number.isFinite(ts) && ts > 0 ? ts : Date.now();
+
+    patched.updatedBy = String(access.empNo || "").trim();
+
+    if(isLocked){
+      return { ok:false, err:"Skrivning är låst (fail-closed)." };
+    }
+
+    all[idx] = patched;
+    if(!safeSaveAllTasks(all)){
+      return { ok:false, err:"Kunde inte spara (lagring)." };
+    }
+
+    return { ok:true };
   }
 
   $("#btnSave").addEventListener("click", () => {
     setMsg("", "");
-    const { visible } = computeVisibleAndHidden();
-    const t = getSelectedTaskFromVisible(visible);
+    if(isLocked){
+      setMsg("err", "Skrivning är låst (fail-closed).");
+      return;
+    }
+
+    const items = computeMineVisible();
+    const t = getSelectedFrom(items);
     if(!t){
       setMsg("err", "Vald uppgift hittades inte.");
       closeDetail();
@@ -626,93 +835,141 @@ PATCH v1.3 (AO-019 6/8-FIX-02):
       return;
     }
 
-    const next = { ...t };
-    next.status = $("#dStatus").value;
-    next.employeeComment = String($("#dComment").value || "").trim();
-    next.updatedAt = Date.now();
+    const desiredStatus = normalizeStatus($("#dStatus").value || (t.status||"open"));
+    if(!desiredStatus){
+      setMsg("err", "Ogiltig status (okänt värde).");
+      return;
+    }
 
-    if(!upsertTask(next)){
-      setMsg("err", "Kunde inte spara (lagring).");
+    const desiredComment = sanitizeComment($("#dComment").value || "");
+
+    const res = upsertAllowedMutation({
+      id: t.id,
+      scopeId: t.scopeId,
+      status: desiredStatus,
+      employeeComment: desiredComment,
+      updatedAt: Date.now()
+    });
+
+    if(!res.ok){
+      setMsg("err", res.err || "Kunde inte spara.");
+      render();
+      const items2 = computeMineVisible();
+      const again = items2.find(x => String(x?.id) === String(t.id));
+      if(again) openDetail(again); else closeDetail();
       return;
     }
 
     setMsg("ok", "Sparat.");
     render();
-    const { visible: v2 } = computeVisibleAndHidden();
-    const again = v2.find(x => x?.id === next.id);
+    const items2 = computeMineVisible();
+    const again = items2.find(x => String(x?.id) === String(t.id));
     if(again) openDetail(again);
   });
 
-  $("#btnMarkToday").addEventListener("click", () => {
-    setMsg("", "");
-    const { visible } = computeVisibleAndHidden();
-    const t = getSelectedTaskFromVisible(visible);
-    if(!t){
-      setMsg("err", "Vald uppgift hittades inte.");
-      closeDetail();
-      render();
-      return;
-    }
-    if(t.kind !== "recurring"){
-      setMsg("err", "Gäller bara återkommande.");
-      return;
+  // ----------------------------
+  // Render (DOM-bygg, ingen innerHTML för list/empty/locked)
+  // ----------------------------
+  function makeEmpty(text){
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = text;
+    return d;
+  }
+
+  function makeMetaLine(label, value){
+    const div = document.createElement("div");
+    div.className = "meta";
+    const span = document.createElement("span");
+    const strong = document.createElement("strong");
+    strong.textContent = label;
+    span.appendChild(strong);
+    span.appendChild(document.createTextNode(" " + String(value || "—")));
+    div.appendChild(span);
+    return div;
+  }
+
+  function makePill(text){
+    const s = document.createElement("span");
+    s.className = "pill";
+    s.textContent = text;
+    return s;
+  }
+
+  function makeItemCard(x){
+    const el = document.createElement("div");
+    el.className = "item";
+
+    const left = document.createElement("div");
+    left.style.minWidth = "260px";
+    left.style.flex = "1 1 520px";
+
+    const title = document.createElement("p");
+    title.className = "item-title";
+    title.textContent = String(x?.title || "Uppgift");
+    left.appendChild(title);
+
+    const meta1 = document.createElement("div");
+    meta1.className = "meta";
+
+    const st = normalizeStatus(x?.status) || "open";
+    const dates = dateLabel(x || {});
+    const prio = String(x?.prio || "normal");
+
+    meta1.appendChild(makePill(statusLabel(st)));
+    meta1.appendChild(makePill("Prio: " + prio));
+    meta1.appendChild(makePill("Datum: " + dates));
+    left.appendChild(meta1);
+
+    left.appendChild(makeMetaLine("Text:", String(x?.text || "—")));
+
+    if(x?.adminNote){
+      left.appendChild(makeMetaLine("Admin:", String(x.adminNote)));
     }
 
-    const iso = todayISO();
-    const next = { ...t };
-    const arr = Array.isArray(next.exceptionsDone) ? next.exceptionsDone.slice() : [];
-    if(!arr.includes(iso)) arr.push(iso);
-    next.exceptionsDone = arr;
-    next.updatedAt = Date.now();
-
-    if(!upsertTask(next)){
-      setMsg("err", "Kunde inte spara (lagring).");
-      return;
+    // P1: clamp visning för att skydda UI (datat i storage ändras inte här)
+    if(x?.employeeComment){
+      left.appendChild(makeMetaLine("Din kommentar:", sanitizeComment(String(x.employeeComment))));
     }
 
-    setMsg("ok", `Markerad klar för idag (${iso}).`);
-    render();
-    const { visible: v2 } = computeVisibleAndHidden();
-    const again = v2.find(x => x?.id === next.id);
-    if(again) openDetail(again);
-  });
+    const right = document.createElement("div");
+    right.className = "row";
+    right.style.gap = "8px";
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.open = String(x?.id || "");
+    btn.textContent = "Öppna";
+    right.appendChild(btn);
+
+    el.appendChild(left);
+    el.appendChild(right);
+
+    return el;
+  }
 
   function render(){
     const list = $("#list");
-    list.innerHTML = "";
+    list.textContent = "";
+
+    if(isLocked){
+      updateKpis([]);
+      list.appendChild(makeEmpty("Listning är avstängd (fail-closed)."));
+      if(selectedId) closeDetail();
+      return;
+    }
 
     const filter = $("#filter").value;
     const q = String($("#search").value || "").trim().toLowerCase();
 
-    const { visible, hiddenNoScope } = computeVisibleAndHidden();
-    updateHintNoScope(hiddenNoScope);
-
-    const mine = visible.slice().sort((a,b) => (b?.createdAt||0) - (a?.createdAt||0));
+    const mine = computeMineVisible();
     updateKpis(mine);
 
     let items = mine;
 
-    if(filter === "open"){
-      items = items.filter(x => !isDoneForUi(x));
-    }
-    if(filter === "progress"){
-      items = items.filter(x => (x?.status||"open") === "progress" && !isDoneForUi(x));
-    }
-    if(filter === "done"){
-      items = items.filter(x => isDoneForUi(x));
-    }
-    if(filter === "recurring"){
-      items = items.filter(x => (x?.kind||"oneoff") === "recurring");
-    }
-    if(filter === "todayDue"){
-      // Endast engång/uppgifter med endDate
-      items = items.filter(x =>
-        (x?.kind||"oneoff") !== "recurring" &&
-        x?.endDate &&
-        isPastOrToday(x.endDate) &&
-        !isDoneForUi(x)
-      );
-    }
+    if(filter === "open") items = items.filter(x => (normalizeStatus(x?.status) || "open") !== "done");
+    if(filter === "progress") items = items.filter(x => (normalizeStatus(x?.status) || "open") === "progress");
+    if(filter === "done") items = items.filter(x => (normalizeStatus(x?.status) || "open") === "done");
 
     if(q){
       items = items.filter(x => {
@@ -722,69 +979,32 @@ PATCH v1.3 (AO-019 6/8-FIX-02):
     }
 
     if(items.length === 0){
-      list.innerHTML = `<div class="empty">Inga uppgifter att visa.</div>`;
-      const sel = getSelectedTaskFromVisible(mine);
+      list.appendChild(makeEmpty("Inga uppgifter att visa."));
+      const sel = getSelectedFrom(mine);
       if(!sel && selectedId) closeDetail();
       return;
     }
 
-    items.slice(0, 80).forEach(x => {
-      const el = document.createElement("div");
-      el.className = "item";
+    items.slice(0, 80).forEach(x => list.appendChild(makeItemCard(x)));
 
-      const kind = x?.kind || "oneoff";
-      const dates = dateLabel(x || {});
-      const warn = ((kind !== "recurring") && x?.endDate && isPastOrToday(x.endDate) && !isDoneForUi(x));
-      const tagClass = warn ? "pill tagwarn" : "pill tagok";
-
-      // v1.2+: recToday är en label, doneToday räknas in i done/filter/KPI
-      let recTodayLabel = "";
-      if(kind === "recurring"){
-        const iso = todayISO();
-        const doneToday = isRecurringDoneToday(x);
-        recTodayLabel = doneToday ? ` • Klar idag (${iso})` : "";
-      }
-
-      const statusUi = isDoneForUi(x) ? "done" : (x?.status||"open");
-
-      el.innerHTML = `
-        <div style="min-width:260px; flex: 1 1 520px;">
-          <p class="item-title">${escapeHtml(x?.title || "Uppgift")}</p>
-          <div class="meta">
-            <span class="pill">${escapeHtml(statusLabel(statusUi))}</span>
-            <span class="pill">${escapeHtml(kindLabel(kind) + recTodayLabel)}</span>
-            <span class="pill">Prio: ${escapeHtml(x?.prio || "normal")}</span>
-            <span class="${tagClass}">Datum: ${escapeHtml(dates)}</span>
-          </div>
-          <div class="meta"><span><strong>Text:</strong> ${escapeHtml(x?.text || "—")}</span></div>
-          ${x?.adminNote ? `<div class="meta"><span><strong>Admin:</strong> ${escapeHtml(x.adminNote)}</span></div>` : ``}
-          ${x?.employeeComment ? `<div class="meta"><span><strong>Din kommentar:</strong> ${escapeHtml(x.employeeComment)}</span></div>` : ``}
-        </div>
-        <div class="row" style="gap:8px;">
-          <button type="button" data-open="${escapeHtml(x?.id)}">Öppna</button>
-        </div>
-      `;
-      list.appendChild(el);
-    });
-
-    list.querySelectorAll("button[data-open]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const id = btn.getAttribute("data-open");
-        const { visible: v2 } = computeVisibleAndHidden();
-        const task = v2.find(t => String(t?.id) === String(id));
-        if(task) openDetail(task);
-      });
-    });
-
-    const sel = getSelectedTaskFromVisible(mine);
+    const sel = getSelectedFrom(mine);
     if(sel) openDetail(sel);
     if(!sel && selectedId) closeDetail();
   }
 
+  // Event delegation (P0): one handler only
+  $("#list").addEventListener("click", (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest("button[data-open]") : null;
+    if(!btn) return;
+    const id = btn.getAttribute("data-open") || btn.dataset.open || "";
+    const mine2 = computeMineVisible();
+    const task = mine2.find(t => String(t?.id) === String(id));
+    if(task) openDetail(task);
+  });
+
   $("#filter").addEventListener("change", render);
   $("#search").addEventListener("input", render);
 
-  // init
   render();
 
 })();
