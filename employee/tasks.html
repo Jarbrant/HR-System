@@ -2,6 +2,7 @@
 AO-054 | FIL-ID: employee/tasks.html
 Projekt: HR-System
 Syfte: Employee – Uppgifter (tilldelade) – UI-only v1 (nivå 3)
+PATCH: v1.2 (role-normalisering + recurring doneToday i KPI/filter + hint vid saknat scope)
 Krav:
 - Visa endast uppgifter tilldelade till inloggad employee (empNo)
 - Status: open/progress/done
@@ -12,6 +13,7 @@ Policy:
 - Ingen backend
 - Ingen känslig data lagras
 - Robust guard: sessionStorage först, fallback localStorage
+- Fail-closed: tasks utan scopeId visas inte (hint visas)
 Lagring:
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
 - AO-014_TASKS_V1 (localStorage) – uppgifter (från admin/tasks)
@@ -113,6 +115,17 @@ Lagring:
 
     .tagwarn{ background: rgba(254,226,226,.9); }
     .tagok{ background: rgba(220,252,231,.9); }
+
+    .hint{
+      margin-top:10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.75);
+      color: var(--muted);
+      font-size: .95rem;
+    }
+    .hint strong{ color:#111; }
   </style>
 </head>
 
@@ -180,6 +193,8 @@ Lagring:
             <input id="search" type="text" placeholder="t.ex. hygien" />
           </label>
         </div>
+
+        <div id="hintNoScope" class="hint" style="display:none;"></div>
 
         <div id="list"></div>
 
@@ -253,10 +268,11 @@ Lagring:
 <script>
 /* ============================================================
 AO-054 | FIL-ID: employee/tasks.html (inline JS)
-Syfte: Guard + lista + status/kommentar + recurring exceptionsDone
-Autopatch:
+PATCH v1.2:
+- Role-normalisering: accepterar "EMPLOYEE"/"Employee" osv (lowercase)
+- Recurring "Klar idag" räknas som KLAR i KPI + filter "Klara"
+- Fail-closed: tasks utan scopeId visas inte + hint visas om sådana finns
 - Fail-closed save (kvot/blocked)
-- Recurring "klar idag" räknas som klar idag i filter/labels utan att sätta global status=done
 - todayDue gäller endast engång (endDate). Recurring använder untilDate, inte endDate.
 ============================================================ */
 (function(){
@@ -277,15 +293,52 @@ Autopatch:
     return null;
   }
 
+  function normalizeRole(role){
+    return String(role || "").trim().toLowerCase();
+  }
+
+  function getEmpNoFromAuth(auth){
+    const candidates = [
+      auth?.empNo,
+      auth?.employeeNo,
+      auth?.empno,
+      auth?.userId,
+      auth?.username,
+      auth?.login,
+      auth?.identifier,
+    ];
+    for (const c of candidates) {
+      const s = String(c || "").trim();
+      if (!s) continue;
+      const digits = s.replace(/[^\d]/g, "");
+      if (digits) return digits.slice(0, 10);
+    }
+    return "";
+  }
+
   function readAuth(){
     try{
       const raw = readRawSession();
       if(!raw) return null;
+
       const data = JSON.parse(raw);
       if(!data?.auth?.isAuthed) return null;
-      if(data.auth.role !== "employee") return null;
-      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-      return data.auth;
+
+      const auth = data.auth;
+      if (auth.expiresAt && Number(auth.expiresAt) < Date.now()) return null;
+
+      // P0-fix: role-normalisering
+      const r = normalizeRole(auth.role);
+      if(r !== "employee") return null;
+
+      // Se till att vi har empNo (policy: endast anst.nr)
+      const empNo = getEmpNoFromAuth(auth);
+      if(!empNo) return null;
+
+      // Normalisera tillbaka empNo in i auth för konsekvent rendering
+      auth.empNo = empNo;
+
+      return auth;
     }catch{
       return null;
     }
@@ -387,6 +440,16 @@ Autopatch:
     return Array.isArray(task.exceptionsDone) && task.exceptionsDone.includes(iso);
   }
 
+  // UI "done" policy v1.2:
+  // - Engång: status === done
+  // - Återkommande: status === done OR doneToday
+  function isDoneForUi(task){
+    const st = (task?.status || "open");
+    if(st === "done") return true;
+    if(task?.kind === "recurring") return isRecurringDoneToday(task);
+    return false;
+  }
+
   // --- Guard ---
   const auth = readAuth();
   if(!auth){ redirectLogin(); return; }
@@ -416,26 +479,53 @@ Autopatch:
     return true;
   }
 
-  function loadMyTasks(){
+  function loadMyTasksRaw(){
     const empNo = String(auth.empNo || "").trim();
     const all = loadAllTasks();
     return all.filter(t => String(t?.empNo || "").trim() === empNo);
   }
 
-  function updateKpis(items){
-    const open = items.filter(x => {
-      if((x?.status||"open") === "open") return true;
-      // recurring: räknas som "öppen" idag om den inte är klar idag och inte globalt done
-      if(x?.kind === "recurring" && (x?.status||"open") !== "done" && !isRecurringDoneToday(x)) return true;
-      return false;
-    }).length;
+  function computeVisibleAndHidden(){
+    const mine = loadMyTasksRaw();
+    const hiddenNoScope = mine.filter(t => !String(t?.scopeId || "").trim()).length;
 
-    const prog = items.filter(x => (x?.status||"open") === "progress").length;
-    const done = items.filter(x => (x?.status||"open") === "done").length;
+    // Fail-closed: visa inte tasks utan scopeId
+    const visible = mine.filter(t => String(t?.scopeId || "").trim());
+
+    return { visible, hiddenNoScope, totalMine: mine.length };
+  }
+
+  function updateHintNoScope(hiddenNoScope){
+    const box = $("#hintNoScope");
+    if(!box) return;
+
+    if(hiddenNoScope > 0){
+      box.style.display = "block";
+      box.innerHTML = `<strong>Info:</strong> ${hiddenNoScope} uppgift(er) är dolda eftersom de saknar <code>scopeId</code>.
+      Kontakta admin så att uppgifterna kan uppdateras.`;
+    }else{
+      box.style.display = "none";
+      box.textContent = "";
+    }
+  }
+
+  function updateKpis(items){
+    const open = items.filter(x => !isDoneForUi(x) && (x?.status || "open") !== "progress").length
+      + items.filter(x => (x?.status||"open") === "open" && !isDoneForUi(x)).length; // robust, men enkel
+
+    const prog = items.filter(x => (x?.status||"open") === "progress" && !isDoneForUi(x)).length;
+
+    // P0-fix: KPI Done inkluderar recurring doneToday
+    const done = items.filter(x => isDoneForUi(x)).length;
+
     const rec  = items.filter(x => (x?.kind||"oneoff") === "recurring").length;
 
-    $("#kpiOpen").textContent = String(open);
-    $("#kpiProg").textContent = String(prog);
+    // Open ska vara: alla som inte är doneForUi och inte progress? (men "open" status)
+    // För tydlighet räknar vi:
+    const open2 = items.filter(x => (x?.status||"open") === "open" && !isDoneForUi(x)).length;
+
+    $("#kpiOpen").textContent = String(open2);
+    $("#kpiProg").textContent = String(items.filter(x => (x?.status||"open") === "progress" && !isDoneForUi(x)).length);
     $("#kpiDone").textContent = String(done);
     $("#kpiRec").textContent  = String(rec);
   }
@@ -494,14 +584,15 @@ Autopatch:
     return safeSaveAllTasks(all);
   }
 
-  function getSelectedTask(){
+  function getSelectedTaskFromVisible(visible){
     if(!selectedId) return null;
-    return loadMyTasks().find(t => String(t?.id) === String(selectedId)) || null;
+    return visible.find(t => String(t?.id) === String(selectedId)) || null;
   }
 
   $("#btnSave").addEventListener("click", () => {
     setMsg("", "");
-    const t = getSelectedTask();
+    const { visible } = computeVisibleAndHidden();
+    const t = getSelectedTaskFromVisible(visible);
     if(!t){
       setMsg("err", "Vald uppgift hittades inte.");
       closeDetail();
@@ -521,13 +612,15 @@ Autopatch:
 
     setMsg("ok", "Sparat.");
     render();
-    const again = loadMyTasks().find(x => x?.id === next.id);
+    const { visible: v2 } = computeVisibleAndHidden();
+    const again = v2.find(x => x?.id === next.id);
     if(again) openDetail(again);
   });
 
   $("#btnMarkToday").addEventListener("click", () => {
     setMsg("", "");
-    const t = getSelectedTask();
+    const { visible } = computeVisibleAndHidden();
+    const t = getSelectedTaskFromVisible(visible);
     if(!t){
       setMsg("err", "Vald uppgift hittades inte.");
       closeDetail();
@@ -553,7 +646,8 @@ Autopatch:
 
     setMsg("ok", `Markerad klar för idag (${iso}).`);
     render();
-    const again = loadMyTasks().find(x => x?.id === next.id);
+    const { visible: v2 } = computeVisibleAndHidden();
+    const again = v2.find(x => x?.id === next.id);
     if(again) openDetail(again);
   });
 
@@ -564,29 +658,34 @@ Autopatch:
     const filter = $("#filter").value;
     const q = String($("#search").value || "").trim().toLowerCase();
 
-    const mine = loadMyTasks().slice().sort((a,b) => (b?.createdAt||0) - (a?.createdAt||0));
+    const { visible, hiddenNoScope } = computeVisibleAndHidden();
+    updateHintNoScope(hiddenNoScope);
+
+    const mine = visible.slice().sort((a,b) => (b?.createdAt||0) - (a?.createdAt||0));
     updateKpis(mine);
 
     let items = mine;
 
     if(filter === "open"){
-      items = items.filter(x => {
-        const st = (x?.status||"open");
-        if(st === "done") return false;
-        if(x?.kind === "recurring") return !isRecurringDoneToday(x);
-        return true;
-      });
+      items = items.filter(x => !isDoneForUi(x));
     }
-    if(filter === "progress") items = items.filter(x => (x?.status||"open") === "progress");
-    if(filter === "done") items = items.filter(x => (x?.status||"open") === "done");
-    if(filter === "recurring") items = items.filter(x => (x?.kind||"oneoff") === "recurring");
+    if(filter === "progress"){
+      items = items.filter(x => (x?.status||"open") === "progress" && !isDoneForUi(x));
+    }
+    if(filter === "done"){
+      // P0-fix: inkludera recurring doneToday som “Klara”
+      items = items.filter(x => isDoneForUi(x));
+    }
+    if(filter === "recurring"){
+      items = items.filter(x => (x?.kind||"oneoff") === "recurring");
+    }
     if(filter === "todayDue"){
       // Endast engång/uppgifter med endDate
       items = items.filter(x =>
         (x?.kind||"oneoff") !== "recurring" &&
         x?.endDate &&
         isPastOrToday(x.endDate) &&
-        (x?.status||"open") !== "done"
+        !isDoneForUi(x)
       );
     }
 
@@ -599,7 +698,7 @@ Autopatch:
 
     if(items.length === 0){
       list.innerHTML = `<div class="empty">Inga uppgifter att visa.</div>`;
-      const sel = getSelectedTask();
+      const sel = getSelectedTaskFromVisible(mine);
       if(!sel && selectedId) closeDetail();
       return;
     }
@@ -610,22 +709,25 @@ Autopatch:
 
       const kind = x?.kind || "oneoff";
       const dates = dateLabel(x || {});
-      const warn = ((kind !== "recurring") && x?.endDate && isPastOrToday(x.endDate) && (x?.status||"open") !== "done");
+      const warn = ((kind !== "recurring") && x?.endDate && isPastOrToday(x.endDate) && !isDoneForUi(x));
       const tagClass = warn ? "pill tagwarn" : "pill tagok";
 
-      let recToday = "";
+      // v1.2: recToday är bara en label, men doneToday räknas in i done/filter/KPI
+      let recTodayLabel = "";
       if(kind === "recurring"){
         const iso = todayISO();
         const doneToday = isRecurringDoneToday(x);
-        recToday = doneToday ? ` • Klar idag (${iso})` : "";
+        recTodayLabel = doneToday ? ` • Klar idag (${iso})` : "";
       }
+
+      const statusUi = isDoneForUi(x) ? "done" : (x?.status||"open");
 
       el.innerHTML = `
         <div style="min-width:260px; flex: 1 1 520px;">
           <p class="item-title">${escapeHtml(x?.title || "Uppgift")}</p>
           <div class="meta">
-            <span class="pill">${escapeHtml(statusLabel(x?.status))}</span>
-            <span class="pill">${escapeHtml(kindLabel(kind))}${escapeHtml(recToday)}</span>
+            <span class="pill">${escapeHtml(statusLabel(statusUi))}</span>
+            <span class="pill">${escapeHtml(kindLabel(kind) + recTodayLabel)}</span>
             <span class="pill">Prio: ${escapeHtml(x?.prio || "normal")}</span>
             <span class="${tagClass}">Datum: ${escapeHtml(dates)}</span>
           </div>
@@ -643,12 +745,13 @@ Autopatch:
     list.querySelectorAll("button[data-open]").forEach(btn => {
       btn.addEventListener("click", () => {
         const id = btn.getAttribute("data-open");
-        const task = loadMyTasks().find(t => String(t?.id) === String(id));
+        const { visible: v2 } = computeVisibleAndHidden();
+        const task = v2.find(t => String(t?.id) === String(id));
         if(task) openDetail(task);
       });
     });
 
-    const sel = getSelectedTask();
+    const sel = getSelectedTaskFromVisible(mine);
     if(sel) openDetail(sel);
     if(!sel && selectedId) closeDetail();
   }
