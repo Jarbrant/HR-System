@@ -1,19 +1,14 @@
 <!-- ============================================================
-PRC/FIX-ARBETORDER: AO-019 3/8-FIX-01 | FIL-ID: admin/org.html
+AO-004 (POLICY FIX) | FIL-ID: admin/org.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: Org Builder = enda sanna källan för scope-trädet (subtree)
+Policy (LÅST):
+- SYSTEM_ADMIN-only: org-trädet är systemets styrstruktur (ren förvaltning)
+- ADMIN/MANAGER får INTE ändra org-strukturen
 Typ: UI-only, hel fil (PATCH)
 Risk: Medel (träd, delete-guards, korrupt data)
 
-FIX-01 (LÅST):
-- Koppla på core: inkludera ../UI/UI-03-APP.js
-- Kör HRApp.requireAuth({ pageRole:"admin" }) tidigt
-- System-policy: ADMIN/MANAGER ska blockas av core (via access/modules) – sidan står inte fristående
-- Logout: anropa HRApp.logout() (ingen egen session-key i denna fil)
-- Repair: bevara root metadata (name/type) om root fanns
-- Invalid scopeIds i assignments: Delete blockeras (fail-closed), Create/Save tillåts, tydlig varning i healthBox
-
-LÅSTA REGLER (AO-019):
+LÅSTA REGLER:
 - Ingen backend
 - Ingen känslig persondata
 - Inga nya storage-keys
@@ -39,7 +34,7 @@ Kontrakt:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Admin • Org Builder</title>
+  <title>HR-System – System • Org Builder</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
@@ -177,7 +172,7 @@ Kontrakt:
 <header class="top">
   <div class="brand">
     <strong>HR-System</strong>
-    <span class="muted">• Admin • Org Builder</span>
+    <span class="muted">• System • Org Builder</span>
   </div>
 
   <nav class="nav" aria-label="Meny">
@@ -195,7 +190,7 @@ Kontrakt:
 
 <main class="container">
   <h1 class="tight">Org Builder</h1>
-  <p class="muted">Bygg koncernens struktur (obegränsade nivåer). Root är alltid 1 och allt ligger under den.</p>
+  <p class="muted">Bygg koncernens struktur (obegränsade nivåer). Root är alltid 1 och allt ligger under den. (SYSTEM_ADMIN-only)</p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
@@ -310,16 +305,17 @@ Kontrakt:
   </section>
 </main>
 
-<!-- Core (stam) enligt AO-019 1/8 -->
+<!-- Config (stam) -->
+<script src="../UI/UI-04-CONFIG.js"></script>
+<!-- Core (stam) -->
 <script src="../UI/UI-03-APP.js"></script>
 
 <script>
 /* ============================================================
-AO-019 3/8-FIX-01 | admin/org.html (inline JS)
-- Core-guard: requireAuth({ pageRole:"admin" }) tidigt
-- Policy: Org-vyn kräver ADMIN_ORG=manage (hämtas från core access) -> core avgör ADMIN/MANAGER-block
-- Logout: HRApp.logout() (ingen session-key här)
-- Repair: bevarar root metadata (name/type) om root fanns
+AO-004 (POLICY FIX) | admin/org.html (inline JS)
+- SYSTEM_ADMIN-only: requireAuth({ allowRoles:["SYSTEM_ADMIN"] }) tidigt
+- Logout: HRApp.logout() (fallback: clearSession) (ingen egen session-key här)
+- Delete fail-closed + repair preserve root metadata
 - Invalid scopeIds i assignments: Delete blockeras, Create/Save tillåts, healthBox varnar
 - Endast ORG_KEY (RW) + ASSIGN_V2_KEY (R). Inga andra keys.
 - XSS-escape på allt från storage
@@ -333,16 +329,7 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
   const ROOT_ID = "org_root_v1";
   const MAX_CHAIN_GUARD = 200; // fail-closed mot korrupta kedjor
 
-  const SCOPE_ORDER = ["none","view","act","manage"];
   const $ = (s) => document.querySelector(s);
-
-  function normalizeScope(scope){
-    const s = String(scope || "none");
-    return SCOPE_ORDER.includes(s) ? s : "none";
-  }
-  function scopeRank(scope){
-    return SCOPE_ORDER.indexOf(normalizeScope(scope));
-  }
 
   function safeReplace(url){
     try{ window.location.replace(url); }catch{ window.location.href = url; }
@@ -351,15 +338,21 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
   // ---- Core guard (tidigt) ----
   const HRApp = window.HRApp;
   if(!HRApp || typeof HRApp.requireAuth !== "function"){
-    // Fail-closed: core saknas -> sidan ska inte stå fristående
     safeReplace("../UI/UI-01-SKELETON.html");
     return;
   }
 
-  // Låt core hantera redirect till login om ej authed
-  const ctx = HRApp.requireAuth({ pageRole: "admin", loginUrl: "../UI/UI-01-SKELETON.html" });
-  if(ctx === false){
-    // Core kan ha redirectat redan
+  let ctx = null;
+  try{
+    ctx = HRApp.requireAuth({
+      allowRoles: ["SYSTEM_ADMIN"],
+      loginUrl: "../UI/UI-01-SKELETON.html"
+    });
+  }catch{
+    safeReplace("../UI/UI-01-SKELETON.html");
+    return;
+  }
+  if(ctx === false || ctx === null || ctx === undefined){
     return;
   }
 
@@ -367,52 +360,35 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     ? (ctx.auth || ctx.session?.auth || ctx.user || null)
     : null;
 
-  $("#whoName").textContent = (auth?.displayName || auth?.name || "Admin");
-  $("#whoRole").textContent = (auth?.roleLabel || auth?.role || auth?.roleId || "admin");
-
-  function getAccessScope(accessObj, key){
-    const a = accessObj && typeof accessObj === "object" ? accessObj : null;
-    if(!a) return "";
-    // vanligaste formerna vi sett i core: access.effectiveModules / access.modules
-    const em = a.effectiveModules && typeof a.effectiveModules === "object" ? a.effectiveModules : null;
-    const m  = a.modules && typeof a.modules === "object" ? a.modules : null;
-    const v = (em && Object.prototype.hasOwnProperty.call(em, key)) ? em[key]
-            : (m  && Object.prototype.hasOwnProperty.call(m,  key)) ? m[key]
-            : "";
-    return String(v || "").trim();
+  const who = $("#whoName");
+  if(who){
+    const dn = String(auth?.displayName || auth?.name || "").trim();
+    const en = String(auth?.empNo || "").trim();
+    who.textContent = dn || (en ? ("#" + en) : "—");
+  }
+  const wr = $("#whoRole");
+  if(wr){
+    wr.textContent = String(auth?.roleLabel || auth?.role || auth?.roleId || "—");
   }
 
-  const access = (ctx && typeof ctx === "object") ? (ctx.access || ctx.currentAccess || ctx.acl || null) : null;
-  const orgScope = getAccessScope(access, "ADMIN_ORG");
-
-  // System-policy (core avgör): kräver ADMIN_ORG=manage.
-  // Om core inte exponerar detta tydligt -> fail-closed (lås + redirect).
-  if(!orgScope || scopeRank(orgScope) < scopeRank("manage")){
-    // Fail-closed: sidan ska inte vara en fristående policy-keeper
-    // Vi visar en kort låsnotis (om DOM finns) och skickar tillbaka till admin-home.
-    try{
-      $("#healthBox").style.display = "block";
-      $("#healthText").textContent = "Åtkomst nekad: kräver ADMIN_ORG = manage (styrt av core).";
-      $("#lockBox").style.display = "block";
-      $("#lockText").textContent = "Du saknar behörighet till Org-vyn. (ADMIN/MANAGER blockas via core-policy.)";
-      $("#btnSave").disabled = true;
-      $("#btnNew").disabled = true;
-    }catch{}
-    safeReplace("./home.html");
-    return;
+  const navLogout = $("#navLogout");
+  if(navLogout){
+    navLogout.addEventListener("click", (e) => {
+      e.preventDefault();
+      try{
+        if(window.HRApp && typeof window.HRApp.logout === "function"){
+          window.HRApp.logout();
+          return;
+        }
+        if(window.HRApp && typeof window.HRApp.clearSession === "function"){
+          window.HRApp.clearSession();
+          safeReplace("../UI/UI-01-SKELETON.html");
+          return;
+        }
+      }catch{}
+      safeReplace("../UI/UI-01-SKELETON.html");
+    });
   }
-
-  // Logout (core äger session)
-  $("#navLogout").addEventListener("click", (e) => {
-    e.preventDefault();
-    try{
-      if(window.HRApp && typeof window.HRApp.logout === "function"){
-        window.HRApp.logout();
-        return;
-      }
-    }catch{}
-    safeReplace("../UI/UI-01-SKELETON.html");
-  });
 
   function safeParseLocal(key, fallback){
     try{
@@ -430,15 +406,16 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
 
   function escapeHtml(s){
     return String(s ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
+      .replace(/&/g,"&amp;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;")
+      .replace(/'/g,"&#039;");
   }
 
   function setMsg(kind, text){
     const m = $("#msg");
+    if(!m) return;
     m.className = "message" + (kind ? " " + kind : "");
     m.textContent = text || "";
   }
@@ -476,7 +453,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       return { id: ROOT_ID, name: name || "Koncern (Root)", type: type || "Root", parentId: null, createdAt, updatedAt };
     }
 
-    // Allt ska ligga under root (parentId får inte vara null)
     const parentIdRaw = (n?.parentId === null || n?.parentId === undefined) ? ROOT_ID : String(n.parentId).trim();
     const parentId = parentIdRaw ? parentIdRaw : ROOT_ID;
 
@@ -520,7 +496,7 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       });
 
       for(const k of kids){
-        if(path.has(k)) continue; // loop-safe render
+        if(path.has(k)) continue;
         path.add(k);
         walk(k, depth + 1, path);
         path.delete(k);
@@ -547,37 +523,30 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     return maxDepth;
   }
 
-  // --- Loop/corruption checks ---
   function chainHasCycleOrCorrupt(parentOf, startId){
     const seen = new Set();
     let cur = startId;
     let steps = 0;
 
     while(cur && steps < MAX_CHAIN_GUARD){
-      if(cur === ROOT_ID) return false; // reaches root => ok
-      if(seen.has(cur)) return true;    // cycle
+      if(cur === ROOT_ID) return false;
+      if(seen.has(cur)) return true;
       seen.add(cur);
 
       const p = parentOf.get(cur);
-      // parentId must exist (orphans are corruption until repaired)
       if(!p) return true;
       cur = p;
       steps++;
     }
-    // guard hit => treat as corruption (fail-closed)
     return true;
   }
 
-  // --- Validation (strict) ---
   function validateStrict(rawNodes){
-    // returns:
-    // { nodes, issues, needsRepair, criticalLock, cycleNodes, orphanNodes, rootCount }
     let arr = Array.isArray(rawNodes) ? rawNodes.slice() : [];
     const issues = [];
     let needsRepair = false;
     let criticalLock = false;
 
-    // Normalize & drop invalid
     const norm = [];
     for(const it of arr){
       const n = normalizeNode(it);
@@ -585,7 +554,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     }
     arr = norm;
 
-    // Root count (strict)
     const roots = arr.filter(n => n.id === ROOT_ID);
     const rootCount = roots.length;
 
@@ -598,7 +566,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       criticalLock = true;
     }
 
-    // Duplicates (strict)
     const { dupes } = buildById(arr);
     if(dupes.length){
       issues.push(`Kritiskt: Dublett-ID upptäckt: ${dupes.slice(0,6).join(", ")}${dupes.length>6?"…":""}.`);
@@ -606,13 +573,11 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       criticalLock = true;
     }
 
-    // If missing root: create shadow root for rendering/repair UX (NOT auto-save)
     let work = arr.slice();
     if(rootCount === 0){
       const now = Date.now();
       work.unshift({ id: ROOT_ID, name: "Koncern (Root)", type: "Root", parentId: null, createdAt: now, updatedAt: now });
     }
-    // If multiple roots: keep first for render; still lock actions until repair
     if(rootCount > 1){
       const firstIdx = work.findIndex(n => n.id === ROOT_ID);
       const seenRoot = { done: false };
@@ -626,10 +591,8 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       });
     }
 
-    // Build id set
     const ids = new Set(work.map(x => x.id));
 
-    // Orphans
     const orphanNodes = [];
     work = work.map(n => {
       if(n.id === ROOT_ID) return { ...n, parentId: null };
@@ -646,7 +609,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       issues.push("Kritiskt: Orphan(s) / ogiltig parentId hittades. (Repair krävs innan actions.)");
     }
 
-    // Cycles/corruption
     const parentOf = new Map(work.map(n => [n.id, n.parentId]));
     const cycleNodes = work
       .filter(n => n.id !== ROOT_ID && chainHasCycleOrCorrupt(parentOf, n.id))
@@ -662,7 +624,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
   }
 
   function readRootMetaFromRaw(raw){
-    // preserve name/type if root existed in stored data
     try{
       const arr = Array.isArray(raw) ? raw : [];
       const roots = arr.filter(n => String(n?.id || "").trim() === ROOT_ID);
@@ -671,11 +632,7 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       const name = String(r0?.name || "").trim();
       const type = String(r0?.type || "").trim();
       const createdAt = Number.isFinite(r0?.createdAt) ? r0.createdAt : null;
-      return {
-        name: name || "Koncern (Root)",
-        type: type || "Root",
-        createdAt
-      };
+      return { name: name || "Koncern (Root)", type: type || "Root", createdAt };
     }catch{
       return null;
     }
@@ -688,7 +645,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     const v = validateStrict(raw);
     let nodes = v.nodes.slice();
 
-    // 1) Dedup IDs (keep first occurrence)
     const seen = new Set();
     nodes = nodes.filter(n => {
       if(seen.has(n.id)) return false;
@@ -696,7 +652,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       return true;
     });
 
-    // 2) Ensure exactly one root, preserve metadata if it existed
     nodes = nodes.filter(n => n.id !== ROOT_ID);
     const now = Date.now();
     const rootNode = {
@@ -709,10 +664,8 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     };
     nodes.unshift(rootNode);
 
-    // Rebuild id set after root insert
     const ids = new Set(nodes.map(x => x.id));
 
-    // 3) Fix orphans to root
     nodes = nodes.map(n => {
       if(n.id === ROOT_ID) return n;
       const pid = String(n.parentId || "").trim();
@@ -722,7 +675,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       return n;
     });
 
-    // 4) Break cycles: move cycle nodes directly under root
     const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
     for(let i=0;i<nodes.length;i++){
       const n = nodes[i];
@@ -736,39 +688,42 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     saveLocal(ORG_KEY, nodes);
   }
 
-  // --- Scope-block (ancestor-scope) ---
-  function computeBlockedByScopes(nodes, scopeIds){
-    // Fail-closed: om någon scopeId saknas i org => blocka ALL radering (men create/save tillåts i FIX-01)
+  function computeDeleteGuards(nodes, scopeIds){
     const nodeIds = new Set(nodes.map(n => n.id));
-    const invalidScopes = (scopeIds || []).map(String).filter(sid => sid && !nodeIds.has(sid));
+    const scopesArr = (scopeIds || []).map(String).filter(Boolean);
+
+    if(scopesArr.includes(ROOT_ID)){
+      return {
+        deleteLocked: true,
+        invalidScopes: [],
+        blocked: new Set(nodes.map(n => n.id)),
+        reason: "ROOT_SCOPE_ACTIVE"
+      };
+    }
+
+    const invalidScopes = scopesArr.filter(sid => sid && !nodeIds.has(sid));
     if(invalidScopes.length){
       return {
         deleteLocked: true,
         invalidScopes: invalidScopes.slice(0, 20),
-        blocked: new Set(nodes.map(n => n.id)) // används bara för UI-pill
+        blocked: new Set(nodes.map(n => n.id)),
+        reason: "INVALID_SCOPES"
       };
     }
 
-    const scopes = new Set((scopeIds || []).map(String));
+    const scopes = new Set(scopesArr);
     const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
 
-    const memo = new Map(); // nodeId -> boolean
+    const memo = new Map();
     function isBlocked(nodeId){
       const id = String(nodeId);
       if(memo.has(id)) return memo.get(id);
-
-      if(id === ROOT_ID){
-        const v = scopes.has(ROOT_ID);
-        memo.set(id, v);
-        return v;
-      }
 
       if(scopes.has(id)){
         memo.set(id, true);
         return true;
       }
 
-      // walk ancestors: if any ancestor is a scope => blocked
       let cur = id;
       let steps = 0;
       const seen = new Set([cur]);
@@ -776,27 +731,21 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       while(cur && steps < MAX_CHAIN_GUARD){
         const p = parentOf.get(cur);
         if(!p){
-          // corruption => fail-closed: treat as blocked
           memo.set(id, true);
           return true;
         }
-
         if(scopes.has(p)){
           memo.set(id, true);
           return true;
         }
-
         if(p === ROOT_ID){
-          const v = scopes.has(ROOT_ID);
-          memo.set(id, v);
-          return v;
+          memo.set(id, false);
+          return false;
         }
-
         if(seen.has(p)){
           memo.set(id, true);
           return true;
         }
-
         seen.add(p);
         cur = p;
         steps++;
@@ -809,11 +758,12 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     const blocked = new Set();
     nodes.forEach(n => { if(isBlocked(n.id)) blocked.add(n.id); });
 
-    return { deleteLocked: false, invalidScopes: [], blocked };
+    return { deleteLocked: false, invalidScopes: [], blocked, reason: "" };
   }
 
   // --- UI state ---
   let editingId = null;
+  let lastNeedsRepair = false;
 
   function validateName(name){
     const s = String(name || "").trim();
@@ -861,20 +811,25 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
         stack.push(k);
       }
     }
-    return seen; // excludes startId
+    return seen;
   }
 
-  function renderHealthAndLocks(v, scopeInfo){
+  function renderHealthAndLocks(v, guards){
     const healthBox = $("#healthBox");
     const lockBox = $("#lockBox");
 
     const issues = (v?.issues || []).slice();
     let showHealth = !!v?.needsRepair;
 
-    // FIX-01: invalid scopes => varna + delete lock, men create/save tillåts
-    if(scopeInfo?.deleteLocked && scopeInfo?.invalidScopes?.length){
+    lastNeedsRepair = !!v?.needsRepair;
+
+    if(guards?.deleteLocked && guards?.invalidScopes?.length){
       showHealth = true;
-      issues.push(`Varning: assignments pekar på scopeId som saknas i org: ${scopeInfo.invalidScopes.join(", ")}. Delete är låst (fail-closed) tills noder skapas eller scopes rättas.`);
+      issues.push(`Varning: assignments pekar på scopeId som saknas i org: ${guards.invalidScopes.join(", ")}. Delete är låst (fail-closed) tills noder skapas eller scopes rättas.`);
+    }
+    if(guards?.deleteLocked && guards?.reason === "ROOT_SCOPE_ACTIVE"){
+      showHealth = true;
+      issues.push("Varning: någon har ROOT som scopeId. Delete är låst (fail-closed) för att skydda subtree.");
     }
 
     if(!showHealth){
@@ -884,7 +839,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       $("#healthText").textContent = issues.length ? issues.join(" ") : "Org-data kan behöva reparation.";
     }
 
-    // Kritisk korruption (root/dupe/orphan/loop) => lås save/new (fail-closed)
     const critical = !!v?.criticalLock;
     if(critical){
       lockBox.style.display = "block";
@@ -892,11 +846,16 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       $("#btnSave").disabled = true;
       $("#btnNew").disabled = true;
     }else{
-      // FIX-01: även om deleteLocked p.g.a invalid scopes -> save/new ska vara aktiva
-      lockBox.style.display = (scopeInfo?.deleteLocked ? "block" : "none");
-      $("#lockText").textContent = scopeInfo?.deleteLocked
-        ? "Radering är låst (fail-closed) eftersom assignments innehåller ogiltiga scopeId. Skapa saknade noder eller rätta scopes i Access."
-        : "—";
+      if(guards?.deleteLocked){
+        lockBox.style.display = "block";
+        $("#lockText").textContent = "Radering är låst (fail-closed) p.g.a. scope-skydd (ogiltiga scopes eller root-scope). Skapa saknade noder eller rätta scopes i Access.";
+      }else if(lastNeedsRepair){
+        lockBox.style.display = "block";
+        $("#lockText").textContent = "Data kräver reparation (fail-closed-signal). Öppna Datahälsa eller kör Reparera.";
+      }else{
+        lockBox.style.display = "none";
+        $("#lockText").textContent = "—";
+      }
       $("#btnSave").disabled = false;
       $("#btnNew").disabled = false;
     }
@@ -923,7 +882,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     sel.appendChild(optRoot);
 
     const flat = flattenTree(nodes);
-
     const descendants = (editingId && editingId !== ROOT_ID) ? getDescendants(nodes, editingId) : new Set();
 
     flat.forEach(row => {
@@ -934,7 +892,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       const indent = "—".repeat(Math.min(row.depth - 1, 10));
       opt.textContent = `${indent} ${row.name}${row.type ? " • " + row.type : ""}`;
 
-      // Disable selecting itself or its descendants (loop prevention)
       if(editingId && (row.id === editingId || descendants.has(row.id))){
         opt.disabled = true;
       }
@@ -958,7 +915,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     $("#kpiDepth").textContent = String(maxDepth);
   }
 
-  // --- Export: dropdown source for other pages ---
   function exportScopeOptions(nodes){
     const flat = flattenTree(nodes);
     return flat.map(r => ({
@@ -990,17 +946,14 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
 
     const assignments = loadAssignmentsV2();
     const scopeIds = extractScopeIds(assignments);
-    const scopeInfo = computeBlockedByScopes(v.nodes, scopeIds);
+    const guards = computeDeleteGuards(v.nodes, scopeIds);
 
-    renderHealthAndLocks(v, scopeInfo);
+    renderHealthAndLocks(v, guards);
 
-    // For render: use validated/failsafe nodes, but do NOT auto-save
     const nodes = v.nodes;
 
-    // Export API for other pages (dropdown source)
     installExportApi();
 
-    // If editingId points to missing node: reset
     if(editingId && !nodes.some(n => n.id === editingId)){
       resetForm();
     }
@@ -1044,20 +997,12 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
       const isEditing = (editingId && r.id === editingId);
       const kids = childCount(r.id);
 
-      const withinScope = (!isRoot && scopeInfo.blocked.has(r.id));
-
-      // Delete rules:
-      // - root never
-      // - has children
-      // - within-scope safety (exact scope OR under scope)
-      // - fail-closed: invalid scopes => deleteLocked
-      // - fail-closed: critical lock => block delete
       const deleteBlocked =
         criticalLocked ||
-        scopeInfo.deleteLocked ||
+        guards.deleteLocked ||
         isRoot ||
         (kids > 0) ||
-        scopeInfo.blocked.has(r.id);
+        guards.blocked.has(r.id);
 
       const indentPx = Math.min((r.depth - 1) * 14, 140);
 
@@ -1075,8 +1020,8 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
               ${r.type ? `<span class="pill">${escapeHtml(r.type)}</span>` : ``}
               <span class="pill">Barn: ${kids}</span>
               ${criticalLocked ? `<span class="pill warnpill">Actions låsta</span>` : `<span class="pill okpill">OK</span>`}
-              ${scopeInfo.deleteLocked ? `<span class="pill warnpill">Delete låst</span>` : ``}
-              ${withinScope ? `<span class="pill warnpill">Scope-skydd</span>` : ``}
+              ${guards.deleteLocked ? `<span class="pill warnpill">Delete låst</span>` : ``}
+              ${(!isRoot && guards.blocked.has(r.id)) ? `<span class="pill warnpill">Scope-skydd</span>` : ``}
               ${isRoot ? `<span class="pill">Root</span>` : ``}
               ${isEditing ? `<span class="pill">Redigeras</span>` : ``}
             </div>
@@ -1124,8 +1069,8 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
           return;
         }
 
-        if(scopeInfo.deleteLocked){
-          setMsg("err", "Radering stoppas (fail-closed): assignments har scopeId som saknas i org. Skapa saknade noder eller rätta scopes i Access först.");
+        if(guards.deleteLocked){
+          setMsg("err", "Radering stoppas (fail-closed): scope-skydd aktivt (ogiltiga scopes eller root-scope). Skapa saknade noder eller rätta scopes i Access först.");
           return;
         }
 
@@ -1143,7 +1088,7 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
           return;
         }
 
-        if(scopeInfo.blocked.has(id)){
+        if(guards.blocked.has(id)){
           setMsg("err", "Radering stoppas: noden ligger inom en aktiv scope (subtree-skydd). Ändra assignments först.");
           return;
         }
@@ -1166,9 +1111,8 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     }
   }
 
-  // --- Save ---
   function wouldCreateLoop(nodes, nodeId, newParentId){
-    if(nodeId === ROOT_ID) return true; // root cannot be reparented
+    if(nodeId === ROOT_ID) return true;
     const pid = newParentId || ROOT_ID;
     if(pid === nodeId) return true;
 
@@ -1188,7 +1132,6 @@ AO-019 3/8-FIX-01 | admin/org.html (inline JS)
     const raw = safeParseLocal(ORG_KEY, []);
     const v = validateStrict(raw);
 
-    // extra fail-closed: do not allow save if validator still flags critical
     if(v.criticalLock){
       setMsg("err", "Sparande stoppas (fail-closed): org-data är korrupt. Kör Reparera först.");
       return;
