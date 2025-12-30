@@ -1,5 +1,5 @@
 /* ============================================================
-AO-002 v1.2 | FILE: UI/UI-04-CONFIG.js
+AO-002 v1.3 | FILE: UI/UI-04-CONFIG.js
 Projekt: HR-System
 Syfte: Central config för RBAC + route-tillgång + default routing (config-driven)
 Nivå: UI-only (GitHub Pages) | localStorage-first
@@ -13,16 +13,17 @@ Policy (LÅST):
 Debug-notes:
 - DEBUG är AV som default
 - Logga aldrig PII/empNo (kärnan ansvarar)
-Senaste sanning: 2025-12-30 (AO-002 v1.2 slutjustering A–C från PRC)
+Senaste sanning: 2025-12-30 (AO-002 v1.3 PATCH för GitHub Pages stabil BASE_PATH)
 Ändringslogg:
 - v1.2: ADMIN_VIEW_QUESTIONS + bort /UI/ från ROUTES_BY_ROLE + PUBLIC_ROUTES determinism (/index.html only)
+- v1.3 (PATCH): BASE_PATH hårdlåses till "/HR-System" för deterministisk routing/guard på GitHub Pages
 ============================================================ */
 
 /*
   SCOPE (GitHub Pages):
-  - Om ni vill hårdlåsa repo-subpath på GitHub Pages: sätt BASE_PATH="/HR-System"
-  - Default är tom sträng => ingen hårdlåsning (lokalt eller auto-detektion i senare AO om ni vill)
-  - Kärnan (UI-03-APP.js) ska alltid jämföra mot path EFTER BASE_PATH-trim.
+  - Repo körs under /HR-System/ på jarbrant.github.io
+  - För att undvika baspath-regressioner (guards/routing) hårdlåser vi BASE_PATH="/HR-System"
+  - Lokalt kan man byta till "" vid behov, men prod ska vara "/HR-System"
 */
 
 (function () {
@@ -31,9 +32,8 @@ Senaste sanning: 2025-12-30 (AO-002 v1.2 slutjustering A–C från PRC)
   // -------------------------
   // Base-path (GitHub Pages)
   // -------------------------
-  // PRC: default ska vara tom sträng.
-  // Vid hårdlåsning i produktion: "/HR-System"
-  const BASE_PATH = "";
+  // PRC: default får vara tom sträng i teori, men för er drift på GitHub Pages ska detta vara hårdlåst.
+  const BASE_PATH = "/HR-System";
 
   // -------------------------
   // Roles (LÅST)
@@ -48,8 +48,6 @@ Senaste sanning: 2025-12-30 (AO-002 v1.2 slutjustering A–C från PRC)
   // -------------------------
   // Public routes (explicit allowlist)
   // -------------------------
-  // PRC C: Behåll endast /index.html (entydigt) och ta bort "/".
-  // OBS: "/UI/UI-01-SKELETON.html" är publik (login).
   const PUBLIC_ROUTES = Object.freeze([
     "/UI/UI-01-SKELETON.html",
     "/index.html",
@@ -68,8 +66,6 @@ Senaste sanning: 2025-12-30 (AO-002 v1.2 slutjustering A–C från PRC)
   // -------------------------
   // Allowed routes per role (PREFIXES)
   // -------------------------
-  // PRC B: Ta bort /UI/ från authed roller. Authed users ska inte implicit kunna nå UI-mappens övriga sidor.
-  // Login nås via PUBLIC_ROUTES utan session-krav.
   const ROUTES_BY_ROLE = Object.freeze({
     [ROLES.SYSTEM_ADMIN]: Object.freeze([
       "/system/",
@@ -88,7 +84,6 @@ Senaste sanning: 2025-12-30 (AO-002 v1.2 slutjustering A–C från PRC)
   // -------------------------
   // Permissions (minimal nivå 1)
   // -------------------------
-  // PRC A: ADMIN_VIEW_QUESTIONS måste finnas för ADMIN för att undvika spök-nek vid VIEW-checks.
   const PERMISSIONS_BY_ROLE = Object.freeze({
     [ROLES.SYSTEM_ADMIN]: Object.freeze([
       "SYSTEM_VIEW_DASHBOARD",
@@ -100,7 +95,7 @@ Senaste sanning: 2025-12-30 (AO-002 v1.2 slutjustering A–C från PRC)
     ]),
     [ROLES.ADMIN]: Object.freeze([
       "ADMIN_VIEW_HOME",
-      "ADMIN_VIEW_QUESTIONS",       // ✅ PRC A (ny)
+      "ADMIN_VIEW_QUESTIONS",
       "ADMIN_MANAGE_ACCESS",
       "ADMIN_MANAGE_ORG",
       "ADMIN_MANAGE_ROLES",
@@ -142,4 +137,3 @@ Senaste sanning: 2025-12-30 (AO-002 v1.2 slutjustering A–C från PRC)
     PERMISSIONS_BY_ROLE,
   });
 })();
-
