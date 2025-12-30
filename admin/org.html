@@ -1,15 +1,22 @@
 <!-- ============================================================
-PRC/ARBETORDER: AO-019 3/8 | FIL-ID: admin/org.html
+PRC/FIX-ARBETORDER: AO-019 3/8-FIX-01 | FIL-ID: admin/org.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: Org Builder = enda sanna källan för scope-trädet (subtree)
 Typ: UI-only, hel fil (PATCH)
 Risk: Medel (träd, delete-guards, korrupt data)
 
+FIX-01 (LÅST):
+- Koppla på core: inkludera ../UI/UI-03-APP.js
+- Kör HRApp.requireAuth({ pageRole:"admin" }) tidigt
+- System-policy: ADMIN/MANAGER ska blockas av core (via access/modules) – sidan står inte fristående
+- Logout: anropa HRApp.logout() (ingen egen session-key i denna fil)
+- Repair: bevara root metadata (name/type) om root fanns
+- Invalid scopeIds i assignments: Delete blockeras (fail-closed), Create/Save tillåts, tydlig varning i healthBox
+
 LÅSTA REGLER (AO-019):
 - Ingen backend
-- sessionStorage först, fallback localStorage (fail-closed)  [gäller generellt, men denna fil rör inte session-key]
 - Ingen känslig persondata
-- Inga nya storage-keys (i denna AO: inga nya keys)
+- Inga nya storage-keys
 - Endast dessa keys används i denna fil:
   - Läs/Skriv: AO-020_ORG_V1 (localStorage) — org-träd (nodes)
   - Endast läs: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) — assignments (empNo -> { roleId, scopeId })
@@ -193,10 +200,10 @@ Kontrakt:
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
       <div class="muted">
-        Status: <strong id="whoName">Org Admin</strong> • <span id="whoRole">Scope-källa</span>
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
       </div>
       <div class="row wrap">
-        <a class="btn secondary" href="./roles.html">Öppna Roller (demo)</a>
+        <a class="btn secondary" href="./roles.html">Öppna Roller</a>
       </div>
     </div>
 
@@ -222,7 +229,8 @@ Kontrakt:
             </div>
           </div>
           <div class="smallnote">
-            Reparera = (1) säkerställ exakt 1 root, (2) bryt loopar, (3) återställ orphans till root. Sparar om <code>AO-020_ORG_V1</code>.
+            Reparera = (1) säkerställ exakt 1 root (bevarar root name/type om den fanns), (2) bryt loopar, (3) återställ orphans till root.
+            Sparar om <code>AO-020_ORG_V1</code>.
           </div>
         </div>
 
@@ -230,7 +238,7 @@ Kontrakt:
           <strong>Åtgärder låsta (fail-closed).</strong>
           <div class="muted" id="lockText" style="margin-top:4px;">—</div>
           <div class="smallnote" style="margin-top:6px;">
-            Kör <em>Reparera</em> och/eller rätta scopes i Access om assignments pekar på scopeId som saknas.
+            Kör <em>Reparera</em>. Om assignments pekar på scopeId som saknas kan du skapa saknad nod här (create/save tillåts), men radering blockeras tills scopes är friska.
           </div>
         </div>
 
@@ -266,7 +274,7 @@ Kontrakt:
         <p id="msg" class="message" aria-live="polite"></p>
 
         <div class="smallnote">
-          Kontrakt: Root = 1. Scope gäller för nod + subtree. Radering blockeras om noden ligger inom aktiv scope.
+          Kontrakt: Root = 1. Scope gäller för nod + subtree.
           <br/>Lagring: <code>AO-020_ORG_V1</code> + (read-only) <code>AO-020_ROLE_ASSIGNMENTS_V2</code>.
         </div>
       </section>
@@ -302,16 +310,19 @@ Kontrakt:
   </section>
 </main>
 
+<!-- Core (stam) enligt AO-019 1/8 -->
+<script src="../UI/UI-03-APP.js"></script>
+
 <script>
 /* ============================================================
-AO-019 3/8 | admin/org.html (inline JS)
-Verifiering + hårdning:
+AO-019 3/8-FIX-01 | admin/org.html (inline JS)
+- Core-guard: requireAuth({ pageRole:"admin" }) tidigt
+- Policy: Org-vyn kräver ADMIN_ORG=manage (hämtas från core access) -> core avgör ADMIN/MANAGER-block
+- Logout: HRApp.logout() (ingen session-key här)
+- Repair: bevarar root metadata (name/type) om root fanns
+- Invalid scopeIds i assignments: Delete blockeras, Create/Save tillåts, healthBox varnar
 - Endast ORG_KEY (RW) + ASSIGN_V2_KEY (R). Inga andra keys.
-- K1: exakt 1 root, annars fail-closed + Repair
-- K4: delete-guards inkl. ancestor-scope + fail-closed vid oklarheter
-- K5: loop/korrupt data => varning + lås kritiska actions
-- K6: XSS-escape på allt från storage
-- K3: export-dropdown-källa via window.HR_ORG_SCOPE.getScopeOptions()
+- XSS-escape på allt från storage
 ============================================================ */
 (function(){
   "use strict";
@@ -322,17 +333,85 @@ Verifiering + hårdning:
   const ROOT_ID = "org_root_v1";
   const MAX_CHAIN_GUARD = 200; // fail-closed mot korrupta kedjor
 
+  const SCOPE_ORDER = ["none","view","act","manage"];
   const $ = (s) => document.querySelector(s);
 
-  function redirectLogin(){
-    // Den här filen hanterar inte auth/session keys (AO-019: inga andra keys).
-    // Vid "logout" skickar vi bara till login-sidan.
-    window.location.replace("../UI/UI-01-SKELETON.html");
+  function normalizeScope(scope){
+    const s = String(scope || "none");
+    return SCOPE_ORDER.includes(s) ? s : "none";
+  }
+  function scopeRank(scope){
+    return SCOPE_ORDER.indexOf(normalizeScope(scope));
   }
 
+  function safeReplace(url){
+    try{ window.location.replace(url); }catch{ window.location.href = url; }
+  }
+
+  // ---- Core guard (tidigt) ----
+  const HRApp = window.HRApp;
+  if(!HRApp || typeof HRApp.requireAuth !== "function"){
+    // Fail-closed: core saknas -> sidan ska inte stå fristående
+    safeReplace("../UI/UI-01-SKELETON.html");
+    return;
+  }
+
+  // Låt core hantera redirect till login om ej authed
+  const ctx = HRApp.requireAuth({ pageRole: "admin", loginUrl: "../UI/UI-01-SKELETON.html" });
+  if(ctx === false){
+    // Core kan ha redirectat redan
+    return;
+  }
+
+  const auth = (ctx && typeof ctx === "object")
+    ? (ctx.auth || ctx.session?.auth || ctx.user || null)
+    : null;
+
+  $("#whoName").textContent = (auth?.displayName || auth?.name || "Admin");
+  $("#whoRole").textContent = (auth?.roleLabel || auth?.role || auth?.roleId || "admin");
+
+  function getAccessScope(accessObj, key){
+    const a = accessObj && typeof accessObj === "object" ? accessObj : null;
+    if(!a) return "";
+    // vanligaste formerna vi sett i core: access.effectiveModules / access.modules
+    const em = a.effectiveModules && typeof a.effectiveModules === "object" ? a.effectiveModules : null;
+    const m  = a.modules && typeof a.modules === "object" ? a.modules : null;
+    const v = (em && Object.prototype.hasOwnProperty.call(em, key)) ? em[key]
+            : (m  && Object.prototype.hasOwnProperty.call(m,  key)) ? m[key]
+            : "";
+    return String(v || "").trim();
+  }
+
+  const access = (ctx && typeof ctx === "object") ? (ctx.access || ctx.currentAccess || ctx.acl || null) : null;
+  const orgScope = getAccessScope(access, "ADMIN_ORG");
+
+  // System-policy (core avgör): kräver ADMIN_ORG=manage.
+  // Om core inte exponerar detta tydligt -> fail-closed (lås + redirect).
+  if(!orgScope || scopeRank(orgScope) < scopeRank("manage")){
+    // Fail-closed: sidan ska inte vara en fristående policy-keeper
+    // Vi visar en kort låsnotis (om DOM finns) och skickar tillbaka till admin-home.
+    try{
+      $("#healthBox").style.display = "block";
+      $("#healthText").textContent = "Åtkomst nekad: kräver ADMIN_ORG = manage (styrt av core).";
+      $("#lockBox").style.display = "block";
+      $("#lockText").textContent = "Du saknar behörighet till Org-vyn. (ADMIN/MANAGER blockas via core-policy.)";
+      $("#btnSave").disabled = true;
+      $("#btnNew").disabled = true;
+    }catch{}
+    safeReplace("./home.html");
+    return;
+  }
+
+  // Logout (core äger session)
   $("#navLogout").addEventListener("click", (e) => {
     e.preventDefault();
-    redirectLogin();
+    try{
+      if(window.HRApp && typeof window.HRApp.logout === "function"){
+        window.HRApp.logout();
+        return;
+      }
+    }catch{}
+    safeReplace("../UI/UI-01-SKELETON.html");
   });
 
   function safeParseLocal(key, fallback){
@@ -527,8 +606,7 @@ Verifiering + hårdning:
       criticalLock = true;
     }
 
-    // If missing root: we still keep working with a temporary root for rendering/repair UX (NOT auto-save)
-    // Create a shadow root for UI if needed
+    // If missing root: create shadow root for rendering/repair UX (NOT auto-save)
     let work = arr.slice();
     if(rootCount === 0){
       const now = Date.now();
@@ -542,7 +620,7 @@ Verifiering + hårdning:
         if(n.id !== ROOT_ID) return true;
         if(!seenRoot.done){
           seenRoot.done = true;
-          return i === firstIdx; // keep first instance
+          return i === firstIdx;
         }
         return false;
       });
@@ -551,7 +629,7 @@ Verifiering + hårdning:
     // Build id set
     const ids = new Set(work.map(x => x.id));
 
-    // Orphans: parentId must exist for non-root, and must not be null/undefined
+    // Orphans
     const orphanNodes = [];
     work = work.map(n => {
       if(n.id === ROOT_ID) return { ...n, parentId: null };
@@ -559,7 +637,6 @@ Verifiering + hårdning:
       if(!pid || !ids.has(pid)){
         orphanNodes.push(n.id);
         needsRepair = true;
-        // orphan is critical for delete-integrity; lock destructive ops
         criticalLock = true;
         return { ...n, parentId: ROOT_ID };
       }
@@ -584,8 +661,30 @@ Verifiering + hårdning:
     return { nodes: work, issues, needsRepair, criticalLock, cycleNodes, orphanNodes, rootCount };
   }
 
+  function readRootMetaFromRaw(raw){
+    // preserve name/type if root existed in stored data
+    try{
+      const arr = Array.isArray(raw) ? raw : [];
+      const roots = arr.filter(n => String(n?.id || "").trim() === ROOT_ID);
+      if(!roots.length) return null;
+      const r0 = roots[0];
+      const name = String(r0?.name || "").trim();
+      const type = String(r0?.type || "").trim();
+      const createdAt = Number.isFinite(r0?.createdAt) ? r0.createdAt : null;
+      return {
+        name: name || "Koncern (Root)",
+        type: type || "Root",
+        createdAt
+      };
+    }catch{
+      return null;
+    }
+  }
+
   function repairOrg(){
     const raw = safeParseLocal(ORG_KEY, []);
+    const rootMeta = readRootMetaFromRaw(raw);
+
     const v = validateStrict(raw);
     let nodes = v.nodes.slice();
 
@@ -597,10 +696,18 @@ Verifiering + hårdning:
       return true;
     });
 
-    // 2) Ensure exactly one root at index 0
+    // 2) Ensure exactly one root, preserve metadata if it existed
     nodes = nodes.filter(n => n.id !== ROOT_ID);
     const now = Date.now();
-    nodes.unshift({ id: ROOT_ID, name: "Koncern (Root)", type: "Root", parentId: null, createdAt: now, updatedAt: now });
+    const rootNode = {
+      id: ROOT_ID,
+      name: rootMeta?.name || "Koncern (Root)",
+      type: rootMeta?.type || "Root",
+      parentId: null,
+      createdAt: (rootMeta?.createdAt ?? now),
+      updatedAt: now
+    };
+    nodes.unshift(rootNode);
 
     // Rebuild id set after root insert
     const ids = new Set(nodes.map(x => x.id));
@@ -631,11 +738,15 @@ Verifiering + hårdning:
 
   // --- Scope-block (ancestor-scope) ---
   function computeBlockedByScopes(nodes, scopeIds){
-    // Fail-closed: om någon scopeId saknas i org => blocka ALL radering
+    // Fail-closed: om någon scopeId saknas i org => blocka ALL radering (men create/save tillåts i FIX-01)
     const nodeIds = new Set(nodes.map(n => n.id));
     const invalidScopes = (scopeIds || []).map(String).filter(sid => sid && !nodeIds.has(sid));
     if(invalidScopes.length){
-      return { blockedAll: true, invalidScopes: invalidScopes.slice(0, 20), blocked: new Set(nodes.map(n => n.id)) };
+      return {
+        deleteLocked: true,
+        invalidScopes: invalidScopes.slice(0, 20),
+        blocked: new Set(nodes.map(n => n.id)) // används bara för UI-pill
+      };
     }
 
     const scopes = new Set((scopeIds || []).map(String));
@@ -664,9 +775,8 @@ Verifiering + hårdning:
 
       while(cur && steps < MAX_CHAIN_GUARD){
         const p = parentOf.get(cur);
-
-        // corruption => fail-closed: treat as blocked
         if(!p){
+          // corruption => fail-closed: treat as blocked
           memo.set(id, true);
           return true;
         }
@@ -698,7 +808,8 @@ Verifiering + hårdning:
 
     const blocked = new Set();
     nodes.forEach(n => { if(isBlocked(n.id)) blocked.add(n.id); });
-    return { blockedAll: false, invalidScopes: [], blocked };
+
+    return { deleteLocked: false, invalidScopes: [], blocked };
   }
 
   // --- UI state ---
@@ -753,40 +864,39 @@ Verifiering + hårdning:
     return seen; // excludes startId
   }
 
-  function renderHealthAndLocks(v, scopeBlockInfo){
+  function renderHealthAndLocks(v, scopeInfo){
     const healthBox = $("#healthBox");
     const lockBox = $("#lockBox");
 
     const issues = (v?.issues || []).slice();
+    let showHealth = !!v?.needsRepair;
 
-    if(scopeBlockInfo?.blockedAll && scopeBlockInfo.invalidScopes?.length){
-      issues.push(`Assignments pekar på scopeId som saknas i org: ${scopeBlockInfo.invalidScopes.join(", ")}. Fail-closed: ALL radering blockeras tills scopes rättas i Access.`);
+    // FIX-01: invalid scopes => varna + delete lock, men create/save tillåts
+    if(scopeInfo?.deleteLocked && scopeInfo?.invalidScopes?.length){
+      showHealth = true;
+      issues.push(`Varning: assignments pekar på scopeId som saknas i org: ${scopeInfo.invalidScopes.join(", ")}. Delete är låst (fail-closed) tills noder skapas eller scopes rättas.`);
     }
 
-    const needs = !!v?.needsRepair || !!(scopeBlockInfo?.blockedAll);
-
-    if(!needs){
+    if(!showHealth){
       healthBox.style.display = "none";
-      lockBox.style.display = "none";
-      $("#btnSave").disabled = false;
-      $("#btnNew").disabled = false;
-      return;
+    }else{
+      healthBox.style.display = "block";
+      $("#healthText").textContent = issues.length ? issues.join(" ") : "Org-data kan behöva reparation.";
     }
 
-    healthBox.style.display = "block";
-    $("#healthText").textContent = issues.length
-      ? issues.join(" ")
-      : "Org-data ser korrupt ut och kan behöva reparation.";
-
-    // Critical lock: vid root-problem/dupes/orphans/loops => lås create/edit/delete (fail-closed)
-    const critical = !!v?.criticalLock || !!(scopeBlockInfo?.blockedAll);
+    // Kritisk korruption (root/dupe/orphan/loop) => lås save/new (fail-closed)
+    const critical = !!v?.criticalLock;
     if(critical){
       lockBox.style.display = "block";
-      $("#lockText").textContent = "Kritiskt fel eller scope-korruption upptäckt. Skapande/sparande och radering är låst tills reparation/rättning är gjord.";
+      $("#lockText").textContent = "Kritiskt fel i org-data. Skapande/sparande är låst tills du kör Reparera.";
       $("#btnSave").disabled = true;
       $("#btnNew").disabled = true;
     }else{
-      lockBox.style.display = "none";
+      // FIX-01: även om deleteLocked p.g.a invalid scopes -> save/new ska vara aktiva
+      lockBox.style.display = (scopeInfo?.deleteLocked ? "block" : "none");
+      $("#lockText").textContent = scopeInfo?.deleteLocked
+        ? "Radering är låst (fail-closed) eftersom assignments innehåller ogiltiga scopeId. Skapa saknade noder eller rätta scopes i Access."
+        : "—";
       $("#btnSave").disabled = false;
       $("#btnNew").disabled = false;
     }
@@ -848,22 +958,19 @@ Verifiering + hårdning:
     $("#kpiDepth").textContent = String(maxDepth);
   }
 
-  // --- Export: dropdown source for other pages (K3) ---
+  // --- Export: dropdown source for other pages ---
   function exportScopeOptions(nodes){
     const flat = flattenTree(nodes);
-    return flat
-      .filter(r => r.id === ROOT_ID || r.id) // keep all (root included)
-      .map(r => ({
-        id: r.id,
-        depth: r.depth,
-        label: (r.id === ROOT_ID)
-          ? "Root (Koncern)"
-          : `${"—".repeat(Math.min(r.depth - 1, 10))} ${r.name}${r.type ? " • " + r.type : ""}`
-      }));
+    return flat.map(r => ({
+      id: r.id,
+      depth: r.depth,
+      label: (r.id === ROOT_ID)
+        ? "Root (Koncern)"
+        : `${"—".repeat(Math.min(r.depth - 1, 10))} ${r.name}${r.type ? " • " + r.type : ""}`
+    }));
   }
 
-  function installExportApi(nodes){
-    // stable, no storage key, only in-memory export
+  function installExportApi(){
     window.HR_ORG_SCOPE = {
       ROOT_ID,
       getScopeOptions: function(){
@@ -881,18 +988,17 @@ Verifiering + hårdning:
     const raw = safeParseLocal(ORG_KEY, []);
     const v = validateStrict(raw);
 
-    // scope-block from assignments (fail-closed on invalid scopeIds)
     const assignments = loadAssignmentsV2();
     const scopeIds = extractScopeIds(assignments);
-    const scopeBlockInfo = computeBlockedByScopes(v.nodes, scopeIds);
+    const scopeInfo = computeBlockedByScopes(v.nodes, scopeIds);
 
-    renderHealthAndLocks(v, scopeBlockInfo);
+    renderHealthAndLocks(v, scopeInfo);
 
     // For render: use validated/failsafe nodes, but do NOT auto-save
     const nodes = v.nodes;
 
     // Export API for other pages (dropdown source)
-    installExportApi(nodes);
+    installExportApi();
 
     // If editingId points to missing node: reset
     if(editingId && !nodes.some(n => n.id === editingId)){
@@ -938,20 +1044,20 @@ Verifiering + hårdning:
       const isEditing = (editingId && r.id === editingId);
       const kids = childCount(r.id);
 
-      const withinScope = (!isRoot && scopeBlockInfo.blocked.has(r.id));
+      const withinScope = (!isRoot && scopeInfo.blocked.has(r.id));
 
-      // Block delete rules (K4):
+      // Delete rules:
       // - root never
       // - has children
       // - within-scope safety (exact scope OR under scope)
-      // - fail-closed: invalid scopes => block all
+      // - fail-closed: invalid scopes => deleteLocked
       // - fail-closed: critical lock => block delete
-      const blocked =
+      const deleteBlocked =
         criticalLocked ||
-        scopeBlockInfo.blockedAll ||
+        scopeInfo.deleteLocked ||
         isRoot ||
         (kids > 0) ||
-        scopeBlockInfo.blocked.has(r.id);
+        scopeInfo.blocked.has(r.id);
 
       const indentPx = Math.min((r.depth - 1) * 14, 140);
 
@@ -969,7 +1075,7 @@ Verifiering + hårdning:
               ${r.type ? `<span class="pill">${escapeHtml(r.type)}</span>` : ``}
               <span class="pill">Barn: ${kids}</span>
               ${criticalLocked ? `<span class="pill warnpill">Actions låsta</span>` : `<span class="pill okpill">OK</span>`}
-              ${scopeBlockInfo.blockedAll ? `<span class="pill warnpill">Fail-closed: scope-korrupt</span>` : ``}
+              ${scopeInfo.deleteLocked ? `<span class="pill warnpill">Delete låst</span>` : ``}
               ${withinScope ? `<span class="pill warnpill">Scope-skydd</span>` : ``}
               ${isRoot ? `<span class="pill">Root</span>` : ``}
               ${isEditing ? `<span class="pill">Redigeras</span>` : ``}
@@ -979,7 +1085,7 @@ Verifiering + hårdning:
 
         <div class="row" style="gap:8px;">
           <button type="button" class="secondary" data-edit="${escapeHtml(r.id)}" ${criticalLocked ? "disabled" : ""}>Redigera</button>
-          <button type="button" class="secondary" data-del="${escapeHtml(r.id)}" ${blocked ? "disabled" : ""}>
+          <button type="button" class="secondary" data-del="${escapeHtml(r.id)}" ${deleteBlocked ? "disabled" : ""}>
             Ta bort
           </button>
         </div>
@@ -1018,8 +1124,8 @@ Verifiering + hårdning:
           return;
         }
 
-        if(scopeBlockInfo.blockedAll){
-          setMsg("err", "Radering stoppas (fail-closed): assignments har scopeId som saknas i org. Öppna Access och rätta scopes först.");
+        if(scopeInfo.deleteLocked){
+          setMsg("err", "Radering stoppas (fail-closed): assignments har scopeId som saknas i org. Skapa saknade noder eller rätta scopes i Access först.");
           return;
         }
 
@@ -1031,14 +1137,13 @@ Verifiering + hårdning:
           return;
         }
 
-        const children = buildChildrenMap(nodes);
-        const kids = (children.get(id) || []).length;
+        const kids = (buildChildrenMap(nodes).get(id) || []).length;
         if(kids > 0){
           setMsg("err", "Noden har barn. Flytta/ta bort barn först.");
           return;
         }
 
-        if(scopeBlockInfo.blocked.has(id)){
+        if(scopeInfo.blocked.has(id)){
           setMsg("err", "Radering stoppas: noden ligger inom en aktiv scope (subtree-skydd). Ändra assignments först.");
           return;
         }
