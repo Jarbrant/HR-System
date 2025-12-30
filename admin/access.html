@@ -6,6 +6,7 @@ Mål:
 - Se “vem får se vad” (rollens effektiva moduler + scope/subtree)
 - Tilldela roll + scope till anställd (empNo) (UI-only)
 - Riskpanel: saknade roller/scope, korrupt data, loop-varning, dublett-ID
+- (AO-023 tillägg v1.1): systemadmin + role.locale + role.supportProfileId (metadata/preview + risk)
 Policy:
 - Ingen backend
 - Ingen känslig persondata lagras
@@ -15,6 +16,7 @@ Lagring:
 - AO-019_ROLES_V1 (localStorage) – roller (role-builder)
 - AO-020_ORG_V1 (localStorage) – org-träd (org-builder)
 - AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – role assignments { [empNo]: { roleId, scopeId, updatedAt } }
+- AO-023_SUPPORT_PROFILES_V1 (localStorage) – support-profiler (seedas här om saknas)
 Kontrakt:
 - Subtree-scope: scope gäller för vald nod + alla dess barn
 - Access ska INTE skapa egna “alternativa” roller med andra modulnycklar
@@ -185,12 +187,12 @@ Kontrakt:
 
 <main class="container">
   <h1 class="tight">Access Matrix</h1>
-  <p class="muted">Tilldela roll + scope (org). Förhandsvisa effektiva moduler och vilka noder scope täcker. UI-only v1.</p>
+  <p class="muted">Tilldela roll + scope (org). Förhandsvisa effektiva moduler, locale och supportprofil. UI-only v1.</p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
       <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
       </div>
       <div class="row wrap">
         <a class="btn secondary" href="./roles.html">Öppna roller</a>
@@ -224,6 +226,8 @@ Kontrakt:
           <p class="title">Preview</p>
           <div class="meta">
             <span class="pill" id="pvRole">Roll: —</span>
+            <span class="pill" id="pvLocale">Locale: —</span>
+            <span class="pill" id="pvSupport">Support: —</span>
             <span class="pill" id="pvScope">Scope: —</span>
             <span class="pill" id="pvCovers">Täcker: —</span>
           </div>
@@ -290,6 +294,7 @@ Kontrakt:
 <script>
 /* ============================================================
 AO-021 | FIL-ID: admin/access.html (inline JS)
+AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
 ============================================================ */
 (function(){
   "use strict";
@@ -298,6 +303,11 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
   const ROLES_KEY   = "AO-019_ROLES_V1";
   const ORG_KEY     = "AO-020_ORG_V1";
   const ASG_KEY     = "AO-020_ROLE_ASSIGNMENTS_V2";
+
+  // AO-023
+  const SUPPORT_KEY = "AO-023_SUPPORT_PROFILES_V1";
+  const DEFAULT_LOCALE = "sv-SE";
+  const DEFAULT_SUPPORT_ID = "support_default_v1";
 
   // Harmonisering mot org-builder: stöd flera möjliga root-id
   const ROOT_ID_PRIMARY = "org_root_v1";
@@ -321,7 +331,8 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
       if(!raw) return null;
       const data = JSON.parse(raw);
       if(!data?.auth?.isAuthed) return null;
-      if(data.auth.role !== "admin") return null;
+      // Tillåt admin + systemadmin
+      if(data.auth.role !== "admin" && data.auth.role !== "systemadmin") return null;
       if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
       return data.auth;
     }catch{
@@ -380,6 +391,7 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
   const auth = readAuth();
   if(!auth){ redirectLogin(); return; }
   $("#whoName").textContent = auth.displayName || "Admin";
+  $("#whoRole").textContent = auth.role || "admin";
 
   function doLogout(){
     sessionStorage.removeItem(SESSION_KEY);
@@ -388,7 +400,7 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  // --- Seed (endast minimal, utan att splittra sanningen) ---
+  // --- Seed (minimal) ---
   function seedOrgIfEmpty(){
     const raw = safeParse(ORG_KEY, null);
     if(Array.isArray(raw) && raw.length) return;
@@ -401,15 +413,44 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     if(raw && typeof raw === "object" && !Array.isArray(raw)) return;
     save(ASG_KEY, {});
   }
+  function seedSupportProfilesIfEmpty(){
+    const raw = safeParse(SUPPORT_KEY, null);
+    // Stöd både array och map, men vi lagrar som array (enklast att läsa/seed)
+    const okArr = Array.isArray(raw) ? raw : null;
+    if(okArr && okArr.length) return;
 
-  // Access ska inte skapa egna roller här. Roller ska skapas i admin/roles.html
+    const now = Date.now();
+    const seed = [
+      { id: "support_default_v1", name: "Support • Standard", kind: "default", locale: DEFAULT_LOCALE, notes: "Bas-support. Neutral, kort, saklig.", createdAt: now, updatedAt: now },
+      { id: "support_employee_v1", name: "Support • Medarbetare", kind: "employee", locale: DEFAULT_LOCALE, notes: "Fokus: uppgifter, frågor, dokument, felrapport.", createdAt: now, updatedAt: now },
+      { id: "support_admin_v1", name: "Support • Admin", kind: "admin", locale: DEFAULT_LOCALE, notes: "Fokus: tilldelning, uppföljning, översikter.", createdAt: now, updatedAt: now },
+      { id: "support_systemadmin_v1", name: "Support • Systemadmin", kind: "systemadmin", locale: DEFAULT_LOCALE, notes: "Fokus: roller/org/access/policy.", createdAt: now, updatedAt: now },
+    ];
+    save(SUPPORT_KEY, seed);
+  }
+
+  // Access ska inte skapa roller här. Roller ska skapas i admin/roles.html
   seedOrgIfEmpty();
   seedAssignmentsIfEmpty();
+  seedSupportProfilesIfEmpty();
 
   // --- Data loaders + meta ---
   function loadRoles(){
     const arr = safeParse(ROLES_KEY, []);
     return Array.isArray(arr) ? arr : [];
+  }
+
+  function loadSupportProfiles(){
+    const raw = safeParse(SUPPORT_KEY, []);
+    const arr = Array.isArray(raw) ? raw : [];
+    const map = new Map();
+    arr.forEach(p => {
+      if(!p || typeof p !== "object") return;
+      const id = String(p.id || "").trim();
+      if(!id) return;
+      map.set(id, p);
+    });
+    return { arr, byId: map };
   }
 
   function loadOrgEx(){
@@ -439,7 +480,6 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     if(hasPrimary) bestRootId = ROOT_ID_PRIMARY;
     else if(hasFallback) bestRootId = ROOT_ID_FALLBACK;
     else{
-      // försök hitta node med parentId null
       const anyRoot = ids.find(id => {
         const n = byId.get(id);
         return n && (n.parentId === null || n.parentId === undefined || String(n.parentId).trim() === "");
@@ -482,7 +522,6 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
         children.get(pid).push(String(n.id));
       }
     });
-    // stable sort by name
     children.forEach((arr, pid) => {
       arr.sort((a,b) => String(byId.get(a)?.name||"").localeCompare(String(byId.get(b)?.name||""), "sv"));
       children.set(pid, arr);
@@ -512,7 +551,6 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
       return lab;
     }
 
-    // prefill for stability
     Array.from(byId.keys()).forEach(id => labelFor(id));
     return { labelFor };
   }
@@ -572,7 +610,7 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
   }
 
   function mergeModules(base, add){
-    // Additiv union (OR): passar “arv = lägg till rättigheter”
+    // Additiv union (OR): arv = lägg till rättigheter
     const b = normalizeModules(base);
     const a = normalizeModules(add);
     const out = { ...b };
@@ -587,7 +625,6 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
       };
     });
 
-    // enforce manage => act+view, act => view
     Object.keys(out).forEach(k => {
       if(out[k].manage){ out[k].act = true; out[k].view = true; }
       if(out[k].act){ out[k].view = true; }
@@ -605,7 +642,6 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     let depthClipped = false;
     let loop = false;
 
-    // Depth limit: flexibel men skyddar mot trasig storage
     const MAX_DEPTH = 80;
 
     while(curId && byId.has(curId)){
@@ -632,6 +668,20 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
       const lvl = v.manage ? "manage" : (v.act ? "act" : (v.view ? "view" : "none"));
       return { key:k, lvl };
     }).filter(x => x.lvl !== "none");
+  }
+
+  // --- AO-023 role metadata resolve ---
+  function effectiveLocale(role){
+    const loc = String(role?.locale || "").trim();
+    return loc || DEFAULT_LOCALE;
+  }
+  function effectiveSupportId(role){
+    const sid = String(role?.supportProfileId || "").trim();
+    return sid || DEFAULT_SUPPORT_ID;
+  }
+  function supportNameById(supportById, supportId){
+    const p = supportById.get(String(supportId || "")) || null;
+    return p ? (p.name || p.id) : "(saknas)";
   }
 
   // --- UI: selects ---
@@ -677,7 +727,6 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
       sel.appendChild(opt);
     });
 
-    // default: bestRootId om möjligt
     const bestRoot = meta.bestRootId;
     sel.value = byId.has(bestRoot) ? bestRoot : (ids[0] || "");
   }
@@ -690,6 +739,7 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     const { nodes, meta } = loadOrgEx();
     const { byId } = buildOrgIndex(nodes);
     const { labelFor } = buildPathLabelCache(nodes);
+    const { byId: supportById } = loadSupportProfiles();
 
     const roleId = $("#roleSelect").value;
     const scopeId = $("#scopeSelect").value || meta.bestRootId;
@@ -698,6 +748,12 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     const scopeNode = byId.get(String(scopeId)) || null;
 
     $("#pvRole").textContent = "Roll: " + (role ? (role.name || role.id) : "—");
+    $("#pvLocale").textContent = "Locale: " + (role ? effectiveLocale(role) : "—");
+
+    const sid = role ? effectiveSupportId(role) : "";
+    const sName = role ? supportNameById(supportById, sid) : "—";
+    $("#pvSupport").textContent = "Support: " + (role ? sName : "—");
+
     $("#pvScope").textContent = "Scope: " + (scopeNode ? (scopeNode.name || scopeNode.id) : "—");
 
     const subtree = scopeNode ? getSubtreeIds(scopeNode.id, nodes) : [];
@@ -722,8 +778,8 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     }
 
     const nodeNames = subtree.slice(0, 14).map(id => escapeHtml(labelFor(id).split(" → ").slice(-1)[0] || id));
-    const more = subtree.length > 14 ? ` +${subtree.length-14} till` : "";
-    $("#pvNodes").innerHTML = subtree.length ? (nodeNames.join(", ") + escapeHtml(more)) : "—";
+    const moreText = subtree.length > 14 ? ` +${subtree.length-14} till` : "";
+    $("#pvNodes").textContent = subtree.length ? (nodeNames.join(", ") + moreText) : "—";
 
     // preview-warnings
     const warns = [];
@@ -731,11 +787,18 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     if(!nodes.length) warns.push("Org saknas. Skapa org i admin/org.html.");
     if(meta.duplicates && meta.duplicates.length) warns.push(`Org har dublett-ID (${meta.duplicates.slice(0,3).join(", ")}${meta.duplicates.length>3 ? "…" : ""}). Noder kan döljas.`);
     if(!meta.hasPrimary && meta.hasFallback) warns.push(`Root-id avviker (hittade "${ROOT_ID_FALLBACK}" men förväntar "${ROOT_ID_PRIMARY}"). Det är OK, men harmonisera gärna i org-builder.`);
-    if(role && (eff.loop || eff.depthClipped)){
-      const parts = [];
-      if(eff.loop) parts.push("arv-loop");
-      if(eff.depthClipped) parts.push("arv för lång (klippt)");
-      warns.push(`Rollen har problem (${parts.join(", ")}). Preview kan vara ofullständig.`);
+    if(role){
+      const loc = effectiveLocale(role);
+      if(!String(role.locale || "").trim()) warns.push(`Rollen saknar locale. Default används (${loc}).`);
+      const spId = effectiveSupportId(role);
+      if(!String(role.supportProfileId || "").trim()) warns.push(`Rollen saknar supportProfileId. Default används (${DEFAULT_SUPPORT_ID}).`);
+      if(spId && !supportById.has(spId)) warns.push(`Supportprofil saknas i AO-023 (${spId}). Skapa/seed i ${SUPPORT_KEY}.`);
+      if(eff.loop || eff.depthClipped){
+        const parts = [];
+        if(eff.loop) parts.push("arv-loop");
+        if(eff.depthClipped) parts.push("arv för lång (klippt)");
+        warns.push(`Rollen har problem (${parts.join(", ")}). Preview kan vara ofullständig.`);
+      }
     }
 
     if(warns.length) setPreviewWarn(warns.join(" "));
@@ -778,33 +841,29 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
   function computeRisks(roles, orgEx, asg){
     const nodes = orgEx.nodes;
     const meta = orgEx.meta;
+    const { byId: supportById } = loadSupportProfiles();
 
     const roleById = new Map(roles.map(r => [String(r.id), r]));
     const nodeById = new Map(nodes.map(n => [String(n.id), n]));
 
     const risks = [];
 
-    // dataset
     if(!roles.length) risks.push("Inga roller finns. Skapa i admin/roles.html (AO-019).");
     if(!nodes.length) risks.push("Org-data saknas. Skapa i admin/org.html (AO-020).");
 
-    // org duplicates
     if(meta.duplicates && meta.duplicates.length){
       risks.push(`Org har dublett-ID: ${meta.duplicates.join(", ")}. En nod kan “försvinna” (sista vinner).`);
     }
 
-    // org cycles (parent-cykler)
     const cyc = detectOrgParentCycles(nodes);
     if(cyc.hasCycle){
       risks.push(`Org-data innehåller parent-loop/cykel (hint: ${cyc.cycleHint}). Vissa noder kan döljas i vyer.`);
     }
 
-    // root mismatch info
     if(!meta.hasPrimary && meta.hasFallback){
       risks.push(`Root-id mismatch: hittade "${ROOT_ID_FALLBACK}" men inte "${ROOT_ID_PRIMARY}". Harmonisering rekommenderas.`);
     }
 
-    // assignments validation
     Object.keys(asg || {}).forEach(empNo => {
       const a = asg[empNo] || {};
       const rid = String(a.roleId || "");
@@ -817,7 +876,6 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
       }
     });
 
-    // role inheritance issues
     roles.forEach(r => {
       const eff = resolveRoleEffective(r.id, roles);
       if(eff.loop) risks.push(`Roll "${r.name || r.id}" har arv-loop. Åtgärda i admin/roles.html.`);
@@ -825,6 +883,19 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
       const inh = String(r.inherits || "").trim();
       if(inh && !roleById.has(inh)){
         risks.push(`Roll "${r.name || r.id}" ärver från roll som inte finns (${inh}).`);
+      }
+
+      // AO-023: locale + supportProfileId
+      const loc = String(r.locale || "").trim();
+      if(!loc){
+        risks.push(`Roll "${r.name || r.id}" saknar locale. Default används (${DEFAULT_LOCALE}).`);
+      }
+      const spId = String(r.supportProfileId || "").trim() || DEFAULT_SUPPORT_ID;
+      if(!String(r.supportProfileId || "").trim()){
+        risks.push(`Roll "${r.name || r.id}" saknar supportProfileId. Default används (${DEFAULT_SUPPORT_ID}).`);
+      }
+      if(spId && !supportById.has(spId)){
+        risks.push(`Roll "${r.name || r.id}" pekar på supportprofil som inte finns (${spId}).`);
       }
     });
 
@@ -839,10 +910,10 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     const roles = loadRoles();
     const orgEx = loadOrgEx();
     const nodes = orgEx.nodes;
-    const meta = orgEx.meta;
 
     const { byId } = buildOrgIndex(nodes);
     const { labelFor } = buildPathLabelCache(nodes);
+    const { byId: supportById } = loadSupportProfiles();
 
     const asg = loadAssignments();
     const roleById = new Map(roles.map(r => [String(r.id), r]));
@@ -852,20 +923,28 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
         const a = asg[empNo] || {};
         const role = roleById.get(String(a.roleId||"")) || null;
         const scope = byId.get(String(a.scopeId||"")) || null;
+
+        const loc = role ? effectiveLocale(role) : DEFAULT_LOCALE;
+        const spId = role ? effectiveSupportId(role) : DEFAULT_SUPPORT_ID;
+        const spName = role ? supportNameById(supportById, spId) : "(—)";
+
         return {
           empNo: String(empNo),
           roleId: String(a.roleId||""),
           scopeId: String(a.scopeId||""),
           roleName: role ? (role.name || role.id) : "(saknas)",
           scopeName: scope ? labelFor(scope.id) : "(saknas)",
-          updatedAt: a.updatedAt || 0
+          updatedAt: a.updatedAt || 0,
+          locale: loc,
+          supportId: spId,
+          supportName: spName
         };
       })
       .sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
 
     const query = String(q||"").trim().toLowerCase();
     const filtered = query ? rows.filter(r => {
-      const blob = `${r.empNo} ${r.roleName} ${r.roleId} ${r.scopeName} ${r.scopeId}`.toLowerCase();
+      const blob = `${r.empNo} ${r.roleName} ${r.roleId} ${r.scopeName} ${r.scopeId} ${r.locale} ${r.supportName}`.toLowerCase();
       return blob.includes(query);
     }) : rows;
 
@@ -884,6 +963,8 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
       const subtree = scopeNode ? getSubtreeIds(scopeNode.id, nodes) : [];
       const subtreeHint = subtree.length ? `${subtree.length} nod(er)` : "—";
 
+      const supportMissing = role ? (!loadSupportProfiles().byId.has(r.supportId)) : false;
+
       const el = document.createElement("div");
       el.className = "item";
       el.innerHTML = `
@@ -891,6 +972,8 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
           <p class="item-title">Anst.nr ${escapeHtml(r.empNo)}</p>
           <div class="meta">
             <span class="pill"><strong>Roll:</strong> ${escapeHtml(r.roleName)} <span class="muted">(${escapeHtml(r.roleId || "—")})</span></span>
+            <span class="pill"><strong>Locale:</strong> ${escapeHtml(r.locale)}</span>
+            <span class="pill"><strong>Support:</strong> ${escapeHtml(r.supportName)} <span class="muted">(${escapeHtml(r.supportId)})</span></span>
             <span class="pill"><strong>Scope:</strong> ${escapeHtml(r.scopeName)} <span class="muted">(${escapeHtml(r.scopeId || "—")})</span></span>
             <span class="pill"><strong>Täcker:</strong> ${escapeHtml(subtreeHint)}</span>
             <span class="pill"><strong>Uppdat:</strong> ${escapeHtml(fmtDate(r.updatedAt))}</span>
@@ -899,6 +982,15 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
           <div class="chips" style="margin-top:8px;">
             ${chips.length ? chips.map(c => `<span class="chip"><strong>${escapeHtml(c.key)}</strong> <span class="muted">${escapeHtml(c.lvl)}</span></span>`).join("") : `<span class="muted">${role ? "Inga moduler" : "Roll saknas"}</span>`}
           </div>
+
+          ${(supportMissing) ? `
+            <div class="warnbox" style="margin-top:10px;">
+              <div class="title">Varning</div>
+              <div class="muted" style="font-size:.95rem;">
+                Supportprofil saknas (${escapeHtml(r.supportId)}). Åtgärda i <code>${SUPPORT_KEY}</code> eller uppdatera roll i <code>admin/roles.html</code>.
+              </div>
+            </div>
+          ` : ``}
 
           ${(role && (eff.loop || eff.depthClipped)) ? `
             <div class="warnbox" style="margin-top:10px;">
@@ -909,7 +1001,6 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
               </div>
             </div>
           ` : ``}
-
         </div>
 
         <div class="row" style="gap:8px;">
@@ -953,13 +1044,15 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     view.innerHTML = "";
 
     const roles = loadRoles();
+    const { byId: supportById } = loadSupportProfiles();
+
     const query = String(q||"").trim().toLowerCase();
     const list = roles
       .slice()
       .sort((a,b) => String(a.name||a.id||"").localeCompare(String(b.name||b.id||""), "sv"))
       .filter(r => {
         if(!query) return true;
-        const blob = `${r.id||""} ${r.name||""} ${r.inherits||""}`.toLowerCase();
+        const blob = `${r.id||""} ${r.name||""} ${r.inherits||""} ${r.locale||""} ${r.supportProfileId||""}`.toLowerCase();
         return blob.includes(query);
       });
 
@@ -971,6 +1064,12 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     list.slice(0, 60).forEach(r => {
       const eff = resolveRoleEffective(r.id, roles);
       const chips = roleModulesToChips(eff.modules);
+
+      const loc = effectiveLocale(r);
+      const spId = effectiveSupportId(r);
+      const spName = supportNameById(supportById, spId);
+      const spMissing = !supportById.has(spId);
+
       const el = document.createElement("div");
       el.className = "item";
       el.innerHTML = `
@@ -979,17 +1078,20 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
           <div class="meta">
             <span class="pill"><strong>ID:</strong> ${escapeHtml(r.id)}</span>
             <span class="pill"><strong>Ärver:</strong> ${escapeHtml(String(r.inherits||"") || "—")}</span>
+            <span class="pill"><strong>Locale:</strong> ${escapeHtml(loc)}${String(r.locale||"").trim() ? "" : " (default)"}</span>
+            <span class="pill"><strong>Support:</strong> ${escapeHtml(spName)} <span class="muted">(${escapeHtml(spId)})</span>${spMissing ? " (saknas)" : ""}</span>
           </div>
 
           <div class="chips" style="margin-top:8px;">
             ${chips.length ? chips.map(c => `<span class="chip"><strong>${escapeHtml(c.key)}</strong> <span class="muted">${escapeHtml(c.lvl)}</span></span>`).join("") : `<span class="muted">Inga moduler</span>`}
           </div>
 
-          ${(eff.loop || eff.depthClipped) ? `
+          ${(eff.loop || eff.depthClipped || spMissing) ? `
             <div class="warnbox" style="margin-top:10px;">
               <div class="title">Varning</div>
               <div class="muted" style="font-size:.95rem;">
                 ${eff.loop ? "Arv-loop. " : ""}${eff.depthClipped ? "Arv för lång (klippt). " : ""}
+                ${spMissing ? `Supportprofil saknas (${escapeHtml(spId)}). ` : ""}
                 Kontrollera i <code>admin/roles.html</code>.
               </div>
             </div>
@@ -1025,12 +1127,12 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
     box.innerHTML = `
       <div class="title">Riskpanel</div>
       <ul class="warnlist" id="riskList"></ul>
-      <div class="smallnote">Obs: detta är varningar (read-only). Åtgärda i <code>admin/roles.html</code> och <code>admin/org.html</code>.</div>
+      <div class="smallnote">Obs: varningar (read-only). Åtgärda i <code>admin/roles.html</code>, <code>admin/org.html</code> och/eller <code>${SUPPORT_KEY}</code>.</div>
     `;
     view.appendChild(box);
 
     const ul = box.querySelector("#riskList");
-    filtered.slice(0, 80).forEach(r => {
+    filtered.slice(0, 120).forEach(r => {
       const li = document.createElement("li");
       li.textContent = r;
       ul.appendChild(li);
@@ -1062,11 +1164,9 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
   function renderAll(opts){
     const reason = (opts && opts.reason) ? String(opts.reason) : "";
 
-    // Re-render selects if needed (org/roles can change between sessions)
     renderRoleSelect();
     renderScopeSelect();
 
-    // Assign button disable if roles missing or scope missing
     const roles = loadRoles();
     const orgEx = loadOrgEx();
     const hasRoles = roles.length > 0;
@@ -1077,7 +1177,6 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
       setPreviewWarn("För att spara tilldelning krävs både roller (AO-019) och org (AO-020).");
     }
 
-    // Keep selection stable if possible
     if(hasRoles){
       const sel = $("#roleSelect");
       if(!sel.value && roles[0]) sel.value = String(roles[0].id);
@@ -1087,7 +1186,6 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
       scopeSel.value = orgEx.meta.bestRootId || scopeSel.options?.[0]?.value || "";
     }
 
-    // Preview should update on non-search reasons
     if(reason !== "search"){
       updatePreview();
     }
@@ -1166,4 +1264,3 @@ AO-021 | FIL-ID: admin/access.html (inline JS)
 
 </body>
 </html>
-
