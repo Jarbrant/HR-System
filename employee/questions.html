@@ -1,11 +1,15 @@
 <!-- ============================================================
-AO-019 7/8 (PATCH) | FIL-ID: employee/questions.html
+AO-019 7/8-FIX-01 | FIL-ID: employee/questions.html
 Projekt: HR-System
 Syfte: Employee – Frågor (svara) – UI-only v1 (nivå 3) – scope-styrt
+PATCH: v1.1 (Assignments V2 map+array + org-loop fail-fast)
 Krav (AO-019 7/8):
 - Employee ser endast frågor där isInScope(employee.scopeId, question.scopeId, orgTree) === true
 - Saknat scopeId på fråga → visa inte
 - Saknad org/assignments → lås listning/svarande + visa felpanel (fail-closed)
+FIX-01:
+- Assignments V2 ska stödja både map och array
+- Org-loop ska faila snabbt: subtree-walk/ancestor-walk med visited-set
 Policy:
 - Ingen backend
 - sessionStorage först, fallback localStorage (fail-closed)
@@ -225,6 +229,9 @@ Lagring:
 /* ============================================================
 AO-019 7/8 | FIL-ID: employee/questions.html (inline JS)
 Syfte: Guard + scope-filter + visa frågor + spara svar separat (fail-closed)
+FIX-01:
+- Assignments V2 map+array
+- Org-loop fail-fast (visited-set)
 ============================================================ */
 (function(){
   "use strict";
@@ -374,15 +381,30 @@ Syfte: Guard + scope-filter + visa frågor + spara svar separat (fail-closed)
     return { byId, children };
   }
 
+  // FIX-01: fail-fast vid loop/korrup kedja (visited-set)
   function isDescendant(index, nodeId, ancestorId){
     const a = String(ancestorId);
     const n = String(nodeId);
     if(n === a) return true;
+
+    const visited = new Set();
+    visited.add(n);
+
     let cur = index.byId.get(n);
     let hops = 0;
+
     while(cur && cur.parentId && hops < 5000){
-      if(cur.parentId === a) return true;
-      cur = index.byId.get(String(cur.parentId));
+      const pid = String(cur.parentId);
+
+      if(pid === a) return true;
+
+      if(visited.has(pid)){
+        // loop/korrup kedja → fail-closed snabbt
+        return false;
+      }
+      visited.add(pid);
+
+      cur = index.byId.get(pid);
       hops++;
     }
     return false;
@@ -397,28 +419,47 @@ Syfte: Guard + scope-filter + visa frågor + spara svar separat (fail-closed)
     return false;
   }
 
-  // Assignments helpers
+  // Assignments helpers (FIX-01: stöd för map + array)
   function normalizeAssignments(raw){
-    const arr =
+    // Array-lägen (befintligt):
+    const arrFromArray =
       Array.isArray(raw) ? raw :
       (Array.isArray(raw?.assignments) ? raw.assignments :
       (Array.isArray(raw?.items) ? raw.items : null));
 
-    if(!Array.isArray(arr)) return [];
+    if(Array.isArray(arrFromArray)){
+      return arrFromArray
+        .filter(a => a && (a.empNo !== undefined && a.empNo !== null))
+        .map(a => ({
+          empNo: normalizeEmpNo(a.empNo),
+          roleId: String(a.roleId ?? a.role ?? ""),
+          scopeId: (a.scopeId === undefined || a.scopeId === null) ? "" : String(a.scopeId)
+        }))
+        .filter(a => a.empNo);
+    }
 
-    return arr
-      .filter(a => a && (a.empNo !== undefined && a.empNo !== null))
-      .map(a => ({
-        empNo: normalizeEmpNo(a.empNo),
-        roleId: String(a.roleId ?? a.role ?? ""),
-        scopeId: (a.scopeId === undefined || a.scopeId === null) ? "" : String(a.scopeId)
-      }))
-      .filter(a => a.empNo);
+    // Map-läge: { "123": { roleId, scopeId } }
+    if(raw && typeof raw === "object"){
+      const out = [];
+      for(const [k, v] of Object.entries(raw)){
+        const empNo = normalizeEmpNo(k);
+        if(!empNo) continue;
+        const scopeId = (v && (v.scopeId !== undefined && v.scopeId !== null)) ? String(v.scopeId) : "";
+        const roleId = (v && (v.roleId !== undefined && v.roleId !== null)) ? String(v.roleId) : String(v?.role ?? "");
+        out.push({ empNo, roleId, scopeId });
+      }
+      return out.filter(a => a.empNo);
+    }
+
+    return [];
   }
 
   function getMyScopeId(empNo, assignments){
-    const row = assignments.find(x => x.empNo === empNo);
-    return String(row?.scopeId || "").trim();
+    // FIX-01: undvik “tom scope” när map finns → ta första träffen med scopeId om flera
+    const rows = assignments.filter(x => x.empNo === empNo);
+    if(!rows.length) return "";
+    const withScope = rows.find(r => String(r.scopeId || "").trim());
+    return String((withScope || rows[0])?.scopeId || "").trim();
   }
 
   // Guard
@@ -438,7 +479,10 @@ Syfte: Guard + scope-filter + visa frågor + spara svar separat (fail-closed)
   // Load org + assignments (fail-closed på scope)
   const orgNodes = normalizeOrgTree(safeParse(ORG_KEY, null));
   const orgIndex = buildOrgIndex(orgNodes);
-  const assignments = normalizeAssignments(safeParse(ASSIGNMENTS_KEY, null));
+
+  const assignmentsRaw = safeParse(ASSIGNMENTS_KEY, null);
+  const assignments = normalizeAssignments(assignmentsRaw);
+
   const myEmpNo = String(auth.empNo || "").trim();
   const myScopeId = myEmpNo ? getMyScopeId(myEmpNo, assignments) : "";
 
