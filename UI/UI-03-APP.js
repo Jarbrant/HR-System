@@ -1,5 +1,5 @@
 /* ============================================================
-AO-002 v1.2 | FILE: UI/UI-03-APP.js
+AO-002 v1.3 | FILE: UI/UI-03-APP.js
 Projekt: HR-System
 Syfte: CORE “hjärta” — Auth-guard, RBAC, fail-closed routing, scope-grund, XSS-helpers
 Nivå: UI-only (GitHub Pages) | localStorage-first
@@ -9,9 +9,10 @@ Policy (LÅST):
 - Ingen känslig persondata (endast empNo om det finns i session; logga ej)
 - Inga nya storage-keys/datamodell utan AO (AO-002: skriver inget nytt)
 - XSS-escape på allt som renderas från storage (helpers erbjuds här)
-Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
+Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
 Ändringslogg:
 - v1.2: getSafePathname + prefix startsWith + BASE_PATH-trim + canonical getAuth + redirectTo + _paths endast i DEBUG
+- v1.3 (PATCH): ROUTES_BY_ROLE entries som slutar med "/" tolkas som PREFIX (inte exakt). Fixar att "/admin/" matchar "/admin/home.html" etc.
 ============================================================ */
 
 (function () {
@@ -121,13 +122,11 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
     const raw = String(p || "");
     const dec = decodeOnceSafe(raw);
 
-    // Splitta på / och kolla segment exakt ".."
     function check(s) {
       const parts = String(s || "").split("/");
       return parts.some((seg) => seg === "..");
     }
 
-    // Även "%2e%2e" kan bli ".." efter decode.
     return check(raw) || check(dec);
   }
 
@@ -135,32 +134,14 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
     const cfg = getConfig();
     if (!cfg) return "";
 
-    // 1) raw pathname
     let p = String(window.location.pathname || "/");
-
-    // 2) defensiv decode en gång (för att fånga "%2e%2e" och andra konstigheter)
-    //    men vi använder även raw för fail-closed checks.
     const decoded = decodeOnceSafe(p);
-
-    // 3) collapse slashes (på decoded)
     p = collapseSlashes(decoded);
-
-    // 4) ensure leading slash
     p = ensureLeadingSlash(p);
-
-    // 5) trim BASE_PATH (P1)
     p = trimBasePath(p, cfg.BASE_PATH);
-
-    // 6) collapse slashes igen efter trim
     p = collapseSlashes(p);
-
-    // 7) blockera .. segment (P0 fail-closed)
     if (hasDotDotSegment(p)) return "";
-
-    // 8) final: säkerställ leading slash igen
     p = ensureLeadingSlash(p);
-
-    // GUARD: endast pathname här (query/hash ingår inte i location.pathname).
     return p;
   }
 
@@ -179,9 +160,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
   }
 
   function getAuth(session) {
-    // SCOPE: Standardisera utan att skriva storage:
-    // - Stöd platt session: { isAuthed, role, scopeId, expiresAt }
-    // - Stöd wrapped: { auth: { ... } }
     const s = session && typeof session === "object" ? session : null;
     if (!s) return null;
 
@@ -193,13 +171,10 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
       expiresAt: a.expiresAt ? Number(a.expiresAt) : null,
     };
 
-    // GUARD: role måste vara giltig när authed
     if (out.isAuthed && !out.role) return null;
-
     return out;
   }
 
-  // GUARD: validera session; om saknas/korrupt => null.
   function mustGetSession() {
     const data = readStorage(SESSION_KEY);
     if (!data || typeof data !== "object") return null;
@@ -207,7 +182,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
     const auth = getAuth(data);
     if (!auth || auth.isAuthed !== true) return null;
 
-    // GUARD: expiresAt (om finns) måste vara i framtiden.
     if (auth.expiresAt && auth.expiresAt < Date.now()) return null;
 
     return data; // PRC: returnera originalobjektet
@@ -218,7 +192,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
   // ============================================================
 
   function stripQueryHash(urlLike) {
-    // GUARD: för route checks som får input med query/hash
     const s = String(urlLike || "");
     return s.split("#")[0].split("?")[0];
   }
@@ -230,12 +203,11 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
     const p = String(appRelPath || "");
     if (!p) return false;
 
-    // GUARD: exakt match mot PUBLIC_ROUTES.
     return cfg.PUBLIC_ROUTES.includes(p);
   }
 
   // ============================================================
-  // RBAC (P0) — deterministic prefix match on normalized relative path
+  // RBAC (P0) — deterministic match on normalized relative path
   // ============================================================
 
   function isHtmlLikeRoute(appRelPath) {
@@ -245,16 +217,9 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
   }
 
   function normalizeRelPathForCheck(inputPath) {
-    // SCOPE:
-    // - Tar emot pathname-liknande sträng (kan ha query/hash)
-    // - Använder getSafePathname() för den aktuella sidan (window.pathname)
-    //   eller bearbetar input via samma regler så långt det går.
-    // För AO-002 använder vi främst nuvarande route via getSafePathname().
     const raw = stripQueryHash(inputPath);
-
-    // Om inputPath är exakt current pathname, använd getSafePathname() (starkast).
-    // Annars gör en minimal normalisering som speglar samma grundregler.
     const currentRaw = String(window.location.pathname || "");
+
     if (raw === currentRaw) return getSafePathname();
 
     const cfg = getConfig();
@@ -268,16 +233,36 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
   }
 
   function rootAwareStartsWith(path, prefix) {
-    // GUARD: startsWith(prefix) men “root-aware”:
-    // - prefix "/admin" matchar "/admin" och "/admin/..." men INTE "/adminx"
+    // prefix "/admin" matchar "/admin" och "/admin/..." men INTE "/adminx"
     const p = String(path || "");
     const pre = String(prefix || "");
     if (!p || !pre) return false;
 
     if (!p.startsWith(pre)) return false;
-    if (p.length === pre.length) return true; // exakt
-    // nästa tecken måste vara "/"
+    if (p.length === pre.length) return true;
     return p.charAt(pre.length) === "/";
+  }
+
+  function matchRouteEntry(relPath, entryRaw) {
+    // ============================================================
+    // AO-002 v1.3 (PATCH): detta är fixen som gör att
+    // "/admin/" betyder PREFIX och matchar "/admin/home.html"
+    // ============================================================
+    const rel = String(relPath || "");
+    const e = String(entryRaw || "").trim();
+    if (!rel || !e) return false;
+
+    // Root exakt
+    if (e === "/") return rel === "/";
+
+    // Exakt fil (html)
+    if (e.toLowerCase().endsWith(".html")) return rel === e;
+
+    // Prefix med trailing "/" (t.ex. "/admin/") => enkel startsWith räcker
+    if (e.endsWith("/")) return rel.startsWith(e);
+
+    // Prefix utan trailing "/" (t.ex. "/admin") => root-aware
+    return rootAwareStartsWith(rel, e);
   }
 
   function canAccessRoute(role, pathname) {
@@ -287,7 +272,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
     const r = normalizeRole(role);
     if (!r) return false;
 
-    // P0/P1: Normalisera relativ path (BASE_PATH bort, // kollaps, .. block)
     const rel = normalizeRelPathForCheck(pathname || window.location.pathname || "");
     if (!rel) return false; // fail-closed
 
@@ -297,20 +281,7 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
     const allowed = cfg.ROUTES_BY_ROLE[r];
     if (!Array.isArray(allowed) || allowed.length === 0) return false;
 
-    // P0: deterministisk prefixmatch (root-aware)
-    // Här antar vi att ROUTES_BY_ROLE kan innehålla:
-    // - exakta routes ("/admin/home.html")
-    // - eller prefix ("/admin") om ni väljer det i config senare
-    return allowed.some((entry) => {
-      const e = String(entry || "").trim();
-      if (!e) return false;
-      if (e.endsWith(".html") || e === "/" || e.endsWith("/")) {
-        // exakt match
-        return rel === e;
-      }
-      // prefix match
-      return rootAwareStartsWith(rel, e);
-    });
+    return allowed.some((entry) => matchRouteEntry(rel, entry));
   }
 
   function hasPermission(role, permission) {
@@ -370,14 +341,19 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
   // AUTH GUARD (fail-closed) + redirectTo (P1)
   // ============================================================
 
+  function redirect(url) {
+    try {
+      window.location.replace(String(url || "/"));
+    } catch {
+      window.location.href = String(url || "/");
+    }
+  }
+
   // requireAuth({ allowRoles?: [], redirectTo?: string })
   function requireAuth(opts) {
     const options = (opts && typeof opts === "object") ? opts : {};
     const allowRoles = Array.isArray(options.allowRoles) ? options.allowRoles : [];
 
-    // P1: redirectTo implementeras korrekt
-    // - Om given, måste vara en APP-RELATIVE html-path ("/UI/UI-01-SKELETON.html" eller "/employee/home.html")
-    // - Annars default login
     const redirectToRaw = String(options.redirectTo || "").trim();
     const redirectTo =
       redirectToRaw && redirectToRaw.startsWith("/") && !hasDotDotSegment(redirectToRaw)
@@ -390,7 +366,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
       return null;
     }
 
-    // P0: Säker pathname (relativ i appen)
     const rel = getSafePathname();
     if (!rel) {
       redirect(loginUrl("forbidden"));
@@ -414,7 +389,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
       return null;
     }
 
-    // allowRoles-filter om angivet
     if (allowRoles.length > 0) {
       const allowed = allowRoles.map(normalizeRole).filter(Boolean);
       if (!allowed.includes(auth.role)) {
@@ -423,7 +397,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
       }
     }
 
-    // Route allowlist (deterministisk prefixmatch, root-aware)
     if (isHtmlLikeRoute(rel) && !canAccessRoute(auth.role, rel)) {
       redirect(loginUrl("forbidden"));
       return null;
@@ -442,7 +415,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
     return String(auth.scopeId || "").trim();
   }
 
-  // fail-closed om något saknas
   function sameOrMissingScope(a, b) {
     const A = String(a || "").trim();
     const B = String(b || "").trim();
@@ -546,7 +518,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
     logout,
   };
 
-  // P2: _paths endast i DEBUG
   if (debugEnabled()) {
     api._paths = {
       basePath: function () {
