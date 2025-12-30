@@ -1,38 +1,40 @@
 <!-- ============================================================
-AO-046 | FIL-ID: admin/tasks.html
+AO-046 + AO-019 6/8 | FIL-ID: admin/tasks.html
 Projekt: HR-System
-Syfte: Admin – Uppgifter (tilldela) – UI-only v1 (nivå 3)
+Syfte: Admin/Manager – Uppgifter (tilldela) – UI-only v1.1 (nivå 3)
 Krav:
-- Admin skapar/tilldelar uppgifter (batch)
+- Admin/Manager skapar/tilldelar uppgifter (batch)
 - Mottagare: en employee, alla, eller grupp
 - Status + kommentar (admin-notis)
-- Inga skapafunktioner på employee-sidan (employee markerar bara status + kommentar)
-Nytt i denna version:
-- Mallar (spara/ladda/ta bort) ✅ FIX: “Spara som mall” skapar ALLTID en ny mall
-- Datum (start + slut/deadline)
-- Återkommande uppgifter (tillsvidare eller till slutdatum)
+- Employee uppdaterar status + kommentar på employee/tasks.html
+NYTT (AO-019 6/8 – Scope-policy):
+- Alla uppgifter MÅSTE ha scopeId (fail-closed)
+- Default scope = inloggads eget scopeId
+- Manager får bara skapa/lista/ta bort inom sin scope-subtree
+- Fail-closed: om org/assignments saknas/korrupt -> blockera skapande
 Policy:
 - Ingen backend
-- Ingen känslig data lagras
-- Robust guard: sessionStorage först, fallback localStorage
+- Ingen känslig data lagras (endast anst.nr)
+- Robust guard: sessionStorage först, fallback localStorage (fail-closed)
+- XSS-escape på all rendering från storage
 Lagring:
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-020_ORG_V1 (localStorage) – org-träd (nodes) [LÄS]
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – assignments (empNo -> { roleId, scopeId }) [LÄS]
 - AO-017_GROUPS_V1 (localStorage) – grupper
-- AO-014_TASKS_V1 (localStorage) – uppgifter (utökade fält, ingen ny key)
+- AO-014_TASKS_V1 (localStorage) – uppgifter (befintlig key; nu krävs scopeId)
 - AO-047_TASK_TEMPLATES_V1 (localStorage) – mallar (admin-metadata)
-Obs:
-- “Klar bara den dagen” för återkommande kräver att employee/tasks.html
-  markerar undantag per datum (t.ex. exceptionsDone). Admin-sidan sparar
-  fälten som behövs.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Admin • Uppgifter</title>
+  <title>HR-System – Admin/Manager • Uppgifter</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  <!-- HRApp (auth/routing). Fail-safe: sidan har egen fallback om HRApp saknas -->
+  <script src="../UI/UI-03-APP.js"></script>
 
   <style>
     .layout{
@@ -168,6 +170,16 @@ Obs:
       font-size:.95rem;
     }
     code{ font-size:.95em; }
+
+    .lockbox{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px dashed var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      color: var(--muted);
+    }
+    .lockbox strong{ color:#111; }
   </style>
 </head>
 
@@ -176,7 +188,7 @@ Obs:
 <header class="top">
   <div class="brand">
     <strong>HR-System</strong>
-    <span class="muted">• Admin • Uppgifter</span>
+    <span class="muted">• Admin/Manager • Uppgifter</span>
   </div>
 
   <nav class="nav" aria-label="Meny">
@@ -191,18 +203,20 @@ Obs:
 </header>
 
 <main class="container">
-  <h1 class="tight">Uppgifter (Admin)</h1>
-  <p class="muted">Skapa och tilldela uppgifter. Medarbetaren uppdaterar status på sin sida.</p>
+  <h1 class="tight">Uppgifter (Admin/Manager)</h1>
+  <p class="muted">Skapa och tilldela uppgifter. Medarbetaren uppdaterar status på sin sida. Scope styr vad som kan skapas och vad som syns.</p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
       <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
       </div>
       <div class="row wrap">
         <a class="btn secondary" href="../employee/tasks.html">Öppna employee/tasks (demo)</a>
       </div>
     </div>
+
+    <div id="lockBox" class="lockbox" style="display:none;"></div>
 
     <div class="layout">
 
@@ -254,6 +268,17 @@ Obs:
               <option value="low">Låg</option>
             </select>
           </label>
+        </div>
+
+        <!-- Scope (AO-019 6/8) -->
+        <div class="row2" style="margin-top:10px;">
+          <label>
+            Scope (org-nod)
+            <select id="scopeSelect"></select>
+          </label>
+          <div class="smallnote" style="margin-top:0; align-self:end;">
+            Default: ditt scope. Manager kan bara välja inom sin subtree.
+          </div>
         </div>
 
         <label style="margin-top:10px;">
@@ -385,7 +410,7 @@ Obs:
         <p id="msg" class="message" aria-live="polite"></p>
 
         <div class="smallnote">
-          Batch: en rad = en uppgift. Skapas per mottagare.
+          Batch: en rad = en uppgift. Skapas per mottagare. Alla uppgifter får <code>scopeId</code> (fail-closed).
         </div>
       </section>
 
@@ -421,7 +446,7 @@ Obs:
         <div id="list"></div>
 
         <div class="smallnote">
-          Medarbetaren uppdaterar status på <code>employee/tasks.html</code>.
+          Scope-policy: tasks utan scope visas inte för employee (fail-closed). Manager ser endast sin subtree.
         </div>
       </section>
 
@@ -431,13 +456,15 @@ Obs:
 
 <script>
 /* ============================================================
-AO-046 | FIL-ID: admin/tasks.html (inline JS)
-Autopatch:
-- ✅ FIX: "Spara som mall" skapar alltid NY mall (ingen uppdatera-befintlig confirm)
-- Dedupe-signatur ignorerar adminNote/prio (minskar “falska” dubletter)
-- Weekly default weekday = startdatum om inga valts
-- untilDate policy: INKLUSIVE + flagga (utan ny key)
-- Fail-closed save + input normalisering + defensiv rendering
+AO-046 + AO-019 6/8 | FIL-ID: admin/tasks.html (inline JS)
+v1.1 patch:
+- Source of truth: HRApp.getCurrentAccess() (fallback till lokal session)
+- ScopeId krävs på tasks (create) + scope-dropdown (org)
+- Manager-policy: list/create/delete scope-filtreras till viewer subtree
+- Fail-closed: saknat/korrupt org/assignments => skapa blockeras (lockbox)
+- Preflight recipients: blocka om någon mottagare saknar scope/eller scope-mismatch (med tydlig lista)
+- Dedupe: byWeekday normaliseras (sort+unique) innan signatur
+- Templates: visa fel om localStorage-set failar
 ============================================================ */
 (function(){
   "use strict";
@@ -447,34 +474,18 @@ Autopatch:
   const GROUPS_KEY    = "AO-017_GROUPS_V1";
   const TEMPLATES_KEY = "AO-047_TASK_TEMPLATES_V1";
 
+  // AO-019 6/8 reads:
+  const ORG_KEY       = "AO-020_ORG_V1";
+  const ASG_V2_KEY    = "AO-020_ROLE_ASSIGNMENTS_V2";
+
+  const MAX_CHAIN_GUARD = 200;
+
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => Array.from(document.querySelectorAll(s));
 
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
-  function readRawSession(){
-    const s1 = sessionStorage.getItem(SESSION_KEY);
-    if (s1) return s1;
-    const s2 = localStorage.getItem(SESSION_KEY);
-    if (s2) return s2;
-    return null;
-  }
-
-  function readAuth(){
-    try{
-      const raw = readRawSession();
-      if(!raw) return null;
-      const data = JSON.parse(raw);
-      if(!data?.auth?.isAuthed) return null;
-      if(data.auth.role !== "admin") return null;
-      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-      return data.auth;
-    }catch{
-      return null;
-    }
-  }
-
-  function safeParse(key, fallback){
+  function safeParseLocal(key, fallback){
     try{
       const v = JSON.parse(localStorage.getItem(key) || "null");
       return (v === null || v === undefined) ? fallback : v;
@@ -503,6 +514,17 @@ Autopatch:
     const m = $("#msg");
     m.className = "message" + (kind ? " " + kind : "");
     m.textContent = text || "";
+  }
+
+  function showLockBox(lines){
+    const box = $("#lockBox");
+    if(!lines || !lines.length){
+      box.style.display = "none";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "block";
+    box.innerHTML = `<strong>Låst (fail-closed):</strong> ${escapeHtml(lines.join(" "))}`;
   }
 
   function genId(prefix){
@@ -555,26 +577,283 @@ Autopatch:
   }
 
   function normalizeLine(s, max){
-    // normalisera whitespace lite för stabil dedupe + robusthet
     const x = String(s ?? "").replace(/\s+/g, " ").trim();
     return clampText(x, max);
   }
 
-  // --- Guard ---
-  const auth = readAuth();
-  if(!auth){ redirectLogin(); return; }
-  $("#whoName").textContent = auth.displayName || "Admin";
+  // ------------------------------------------------------------
+  // Access source of truth (HRApp first; fallback to local session)
+  // ------------------------------------------------------------
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
+  function safeParseJson(raw, fallback){
+    try{
+      const v = JSON.parse(raw);
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+
+  function readAuthFallback(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = safeParseJson(raw, null);
+      if(!data?.auth?.isAuthed) return null;
+      if (data.auth.expiresAt && Number(data.auth.expiresAt) < Date.now()) return null;
+      if(!data.auth.role) return null;
+      return data.auth;
+    }catch{
+      return null;
+    }
+  }
+
+  function pickEmpNoFromAuth(auth){
+    const candidates = [
+      auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier
+    ];
+    for(const c of candidates){
+      const s = String(c || "").trim();
+      if(!s) continue;
+      const digits = s.replace(/[^\d]/g, "");
+      if(digits) return digits.slice(0, 10);
+    }
+    return "";
+  }
+
+  function loadAssignmentsV2(){
+    const obj = safeParseLocal(ASG_V2_KEY, {});
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  }
+
+  function roleClassFromAuthRole(role){
+    const r = String(role || "").toLowerCase();
+    if(r === "systemadmin") return "SYSTEM_ADMIN";
+    if(r === "admin") return "ADMIN";
+    if(r === "manager") return "MANAGER";
+    return "UNKNOWN";
+  }
+
+  function getAccessCtx(){
+    // HRApp first
+    if(window.HRApp && typeof window.HRApp.getCurrentAccess === "function"){
+      const acc = window.HRApp.getCurrentAccess();
+      if(acc && acc.ok && acc.auth){
+        const cls = roleClassFromAuthRole(acc.auth.role);
+        return {
+          source: "HRApp",
+          roleClass: cls,
+          auth: acc.auth,
+          empNo: String(acc.empNo || "").trim(),
+          viewerScopeId: String(acc.scopeId || "").trim(),
+          assignment: acc.assignment || null
+        };
+      }
+    }
+
+    // Fallback
+    const auth = readAuthFallback();
+    if(!auth) return null;
+
+    const empNo = pickEmpNoFromAuth(auth);
+    const asg = loadAssignmentsV2();
+    const rec = empNo ? asg[empNo] : null;
+
+    return {
+      source: "fallback",
+      roleClass: roleClassFromAuthRole(auth.role),
+      auth,
+      empNo,
+      viewerScopeId: String(rec?.scopeId || "").trim(),
+      assignment: rec || null
+    };
+  }
+
+  const access = getAccessCtx();
+  if(!access || access.roleClass === "UNKNOWN"){
+    redirectLogin(); return;
+  }
+  if(access.roleClass !== "SYSTEM_ADMIN" && access.roleClass !== "ADMIN" && access.roleClass !== "MANAGER"){
+    redirectLogin(); return;
+  }
+
+  $("#whoName").textContent = access.auth.displayName || "—";
+  $("#whoRole").textContent = (access.auth.role || "").toLowerCase() || "—";
 
   function doLogout(){
+    if(window.HRApp && typeof window.HRApp.logout === "function"){
+      window.HRApp.logout();
+      return;
+    }
     sessionStorage.removeItem(SESSION_KEY);
     localStorage.removeItem(SESSION_KEY);
     redirectLogin();
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  // --- Groups ---
+  // ------------------------------------------------------------
+  // Org helpers (AO-019 6/8)
+  // ------------------------------------------------------------
+  function normalizeOrgNodes(raw){
+    const arr = Array.isArray(raw) ? raw : [];
+    const out = [];
+    for(const n of arr){
+      const id = String(n?.id || "").trim();
+      const name = String(n?.name || "").trim();
+      const type = String(n?.type || "").trim();
+      const parentId = (n?.parentId === null || n?.parentId === undefined) ? null : String(n.parentId).trim();
+      if(!id || !name) continue;
+      out.push({ id, name, type, parentId });
+    }
+    return out;
+  }
+
+  function buildOrgIndex(nodes){
+    const byId = new Map();
+    for(const n of nodes){ if(!byId.has(n.id)) byId.set(n.id, n); }
+    const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
+    const children = new Map();
+    nodes.forEach(n => children.set(n.id, []));
+    nodes.forEach(n => {
+      if(n.parentId && children.has(n.parentId)) children.get(n.parentId).push(n.id);
+    });
+    return { byId, parentOf, children };
+  }
+
+  function detectOrgLoop(nodes){
+    const { parentOf } = buildOrgIndex(nodes);
+    function chainHasLoop(startId){
+      let cur = startId;
+      let steps = 0;
+      const seen = new Set();
+      while(cur && steps < MAX_CHAIN_GUARD){
+        if(seen.has(cur)) return true;
+        seen.add(cur);
+        const p = parentOf.get(cur);
+        if(!p) return false;
+        cur = p;
+        steps++;
+      }
+      return true; // guard hit => treat as loop/corrupt
+    }
+    for(const n of nodes){
+      if(chainHasLoop(n.id)) return true;
+    }
+    return false;
+  }
+
+  function isInScope(viewerScopeId, itemScopeId, orgIndex){
+    // True om itemScopeId ligger i viewerScopeId subtree (inkl samma).
+    const v = String(viewerScopeId || "").trim();
+    const s = String(itemScopeId || "").trim();
+    if(!v || !s) return false;
+
+    const { byId, parentOf } = orgIndex;
+    if(!byId.has(v)) return false;
+    if(!byId.has(s)) return false;
+
+    if(v === s) return true;
+
+    let cur = s;
+    let steps = 0;
+    const seen = new Set([cur]);
+    while(cur && steps < MAX_CHAIN_GUARD){
+      const p = parentOf.get(cur);
+      if(!p) return false;
+      if(p === v) return true;
+      if(seen.has(p)) return false; // loop => fail-closed
+      seen.add(p);
+      cur = p;
+      steps++;
+    }
+    return false;
+  }
+
+  function computeSubtreeSet(rootId, orgIndex){
+    const r = String(rootId || "").trim();
+    if(!r) return new Set();
+    if(!orgIndex.byId.has(r)) return new Set();
+    const set = new Set([r]);
+    const stack = [r];
+    while(stack.length){
+      const cur = stack.pop();
+      const kids = orgIndex.children.get(cur) || [];
+      for(const k of kids){
+        if(set.has(k)) continue;
+        set.add(k);
+        stack.push(k);
+      }
+    }
+    return set;
+  }
+
+  function flattenOrgForSelect(nodes, orgIndex){
+    // Depth-first from detected roots (parentId=null). If none, fallback to all nodes sorted.
+    const roots = nodes.filter(n => n.parentId === null).map(n => n.id);
+    const visited = new Set();
+    const out = [];
+
+    function walk(id, depth){
+      if(visited.has(id)) return;
+      visited.add(id);
+      const n = orgIndex.byId.get(id);
+      if(!n) return;
+      out.push({ id:n.id, name:n.name, type:n.type, depth });
+      const kids = (orgIndex.children.get(id) || []).slice().sort((a,b)=>{
+        const na = orgIndex.byId.get(a)?.name || "";
+        const nb = orgIndex.byId.get(b)?.name || "";
+        return na.localeCompare(nb, "sv");
+      });
+      kids.forEach(k => walk(k, depth+1));
+    }
+
+    if(roots.length){
+      roots.slice().sort((a,b)=>{
+        const na = orgIndex.byId.get(a)?.name || "";
+        const nb = orgIndex.byId.get(b)?.name || "";
+        return na.localeCompare(nb, "sv");
+      }).forEach(r => walk(r, 1));
+    }else{
+      nodes.slice().sort((a,b)=>a.name.localeCompare(b.name,"sv")).forEach(n => out.push({ id:n.id, name:n.name, type:n.type, depth:1 }));
+    }
+
+    return out;
+  }
+
+  // Load org + assignments (fail-closed for create)
+  const orgRaw = safeParseLocal(ORG_KEY, []);
+  const orgNodes = normalizeOrgNodes(orgRaw);
+  const orgIndex = buildOrgIndex(orgNodes);
+  const orgHasLoop = orgNodes.length ? detectOrgLoop(orgNodes) : true;
+
+  const assignmentsV2 = loadAssignmentsV2();
+
+  // Basic data health
+  const lockReasons = [];
+  if(!orgNodes.length) lockReasons.push("Org saknas/korrupt.");
+  if(orgHasLoop) lockReasons.push("Org har loop/korrupt parent-chain.");
+  if(!assignmentsV2 || typeof assignmentsV2 !== "object") lockReasons.push("Assignments saknas/korrupt.");
+
+  // viewer scope
+  const viewerScopeId = String(access.viewerScopeId || "").trim();
+  if(!viewerScopeId) lockReasons.push("Ditt scope saknas (assignment saknar scopeId).");
+  if(viewerScopeId && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("Ditt scopeId finns inte i org.");
+
+  // Manager-specific safety (still allow list, but create must be locked if scope invalid)
+  const canCreate = (lockReasons.length === 0);
+
+  showLockBox(lockReasons);
+
+  // ------------------------------------------------------------
+  // Groups
+  // ------------------------------------------------------------
   function loadGroups(){
-    const arr = safeParse(GROUPS_KEY, []);
+    const arr = safeParseLocal(GROUPS_KEY, []);
     return Array.isArray(arr) ? arr : [];
   }
   function renderGroupSelect(){
@@ -590,13 +869,62 @@ Autopatch:
     }
     groups.forEach(g => {
       const opt = document.createElement("option");
-      opt.value = g.id;
-      opt.textContent = `${g.name} (${(g.members||[]).length})`;
+      opt.value = String(g.id || "");
+      opt.textContent = `${String(g.name || g.id || "Grupp")} (${(g.members||[]).length})`;
       sel.appendChild(opt);
     });
   }
 
-  // --- Target mode UI ---
+  // ------------------------------------------------------------
+  // Scope select
+  // ------------------------------------------------------------
+  function renderScopeSelect(){
+    const sel = $("#scopeSelect");
+    sel.innerHTML = "";
+
+    if(!orgNodes.length || orgHasLoop){
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "— Org saknas/korrupt —";
+      sel.appendChild(opt);
+      sel.disabled = true;
+      return;
+    }
+
+    sel.disabled = false;
+
+    // Allowed scopes
+    let allowed = null;
+    if(access.roleClass === "MANAGER"){
+      allowed = computeSubtreeSet(viewerScopeId, orgIndex);
+    }
+
+    const flat = flattenOrgForSelect(orgNodes, orgIndex);
+
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = "(Välj scope)";
+    sel.appendChild(opt0);
+
+    flat.forEach(row => {
+      if(allowed && !allowed.has(row.id)) return;
+
+      const opt = document.createElement("option");
+      opt.value = row.id;
+      const indent = "—".repeat(Math.min((row.depth - 1), 10));
+      opt.textContent = `${indent} ${row.name}${row.type ? " • " + row.type : ""}`;
+      sel.appendChild(opt);
+    });
+
+    // default
+    if(viewerScopeId && (!allowed || allowed.has(viewerScopeId))){
+      sel.value = viewerScopeId;
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Target mode UI
+  // ------------------------------------------------------------
   function syncTargetUI(){
     const mode = $("#targetMode").value;
     $("#oneWrap").style.display = (mode === "one") ? "block" : "none";
@@ -604,7 +932,9 @@ Autopatch:
   }
   $("#targetMode").addEventListener("change", syncTargetUI);
 
-  // --- Kind UI ---
+  // ------------------------------------------------------------
+  // Kind UI
+  // ------------------------------------------------------------
   function syncKindUI(){
     const kind = $("#taskKind").value;
     $("#oneoffBox").style.display = (kind === "oneoff") ? "block" : "none";
@@ -623,9 +953,11 @@ Autopatch:
   $("#freq").addEventListener("change", syncKindUI);
   $$("input[name='untilMode']").forEach(r => r.addEventListener("change", syncUntilUI));
 
-  // --- Tasks store ---
+  // ------------------------------------------------------------
+  // Tasks store
+  // ------------------------------------------------------------
   function loadTasks(){
-    const arr = safeParse(TASKS_KEY, []);
+    const arr = safeParseLocal(TASKS_KEY, []);
     return Array.isArray(arr) ? arr : [];
   }
 
@@ -658,7 +990,8 @@ Autopatch:
     let days = "";
     if(freq === "weekly" && Array.isArray(rec.byWeekday) && rec.byWeekday.length){
       const map = {1:"mån",2:"tis",3:"ons",4:"tor",5:"fre",6:"lör",7:"sön"};
-      days = " (" + rec.byWeekday.map(d => map[String(d)] || "").filter(Boolean).join(", ") + ")";
+      const norm = Array.from(new Set(rec.byWeekday.map(d => Number(d)).filter(n => Number.isFinite(n)))).sort((a,b)=>a-b);
+      days = " (" + norm.map(d => map[String(d)] || "").filter(Boolean).join(", ") + ")";
     }
     const until = rec.untilDate ? ` t.o.m. ${rec.untilDate}` : " tillsvidare";
     return `Varje${iv} ${freqSv}${days}${until}`;
@@ -680,8 +1013,7 @@ Autopatch:
     return "—";
   }
 
-  function computeAllTargets(mode){
-    if(mode !== "all") return [];
+  function computeAllTargets(){
     const set = new Set();
     loadGroups().forEach(g => (g.members||[]).forEach(m => {
       const v = validateEmpNo(m);
@@ -696,7 +1028,7 @@ Autopatch:
     return Array.from(set);
   }
 
-  function makeBaseTask(empNo, title, text, prio, adminNote){
+  function makeBaseTask(empNo, title, text, prio, adminNote, scopeId){
     const now = Date.now();
     return {
       id: genId("t"),
@@ -707,15 +1039,23 @@ Autopatch:
       adminNote: adminNote || "",
       status: "open",
       employeeComment: "",
+      scopeId: String(scopeId || "").trim(),
       createdAt: now,
       updatedAt: now
     };
   }
 
+  function normalizeByWeekday(arr){
+    const a = Array.isArray(arr) ? arr : [];
+    const nums = a.map(x => Number(x)).filter(n => Number.isFinite(n) && n >= 1 && n <= 7);
+    return Array.from(new Set(nums)).sort((x,y)=>x-y);
+  }
+
   function signatureForDedupe(t){
-    // AUTOPATCH: ignorera adminNote + prio
+    const byW = normalizeByWeekday(t?.recurring?.byWeekday || []);
     const parts = [
       String(t.empNo||""),
+      String(t.scopeId||""), // scope ingår: olika scope => inte dublett
       String(t.kind||"oneoff"),
       normalizeLine(t.title||"", 240),
       normalizeLine(t.text||"", 2000),
@@ -724,7 +1064,7 @@ Autopatch:
       t.kind === "recurring" ? String(t.recurring?.freq||"") : "",
       t.kind === "recurring" ? String(t.recurring?.interval||"") : "",
       t.kind === "recurring" ? String(t.recurring?.untilDate||"") : "",
-      t.kind === "recurring" ? JSON.stringify(t.recurring?.byWeekday||[]) : ""
+      t.kind === "recurring" ? JSON.stringify(byW) : ""
     ];
     return parts.join("|").toLowerCase();
   }
@@ -738,7 +1078,7 @@ Autopatch:
 
     targetEmpNos.forEach(empNo => {
       payload.lines.forEach(text => {
-        const t = makeBaseTask(empNo, payload.title, text, payload.prio, payload.adminNote);
+        const t = makeBaseTask(empNo, payload.title, text, payload.prio, payload.adminNote, payload.scopeId);
 
         if(payload.startDate) t.startDate = payload.startDate;
         if(payload.endDate) t.endDate = payload.endDate;
@@ -750,11 +1090,10 @@ Autopatch:
             kind: "recurring",
             freq: payload.freq,
             interval: payload.interval,
-            byWeekday: payload.byWeekday || [],
+            byWeekday: normalizeByWeekday(payload.byWeekday || []),
             untilDate: payload.untilDate || null,
             untilInclusive: true
           };
-          // OBS: dessa fält fanns redan i din kod – vi behåller dem.
           t.exceptionsDone = [];
           t.exceptionsSnoozed = {};
         }
@@ -774,9 +1113,11 @@ Autopatch:
     return count;
   }
 
-  // --- Templates ---
+  // ------------------------------------------------------------
+  // Templates
+  // ------------------------------------------------------------
   function seedTemplatesIfEmpty(){
-    const raw = safeParse(TEMPLATES_KEY, null);
+    const raw = safeParseLocal(TEMPLATES_KEY, null);
     if(Array.isArray(raw) && raw.length) return;
 
     const now = Date.now();
@@ -819,18 +1160,19 @@ Autopatch:
         updatedAt: now
       }
     ];
+
     const res = saveFailClosed(TEMPLATES_KEY, seeds);
     if(!res.ok){
-      // tyst fail här – templates är “nice-to-have”
+      // Templates är nice-to-have, men vi signalerar inte hårt här.
     }
   }
 
   function loadTemplates(){
-    const arr = safeParse(TEMPLATES_KEY, []);
+    const arr = safeParseLocal(TEMPLATES_KEY, []);
     return Array.isArray(arr) ? arr : [];
   }
   function saveTemplates(arr){
-    saveFailClosed(TEMPLATES_KEY, Array.isArray(arr) ? arr : []);
+    return saveFailClosed(TEMPLATES_KEY, Array.isArray(arr) ? arr : []);
   }
 
   function renderTemplateSelect(){
@@ -856,8 +1198,8 @@ Autopatch:
       .sort((a,b) => String(a?.name||"").localeCompare(String(b?.name||""), "sv"))
       .forEach(t => {
         const opt = document.createElement("option");
-        opt.value = t.id;
-        opt.textContent = t.name || t.id;
+        opt.value = String(t.id || "");
+        opt.textContent = String(t.name || t.id || "Mall");
         sel.appendChild(opt);
       });
   }
@@ -866,17 +1208,17 @@ Autopatch:
     const sel = $("#tplSelect");
     const id = sel ? sel.value : "";
     if(!id || id === "__none__") return null;
-    return loadTemplates().find(t => t.id === id) || null;
+    return loadTemplates().find(t => String(t.id) === id) || null;
   }
 
   function getSelectedWeekdays(){
     const sel = $("#byWeekday");
-    return Array.from(sel.selectedOptions).map(o => Number(o.value)).filter(n => Number.isFinite(n));
+    return Array.from(sel.selectedOptions).map(o => Number(o.value)).filter(n => Number.isFinite(n) && n>=1 && n<=7);
   }
 
   function setSelectedWeekdays(days){
-    const set = new Set((days||[]).map(x => String(x)));
-    Array.from($("#byWeekday").options).forEach(o => { o.selected = set.has(String(o.value)); });
+    const norm = new Set(normalizeByWeekday(days).map(x => String(x)));
+    Array.from($("#byWeekday").options).forEach(o => { o.selected = norm.has(String(o.value)); });
   }
 
   function applyTemplateToForm(tpl){
@@ -923,7 +1265,7 @@ Autopatch:
     }else{
       const freq = $("#freq").value;
       const interval = Number($("#interval").value || 1);
-      const byWeekday = (freq === "weekly") ? getSelectedWeekdays() : [];
+      const byWeekday = (freq === "weekly") ? normalizeByWeekday(getSelectedWeekdays()) : [];
       const untilMode = ($$("input[name='untilMode']").find(x => x.checked)?.value) || "forever";
       const untilDate = String($("#untilDate").value || "").trim();
 
@@ -954,7 +1296,7 @@ Autopatch:
     setMsg("ok", `Mall laddad: ${tpl.name || tpl.id}`);
   });
 
-  // ✅ FIX: Spara som mall skapar ALLTID en NY mall
+  // Spara som mall skapar ALLTID en NY mall
   $("#btnTplSave").addEventListener("click", () => {
     setMsg("", "");
 
@@ -988,7 +1330,11 @@ Autopatch:
     };
 
     tpls.push(newTpl);
-    saveTemplates(tpls);
+    const res = saveTemplates(tpls);
+    if(!res.ok){
+      setMsg("err", "Kunde inte spara mall (localStorage fullt eller blockerad).");
+      return;
+    }
     renderTemplateSelect();
     $("#tplSelect").value = newTpl.id;
     setMsg("ok", "Ny mall sparad.");
@@ -1002,16 +1348,86 @@ Autopatch:
       return;
     }
     if(!confirm(`Ta bort mall "${tpl.name || tpl.id}"?`)) return;
-    const next = loadTemplates().filter(t => t.id !== tpl.id);
-    saveTemplates(next);
+    const next = loadTemplates().filter(t => String(t.id) !== String(tpl.id));
+    const res = saveTemplates(next);
+    if(!res.ok){
+      setMsg("err", "Kunde inte ta bort mall (localStorage fullt eller blockerad).");
+      return;
+    }
     renderTemplateSelect();
     $("#tplSelect").value = "";
     setMsg("ok", "Mall borttagen.");
   });
 
-  // --- Create ---
+  // ------------------------------------------------------------
+  // Create (AO-019 6/8 scope policy)
+  // ------------------------------------------------------------
+  function getOrgName(scopeId){
+    const id = String(scopeId || "").trim();
+    return orgIndex.byId.get(id)?.name || "";
+  }
+
+  function validateSelectedScope(){
+    const sid = String($("#scopeSelect").value || "").trim();
+    if(!sid) return { ok:false, scopeId:"" };
+    if(!orgIndex.byId.has(sid)) return { ok:false, scopeId:sid };
+    if(access.roleClass === "MANAGER"){
+      // Manager får bara jobba inom sin subtree
+      if(!isInScope(viewerScopeId, sid, orgIndex)) return { ok:false, scopeId:sid };
+    }
+    return { ok:true, scopeId:sid };
+  }
+
+  function preflightTargetsAgainstScope(targets, taskScopeId){
+    // Fail-closed: blocka om någon mottagare saknar assignment/scope eller om task scope inte ligger i mottagarens subtree
+    const missing = [];
+    const mismatch = [];
+    const invalidEmpScope = [];
+
+    for(const empNo of targets){
+      const rec = assignmentsV2[String(empNo)] || null;
+      const empScope = String(rec?.scopeId || "").trim();
+      if(!empScope){
+        missing.push(String(empNo));
+        continue;
+      }
+      if(!orgIndex.byId.has(empScope)){
+        invalidEmpScope.push(`${empNo}(${empScope})`);
+        continue;
+      }
+      // För att mottagaren ska SE tasken: taskScopeId måste ligga i empScope subtree.
+      if(!isInScope(empScope, taskScopeId, orgIndex)){
+        mismatch.push(`${empNo}(${empScope})`);
+      }
+    }
+
+    return { missing, invalidEmpScope, mismatch };
+  }
+
+  function summarizeBlockers(blockers){
+    const parts = [];
+    if(blockers.missing.length){
+      const a = blockers.missing.slice(0, 10);
+      parts.push(`Saknar assignment/scope: ${a.join(", ")}${blockers.missing.length>10?"…":""}.`);
+    }
+    if(blockers.invalidEmpScope.length){
+      const a = blockers.invalidEmpScope.slice(0, 10);
+      parts.push(`Emp scopeId finns inte i org: ${a.join(", ")}${blockers.invalidEmpScope.length>10?"…":""}.`);
+    }
+    if(blockers.mismatch.length){
+      const a = blockers.mismatch.slice(0, 10);
+      parts.push(`Scope-mismatch (task scope ligger utanför mottagarens subtree): ${a.join(", ")}${blockers.mismatch.length>10?"…":""}.`);
+    }
+    return parts.join(" ");
+  }
+
   $("#btnCreate").addEventListener("click", () => {
     setMsg("", "");
+
+    if(!canCreate){
+      setMsg("err", "Skapande är låst (fail-closed). Åtgärda org/assignments/scope först.");
+      return;
+    }
 
     const mode = $("#targetMode").value;
     const title = normalizeLine($("#title").value || "", 160);
@@ -1025,6 +1441,12 @@ Autopatch:
 
     if(lines.length === 0){
       setMsg("err", "Skriv minst en uppgift (en per rad).");
+      return;
+    }
+
+    const vScope = validateSelectedScope();
+    if(!vScope.ok){
+      setMsg("err", "Välj ett giltigt scope. (Manager: endast inom din subtree.)");
       return;
     }
 
@@ -1065,7 +1487,7 @@ Autopatch:
 
       let byWeekday = [];
       if(freq === "weekly"){
-        byWeekday = getSelectedWeekdays();
+        byWeekday = normalizeByWeekday(getSelectedWeekdays());
         if(byWeekday.length === 0){
           const wd = weekdayFromISO(startDate);
           if(wd) byWeekday = [wd];
@@ -1109,7 +1531,7 @@ Autopatch:
     }
 
     if(mode === "all"){
-      targets = computeAllTargets("all");
+      targets = computeAllTargets();
       if(targets.length === 0){
         setMsg("err", "‘Alla’ kräver att minst en medarbetare finns i grupper (eller redan i uppgifter).");
         return;
@@ -1118,7 +1540,7 @@ Autopatch:
 
     if(mode === "group"){
       const gid = $("#targetGroup").value;
-      const g = loadGroups().find(x => x.id === gid);
+      const g = loadGroups().find(x => String(x.id) === String(gid));
       if(!g){
         setMsg("err", "Välj en grupp.");
         return;
@@ -1135,12 +1557,21 @@ Autopatch:
       }
     }
 
+    // Preflight: fail-closed recipients must be able to SEE the task scope
+    const blockers = preflightTargetsAgainstScope(targets, vScope.scopeId);
+    if(blockers.missing.length || blockers.invalidEmpScope.length || blockers.mismatch.length){
+      const msg = summarizeBlockers(blockers);
+      setMsg("err", "Skapande stoppas (fail-closed). " + (msg || "Mottagare saknar giltigt scope."));
+      return;
+    }
+
     const payload = {
       kind,
       title,
       prio,
       adminNote,
       lines,
+      scopeId: vScope.scopeId,
       startDate: startDate || "",
       endDate: (kind === "oneoff") ? (endDate || "") : "",
       dedupe
@@ -1155,7 +1586,7 @@ Autopatch:
 
     const created = pushTasks(targets, payload);
     if(created > 0){
-      setMsg("ok", `Skapat ${created} uppgift(er).`);
+      setMsg("ok", `Skapat ${created} uppgift(er). Scope: ${getOrgName(vScope.scopeId) || vScope.scopeId}.`);
       renderList();
     }
   });
@@ -1179,7 +1610,13 @@ Autopatch:
     syncKindUI();
   });
 
-  // --- List ---
+  // Disable create button if locked
+  $("#btnCreate").disabled = !canCreate;
+  $("#scopeSelect").disabled = $("#scopeSelect").disabled || !canCreate;
+
+  // ------------------------------------------------------------
+  // List (Manager scope-filter)
+  // ------------------------------------------------------------
   function updateKpis(all){
     const open = all.filter(x => (x?.status||"open") === "open").length;
     const prog = all.filter(x => (x?.status||"open") === "progress").length;
@@ -1207,6 +1644,28 @@ Autopatch:
     if(safeSaveTasks(all)) renderList();
   }
 
+  function canSeeTask(task){
+    const sid = String(task?.scopeId || "").trim();
+    if(!sid) return (access.roleClass !== "MANAGER"); // Manager: fail-closed (hide). Admin/System: may see legacy with warning.
+    if(!orgIndex.byId.has(sid)) return (access.roleClass !== "MANAGER"); // Manager hide.
+    if(access.roleClass === "MANAGER"){
+      if(!viewerScopeId || !orgIndex.byId.has(viewerScopeId)) return false;
+      return isInScope(viewerScopeId, sid, orgIndex);
+    }
+    return true;
+  }
+
+  function canDeleteTask(task){
+    // Manager får bara ta bort inom sin subtree; Admin/System kan ta bort (men vi respekterar synlighet).
+    if(!canSeeTask(task)) return false;
+    if(access.roleClass === "MANAGER"){
+      const sid = String(task?.scopeId || "").trim();
+      if(!sid) return false;
+      return isInScope(viewerScopeId, sid, orgIndex);
+    }
+    return true;
+  }
+
   function renderList(){
     const list = $("#list");
     list.innerHTML = "";
@@ -1214,10 +1673,14 @@ Autopatch:
     const filter = $("#listFilter").value;
     const q = String($("#search").value || "").trim().toLowerCase();
 
-    const all = loadTasks().slice().sort((a,b) => (b?.createdAt||0) - (a?.createdAt||0));
-    updateKpis(all);
+    const raw = loadTasks().slice().sort((a,b) => (b?.createdAt||0) - (a?.createdAt||0));
 
-    let shown = all;
+    // Apply visibility (manager scoped)
+    let allVisible = raw.filter(canSeeTask);
+
+    updateKpis(allVisible);
+
+    let shown = allVisible;
 
     if(filter === "open") shown = shown.filter(x => (x?.status||"open") !== "done");
     if(filter === "done") shown = shown.filter(x => (x?.status||"open") === "done");
@@ -1226,7 +1689,7 @@ Autopatch:
 
     if(q){
       shown = shown.filter(x => {
-        const blob = `${x?.empNo||""} ${x?.title||""} ${x?.text||""} ${x?.adminNote||""} ${x?.employeeComment||""} ${x?.startDate||""} ${x?.endDate||""} ${(x?.recurring?.untilDate)||""}`.toLowerCase();
+        const blob = `${x?.empNo||""} ${x?.title||""} ${x?.text||""} ${x?.adminNote||""} ${x?.employeeComment||""} ${x?.startDate||""} ${x?.endDate||""} ${(x?.recurring?.untilDate)||""} ${x?.scopeId||""}`.toLowerCase();
         return blob.includes(q);
       });
     }
@@ -1242,6 +1705,12 @@ Autopatch:
       const kind = x?.kind || "oneoff";
       const recLabel = (kind === "recurring") ? recurringRuleLabel(x?.recurring) : "";
       const dates = dateLabel(x || {});
+      const scopeId = String(x?.scopeId || "").trim();
+      const scopeName = scopeId ? (getOrgName(scopeId) || "") : "";
+      const scopeOk = !!(scopeId && orgIndex.byId.has(scopeId));
+      const legacyWarn = (!scopeId || !scopeOk);
+
+      const delDisabled = !canDeleteTask(x);
 
       const el = document.createElement("div");
       el.className = "item";
@@ -1253,6 +1722,11 @@ Autopatch:
             <span class="pill">${escapeHtml(statusLabel(x?.status))}</span>
             <span class="pill">Prio: ${escapeHtml(x?.prio || "normal")}</span>
             <span class="pill">${escapeHtml(kindLabel(kind))}</span>
+            ${legacyWarn ? `<span class="pill" style="background: rgba(254,226,226,.9);">Scope saknas/ogiltigt</span>` : ``}
+          </div>
+
+          <div class="meta">
+            <span><strong>Scope:</strong> ${scopeName ? escapeHtml(scopeName) : "—"} ${scopeId ? `(<code>${escapeHtml(scopeId)}</code>)` : ``}</span>
           </div>
 
           <div class="meta">
@@ -1267,7 +1741,7 @@ Autopatch:
 
         <div class="row" style="gap:8px;">
           ${kind === "recurring" ? `<button type="button" class="secondary" data-endrec="${escapeHtml(x?.id)}">Avsluta</button>` : ``}
-          <button type="button" class="secondary" data-del="${escapeHtml(x?.id)}" aria-label="Ta bort uppgift ${escapeHtml(x?.title||"")} för ${escapeHtml(x?.empNo||"")}">Ta bort</button>
+          <button type="button" class="secondary" data-del="${escapeHtml(x?.id)}" ${delDisabled ? "disabled" : ""} aria-label="Ta bort uppgift ${escapeHtml(x?.title||"")} för ${escapeHtml(x?.empNo||"")}">Ta bort</button>
         </div>
       `;
       list.appendChild(el);
@@ -1276,8 +1750,17 @@ Autopatch:
     list.querySelectorAll("button[data-del]").forEach(btn => {
       btn.addEventListener("click", () => {
         const id = btn.getAttribute("data-del");
+        const all = loadTasks();
+        const t = all.find(x => String(x?.id) === String(id));
+        if(!t) return;
+
+        if(!canDeleteTask(t)){
+          setMsg("err", "Radering stoppas: du saknar rätt eller task ligger utanför din scope-subtree.");
+          return;
+        }
+
         if(!confirm("Ta bort uppgiften?")) return;
-        const next = loadTasks().filter(x => x?.id !== id);
+        const next = all.filter(x => String(x?.id) !== String(id));
         if(safeSaveTasks(next)) renderList();
       });
     });
@@ -1290,12 +1773,15 @@ Autopatch:
   $("#listFilter").addEventListener("change", renderList);
   $("#search").addEventListener("input", renderList);
 
+  // ------------------------------------------------------------
   // init
+  // ------------------------------------------------------------
   seedTemplatesIfEmpty();
   renderTemplateSelect();
   renderGroupSelect();
   syncTargetUI();
   syncKindUI();
+  renderScopeSelect();
   renderList();
 
 })();
