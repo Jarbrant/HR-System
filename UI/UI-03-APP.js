@@ -1,5 +1,5 @@
 /* ============================================================
-AO-002 v1.1 | FILE: UI/UI-03-APP.js
+AO-002 v1.2 | FILE: UI/UI-03-APP.js
 Projekt: HR-System
 Syfte: CORE “hjärta” — Auth-guard, RBAC, fail-closed routing, scope-grund, XSS-helpers
 Nivå: UI-only (GitHub Pages) | localStorage-first
@@ -9,9 +9,9 @@ Policy (LÅST):
 - Ingen känslig persondata (endast empNo om det finns i session; logga ej)
 - Inga nya storage-keys/datamodell utan AO (AO-002: skriver inget nytt)
 - XSS-escape på allt som renderas från storage (helpers erbjuds här)
-Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
+Senaste sanning: 2025-12-30 (AO-002 PATCH v1.2 PRC-beslut)
 Ändringslogg:
-- v1.1: Strikt allowlist + BASE_PATH + traversal-fail-closed + explicit public routes (endast login)
+- v1.2: getSafePathname + prefix startsWith + BASE_PATH-trim + canonical getAuth + redirectTo + _paths endast i DEBUG
 ============================================================ */
 
 (function () {
@@ -65,87 +65,108 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
     // GUARD: minsta fält som krävs.
     if (!c.ROLES || !c.DEFAULT_ROUTE_BY_ROLE || !c.ROUTES_BY_ROLE || !c.PERMISSIONS_BY_ROLE) return null;
     if (!Array.isArray(c.PUBLIC_ROUTES)) return null;
-    if (!c.SANITIZE || typeof c.SANITIZE !== "object") return null;
 
-    // GUARD: sanitizers måste finnas (AO-002 v1.1).
-    const s = c.SANITIZE;
-    if (
-      typeof s.stripQueryHash !== "function" ||
-      typeof s.isTraversalLike !== "function" ||
-      typeof s.toAppRelativePath !== "function"
-    ) return null;
+    // GUARD: BASE_PATH finns i config (default "" enligt PRC-beslut).
+    // Vi accepterar "" eller "/HR-System" etc.
+    if (typeof c.BASE_PATH !== "string") return null;
 
     return c;
   }
 
   // ============================================================
-  // PATH + NORMALIZATION (risk-hardening)
+  // PATH NORMALIZATION (P0) — getSafePathname()
   // ============================================================
 
-  // GUARD: Vi matchar endast mot “app-relative path”, utan query/hash.
-  function getAppRelativePathname(inputPathname) {
+  function decodeOnceSafe(s) {
+    // GUARD: defensiv decodeURIComponent
+    try {
+      return decodeURIComponent(String(s || ""));
+    } catch {
+      return String(s || "");
+    }
+  }
+
+  function collapseSlashes(p) {
+    return String(p || "").replace(/\/{2,}/g, "/");
+  }
+
+  function ensureLeadingSlash(p) {
+    const s = String(p || "");
+    if (!s) return "/";
+    return s.startsWith("/") ? s : ("/" + s);
+  }
+
+  function normalizeBasePath(basePath) {
+    // SCOPE: PRC-beslut: BASE_PATH default "" (tom).
+    // Om satt, ska den vara "/HR-System" (utan trailing slash).
+    const b = String(basePath || "").trim();
+    if (!b) return "";
+    const withSlash = ensureLeadingSlash(b);
+    return withSlash.replace(/\/+$/, "");
+  }
+
+  function trimBasePath(pathname, basePath) {
+    const p = String(pathname || "");
+    const b = normalizeBasePath(basePath);
+
+    if (!b) return p; // inget att trimma
+    if (p === b) return "/"; // exakt bas => root i app
+    if (p.startsWith(b + "/")) return p.slice(b.length) || "/";
+    return p; // matchar inte => lämna, men detta kan leda till deny senare
+  }
+
+  function hasDotDotSegment(p) {
+    // GUARD: blockera .. segment (även om den är URL-encoded)
+    // Vi kollar både innan och efter decode.
+    const raw = String(p || "");
+    const dec = decodeOnceSafe(raw);
+
+    // Splitta på / och kolla segment exakt ".."
+    function check(s) {
+      const parts = String(s || "").split("/");
+      return parts.some((seg) => seg === "..");
+    }
+
+    // Även "%2e%2e" kan bli ".." efter decode.
+    return check(raw) || check(dec);
+  }
+
+  function getSafePathname() {
     const cfg = getConfig();
     if (!cfg) return "";
 
-    const raw = String(inputPathname || window.location.pathname || "");
-    // GUARD: query/hash får aldrig påverka access.
-    const noQH = cfg.SANITIZE.stripQueryHash(raw);
+    // 1) raw pathname
+    let p = String(window.location.pathname || "/");
 
-    // GUARD: traversal-liknande ska alltid fail-closed.
-    if (cfg.SANITIZE.isTraversalLike(noQH)) return ""; // => deny
+    // 2) defensiv decode en gång (för att fånga "%2e%2e" och andra konstigheter)
+    //    men vi använder även raw för fail-closed checks.
+    const decoded = decodeOnceSafe(p);
 
-    // SCOPE: "/HR-System/admin/home.html" => "/admin/home.html"
-    const rel = cfg.SANITIZE.toAppRelativePath(noQH);
-    return String(rel || "");
-  }
+    // 3) collapse slashes (på decoded)
+    p = collapseSlashes(decoded);
 
-  // GUARD: Absolut path från app-root (BASE_PATH stöd via CONFIG).
-  function absPathFromApp(relativeAppPath) {
-    const cfg = getConfig();
-    if (!cfg) return "/";
+    // 4) ensure leading slash
+    p = ensureLeadingSlash(p);
 
-    const base = String(cfg.BASE_PATH || "").replace(/\/+$/, "");
-    const rel = String(relativeAppPath || "").trim();
-    const relNorm = rel.startsWith("/") ? rel : ("/" + rel);
+    // 5) trim BASE_PATH (P1)
+    p = trimBasePath(p, cfg.BASE_PATH);
 
-    if (!base || base === "/") return relNorm;
-    return base + relNorm;
-  }
+    // 6) collapse slashes igen efter trim
+    p = collapseSlashes(p);
 
-  function loginUrl(err) {
-    // DEBUG: bara felkod, aldrig empNo/PII.
-    const base = absPathFromApp("/UI/UI-01-SKELETON.html");
-    return err ? (base + "?err=" + encodeURIComponent(String(err))) : base;
-  }
+    // 7) blockera .. segment (P0 fail-closed)
+    if (hasDotDotSegment(p)) return "";
 
-  function redirect(url) {
-    window.location.replace(String(url || loginUrl("unauth")));
+    // 8) final: säkerställ leading slash igen
+    p = ensureLeadingSlash(p);
+
+    // GUARD: endast pathname här (query/hash ingår inte i location.pathname).
+    return p;
   }
 
   // ============================================================
-  // SESSION / AUTH (fail-closed)
+  // AUTH SHAPE (P1) — canonical getAuth()
   // ============================================================
-
-  // GUARD: validera sessionform; om saknas/korrupt => null.
-  function mustGetSession() {
-    const data = readStorage(SESSION_KEY);
-    if (!data || typeof data !== "object") return null;
-
-    // SCOPE: stöd både {auth:{...}} och platt form.
-    const auth = (data.auth && typeof data.auth === "object") ? data.auth : data;
-
-    // GUARD: explicit isAuthed måste vara true.
-    if (auth.isAuthed !== true) return null;
-
-    // GUARD: expiresAt (om finns) måste vara i framtiden.
-    if (auth.expiresAt && Number(auth.expiresAt) < Date.now()) return null;
-
-    // GUARD: roll måste vara giltig enligt config.
-    const role = normalizeRole(auth.role);
-    if (!role) return null;
-
-    return data;
-  }
 
   function normalizeRole(roleRaw) {
     const cfg = getConfig();
@@ -157,16 +178,50 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
     return values.includes(r) ? r : "";
   }
 
-  function getRoleFromSession(session) {
+  function getAuth(session) {
+    // SCOPE: Standardisera utan att skriva storage:
+    // - Stöd platt session: { isAuthed, role, scopeId, expiresAt }
+    // - Stöd wrapped: { auth: { ... } }
     const s = session && typeof session === "object" ? session : null;
-    if (!s) return "";
-    const auth = (s.auth && typeof s.auth === "object") ? s.auth : s;
-    return normalizeRole(auth.role);
+    if (!s) return null;
+
+    const a = (s.auth && typeof s.auth === "object") ? s.auth : s;
+    const out = {
+      isAuthed: a.isAuthed === true,
+      role: normalizeRole(a.role),
+      scopeId: String((a.scopeId ?? s.scopeId) ?? "").trim(),
+      expiresAt: a.expiresAt ? Number(a.expiresAt) : null,
+    };
+
+    // GUARD: role måste vara giltig när authed
+    if (out.isAuthed && !out.role) return null;
+
+    return out;
+  }
+
+  // GUARD: validera session; om saknas/korrupt => null.
+  function mustGetSession() {
+    const data = readStorage(SESSION_KEY);
+    if (!data || typeof data !== "object") return null;
+
+    const auth = getAuth(data);
+    if (!auth || auth.isAuthed !== true) return null;
+
+    // GUARD: expiresAt (om finns) måste vara i framtiden.
+    if (auth.expiresAt && auth.expiresAt < Date.now()) return null;
+
+    return data; // PRC: returnera originalobjektet
   }
 
   // ============================================================
-  // PUBLIC ROUTES (explicit, no implicit /UI/)
+  // PUBLIC ROUTES (explicit) — no implicit /UI/
   // ============================================================
+
+  function stripQueryHash(urlLike) {
+    // GUARD: för route checks som får input med query/hash
+    const s = String(urlLike || "");
+    return s.split("#")[0].split("?")[0];
+  }
 
   function isPublicRoute(appRelPath) {
     const cfg = getConfig();
@@ -175,24 +230,56 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
     const p = String(appRelPath || "");
     if (!p) return false;
 
-    // GUARD: endast exakt match mot PUBLIC_ROUTES.
-    // Ex: "/UI/UI-01-SKELETON.html" är publik, men "/UI/annat.html" är inte.
+    // GUARD: exakt match mot PUBLIC_ROUTES.
     return cfg.PUBLIC_ROUTES.includes(p);
   }
 
   // ============================================================
-  // RBAC (strict allowlist)
+  // RBAC (P0) — deterministic prefix match on normalized relative path
   // ============================================================
 
   function isHtmlLikeRoute(appRelPath) {
-    // GUARD: Vi begränsar route-access-check till HTML routes, så att assets (css/js/img)
-    // inte “blockeras” i nätverkslagret via guard-liknande calls.
     const p = String(appRelPath || "").toLowerCase();
     if (!p) return false;
-    return p === "/" || p.endsWith(".html") || p.endsWith("/"); // GH Pages dir index
+    return p === "/" || p.endsWith(".html") || p.endsWith("/");
   }
 
-  // canAccessRoute(role, pathname) - config-driven strict list
+  function normalizeRelPathForCheck(inputPath) {
+    // SCOPE:
+    // - Tar emot pathname-liknande sträng (kan ha query/hash)
+    // - Använder getSafePathname() för den aktuella sidan (window.pathname)
+    //   eller bearbetar input via samma regler så långt det går.
+    // För AO-002 använder vi främst nuvarande route via getSafePathname().
+    const raw = stripQueryHash(inputPath);
+
+    // Om inputPath är exakt current pathname, använd getSafePathname() (starkast).
+    // Annars gör en minimal normalisering som speglar samma grundregler.
+    const currentRaw = String(window.location.pathname || "");
+    if (raw === currentRaw) return getSafePathname();
+
+    const cfg = getConfig();
+    if (!cfg) return "";
+
+    let p = ensureLeadingSlash(collapseSlashes(decodeOnceSafe(raw)));
+    p = trimBasePath(p, cfg.BASE_PATH);
+    p = collapseSlashes(p);
+    if (hasDotDotSegment(p)) return "";
+    return ensureLeadingSlash(p);
+  }
+
+  function rootAwareStartsWith(path, prefix) {
+    // GUARD: startsWith(prefix) men “root-aware”:
+    // - prefix "/admin" matchar "/admin" och "/admin/..." men INTE "/adminx"
+    const p = String(path || "");
+    const pre = String(prefix || "");
+    if (!p || !pre) return false;
+
+    if (!p.startsWith(pre)) return false;
+    if (p.length === pre.length) return true; // exakt
+    // nästa tecken måste vara "/"
+    return p.charAt(pre.length) === "/";
+  }
+
   function canAccessRoute(role, pathname) {
     const cfg = getConfig();
     if (!cfg) return false;
@@ -200,22 +287,32 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
     const r = normalizeRole(role);
     if (!r) return false;
 
-    // Normalize + harden
-    const appRel = getAppRelativePathname(pathname);
-    if (!appRel) return false; // traversal/korrupt => deny
+    // P0/P1: Normalisera relativ path (BASE_PATH bort, // kollaps, .. block)
+    const rel = normalizeRelPathForCheck(pathname || window.location.pathname || "");
+    if (!rel) return false; // fail-closed
 
-    // GUARD: Public route ska inte kräva session (hanteras separat i requireAuth/soft check).
-    // canAccessRoute är endast för skyddade html-sidor.
-    if (!isHtmlLikeRoute(appRel)) return true; // assets ska inte stoppas här
+    // Assets ska inte blockeras av denna kontroll
+    if (!isHtmlLikeRoute(rel)) return true;
 
     const allowed = cfg.ROUTES_BY_ROLE[r];
     if (!Array.isArray(allowed) || allowed.length === 0) return false;
 
-    // GUARD: strikt allowlist (exakt match)
-    return allowed.includes(appRel);
+    // P0: deterministisk prefixmatch (root-aware)
+    // Här antar vi att ROUTES_BY_ROLE kan innehålla:
+    // - exakta routes ("/admin/home.html")
+    // - eller prefix ("/admin") om ni väljer det i config senare
+    return allowed.some((entry) => {
+      const e = String(entry || "").trim();
+      if (!e) return false;
+      if (e.endsWith(".html") || e === "/" || e.endsWith("/")) {
+        // exakt match
+        return rel === e;
+      }
+      // prefix match
+      return rootAwareStartsWith(rel, e);
+    });
   }
 
-  // hasPermission(role, permission) - minimal nivå 1
   function hasPermission(role, permission) {
     const cfg = getConfig();
     if (!cfg) return false;
@@ -233,21 +330,36 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
   }
 
   // ============================================================
-  // ROUTING (deterministisk)
+  // ROUTING (deterministisk, BASE_PATH-safe)
   // ============================================================
 
-  // routeAfterLogin(session) => absolut url (BASE_PATH-safe)
+  function absPathFromApp(relativeAppPath) {
+    const cfg = getConfig();
+    if (!cfg) return "/";
+
+    const base = normalizeBasePath(cfg.BASE_PATH);
+    const rel = String(relativeAppPath || "").trim();
+    const relNorm = ensureLeadingSlash(rel);
+
+    if (!base) return relNorm;
+    return base + relNorm;
+  }
+
+  function loginUrl(err) {
+    const base = absPathFromApp("/UI/UI-01-SKELETON.html");
+    return err ? (base + "?err=" + encodeURIComponent(String(err))) : base;
+  }
+
   function routeAfterLogin(session) {
     const cfg = getConfig();
     if (!cfg) return loginUrl("config");
 
-    const role = getRoleFromSession(session);
-    if (!role) return loginUrl("role");
+    const auth = getAuth(session);
+    if (!auth || !auth.isAuthed || !auth.role) return loginUrl("role");
 
-    const dest = cfg.DEFAULT_ROUTE_BY_ROLE[role];
+    const dest = cfg.DEFAULT_ROUTE_BY_ROLE[auth.role];
     if (!dest) return loginUrl("route");
 
-    // GUARD: dest i config är app-relative med ledande "/"
     const appRel = String(dest || "").trim();
     if (!appRel.startsWith("/")) return loginUrl("route");
 
@@ -255,14 +367,22 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
   }
 
   // ============================================================
-  // AUTH GUARD (fail-closed)
+  // AUTH GUARD (fail-closed) + redirectTo (P1)
   // ============================================================
 
-  // requireAuth({ allowRoles?: [], redirect?: string })
+  // requireAuth({ allowRoles?: [], redirectTo?: string })
   function requireAuth(opts) {
     const options = (opts && typeof opts === "object") ? opts : {};
     const allowRoles = Array.isArray(options.allowRoles) ? options.allowRoles : [];
-    const redirectTo = String(options.redirect || loginUrl("unauth"));
+
+    // P1: redirectTo implementeras korrekt
+    // - Om given, måste vara en APP-RELATIVE html-path ("/UI/UI-01-SKELETON.html" eller "/employee/home.html")
+    // - Annars default login
+    const redirectToRaw = String(options.redirectTo || "").trim();
+    const redirectTo =
+      redirectToRaw && redirectToRaw.startsWith("/") && !hasDotDotSegment(redirectToRaw)
+        ? absPathFromApp(stripQueryHash(redirectToRaw))
+        : loginUrl("unauth");
 
     const cfg = getConfig();
     if (!cfg) {
@@ -270,43 +390,41 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
       return null;
     }
 
-    // Normalize current route
-    const appRel = getAppRelativePathname(window.location.pathname);
-    if (!appRel) {
-      // GUARD: traversal/korrupt path => alltid fail-closed
+    // P0: Säker pathname (relativ i appen)
+    const rel = getSafePathname();
+    if (!rel) {
       redirect(loginUrl("forbidden"));
       return null;
     }
 
-    // GUARD: Public routes får nås utan session (MEN endast explicit PUBLIC_ROUTES).
-    if (isHtmlLikeRoute(appRel) && isPublicRoute(appRel)) {
+    // Public route får nås utan session, men endast explicit allowlist
+    if (isHtmlLikeRoute(rel) && isPublicRoute(rel)) {
       return { public: true };
     }
 
-    // Allt annat kräver giltig session
     const session = mustGetSession();
     if (!session) {
-      redirect(loginUrl("unauth"));
+      redirect(redirectTo);
       return null;
     }
 
-    const role = getRoleFromSession(session);
-    if (!role) {
-      redirect(loginUrl("role"));
+    const auth = getAuth(session);
+    if (!auth || auth.isAuthed !== true || !auth.role) {
+      redirect(redirectTo);
       return null;
     }
 
-    // allowRoles-filter (om angivet)
+    // allowRoles-filter om angivet
     if (allowRoles.length > 0) {
       const allowed = allowRoles.map(normalizeRole).filter(Boolean);
-      if (!allowed.includes(role)) {
+      if (!allowed.includes(auth.role)) {
         redirect(loginUrl("forbidden"));
         return null;
       }
     }
 
-    // Route allowlist (strict)
-    if (isHtmlLikeRoute(appRel) && !canAccessRoute(role, window.location.pathname)) {
+    // Route allowlist (deterministisk prefixmatch, root-aware)
+    if (isHtmlLikeRoute(rel) && !canAccessRoute(auth.role, rel)) {
       redirect(loginUrl("forbidden"));
       return null;
     }
@@ -319,11 +437,9 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
   // ============================================================
 
   function getScopeId(session) {
-    const s = session && typeof session === "object" ? session : null;
-    if (!s) return "";
-    const auth = (s.auth && typeof s.auth === "object") ? s.auth : s;
-    const v = auth.scopeId ?? s.scopeId;
-    return String(v || "").trim();
+    const auth = getAuth(session);
+    if (!auth) return "";
+    return String(auth.scopeId || "").trim();
   }
 
   // fail-closed om något saknas
@@ -354,7 +470,7 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
   }
 
   // ============================================================
-  // DEBUG HOOKS (AV default)
+  // DEBUG HOOKS (AV default) + P2 _paths exposure
   // ============================================================
 
   function debugEnabled() {
@@ -363,7 +479,6 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
   }
 
   function redactMeta(meta) {
-    // DEBUG: skydda mot oavsiktlig PII i loggar.
     if (!meta || typeof meta !== "object") return meta;
     const out = {};
     for (const k of Object.keys(meta)) {
@@ -397,18 +512,24 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
   // PUBLIC API
   // ============================================================
 
-  window.HRApp = {
+  const api = {
     // Storage/session
     safeJsonParse,
     readStorage,
     mustGetSession,
     clearSession,
 
+    // Canonical auth accessor (P1)
+    getAuth,
+
     // Auth/Routing/RBAC
     requireAuth,
     routeAfterLogin,
     canAccessRoute,
     hasPermission,
+
+    // Path hardening (P0) — exposed (no PII)
+    getSafePathname,
 
     // Scope grund
     getScopeId,
@@ -423,12 +544,19 @@ Senaste sanning: 2025-12-30 (AO-002 v1.1 PATCH-ORDER från PRC)
 
     // Convenience
     logout,
-
-    // Diagnostics (no PII)
-    _diag: {
-      getAppRelativePathname,
-      absPathFromApp,
-      isPublicRoute,
-    },
   };
+
+  // P2: _paths endast i DEBUG
+  if (debugEnabled()) {
+    api._paths = {
+      basePath: function () {
+        const cfg = getConfig();
+        return cfg ? cfg.BASE_PATH : null;
+      },
+      safePathname: getSafePathname,
+      absPathFromApp,
+    };
+  }
+
+  window.HRApp = api;
 })();
