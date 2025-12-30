@@ -1,15 +1,19 @@
 <!-- ============================================================
-AO-001 | FIL-ID: UI/UI-01-SKELETON.html
+AO-003 | FIL-ID: UI/UI-01-SKELETON.html
 Projekt: HR-System
-Syfte: Stammens login + roll-routing (admin/employee) – UI-only v1
-Fix (stabilitet):
-- Sparar session i sessionStorage (primär) + localStorage (fallback) med samma nyckel
-- Förhindrar "klick => logout" när någon sida råkar läsa från fel storage
-Policy/lås:
-- Roller v1: admin, employee
-- PIN implementeras inte (hook: pinRequired=false + TODO)
-- Inga känsliga data lagras
-- Rate-limit i klient (cooldown)
+Syfte: Minimalt login-steg (stam) + routing via kärnan (AO-002)
+Nivå: UI-only (GitHub Pages) | localStorage-first
+Policy (LÅST):
+- Ingen backend
+- Ingen ny auth-logik (använd AO-002: getAuth/routeAfterLogin/requireAuth)
+- Ingen RBAC/scope/redirect-logik i sidan (endast routeAfterLogin)
+- Fail-closed: ogiltig input eller okänd roll => stanna kvar
+- Inga nya storage-keys/datamodell utan AO (AO-003: återanvänder AO-001_LOGIN_V1)
+- Ingen känslig persondata (endast empNo)
+- URL-parametrar (?err=...) får visas som text men påverkar inte logik
+Senaste sanning: 2025-12-30 (AO-003 v1.2 PATCH-ORDER från PRC)
+Ändringslogg:
+- v1.2: strict login-target match + writeSession boolean + empNo digits-only fail + TTL 8h fast (optional override via config)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -17,230 +21,294 @@ Policy/lås:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HR-System – Login</title>
-  <meta name="description" content="Stammens login. Routar till rätt vy baserat på roll." />
-
+  <meta name="description" content="Stam-login. Router deterministiskt via kärnans routeAfterLogin." />
   <link rel="stylesheet" href="./UI-02-STYLES.css" />
 </head>
 <body>
 
-<header class="top">
-  <div class="brand">
-    <strong>HR-System</strong>
-    <span class="muted">• Login</span>
-  </div>
-</header>
-
-<main class="container">
+<main class="container" style="max-width:720px;">
   <section class="card">
     <h1 class="tight">Logga in</h1>
-    <p class="muted">Gemensam ingång för alla roller (v1).</p>
+
+    <!-- URL-parametrar får bara VISAS som text (ingen logik kopplad) -->
+    <p id="errText" class="muted small" style="margin-top:6px;"></p>
 
     <form id="loginForm" novalidate>
-      <div class="row wrap">
-        <label style="flex:1; min-width:240px;">
-          Namn
-          <input id="name" name="name" type="text" autocomplete="name" placeholder="t.ex. Anders" />
-        </label>
-
-        <label style="flex:1; min-width:240px;">
-          Anställningsnummer
-          <input id="empNo" name="empNo" type="text" inputmode="numeric" autocomplete="username" placeholder="t.ex. 1234" />
-        </label>
-      </div>
-
-      <label style="margin-top:10px;">
-        Lösenord
-        <input id="password" name="password" type="password" autocomplete="current-password" placeholder="••••••••" />
+      <label for="empNo">
+        Anställningsnummer (empNo)
       </label>
+      <input
+        id="empNo"
+        name="empNo"
+        type="text"
+        inputmode="numeric"
+        autocomplete="username"
+        required
+        maxlength="20"
+        aria-describedby="msg"
+      />
 
-      <div class="row-actions" style="margin-top:12px;">
+      <label for="role" style="margin-top:10px;">
+        Roll
+      </label>
+      <select id="role" name="role" required aria-describedby="msg">
+        <option value="">Välj…</option>
+        <option value="EMPLOYEE">EMPLOYEE</option>
+        <option value="MANAGER">MANAGER</option>
+        <option value="ADMIN">ADMIN</option>
+        <option value="SYSTEM_ADMIN">SYSTEM_ADMIN</option>
+      </select>
+
+      <div style="display:flex; gap:10px; margin-top:12px;">
         <button id="btnLogin" type="submit">Logga in</button>
         <button id="btnClear" class="secondary" type="button">Rensa</button>
       </div>
 
-      <p id="msg" class="message" aria-live="polite"></p>
-      <p id="cooldownMsg" class="muted small" style="margin-top:8px; display:none;"></p>
-
-      <p class="muted small" style="margin-top:12px;">
-        v1: Ingen “glömt lösen”. Kontakta admin vid problem.
-      </p>
+      <p id="msg" class="message" aria-live="polite" style="margin-top:12px;"></p>
     </form>
   </section>
 </main>
 
+<!-- AO-002 beroenden (LÅSTA): config måste laddas före app -->
+<script src="./UI-04-CONFIG.js"></script>
+<script src="./UI-03-APP.js"></script>
+
 <script>
 /* ============================================================
-AO-001 | FIL-ID: UI/UI-01-SKELETON.html (inline JS)
+AO-003 v1.2 | FIL-ID: UI/UI-01-SKELETON.html (inline JS)
+Patch-order (PRC):
+- isLoginTarget() => strikt path-jämförelse (ingen includes)
+- writeSession() => return boolean; blockera redirect vid false
+- empNo => faila om icke-siffror (t.ex. 12-34)
+- TTL: 8h fast, optional override via config
 ============================================================ */
-(function(){
+(function () {
   "use strict";
 
-  // ---- Storage keys (låsta) ----
-  const SESSION_KEY   = "AO-001_LOGIN_V1";
-  const COOLDOWN_KEY  = "AO-001_COOLDOWN_V1";
+  // STORAGE: återanvänd befintlig nyckel (ingen ny key)
+  const SESSION_KEY = "AO-001_LOGIN_V1";
 
-  // ---- Rate-limit / cooldown (light) ----
-  const MAX_FAILS = 5;
-  const COOLDOWN_MS = 30 * 1000;
+  // EMPNO: strikt siffror-only, fail-closed
+  const EMPNO_MAXLEN = 20;
+  const EMPNO_RE = /^[0-9]{1,20}$/;
+
+  // TTL: 8h fast, optional override via config (om HR_CONFIG.SESSION_TTL_MS finns)
+  const DEFAULT_TTL_MS = 8 * 60 * 60 * 1000;
 
   const $ = (s) => document.querySelector(s);
 
-  function setMsg(kind, text){
-    const m = $("#msg");
-    m.className = "message" + (kind ? " " + kind : "");
-    m.textContent = text || "";
+  function setMsg(kind, text) {
+    const el = $("#msg");
+    if (!el) return;
+    el.className = "message" + (kind ? " " + kind : "");
+    el.textContent = text || "";
   }
 
-  function setCooldownUI(untilTs){
-    const el = $("#cooldownMsg");
-    if(!untilTs || untilTs <= Date.now()){
-      el.style.display = "none";
-      el.textContent = "";
-      return;
-    }
-    const left = Math.max(0, untilTs - Date.now());
-    const sec = Math.ceil(left / 1000);
-    el.style.display = "block";
-    el.textContent = `För många försök. Vänta ${sec} sek.`;
+  function showUrlErrText() {
+    const el = $("#errText");
+    if (!el) return;
+
+    const u = new URL(window.location.href);
+    const err = u.searchParams.get("err");
+
+    if (err) el.textContent = "Info: " + String(err);
+    else el.textContent = "";
   }
 
-  function readCooldown(){
-    try{
-      const raw = localStorage.getItem(COOLDOWN_KEY);
-      if(!raw) return { fails: 0, until: 0 };
-      const v = JSON.parse(raw);
-      return {
-        fails: Number(v?.fails || 0),
-        until: Number(v?.until || 0)
-      };
-    }catch{
-      return { fails: 0, until: 0 };
-    }
-  }
+  function initOrFail() {
+    const form = $("#loginForm");
+    const btnClear = $("#btnClear");
+    const emp = $("#empNo");
+    const role = $("#role");
 
-  function writeCooldown(obj){
-    localStorage.setItem(COOLDOWN_KEY, JSON.stringify(obj));
-  }
-
-  function resetCooldown(){
-    writeCooldown({ fails: 0, until: 0 });
-    setCooldownUI(0);
-  }
-
-  // ---- Auth demo (v1 utan backend) ----
-  // OBS: Dessa credentials är demo. Byt när du vill, men håll rollerna låsta (admin/employee).
-  function checkCredentials(name, empNo, password){
-    const n = String(name||"").trim().toLowerCase();
-    const e = String(empNo||"").trim();
-    const p = String(password||"").trim();
-
-    // Admin: lösenord "admin" (enkelt demo)
-    if(p === "admin"){
-      return { role: "admin", displayName: name || "Admin", empNo: e || "—" };
+    if (!form || !btnClear || !emp || !role) {
+      setMsg("err", "Systemfel: UI-mall saknar element.");
+      return null;
     }
 
-    // Employee: lösenord "employee" (enkelt demo)
-    if(p === "employee"){
-      return { role: "employee", displayName: name || "Medarbetare", empNo: e || "—" };
+    if (!window.HR_CONFIG) {
+      setMsg("err", "Systemfel: config saknas (HR_CONFIG).");
+      return null;
+    }
+    if (!window.HRApp || typeof window.HRApp.routeAfterLogin !== "function") {
+      setMsg("err", "Systemfel: kärnan saknas (HRApp).");
+      return null;
     }
 
-    return null;
+    return { form, btnClear, emp, role };
   }
 
-  function routeByRole(role){
-    // PIN hook (inte implementerat)
-    const pinRequired = false;
-    // TODO (AO-001): Om pinRequired==true, routa till pin-vy (inte i v1)
-
-    if(role === "admin") return "../admin/home.html";
-    return "../employee/home.html";
+  function getAllowedRoles() {
+    const cfg = window.HR_CONFIG;
+    if (!cfg || !cfg.ROLES) return [];
+    return Object.keys(cfg.ROLES).map((k) => cfg.ROLES[k]);
   }
 
-  // ---- Session write: primär + fallback ----
-  function writeSession(auth){
-    const payload = {
+  function isValidRole(role, allowed) {
+    const r = String(role || "").trim();
+    return allowed.includes(r);
+  }
+
+  function normalizeEmpNo(raw) {
+    // PRC: empNo ska faila om icke-siffror => vi "sanerar" inte, vi validerar strikt
+    const s = String(raw || "").trim();
+    return s.length > EMPNO_MAXLEN ? s.slice(0, EMPNO_MAXLEN) : s;
+  }
+
+  function validateEmpNo(empNo) {
+    return EMPNO_RE.test(String(empNo || ""));
+  }
+
+  function getSessionTtlMs() {
+    // TTL: 8h fast, optional override via config
+    const cfg = window.HR_CONFIG;
+    const ttl = cfg && typeof cfg.SESSION_TTL_MS === "number" ? cfg.SESSION_TTL_MS : null;
+    // GUARD: rimlig override (annars default 8h)
+    if (ttl && ttl > 60 * 1000 && ttl < 30 * 24 * 60 * 60 * 1000) return ttl;
+    return DEFAULT_TTL_MS;
+  }
+
+  function buildSession(empNo, role) {
+    const now = Date.now();
+    const ttl = getSessionTtlMs();
+    return {
       auth: {
         isAuthed: true,
-        role: auth.role,
-        displayName: auth.displayName || "",
-        empNo: auth.empNo || "",
-        issuedAt: Date.now(),
-        expiresAt: Date.now() + (8 * 60 * 60 * 1000) // 8h
+        role: String(role || "").trim(),
+        scopeId: "",
+        empNo: String(empNo || "").trim(),
+        issuedAt: now,
+        expiresAt: now + ttl
       }
     };
-
-    const raw = JSON.stringify(payload);
-
-    // Primär
-    sessionStorage.setItem(SESSION_KEY, raw);
-
-    // Fallback: vissa sidor/buggar kan råka läsa localStorage
-    localStorage.setItem(SESSION_KEY, raw);
   }
 
-  function applyUrlParams(){
-    // Stöd för URL-parametrar (enkel)
-    const u = new URL(window.location.href);
-    const name = u.searchParams.get("name");
-    const empNo = u.searchParams.get("empNo");
-    const password = u.searchParams.get("password");
+  function safePathFromUrlString(urlStr) {
+    // Returnerar pathname utan query/hash, defensivt
+    try {
+      const u = new URL(String(urlStr || ""), window.location.origin);
+      return String(u.pathname || "");
+    } catch {
+      return "";
+    }
+  }
 
-    if(name !== null) $("#name").value = name;
-    if(empNo !== null) $("#empNo").value = empNo;
-    if(password !== null) $("#password").value = password;
+  function getLoginPathnameStrict() {
+    // Vi jämför strikt mot "login-sidans pathname" i nuvarande app.
+    // Byggt från aktuell location, men med filnamnet fast.
+    try {
+      const u = new URL(window.location.href);
+      const p = String(u.pathname || "/");
+      // Ersätt sista segmentet med UI/UI-01-SKELETON.html om vi kan, annars använd app-root + /UI/...
+      const idx = p.lastIndexOf("/UI/");
+      if (idx >= 0) return p.slice(0, idx) + "/UI/UI-01-SKELETON.html";
+      // fallback: anta att vi ligger under /UI/ redan
+      const lastSlash = p.lastIndexOf("/");
+      const base = lastSlash >= 0 ? p.slice(0, lastSlash) : "";
+      return base + "/UI-01-SKELETON.html";
+    } catch {
+      return "/UI/UI-01-SKELETON.html";
+    }
+  }
+
+  function isLoginTarget(targetUrl) {
+    // PRC: strikt path-jämförelse (ingen includes).
+    // - target kan ha ?x#y => vi jämför endast pathname.
+    const targetPath = safePathFromUrlString(targetUrl);
+    if (!targetPath) return false;
+    const loginPath = getLoginPathnameStrict();
+    return targetPath === loginPath;
+  }
+
+  function computeTargetOrFail(sessionObj) {
+    const target = window.HRApp.routeAfterLogin(sessionObj);
+    if (!target || typeof target !== "string") {
+      setMsg("err", "Inloggning misslyckades (ingen giltig route).");
+      return "";
+    }
+    return target;
+  }
+
+  function writeSession(sessionObj) {
+    // PRC: return boolean; blockera redirect vid false
+    const raw = JSON.stringify(sessionObj);
+
+    // Primär: sessionStorage
+    try {
+      sessionStorage.setItem(SESSION_KEY, raw);
+      return true;
+    } catch {}
+
+    // Fallback: localStorage
+    try {
+      localStorage.setItem(SESSION_KEY, raw);
+      return true;
+    } catch {}
+
+    return false;
   }
 
   // ---- init ----
-  applyUrlParams();
+  showUrlErrText();
 
-  // cooldown ticker
-  setInterval(() => {
-    const cd = readCooldown();
-    setCooldownUI(cd.until);
-  }, 300);
+  const dom = initOrFail();
+  if (!dom) return;
 
-  $("#btnClear").addEventListener("click", () => {
-    $("#name").value = "";
-    $("#empNo").value = "";
-    $("#password").value = "";
+  const allowedRoles = getAllowedRoles();
+  if (!allowedRoles.length) {
+    setMsg("err", "Systemfel: roller saknas i config.");
+    return;
+  }
+
+  dom.btnClear.addEventListener("click", function () {
+    dom.emp.value = "";
+    dom.role.value = "";
     setMsg("", "");
   });
 
-  $("#loginForm").addEventListener("submit", (e) => {
+  dom.form.addEventListener("submit", function (e) {
     e.preventDefault();
     setMsg("", "");
 
-    const cd = readCooldown();
-    if(cd.until && cd.until > Date.now()){
-      setMsg("err", "För många försök. Vänta en stund och försök igen.");
-      setCooldownUI(cd.until);
+    const empNo = normalizeEmpNo(dom.emp.value);
+    const role = String(dom.role.value || "").trim();
+
+    if (!empNo) {
+      setMsg("err", "Fyll i anställningsnummer.");
+      return;
+    }
+    // PRC: empNo ska faila om icke-siffror (t.ex. 12-34)
+    if (!validateEmpNo(empNo)) {
+      setMsg("err", "Ogiltigt anställningsnummer (endast siffror).");
+      return;
+    }
+    if (!role) {
+      setMsg("err", "Välj roll.");
+      return;
+    }
+    if (!isValidRole(role, allowedRoles)) {
+      setMsg("err", "Ogiltig roll.");
       return;
     }
 
-    const name = $("#name").value;
-    const empNo = $("#empNo").value;
-    const password = $("#password").value;
+    // Beräkna target först (fail-closed)
+    const sessionObj = buildSession(empNo, role);
+    const target = computeTargetOrFail(sessionObj);
+    if (!target) return;
 
-    const auth = checkCredentials(name, empNo, password);
-    if(!auth){
-      // generiskt fel (läcker inte)
-      const nextFails = (cd.fails || 0) + 1;
-      if(nextFails >= MAX_FAILS){
-        const until = Date.now() + COOLDOWN_MS;
-        writeCooldown({ fails: nextFails, until });
-        setMsg("err", "Fel inloggning. För många försök.");
-        setCooldownUI(until);
-      }else{
-        writeCooldown({ fails: nextFails, until: 0 });
-        setMsg("err", "Fel inloggning.");
-      }
+    // Om kärnan skickar tillbaka till login -> skriv inte session
+    if (isLoginTarget(target)) {
+      setMsg("err", "Inloggning nekad (ogiltig route).");
       return;
     }
 
-    // success
-    resetCooldown();
-    writeSession(auth);
-    const target = routeByRole(auth.role);
+    // Skriv session; om misslyckas -> visa fel och stoppa redirect
+    const ok = writeSession(sessionObj);
+    if (!ok) {
+      setMsg("err", "Systemfel: kan inte spara session (storage blockerat).");
+      return;
+    }
+
     window.location.replace(target);
   });
 
