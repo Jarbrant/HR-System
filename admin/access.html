@@ -295,6 +295,10 @@ Kontrakt:
 /* ============================================================
 AO-021 | FIL-ID: admin/access.html (inline JS)
 AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
+Autopatch:
+- Sök ska INTE resetta formulär/val (separerad render: controls vs view)
+- Mindre dubbelarbete: cache support-map per render
+- Fail-closed vid korrupt org/assignments
 ============================================================ */
 (function(){
   "use strict";
@@ -309,9 +313,12 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
   const DEFAULT_LOCALE = "sv-SE";
   const DEFAULT_SUPPORT_ID = "support_default_v1";
 
-  // Harmonisering mot org-builder: stöd flera möjliga root-id
+  // Harmonisering mot org-builder: stöd flera möjliga root-id (fail-closed)
   const ROOT_ID_PRIMARY = "org_root_v1";
   const ROOT_ID_FALLBACK = "org_root";
+
+  const MAX_DEPTH = 80; // role-inherit guard
+  const MAX_CHAIN_GUARD = 250; // org parent-chain guard
 
   const $  = (s) => document.querySelector(s);
 
@@ -400,7 +407,7 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  // --- Seed (minimal) ---
+  // --- Seed (minimal, fail-safe) ---
   function seedOrgIfEmpty(){
     const raw = safeParse(ORG_KEY, null);
     if(Array.isArray(raw) && raw.length) return;
@@ -415,7 +422,6 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
   }
   function seedSupportProfilesIfEmpty(){
     const raw = safeParse(SUPPORT_KEY, null);
-    // Stöd både array och map, men vi lagrar som array (enklast att läsa/seed)
     const okArr = Array.isArray(raw) ? raw : null;
     if(okArr && okArr.length) return;
 
@@ -429,12 +435,11 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     save(SUPPORT_KEY, seed);
   }
 
-  // Access ska inte skapa roller här. Roller ska skapas i admin/roles.html
   seedOrgIfEmpty();
   seedAssignmentsIfEmpty();
   seedSupportProfilesIfEmpty();
 
-  // --- Data loaders + meta ---
+  // --- Data loaders ---
   function loadRoles(){
     const arr = safeParse(ROLES_KEY, []);
     return Array.isArray(arr) ? arr : [];
@@ -456,6 +461,7 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
   function loadOrgEx(){
     const raw = safeParse(ORG_KEY, []);
     const arr = Array.isArray(raw) ? raw : [];
+
     const idCounts = new Map();
     arr.forEach(n => {
       const id = n && typeof n === "object" && n.id ? String(n.id) : "";
@@ -470,7 +476,6 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
       if(n && typeof n === "object" && n.id) byId.set(String(n.id), n);
     });
 
-    // Root-detektion
     const ids = Array.from(byId.keys());
     const hasPrimary = byId.has(ROOT_ID_PRIMARY);
     const hasFallback = byId.has(ROOT_ID_FALLBACK);
@@ -487,7 +492,7 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
       bestRootId = anyRoot || (ids[0] || ROOT_ID_PRIMARY);
     }
 
-    // parent-fix: okända parents -> bestRootId (utom root)
+    // parent-fix (fail-closed): okända parents -> bestRootId (utom root)
     const out = Array.from(byId.values()).map(n => {
       const id = String(n.id);
       let parentId = (n.parentId === null || n.parentId === undefined) ? null : String(n.parentId);
@@ -539,12 +544,14 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
       const parts = [];
       const seen = new Set();
       let cur = key;
+      let guard = 0;
 
-      while(cur && byId.has(cur) && !seen.has(cur)){
+      while(cur && byId.has(cur) && !seen.has(cur) && guard < MAX_CHAIN_GUARD){
         seen.add(cur);
         const n = byId.get(cur);
         parts.push(String(n.name || cur));
         cur = (n.parentId === null) ? "" : String(n.parentId || "");
+        guard++;
       }
       const lab = parts.reverse().join(" → ") || "—";
       cache.set(key, lab);
@@ -642,8 +649,6 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     let depthClipped = false;
     let loop = false;
 
-    const MAX_DEPTH = 80;
-
     while(curId && byId.has(curId)){
       if(seen.has(curId)){ loop = true; break; }
       seen.add(curId);
@@ -684,11 +689,12 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     return p ? (p.name || p.id) : "(saknas)";
   }
 
-  // --- UI: selects ---
-  function renderRoleSelect(){
+  // --- Controls: selects (preserve values) ---
+  function renderRoleSelect(preserveValue){
     const sel = $("#roleSelect");
-    sel.innerHTML = "";
+    const prev = preserveValue ?? sel.value;
 
+    sel.innerHTML = "";
     const roles = loadRoles().slice().sort((a,b) => String(a.name||a.id||"").localeCompare(String(b.name||b.id||""), "sv"));
 
     if(roles.length === 0){
@@ -707,10 +713,16 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
       opt.textContent = r.name ? `${r.name} (${r.id})` : String(r.id);
       sel.appendChild(opt);
     });
+
+    // restore
+    if(prev && roles.some(r => String(r.id) === String(prev))) sel.value = String(prev);
+    else sel.value = String(roles[0].id);
   }
 
-  function renderScopeSelect(){
+  function renderScopeSelect(preserveValue){
     const sel = $("#scopeSelect");
+    const prev = preserveValue ?? sel.value;
+
     sel.innerHTML = "";
 
     const { nodes, meta } = loadOrgEx();
@@ -728,10 +740,14 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     });
 
     const bestRoot = meta.bestRootId;
-    sel.value = byId.has(bestRoot) ? bestRoot : (ids[0] || "");
+    const fallback = byId.has(bestRoot) ? bestRoot : (ids[0] || "");
+
+    // restore
+    if(prev && byId.has(String(prev))) sel.value = String(prev);
+    else sel.value = String(fallback);
   }
 
-  // --- Preview (separat varning, rör inte action-msg) ---
+  // --- Preview ---
   function updatePreview(){
     setPreviewWarn("");
 
@@ -739,7 +755,8 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     const { nodes, meta } = loadOrgEx();
     const { byId } = buildOrgIndex(nodes);
     const { labelFor } = buildPathLabelCache(nodes);
-    const { byId: supportById } = loadSupportProfiles();
+    const support = loadSupportProfiles();
+    const supportById = support.byId;
 
     const roleId = $("#roleSelect").value;
     const scopeId = $("#scopeSelect").value || meta.bestRootId;
@@ -781,12 +798,14 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     const moreText = subtree.length > 14 ? ` +${subtree.length-14} till` : "";
     $("#pvNodes").textContent = subtree.length ? (nodeNames.join(", ") + moreText) : "—";
 
-    // preview-warnings
     const warns = [];
     if(!roles.length) warns.push("Inga roller finns ännu. Skapa roller i admin/roles.html.");
     if(!nodes.length) warns.push("Org saknas. Skapa org i admin/org.html.");
     if(meta.duplicates && meta.duplicates.length) warns.push(`Org har dublett-ID (${meta.duplicates.slice(0,3).join(", ")}${meta.duplicates.length>3 ? "…" : ""}). Noder kan döljas.`);
     if(!meta.hasPrimary && meta.hasFallback) warns.push(`Root-id avviker (hittade "${ROOT_ID_FALLBACK}" men förväntar "${ROOT_ID_PRIMARY}"). Det är OK, men harmonisera gärna i org-builder.`);
+    const cyc = detectOrgParentCycles(nodes);
+    if(cyc.hasCycle) warns.push(`Org innehåller parent-loop/cykel (hint: ${cyc.cycleHint}). Kör “Reparera” i admin/org.html.`);
+
     if(role){
       const loc = effectiveLocale(role);
       if(!String(role.locale || "").trim()) warns.push(`Rollen saknar locale. Default används (${loc}).`);
@@ -838,10 +857,9 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
   }
 
   // --- Risks ---
-  function computeRisks(roles, orgEx, asg){
+  function computeRisks(roles, orgEx, asg, supportById){
     const nodes = orgEx.nodes;
     const meta = orgEx.meta;
-    const { byId: supportById } = loadSupportProfiles();
 
     const roleById = new Map(roles.map(r => [String(r.id), r]));
     const nodeById = new Map(nodes.map(n => [String(n.id), n]));
@@ -913,7 +931,8 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
 
     const { byId } = buildOrgIndex(nodes);
     const { labelFor } = buildPathLabelCache(nodes);
-    const { byId: supportById } = loadSupportProfiles();
+    const support = loadSupportProfiles();
+    const supportById = support.byId;
 
     const asg = loadAssignments();
     const roleById = new Map(roles.map(r => [String(r.id), r]));
@@ -937,7 +956,8 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
           updatedAt: a.updatedAt || 0,
           locale: loc,
           supportId: spId,
-          supportName: spName
+          supportName: spName,
+          supportMissing: role ? (!supportById.has(spId)) : false
         };
       })
       .sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
@@ -963,8 +983,6 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
       const subtree = scopeNode ? getSubtreeIds(scopeNode.id, nodes) : [];
       const subtreeHint = subtree.length ? `${subtree.length} nod(er)` : "—";
 
-      const supportMissing = role ? (!loadSupportProfiles().byId.has(r.supportId)) : false;
-
       const el = document.createElement("div");
       el.className = "item";
       el.innerHTML = `
@@ -983,11 +1001,11 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
             ${chips.length ? chips.map(c => `<span class="chip"><strong>${escapeHtml(c.key)}</strong> <span class="muted">${escapeHtml(c.lvl)}</span></span>`).join("") : `<span class="muted">${role ? "Inga moduler" : "Roll saknas"}</span>`}
           </div>
 
-          ${(supportMissing) ? `
+          ${(r.supportMissing) ? `
             <div class="warnbox" style="margin-top:10px;">
               <div class="title">Varning</div>
               <div class="muted" style="font-size:.95rem;">
-                Supportprofil saknas (${escapeHtml(r.supportId)}). Åtgärda i <code>${SUPPORT_KEY}</code> eller uppdatera roll i <code>admin/roles.html</code>.
+                Supportprofil saknas (${escapeHtml(r.supportId)}). Åtgärda i <code>${escapeHtml(SUPPORT_KEY)}</code> eller uppdatera roll i <code>admin/roles.html</code>.
               </div>
             </div>
           ` : ``}
@@ -1044,7 +1062,8 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     view.innerHTML = "";
 
     const roles = loadRoles();
-    const { byId: supportById } = loadSupportProfiles();
+    const support = loadSupportProfiles();
+    const supportById = support.byId;
 
     const query = String(q||"").trim().toLowerCase();
     const list = roles
@@ -1112,8 +1131,9 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     const roles = loadRoles();
     const orgEx = loadOrgEx();
     const asg   = loadAssignments();
+    const support = loadSupportProfiles();
 
-    const risks = computeRisks(roles, orgEx, asg);
+    const risks = computeRisks(roles, orgEx, asg, support.byId);
     const query = String(q||"").trim().toLowerCase();
     const filtered = query ? risks.filter(x => String(x).toLowerCase().includes(query)) : risks;
 
@@ -1127,7 +1147,7 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     box.innerHTML = `
       <div class="title">Riskpanel</div>
       <ul class="warnlist" id="riskList"></ul>
-      <div class="smallnote">Obs: varningar (read-only). Åtgärda i <code>admin/roles.html</code>, <code>admin/org.html</code> och/eller <code>${SUPPORT_KEY}</code>.</div>
+      <div class="smallnote">Obs: varningar (read-only). Åtgärda i <code>admin/roles.html</code>, <code>admin/org.html</code> och/eller <code>${escapeHtml(SUPPORT_KEY)}</code>.</div>
     `;
     view.appendChild(box);
 
@@ -1143,7 +1163,8 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     const roles = loadRoles();
     const orgEx = loadOrgEx();
     const asg   = loadAssignments();
-    const risks = computeRisks(roles, orgEx, asg);
+    const support = loadSupportProfiles();
+    const risks = computeRisks(roles, orgEx, asg, support.byId);
 
     $("#kpiRoles").textContent = String(roles.length);
     $("#kpiNodes").textContent = String(orgEx.nodes.length);
@@ -1161,14 +1182,14 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     else renderAssignmentsView(q);
   }
 
-  function renderAll(opts){
-    const reason = (opts && opts.reason) ? String(opts.reason) : "";
-
-    renderRoleSelect();
-    renderScopeSelect();
+  function refreshControls(opts){
+    const keep = (opts && opts.keep) ? opts.keep : {};
+    renderRoleSelect(keep.roleId);
+    renderScopeSelect(keep.scopeId);
 
     const roles = loadRoles();
     const orgEx = loadOrgEx();
+
     const hasRoles = roles.length > 0;
     const hasOrg = orgEx.nodes.length > 0;
 
@@ -1176,17 +1197,23 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
     if(!hasRoles || !hasOrg){
       setPreviewWarn("För att spara tilldelning krävs både roller (AO-019) och org (AO-020).");
     }
+  }
 
-    if(hasRoles){
-      const sel = $("#roleSelect");
-      if(!sel.value && roles[0]) sel.value = String(roles[0].id);
-    }
-    const scopeSel = $("#scopeSelect");
-    if(hasOrg && !scopeSel.value){
-      scopeSel.value = orgEx.meta.bestRootId || scopeSel.options?.[0]?.value || "";
-    }
+  function renderAll(opts){
+    const reason = (opts && opts.reason) ? String(opts.reason) : "";
 
+    // preserve form values (autopatch: sök får inte resetta)
+    const keep = {
+      empNo: $("#empNo").value,
+      roleId: $("#roleSelect").value,
+      scopeId: $("#scopeSelect").value
+    };
+
+    // Only rebuild controls on init/action (not on every keypress in search)
     if(reason !== "search"){
+      refreshControls({ keep });
+      // restore empNo after control refresh
+      $("#empNo").value = keep.empNo || "";
       updatePreview();
     }
 
@@ -1257,7 +1284,9 @@ AO-023 tillägg: systemadmin + role.locale + role.supportProfileId
 
   // --- Init ---
   setActionMsg("", "");
-  renderAll({ reason: "init" });
+  refreshControls({ keep: {} });
+  renderViewOnly();
+  updatePreview();
 
 })();
 </script>
