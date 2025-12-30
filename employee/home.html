@@ -1,19 +1,24 @@
 <!-- ============================================================
-AO-048 | FIL-ID: employee/home.html
+AO-048 (PATCH v1.1) | FIL-ID: employee/home.html
 Projekt: HR-System
 Syfte: Medarbetarens startsida (Dashboard) – UI-only v1 (nivå 3)
 Krav:
 - Pastellrutor + hover
-- “Dagens uppgifter” + “3 att göra idag” ska döljas om allt är klart
-- Samma för frågor (panel + “2 nya …”)
+- “Dagens uppgifter” + badge ska döljas om allt är klart
+- Samma för frågor (panel + badge)
 - Guard + logout
 Policy:
 - Ingen backend
-- Ingen känslig data lagras
+- Ingen känslig persondata lagras
+- Fail-closed via AO-002 (HRApp.requireAuth)
 Lagring:
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
 - AO-014_TASKS_V1 (localStorage) – uppgifter
 - AO-015_QA_V1 (localStorage) – frågor/svar
+- AO-018_DOCS_V1 (localStorage) – dokument (om finns)
+- AO-018_DOCS_ACK_V1 (localStorage) – kvittenser (om finns)
+Ändringslogg:
+- v1.1: Byter till AO-002 core-guard, fixar roll (EMPLOYEE), logout via HRApp, tar bort egen auth-parse
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -118,7 +123,7 @@ Lagring:
         <div class="muted">
           Hej <strong id="whoName">—</strong>
           • Anst.nr <span id="whoEmpNo">—</span>
-          • Roll <span>employee</span>
+          • Roll <span>EMPLOYEE</span>
         </div>
       </div>
     </div>
@@ -237,59 +242,27 @@ Lagring:
   </section>
 </main>
 
+<!-- AO-002 beroenden (LÅSTA): config före app -->
+<script src="../UI/UI-04-CONFIG.js"></script>
+<script src="../UI/UI-03-APP.js"></script>
+
 <script>
 /* ============================================================
-AO-048 | FIL-ID: employee/home.html (inline JS)
-Syfte: Guard + UI-fill + logout + smart hide (tasks/questions)
+AO-048 (PATCH v1.1) | employee/home.html (inline JS)
+- Core-guard via HRApp.requireAuth (fail-closed)
+- Fix: role är EMPLOYEE (uppercase) via HRApp.getAuth
+- Logout via HRApp.logout()
+- Smart hide för tasks/questions, tolerant docs-preview
 ============================================================ */
 (function () {
   "use strict";
 
-  const SESSION_KEY = "AO-001_LOGIN_V1";
-  const TASKS_KEY   = "AO-014_TASKS_V1";
-  const QA_KEY      = "AO-015_QA_V1";
-  const DOCS_KEY    = "AO-018_DOCS_V1";
-  const ACK_KEY     = "AO-018_DOCS_ACK_V1";
+  const TASKS_KEY = "AO-014_TASKS_V1";
+  const QA_KEY    = "AO-015_QA_V1";
+  const DOCS_KEY  = "AO-018_DOCS_V1";
+  const ACK_KEY   = "AO-018_DOCS_ACK_V1";
 
-  function redirectToLogin() {
-    window.location.replace("../UI/UI-01-SKELETON.html");
-  }
-
-  function readRawSession(){
-    const s1 = sessionStorage.getItem(SESSION_KEY);
-    if (s1) return s1;
-    const s2 = localStorage.getItem(SESSION_KEY);
-    if (s2) return s2;
-    return null;
-  }
-
-  function readSession() {
-    try {
-      const raw = readRawSession();
-      if (!raw) return null;
-
-      const data = JSON.parse(raw);
-      if (!data?.auth?.isAuthed) return null;
-      if (data.auth.role !== "employee") return null;
-      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-
-      return data.auth;
-    } catch {
-      return null;
-    }
-  }
-
-  function safeParse(key, fallback){
-    try{
-      const v = JSON.parse(localStorage.getItem(key) || "null");
-      return (v === null || v === undefined) ? fallback : v;
-    }catch{ return fallback; }
-  }
-
-  function isAnswered(q){
-    const hasA = !!(q.answer && String(q.answer).trim().length);
-    return q.status === "answered" || hasA;
-  }
+  function $(id){ return document.getElementById(id); }
 
   function setHide(el, hide){
     if(!el) return;
@@ -298,115 +271,15 @@ Syfte: Guard + UI-fill + logout + smart hide (tasks/questions)
   }
 
   function setText(id, txt){
-    const el = document.getElementById(id);
-    if(el) el.textContent = txt;
+    const el = $(id);
+    if(el) el.textContent = String(txt ?? "");
   }
 
-  function init() {
-    const auth = readSession();
-    if (!auth) {
-      redirectToLogin();
-      return;
-    }
-
-    setText("whoName", auth.displayName || "—");
-    setText("whoEmpNo", auth.empNo || "—");
-
-    const doLogout = () => {
-      sessionStorage.removeItem(SESSION_KEY);
-      localStorage.removeItem(SESSION_KEY);
-      redirectToLogin();
-    };
-
-    document.getElementById("btnLogout").addEventListener("click", doLogout);
-    document.getElementById("navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
-
-    // --- Tasks smart hide ---
-    const allTasks = safeParse(TASKS_KEY, []);
-    const myTasks = Array.isArray(allTasks)
-      ? allTasks.filter(t => String(t.empNo||"").trim() === String(auth.empNo||"").trim())
-      : [];
-
-    const openTasks = myTasks.filter(t => (t.status || "open") !== "done");
-    const allTasksDone = (myTasks.length > 0 && openTasks.length === 0);
-
-    // Badge + panel logic
-    if(allTasksDone){
-      setHide(document.getElementById("tasksBadgeLine"), true);
-      setHide(document.getElementById("tasksAllDoneText"), false);
-      setHide(document.getElementById("panelTasks"), true);
-    }else{
-      // show counts (fallback demo if none)
-      const count = (myTasks.length ? openTasks.length : 3);
-      setText("tasksBadgeLine", `${count} att göra idag`);
-      setHide(document.getElementById("tasksBadgeLine"), false);
-      setHide(document.getElementById("tasksAllDoneText"), true);
-      setHide(document.getElementById("panelTasks"), false);
-
-      // list preview (if tasks exist)
-      if(myTasks.length){
-        const ul = document.getElementById("tasksList");
-        ul.innerHTML = "";
-        myTasks.slice(0,3).forEach(t => {
-          const li = document.createElement("li");
-          const status = (t.status === "done") ? "Klar" : (t.status === "progress") ? "Pågår" : "Ej startad";
-          li.innerHTML = `<span>${escapeHtml(t.text || t.title || "Uppgift")}</span><span class="pill">${status}</span>`;
-          ul.appendChild(li);
-        });
-      }
-    }
-
-    // --- Questions smart hide ---
-    const allQA = safeParse(QA_KEY, []);
-    const myQA = Array.isArray(allQA)
-      ? allQA.filter(q => String(q.empNo||"").trim() === String(auth.empNo||"").trim())
-      : [];
-
-    const openQ = myQA.filter(q => !isAnswered(q));
-    const allQDone = (myQA.length > 0 && openQ.length === 0);
-
-    if(allQDone){
-      setHide(document.getElementById("qBadgeLine"), true);
-      setHide(document.getElementById("qAllDoneText"), false);
-      setHide(document.getElementById("panelQuestions"), true);
-    }else{
-      const count = (myQA.length ? openQ.length : 2);
-      setText("qBadgeLine", `${count} nya från admin`);
-      setHide(document.getElementById("qBadgeLine"), false);
-      setHide(document.getElementById("qAllDoneText"), true);
-      setHide(document.getElementById("panelQuestions"), false);
-
-      if(myQA.length){
-        const ul = document.getElementById("qList");
-        ul.innerHTML = "";
-        myQA.slice(0,2).forEach(q => {
-          const li = document.createElement("li");
-          const pill = isAnswered(q) ? "Besvarad" : "Svar krävs";
-          li.innerHTML = `<span>${escapeHtml(q.question || q.title || "Fråga")}</span><span class="pill">${pill}</span>`;
-          ul.appendChild(li);
-        });
-      }
-    }
-
-    // --- Docs preview: show “Kvittera” based on ack map (optional)
-    const docs = safeParse(DOCS_KEY, null);
-    const docsArr = Array.isArray(docs) && docs.length ? docs : null;
-    const ackAll = safeParse(ACK_KEY, {});
-    const mineAck = (ackAll && typeof ackAll === "object" && ackAll[String(auth.empNo||"").trim()])
-      ? ackAll[String(auth.empNo||"").trim()]
-      : {};
-
-    if(docsArr){
-      const needAck = docsArr.filter(d => !mineAck || !mineAck[d.id]);
-      const ul = document.getElementById("docsList");
-      ul.innerHTML = "";
-      (needAck.slice(0,2).length ? needAck.slice(0,2) : docsArr.slice(0,2)).forEach(d => {
-        const li = document.createElement("li");
-        const isAck = !!(mineAck && mineAck[d.id]);
-        li.innerHTML = `<span>${escapeHtml(d.title || "Dokument")}</span><span class="pill">${isAck ? "Kvitterad" : "Kvittera"}</span>`;
-        ul.appendChild(li);
-      });
-    }
+  function safeParseLS(key, fallback){
+    try{
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
   }
 
   function escapeHtml(s){
@@ -418,7 +291,139 @@ Syfte: Guard + UI-fill + logout + smart hide (tasks/questions)
       .replaceAll("'","&#039;");
   }
 
-  init();
+  function isAnswered(q){
+    const hasA = !!(q && q.answer && String(q.answer).trim().length);
+    return (q && q.status === "answered") || hasA;
+  }
+
+  // ---- CORE GUARD (fail-closed) ----
+  if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+    // Om kärnan saknas: fail-closed tillbaka till login.
+    window.location.replace("../UI/UI-01-SKELETON.html?err=core");
+    return;
+  }
+
+  const session = window.HRApp.requireAuth({ allowRoles: ["EMPLOYEE"] });
+  if (!session) return; // core har redan redirectat
+
+  const auth = window.HRApp.getAuth(session);
+  if (!auth || auth.role !== "EMPLOYEE") {
+    window.location.replace("../UI/UI-01-SKELETON.html?err=forbidden");
+    return;
+  }
+
+  // ---- UI fill ----
+  // OBS: vi visar bara empNo som redan finns i session (inte loggas).
+  setText("whoName", auth.displayName || "—");
+  setText("whoEmpNo", auth.empNo || "—");
+
+  // ---- Logout ----
+  function doLogout(){
+    if (window.HRApp && typeof window.HRApp.logout === "function") window.HRApp.logout();
+    else window.location.replace("../UI/UI-01-SKELETON.html?err=logout");
+  }
+  const btn = $("btnLogout");
+  const nav = $("navLogout");
+  if (btn) btn.addEventListener("click", doLogout);
+  if (nav) nav.addEventListener("click", function(e){ e.preventDefault(); doLogout(); });
+
+  // ---- Tasks smart hide ----
+  const allTasks = safeParseLS(TASKS_KEY, []);
+  const myEmp = String(auth.empNo || "").trim();
+
+  const myTasks = Array.isArray(allTasks)
+    ? allTasks.filter(t => String(t?.empNo || "").trim() === myEmp)
+    : [];
+
+  const openTasks = myTasks.filter(t => (t?.status || "open") !== "done");
+  const allTasksDone = (myTasks.length > 0 && openTasks.length === 0);
+
+  if(allTasksDone){
+    setHide($("tasksBadgeLine"), true);
+    setHide($("tasksAllDoneText"), false);
+    setHide($("panelTasks"), true);
+  }else{
+    const count = (myTasks.length ? openTasks.length : 3);
+    const badge = $("tasksBadgeLine");
+    if (badge) badge.textContent = `${count} att göra idag`;
+    setHide($("tasksBadgeLine"), false);
+    setHide($("tasksAllDoneText"), true);
+    setHide($("panelTasks"), false);
+
+    if(myTasks.length){
+      const ul = $("tasksList");
+      if (ul){
+        ul.innerHTML = "";
+        myTasks.slice(0,3).forEach(t => {
+          const status = (t?.status === "done") ? "Klar" : (t?.status === "progress") ? "Pågår" : "Ej startad";
+          const li = document.createElement("li");
+          li.innerHTML = `<span>${escapeHtml(t?.text || t?.title || "Uppgift")}</span><span class="pill">${status}</span>`;
+          ul.appendChild(li);
+        });
+      }
+    }
+  }
+
+  // ---- Questions smart hide ----
+  const allQA = safeParseLS(QA_KEY, []);
+  const myQA = Array.isArray(allQA)
+    ? allQA.filter(q => String(q?.empNo || "").trim() === myEmp)
+    : [];
+
+  const openQ = myQA.filter(q => !isAnswered(q));
+  const allQDone = (myQA.length > 0 && openQ.length === 0);
+
+  if(allQDone){
+    setHide($("qBadgeLine"), true);
+    setHide($("qAllDoneText"), false);
+    setHide($("panelQuestions"), true);
+  }else{
+    const count = (myQA.length ? openQ.length : 2);
+    const badge = $("qBadgeLine");
+    if (badge) badge.textContent = `${count} nya från admin`;
+    setHide($("qBadgeLine"), false);
+    setHide($("qAllDoneText"), true);
+    setHide($("panelQuestions"), false);
+
+    if(myQA.length){
+      const ul = $("qList");
+      if (ul){
+        ul.innerHTML = "";
+        myQA.slice(0,2).forEach(q => {
+          const pill = isAnswered(q) ? "Besvarad" : "Svar krävs";
+          const li = document.createElement("li");
+          li.innerHTML = `<span>${escapeHtml(q?.question || q?.title || "Fråga")}</span><span class="pill">${pill}</span>`;
+          ul.appendChild(li);
+        });
+      }
+    }
+  }
+
+  // ---- Docs preview (tolerant) ----
+  const docs = safeParseLS(DOCS_KEY, null);
+  const docsArr = Array.isArray(docs) && docs.length ? docs : null;
+
+  const ackAll = safeParseLS(ACK_KEY, {});
+  const mineAck = (ackAll && typeof ackAll === "object" && ackAll[myEmp])
+    ? ackAll[myEmp]
+    : {};
+
+  if(docsArr){
+    const ul = $("docsList");
+    if (ul){
+      ul.innerHTML = "";
+      const needAck = docsArr.filter(d => d && d.id && !(mineAck && mineAck[d.id]));
+      const pick = (needAck.length ? needAck : docsArr).slice(0,2);
+
+      pick.forEach(d => {
+        const isAck = !!(mineAck && d && d.id && mineAck[d.id]);
+        const li = document.createElement("li");
+        li.innerHTML = `<span>${escapeHtml(d?.title || "Dokument")}</span><span class="pill">${isAck ? "Kvitterad" : "Kvittera"}</span>`;
+        ul.appendChild(li);
+      });
+    }
+  }
+
 })();
 </script>
 
