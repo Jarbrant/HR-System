@@ -14,6 +14,7 @@ Policy (LÅST):
 Senaste sanning: 2025-12-30 (AO-003 v1.2 PATCH-ORDER från PRC)
 Ändringslogg:
 - v1.2: strict login-target match + writeSession boolean + empNo digits-only fail + TTL 8h fast (optional override via config)
+- v1.3 (PATCH): DEV/TEST bootstrap-knapp + ?seed=1 för att skapa minimal org+assignments+roles (inga nya keys) så test-inloggning fungerar (9000/1001/2001/3001)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -66,6 +67,30 @@ Senaste sanning: 2025-12-30 (AO-003 v1.2 PATCH-ORDER från PRC)
 
       <p id="msg" class="message" aria-live="polite" style="margin-top:12px;"></p>
     </form>
+
+    <!-- ============================================================
+         AO-003 v1.3 (PATCH): TESTDATA / BOOTSTRAP (UI-only)
+         SCOPE: För att kunna TESTA i fail-closed system krävs data i org+assignments.
+         STORAGE: skriver ENDAST befintliga keys (inga nya). Inga personuppgifter (endast empNo).
+         GUARD: syns bara vid behov (saknade nycklar) eller om ?seed=1 används.
+         ============================================================ -->
+    <div id="seedBox" class="card" style="margin-top:14px; display:none;">
+      <h2 class="tight" style="font-size:1.05rem;">Testdata (för att kunna logga in)</h2>
+      <p class="muted small" style="margin-top:6px;">
+        Systemet är fail-closed. Om org/assignments saknas fungerar ingen inloggning.
+        Skapa minimal testdata så att du kan testa rollerna:
+        <strong>9000</strong> (SYSTEM_ADMIN), <strong>1001</strong> (ADMIN),
+        <strong>2001</strong> (MANAGER), <strong>3001</strong> (EMPLOYEE).
+      </p>
+      <div style="display:flex; gap:10px; margin-top:10px; flex-wrap:wrap;">
+        <button id="btnSeed" type="button">Skapa testdata</button>
+        <button id="btnSeedReload" class="secondary" type="button">Skapa + ladda om</button>
+      </div>
+      <p class="muted small" style="margin-top:8px;">
+        Tips: du kan också öppna login med <code>?seed=1</code> för att köra detta automatiskt.
+      </p>
+    </div>
+
   </section>
 </main>
 
@@ -81,6 +106,8 @@ Patch-order (PRC):
 - writeSession() => return boolean; blockera redirect vid false
 - empNo => faila om icke-siffror (t.ex. 12-34)
 - TTL: 8h fast, optional override via config
+AO-003 v1.3 (PATCH):
+- TEST-SEED: skapa minimal org/assignments/roles om saknas (inga nya keys)
 ============================================================ */
 (function () {
   "use strict";
@@ -88,12 +115,20 @@ Patch-order (PRC):
   // STORAGE: återanvänd befintlig nyckel (ingen ny key)
   const SESSION_KEY = "AO-001_LOGIN_V1";
 
+  // STORAGE KEYS (befintliga i projektets AO-plan)
+  const KEY_ROLES = "AO-020_ROLES_V1";
+  const KEY_ORG = "AO-020_ORG_V1";
+  const KEY_ASSIGNMENTS = "AO-020_ROLE_ASSIGNMENTS_V2";
+
   // EMPNO: strikt siffror-only, fail-closed
   const EMPNO_MAXLEN = 20;
   const EMPNO_RE = /^[0-9]{1,20}$/;
 
   // TTL: 8h fast, optional override via config (om HR_CONFIG.SESSION_TTL_MS finns)
   const DEFAULT_TTL_MS = 8 * 60 * 60 * 1000;
+
+  // ORG: minimal seed (kontrakt nära era texter: nodes + root)
+  const ROOT_ID = "ROOT_ID"; // OBS: om er org redan använder annat root-id, ändra här
 
   const $ = (s) => document.querySelector(s);
 
@@ -194,15 +229,11 @@ Patch-order (PRC):
   }
 
   function getLoginPathnameStrict() {
-    // Vi jämför strikt mot "login-sidans pathname" i nuvarande app.
-    // Byggt från aktuell location, men med filnamnet fast.
     try {
       const u = new URL(window.location.href);
       const p = String(u.pathname || "/");
-      // Ersätt sista segmentet med UI/UI-01-SKELETON.html om vi kan, annars använd app-root + /UI/...
       const idx = p.lastIndexOf("/UI/");
       if (idx >= 0) return p.slice(0, idx) + "/UI/UI-01-SKELETON.html";
-      // fallback: anta att vi ligger under /UI/ redan
       const lastSlash = p.lastIndexOf("/");
       const base = lastSlash >= 0 ? p.slice(0, lastSlash) : "";
       return base + "/UI-01-SKELETON.html";
@@ -213,7 +244,6 @@ Patch-order (PRC):
 
   function isLoginTarget(targetUrl) {
     // PRC: strikt path-jämförelse (ingen includes).
-    // - target kan ha ?x#y => vi jämför endast pathname.
     const targetPath = safePathFromUrlString(targetUrl);
     if (!targetPath) return false;
     const loginPath = getLoginPathnameStrict();
@@ -248,6 +278,102 @@ Patch-order (PRC):
     return false;
   }
 
+  // ------------------------------
+  // AO-003 v1.3 (PATCH): TEST-SEED
+  // ------------------------------
+
+  function readAnyStorage(key) {
+    // GUARD: vi läser utan att skapa beroende av en viss lagringsnivå
+    const s = sessionStorage.getItem(key);
+    if (s) return s;
+    const l = localStorage.getItem(key);
+    if (l) return l;
+    return null;
+  }
+
+  function hasParsableJson(key) {
+    const raw = readAnyStorage(key);
+    if (!raw) return false;
+    try { JSON.parse(raw); return true; } catch { return false; }
+  }
+
+  function shouldShowSeedBox() {
+    // SCOPE: visa bootstrap om org/assignments saknas eller är korrupt
+    const orgOk = hasParsableJson(KEY_ORG);
+    const asgOk = hasParsableJson(KEY_ASSIGNMENTS);
+    return !(orgOk && asgOk);
+  }
+
+  function seedMinimalTestData() {
+    // STORAGE: skriver endast befintliga keys. Inga personuppgifter, endast empNo.
+    const now = Date.now();
+
+    // Roles metadata (AO-006-stil). Låst 4 roller.
+    const roles = [
+      { role:"EMPLOYEE", label:"Medarbetare", description:"Utför och kvitterar uppgifter.", isSystem:false, updatedAt: now },
+      { role:"MANAGER", label:"Enhetschef",   description:"Operativt ansvar inom egen scope-subtree.", isSystem:false, updatedAt: now },
+      { role:"ADMIN",    label:"Admin",       description:"Operativ admin (hela org, enligt policy).", isSystem:true, updatedAt: now },
+      { role:"SYSTEM_ADMIN", label:"Systemförvaltare", description:"Ren systemförvaltning (maskinrum).", isSystem:true, updatedAt: now }
+    ];
+
+    // Org minimal (objektform). Root + en enhet. (Fungerar som minsta möjliga träd.)
+    const org = {
+      version: 1,
+      rootId: ROOT_ID,
+      nodes: [
+        { id: ROOT_ID, parentId: null, label: "Root", type: "ROOT", updatedAt: now },
+        { id: "UNIT_A", parentId: ROOT_ID, label: "Enhet A", type: "UNIT", updatedAt: now }
+      ]
+    };
+
+    // Assignments (V2): vi skriver en tolerant struktur som ofta accepteras:
+    // - roleId och role (för kompatibilitet)
+    // - empNo som sträng
+    const assignments = [
+      { empNo: "9000", roleId: "SYSTEM_ADMIN", role: "SYSTEM_ADMIN", scopeId: ROOT_ID, updatedAt: now },
+      { empNo: "1001", roleId: "ADMIN",        role: "ADMIN",        scopeId: ROOT_ID, updatedAt: now },
+      { empNo: "2001", roleId: "MANAGER",      role: "MANAGER",      scopeId: "UNIT_A", updatedAt: now },
+      { empNo: "3001", roleId: "EMPLOYEE",     role: "EMPLOYEE",     scopeId: "UNIT_A", updatedAt: now }
+    ];
+
+    try { localStorage.setItem(KEY_ROLES, JSON.stringify(roles)); } catch {}
+    try { localStorage.setItem(KEY_ORG, JSON.stringify(org)); } catch {}
+    try { localStorage.setItem(KEY_ASSIGNMENTS, JSON.stringify(assignments)); } catch {}
+
+    // DEBUG: ge tydlig feedback
+    setMsg("", "Testdata skapad. Logga in med 9000/1001/2001/3001 (välj roll i listan).");
+  }
+
+  function wireSeedUi() {
+    const seedBox = $("#seedBox");
+    const btnSeed = $("#btnSeed");
+    const btnSeedReload = $("#btnSeedReload");
+    if (!seedBox || !btnSeed || !btnSeedReload) return;
+
+    // Visa endast om det behövs (org/assignments saknas) eller om ?seed=1 triggar
+    const u = new URL(window.location.href);
+    const wantsSeed = u.searchParams.get("seed") === "1";
+
+    if (wantsSeed || shouldShowSeedBox()) {
+      seedBox.style.display = "block";
+    }
+
+    btnSeed.addEventListener("click", function () {
+      seedMinimalTestData();
+    });
+
+    btnSeedReload.addEventListener("click", function () {
+      seedMinimalTestData();
+      // Ladda om så att andra sidor/guards direkt ser data
+      window.location.replace(window.location.pathname);
+    });
+
+    // Auto-seed om ?seed=1 (för att komma ur “ingen kan logga in” snabbt)
+    if (wantsSeed) {
+      seedMinimalTestData();
+    }
+  }
+
   // ---- init ----
   showUrlErrText();
 
@@ -259,6 +385,9 @@ Patch-order (PRC):
     setMsg("err", "Systemfel: roller saknas i config.");
     return;
   }
+
+  // Wire test-seed UI (patch v1.3)
+  wireSeedUi();
 
   dom.btnClear.addEventListener("click", function () {
     dom.emp.value = "";
@@ -277,7 +406,6 @@ Patch-order (PRC):
       setMsg("err", "Fyll i anställningsnummer.");
       return;
     }
-    // PRC: empNo ska faila om icke-siffror (t.ex. 12-34)
     if (!validateEmpNo(empNo)) {
       setMsg("err", "Ogiltigt anställningsnummer (endast siffror).");
       return;
