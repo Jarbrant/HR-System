@@ -203,6 +203,10 @@ Lagring (läser):
 <script>
 /* ============================================================
 AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
+FIX-04:
+- Assignments V2: stöd för map + array (normalisering robust)
+- Org-loop fail-fast: orgHasLoop + visited-set i isDescendant (fail-closed snabbt)
+- Answers dedupe: id → (questionId+empNo) → (questionId+createdAt); undviker synthetic-key som kan ge falska dubletter
 ============================================================ */
 (function(){
   "use strict";
@@ -361,24 +365,110 @@ AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
     return false;
   }
 
-  function isDescendant(index, nodeId, ancestorId){
-    const a = String(ancestorId);
-    const n = String(nodeId);
-    if(n === a) return true;
-    let cur = index.byId.get(n);
-    let hops = 0;
-    while(cur && cur.parentId && hops < 5000){
-      if(cur.parentId === a) return true;
-      cur = index.byId.get(String(cur.parentId));
-      hops++;
+  // Fail-fast loop detection in parent chains (covers corrupt parent cycles)
+  function orgHasLoop(index){
+    const state = new Map(); // 0=unseen, 1=visiting, 2=done
+
+    function visit(startId){
+      let curId = String(startId);
+      const stack = [];
+
+      while(true){
+        const st = state.get(curId) || 0;
+        if(st === 2) break;        // already safe
+        if(st === 1) return true;  // cycle found
+
+        state.set(curId, 1);
+        stack.push(curId);
+
+        const node = index.byId.get(curId);
+        const parentId = node ? node.parentId : null;
+
+        if(!parentId) break;
+        if(!index.byId.has(String(parentId))) break; // broken chain isn't a loop
+
+        curId = String(parentId);
+      }
+
+      // mark stack done
+      for(const id of stack){
+        state.set(id, 2);
+      }
+      return false;
+    }
+
+    for(const id of index.byId.keys()){
+      if((state.get(id) || 0) === 0){
+        if(visit(id)) return true;
+      }
     }
     return false;
   }
 
-  // Assignments helpers
+  // Descendant check with visited-set (abort on loops immediately)
+  function isDescendant(index, nodeId, ancestorId){
+    const a = String(ancestorId);
+    const n = String(nodeId);
+    if(n === a) return true;
+
+    const visited = new Set();
+    let cur = index.byId.get(n);
+    let hops = 0;
+
+    while(cur && cur.parentId){
+      const curId = String(cur.id);
+      if(visited.has(curId)) return false; // loop -> fail-closed
+      visited.add(curId);
+
+      const pid = String(cur.parentId);
+      if(pid === a) return true;
+
+      cur = index.byId.get(pid);
+      hops++;
+      if(hops > 2048) return false; // hard abort (fail-closed)
+    }
+    return false;
+  }
+
+  // Assignments helpers (V2 map + array)
   function normalizeAssignments(raw){
+    // Accept:
+    // - array: [{ empNo, roleId, scopeId }]
+    // - map: { "123": { roleId, scopeId } }
+    // - wrappers: { assignments:[...] } / { items:[...] }
+    // - wrappers: { assignments:{...} } / { items:{...} } (map inside)
+    const unwrap = (v) => {
+      if(Array.isArray(v)) return v;
+      if(v && typeof v === "object"){
+        if(Array.isArray(v.assignments)) return v.assignments;
+        if(Array.isArray(v.items)) return v.items;
+        if(v.assignments && typeof v.assignments === "object" && !Array.isArray(v.assignments)) return v.assignments;
+        if(v.items && typeof v.items === "object" && !Array.isArray(v.items)) return v.items;
+      }
+      return v;
+    };
+
+    const v = unwrap(raw);
+
+    // Map form
+    if(v && typeof v === "object" && !Array.isArray(v)){
+      const out = [];
+      for(const [k, val] of Object.entries(v)){
+        const empNo = normalizeEmpNo(k);
+        if(!empNo) continue;
+        const obj = (val && typeof val === "object") ? val : {};
+        out.push({
+          empNo,
+          roleId: String(obj.roleId ?? obj.role ?? ""),
+          scopeId: (obj.scopeId === undefined || obj.scopeId === null) ? "" : String(obj.scopeId)
+        });
+      }
+      return out.filter(a => a.empNo);
+    }
+
+    // Array form
     const arr =
-      Array.isArray(raw) ? raw :
+      Array.isArray(v) ? v :
       (Array.isArray(raw?.assignments) ? raw.assignments :
       (Array.isArray(raw?.items) ? raw.items : null));
 
@@ -395,7 +485,9 @@ AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
   }
 
   function getMyScopeId(empNo, assignments){
-    const row = assignments.find(x => x.empNo === empNo);
+    const e = String(empNo || "").trim();
+    if(!e) return "";
+    const row = assignments.find(x => String(x.empNo) === e);
     return String(row?.scopeId || "").trim();
   }
 
@@ -413,7 +505,7 @@ AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  // Org/scope state (fail-closed för manager, och även för admin för att undvika läckage om scope krävs)
+  // Org/scope state
   const orgNodes = normalizeOrgTree(safeParse(ORG_KEY, null));
   const orgIndex = buildOrgIndex(orgNodes);
   const assignments = normalizeAssignments(safeParse(ASSIGNMENTS_KEY, null));
@@ -423,8 +515,8 @@ AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
     const problems = [];
     if(!orgNodes.length) problems.push("Org-träd saknas (AO-020_ORG_V1).");
     if(orgNodes.length && orgHasDuplicateIds(orgNodes)) problems.push("Org-trädet är korrupt (duplicerade id).");
+    if(orgNodes.length && !orgHasDuplicateIds(orgNodes) && orgHasLoop(orgIndex)) problems.push("Org-trädet är korrupt (loop i parent-kedja).");
 
-    // Manager måste ha assignments+scopeId för att filtrera
     if(auth.role === "manager"){
       if(!auth.empNo) problems.push("Manager saknar anst.nr i sessionen.");
       if(!assignments.length) problems.push("Role assignments saknas (AO-020_ROLE_ASSIGNMENTS_V2).");
@@ -450,33 +542,79 @@ AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
     const a = loadArray(QUESTIONS_KEY_A);
     const b = loadArray(QUESTIONS_KEY_B);
 
-    // Om båda har data: slå ihop på id (senast vinner)
-    const map = new Map();
-    a.forEach(q => map.set(String(q.id), q));
-    b.forEach(q => map.set(String(q.id), q));
-    return Array.from(map.values());
+    const byId = new Map();
+    a.forEach(q => { if(q && q.id !== undefined && q.id !== null) byId.set(String(q.id), q); });
+    b.forEach(q => { if(q && q.id !== undefined && q.id !== null) byId.set(String(q.id), q); });
+
+    // Behåll även "utan id" som separata (fail-open för historik, men scope filtreras senare)
+    const extra = [];
+    const collectExtra = (arr) => {
+      arr.forEach(q => {
+        if(!q) return;
+        if(q.id === undefined || q.id === null || String(q.id).trim() === ""){
+          extra.push(q);
+        }
+      });
+    };
+    collectExtra(a);
+    collectExtra(b);
+
+    return Array.from(byId.values()).concat(extra);
   }
 
+  // Dedupe answers per PRC:
+  // 1) id om finns
+  // 2) annars (questionId + empNo)
+  // 3) fallback om empNo saknas: (questionId + createdAt)
   function loadAnswersUnified(){
     const a = loadArray(ANSWERS_KEY_A);
     const b = loadArray(ANSWERS_KEY_B);
 
-    // Välj den som faktiskt används (oftast AO-013). Om båda har data -> slå ihop på id.
-    const map = new Map();
-    a.forEach(x => map.set(String(x.id || ""), x));
-    b.forEach(x => map.set(String(x.id || ""), x));
+    const candidates = []
+      .concat(Array.isArray(a) ? a : [])
+      .concat(Array.isArray(b) ? b : [])
+      .filter(x => x && (x.id || x.questionId));
 
-    // Om id saknas i något objekt: lägg en stabil synthetic nyckel
-    const out = [];
-    const seen = new Set();
-    [...a, ...b].forEach(x => {
-      const k = String(x?.id || `${x?.questionId || "q"}_${x?.empNo || "e"}_${x?.createdAt || ""}`);
-      if(seen.has(k)) return;
-      seen.add(k);
-      out.push(x);
-    });
+    const keyOf = (x) => {
+      const id = String(x.id || "").trim();
+      if(id) return "id:" + id;
 
-    return out.length ? out : Array.from(map.values()).filter(x => x && (x.id || x.questionId));
+      const qid = String(x.questionId || "").trim();
+      if(!qid) return null;
+
+      const emp = normalizeEmpNo(x.empNo || "");
+      if(emp) return "qe:" + qid + "|" + emp;
+
+      const ca = Number(x.createdAt);
+      if(Number.isFinite(ca) && ca > 0) return "qc:" + qid + "|" + String(ca);
+
+      return null;
+    };
+
+    const pickNewer = (prev, next) => {
+      const tp = Number(prev?.createdAt ?? prev?.answeredAt ?? prev?.updatedAt ?? 0);
+      const tn = Number(next?.createdAt ?? next?.answeredAt ?? next?.updatedAt ?? 0);
+      return (tn >= tp) ? next : prev;
+    };
+
+    const byKey = new Map();
+    const noKey = [];
+
+    for(const x of candidates){
+      const k = keyOf(x);
+      if(!k){
+        // Om vi inte kan dedupe säkert: behåll (undvik falska dubletter)
+        noKey.push(x);
+        continue;
+      }
+      if(!byKey.has(k)){
+        byKey.set(k, x);
+      }else{
+        byKey.set(k, pickNewer(byKey.get(k), x));
+      }
+    }
+
+    return Array.from(byKey.values()).concat(noKey);
   }
 
   function loadQaFallback(){
@@ -485,7 +623,11 @@ AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
 
   function indexQuestionsById(questions){
     const map = new Map();
-    questions.forEach(q => map.set(String(q.id), q));
+    questions.forEach(q => {
+      if(q && q.id !== undefined && q.id !== null){
+        map.set(String(q.id), q);
+      }
+    });
     return map;
   }
 
@@ -501,18 +643,15 @@ AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
   }
 
   function buildRows(){
-    // fail-closed: om manager och scope inte är redo => lås
     if(!scopeReady()) return [];
 
     const questions = loadQuestionsUnified();
     const qById = indexQuestionsById(questions);
 
-    const primaryAnswers = loadAnswersUnified();
-
-    let answers = Array.isArray(primaryAnswers) ? primaryAnswers.slice() : [];
+    let answers = loadAnswersUnified();
     let source = "primary";
 
-    if(answers.length === 0){
+    if(!answers.length){
       const qa = loadQaFallback();
       answers = qa
         .filter(q => {
@@ -520,8 +659,8 @@ AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
           return (q && (q.status === "answered" || hasA));
         })
         .map(q => ({
-          id: q.id || ("qa_" + Math.random().toString(16).slice(2)),
-          questionId: q.id,
+          id: q.id || "",                // kan saknas -> render ok
+          questionId: q.id,              // i QA_fallback är det oftast samma
           createdAt: q.answeredAt || q.updatedAt || q.createdAt || Date.now(),
           answerText: q.answer,
           anonymous: (q.answerAnonymous === true),
@@ -529,25 +668,24 @@ AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
           employeeName: q.employeeName || "",
           questionTitle: q.title || "Fråga",
           prompt: q.prompt || "—",
-          scopeId: q.scopeId || ""
+          scopeId: q.scopeId || "",
+          allowAnonymous: (q.allowAnonymous === true)
         }));
       source = "fallback";
     }
 
     const sortMode = $("#sort").value;
     answers.sort((a,b) => {
-      const ta = (a.createdAt || a.answeredAt || a.updatedAt || 0);
-      const tb = (b.createdAt || b.answeredAt || b.updatedAt || 0);
+      const ta = Number(a.createdAt || a.answeredAt || a.updatedAt || 0);
+      const tb = Number(b.createdAt || b.answeredAt || b.updatedAt || 0);
       return sortMode === "old" ? (ta - tb) : (tb - ta);
     });
 
     const rows = answers.map(a => {
       const q = qById.get(String(a.questionId)) || null;
 
-      // scope kommer primärt från frågan (kontrakt), fallback från answer/qa
       const scopeId = String(q?.scopeId || a.scopeId || "").trim();
 
-      // manager scope-filter
       if(auth.role === "manager"){
         if(!isInManagerScope(scopeId)) return null;
       }
@@ -563,8 +701,9 @@ AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
       const allowAnon = (q?.allowAnonymous === true) || (a.allowAnonymous === true);
 
       return {
-        id: String(a.id || ""),
-        createdAt: (a.createdAt || a.answeredAt || a.updatedAt || 0),
+        id: String(a.id || ""), // kan vara tomt
+        questionId: String(a.questionId || ""),
+        createdAt: Number(a.createdAt || a.answeredAt || a.updatedAt || 0),
         who,
         empNo,
         isAnon,
@@ -619,7 +758,7 @@ Tid: ${fmtTime(row.createdAt)}`
     const shown = filterRows(allRows).slice(0, 120);
 
     if(allRows.length > 0 && allRows[0]._source === "fallback"){
-      setMsg("warn", "Obs: Visar svar från AO-015_QA_V1 (fallback). För strikt AO-019: säkerställ att employee skriver AO-013_ANSWERS_V1 och admin skriver frågor med scopeId.");
+      setMsg("warn", "Obs: Visar svar från AO-015_QA_V1 (fallback). För AO-019: säkerställ att employee skriver AO-013_ANSWERS_V1 och att frågor har scopeId.");
     }
 
     if(!scopeReady()){
@@ -632,8 +771,12 @@ Tid: ${fmtTime(row.createdAt)}`
       return;
     }
 
-    const byId = new Map();
-    shown.forEach(r => byId.set(r.id, r));
+    const byKey = new Map();
+    shown.forEach((r, idx) => {
+      const k = r.id ? ("id:" + r.id) : ("idx:" + String(idx));
+      byKey.set(k, r);
+      r.__k = k;
+    });
 
     shown.forEach(r => {
       const el = document.createElement("div");
@@ -651,7 +794,7 @@ Tid: ${fmtTime(row.createdAt)}`
           <div class="meta"><span><strong>Svar:</strong> ${escapeHtml(r.answerText || "—")}</span></div>
         </div>
         <div class="row" style="gap:8px;">
-          <button type="button" class="secondary" data-copy="${escapeHtml(r.id)}">Kopiera</button>
+          <button type="button" class="secondary" data-copy="${escapeHtml(r.__k)}">Kopiera</button>
         </div>
       `;
       list.appendChild(el);
@@ -659,8 +802,8 @@ Tid: ${fmtTime(row.createdAt)}`
 
     list.querySelectorAll("button[data-copy]").forEach(btn => {
       btn.addEventListener("click", async () => {
-        const id = btn.getAttribute("data-copy");
-        const row = byId.get(String(id));
+        const k = btn.getAttribute("data-copy");
+        const row = byKey.get(String(k));
         if(!row) return;
 
         const text = makeRowCopyText(row);
@@ -681,7 +824,7 @@ Tid: ${fmtTime(row.createdAt)}`
     setMsg("", "");
 
     if(!scopeReady()){
-      setMsg("err", "Kan inte skapa sammanfattning: scope/org saknas.");
+      setMsg("err", "Kan inte skapa sammanfattning: scope/org/assignments saknas eller org är korrupt.");
       return;
     }
 
