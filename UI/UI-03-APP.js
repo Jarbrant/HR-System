@@ -1,7 +1,7 @@
 /* ============================================================
 AO-022 | FIL-ID: UI/UI-03-APP.js
 Projekt: HR-System
-Syfte: Central Auth Guard + Routing + Manager-policy (UI-only) — AO-019 5/8 PATCH v1.0
+Syfte: Central Auth Guard + Routing + Manager-policy (UI-only) — AO-019 5/8 FIX-PATCH v1.1
 Kontrakt (LÅST):
 - Ingen backend
 - Robust guard: sessionStorage först, fallback localStorage (fail-closed)
@@ -10,7 +10,7 @@ Kontrakt (LÅST):
 Lagring (endast läs):
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
 - AO-019_ROLES_V1 (localStorage) – roller + moduler
-- AO-020_ORG_V1 (localStorage) – org-träd
+- AO-020_ORG_V1 (localStorage) – org-träd (array eller wrapper {nodes:[...]})
 - AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – assignments (empNo -> { roleId, scopeId, updatedAt })
 Policy (AO-019 5/8):
 K1) Rollklassning: SYSTEM_ADMIN / ADMIN / MANAGER / EMPLOYEE
@@ -30,8 +30,6 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
   const ASG_V2_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
 
   // ---- Org root compat (P0 hårdning): acceptera legacy root-id ----
-  // AO-020 org.html använder "org_root_v1" i senaste klistrade fil.
-  // Tidigare trådar har ibland använt "org_root". Vi accepterar båda som kompatibilitet.
   const ROOT_ID_PRIMARY = "org_root_v1";
   const ROOT_ID_LEGACY = "org_root";
 
@@ -49,6 +47,53 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
   function normalizeScope(v) {
     const s = String(v || "none");
     return SCOPE_ORDER.includes(s) ? s : "none";
+  }
+
+  // ---- Robust path helpers (AO-019 5/8-FIX-01) ----
+  function getAppRootPathname() {
+    // Bygg absolut sökväg till projektroten (behåller repo-subpath på GitHub Pages).
+    // Stöd: /admin/*, /employee/*, /UI/*, /index.html (root), samt "/" (directory index)
+    const p = String(window.location.pathname || "/");
+    const iAdmin = p.indexOf("/admin/");
+    if (iAdmin >= 0) return p.slice(0, iAdmin) || "/";
+    const iEmp = p.indexOf("/employee/");
+    if (iEmp >= 0) return p.slice(0, iEmp) || "/";
+    const iUI = p.indexOf("/UI/");
+    if (iUI >= 0) return p.slice(0, iUI) || "/";
+
+    // Om vi är på /index.html eller annan fil i root: använd katalogen före filen
+    if (p.endsWith("/")) return p;
+    const lastSlash = p.lastIndexOf("/");
+    if (lastSlash >= 0) return p.slice(0, lastSlash) || "/";
+    return "/";
+  }
+
+  function joinRoot(rootPath, relativePath) {
+    const root = String(rootPath || "/").replace(/\/+$/, ""); // utan trailing /
+    const rel = String(relativePath || "").replace(/^\/+/, ""); // utan leading /
+    return (root ? root : "") + "/" + rel;
+  }
+
+  function absPath(relFromRoot) {
+    // returnerar absolut path (utan origin). window.location.replace tar både abs/rel.
+    return joinRoot(getAppRootPathname(), relFromRoot);
+  }
+
+  function loginUrl() {
+    // Robust login-path från var som helst i appen
+    return absPath("UI/UI-01-SKELETON.html");
+  }
+
+  function adminHomeUrl() {
+    return absPath("admin/home.html");
+  }
+
+  function employeeHomeUrl() {
+    return absPath("employee/home.html");
+  }
+
+  function redirect(url) {
+    window.location.replace(String(url || loginUrl()));
   }
 
   // ---- Generic helpers ----
@@ -70,12 +115,7 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
     if (s2) return s2;
     return null;
   }
-  function redirect(url) {
-    window.location.replace(url);
-  }
-  function defaultLoginUrl() {
-    return "../UI/UI-01-SKELETON.html";
-  }
+
   function normalizePath(pathname) {
     const p = String(pathname || "");
     const idx = p.lastIndexOf("/");
@@ -89,9 +129,25 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
   }
   function isSystemAdminPageByPathname(pathname) {
     // K3 (LÅST): systemvyer blockas för ADMIN + MANAGER
-    // Matcha exakt filnamn i admin-mappen (minska risk för breda matchningar).
     const file = normalizePath(pathname || window.location.pathname || "");
     return file === "roles.html" || file === "org.html" || file === "access.html";
+  }
+
+  // ---- Canonical empNo (AO-019 5/8-FIX-01) ----
+  function canonicalEmpNo(v) {
+    // Canonical: bara siffror, trimma, max 10. (behåller ev. ledande nollor internt)
+    const s = String(v || "").trim();
+    const digits = s.replace(/[^\d]/g, "");
+    return digits ? digits.slice(0, 10) : "";
+  }
+
+  function empNoComparable(v) {
+    // Read-fallback (utan nya keys): använd numerisk jämförelse genom att strippa ledande nollor.
+    // OBS: används endast vid läsning/matchning, aldrig vid skrivning.
+    const c = canonicalEmpNo(v);
+    if (!c) return "";
+    const stripped = c.replace(/^0+/, "");
+    return stripped || "0";
   }
 
   // ---- Auth/session ----
@@ -120,10 +176,8 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
       auth.identifier,
     ];
     for (const c of candidates) {
-      const s = String(c || "").trim();
-      if (!s) continue;
-      const digits = s.replace(/[^\d]/g, "");
-      if (digits) return digits.slice(0, 10);
+      const emp = canonicalEmpNo(c);
+      if (emp) return emp;
     }
     return "";
   }
@@ -133,9 +187,21 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
     return Array.isArray(arr) ? arr : [];
   }
 
+  // ---- Org-format kompatibilitet (AO-019 5/8-FIX-01) ----
+  function normalizeOrgStorageShape(raw) {
+    // Stöd:
+    // - array av nodes
+    // - wrapper { nodes:[...] }
+    // Okänt format => null (fail-closed)
+    if (Array.isArray(raw)) return raw;
+    if (raw && typeof raw === "object" && Array.isArray(raw.nodes)) return raw.nodes;
+    return null;
+  }
+
   function loadOrg() {
-    const arr = safeParseLocal(ORG_KEY, []);
-    return Array.isArray(arr) ? arr : [];
+    const raw = safeParseLocal(ORG_KEY, null);
+    const nodes = normalizeOrgStorageShape(raw);
+    return Array.isArray(nodes) ? nodes : []; // validateOrg avgör ok/korrupt
   }
 
   function loadAssignmentsV2() {
@@ -145,7 +211,6 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
 
   // ---- Role modules normalization (P1 fix): stöd sträng-scope + {view,act,manage} ----
   function scopeFromTriple(obj) {
-    // obj kan vara {view:true, act:true, manage:false} etc.
     if (!obj || typeof obj !== "object") return "none";
     const v = !!obj.view;
     const a = !!obj.act;
@@ -157,10 +222,6 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
   }
 
   function normalizeModuleValue(v) {
-    // Tillåt:
-    // - "manage"/"act"/"view"/"none"
-    // - {view,act,manage} boolean-triple
-    // - true/false (tolka true som "view")
     if (typeof v === "string") return normalizeScope(v);
     if (typeof v === "boolean") return v ? "view" : "none";
     if (v && typeof v === "object") return scopeFromTriple(v);
@@ -219,15 +280,23 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
   }
 
   function isAdminUIAllowedByModules(effectiveModules) {
-    // Definition v1: admin-UI om någon ADMIN_* modul != none
+    // DIAGNOSTIK ENDAST (AO-019 5/8-FIX-01):
+    // Detta styr INTE routing/branch. Routing styrs av session auth.role (K1/K2).
+    // Variabeln används endast för att kunna visa/diagnosticera “adminish” modulsetup i UI.
     const eff = effectiveModules || {};
     return Object.keys(eff).some((k) => k.startsWith("ADMIN_") && normalizeScope(eff[k]) !== "none");
   }
 
   // ---- Org validation + subtree ----
   function validateOrg(nodesRaw) {
+    // nodesRaw kan vara array eller wrapper {nodes:[...]}.
+    const maybeNodes = normalizeOrgStorageShape(nodesRaw);
+    if (!Array.isArray(maybeNodes)) {
+      return { ok: false, reason: "org-unknown-format", rootId: "", nodes: [] };
+    }
+
     // Fail-closed: om minsta korruption => ok=false
-    const nodes = Array.isArray(nodesRaw) ? nodesRaw : [];
+    const nodes = maybeNodes;
     const norm = [];
 
     for (const n of nodes) {
@@ -257,11 +326,10 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
 
     const rootId = roots[0].id;
 
-    // Root-id kompat: acceptera PRIMARY eller LEGACY, eller exakt 1 root med annat id (tolerans),
-    // men markera som warning via ok=true + warning.
+    // Root-id kompat: acceptera PRIMARY eller LEGACY, eller exakt 1 root med annat id (tolerans)
     const rootCompatOk = rootId === ROOT_ID_PRIMARY || rootId === ROOT_ID_LEGACY;
 
-    // Alla andra måste ha giltig parentId som pekar på existerande nod (ingen orphan)
+    // Alla andra måste ha giltig parentId
     for (const n of norm) {
       if (n.id === rootId) continue;
       if (!n.parentId || !byId.has(n.parentId)) {
@@ -283,7 +351,7 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
         cur = p || rootId;
         steps++;
       }
-      return true; // guard hit => treat as corruption
+      return true;
     }
 
     for (const n of norm) {
@@ -308,7 +376,6 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
   }
 
   function computeSubtreeSet(orgNodes, rootId, scopeId) {
-    // Returnerar Set av nodeId i scope-subtree (inkl scopeId)
     const res = new Set();
     const sid = String(scopeId || "").trim();
     if (!sid) return res;
@@ -335,22 +402,32 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
 
   // ---- Role classification (P0 fix): sessionRole prioriteras strikt ----
   function classifyRoleClass(access) {
-    // K1 (LÅST): SYSTEM_ADMIN / ADMIN / MANAGER / EMPLOYEE
-    // Prioritet:
-    // 1) session auth.role "systemadmin" => SYSTEM_ADMIN
-    // 2) session auth.role "admin" => ADMIN
-    // 3) session auth.role "manager" => MANAGER
-    // 4) annars => EMPLOYEE
-    //
-    // Heuristik på rollnamn får ALDRIG överstyra sessionRole "admin".
     const sr = String(access?.auth?.role || "").toLowerCase().trim();
     if (sr === "systemadmin") return ROLE_CLASS.SYSTEM_ADMIN;
     if (sr === "admin") return ROLE_CLASS.ADMIN;
     if (sr === "manager") return ROLE_CLASS.MANAGER;
-
-    // Om sessionRole är oklart men moduler signalerar manager/adminish kan ni lägga heuristik,
-    // men v1 policy är fail-closed: oklar => EMPLOYEE (routing + pageRole avgör).
     return ROLE_CLASS.EMPLOYEE;
+  }
+
+  // ---- Assignment lookup with empNo fallback (AO-019 5/8-FIX-01) ----
+  function lookupAssignment(assignmentsObj, canonicalEmp) {
+    // Primär: exakt match på canonical string (inkl ledande nollor)
+    const emp = canonicalEmpNo(canonicalEmp);
+    if (!emp) return null;
+    const direct = assignmentsObj ? assignmentsObj[emp] : null;
+    if (direct) return direct;
+
+    // Fallback-läsning: matcha numeriskt ("00123" == "123") utan att skapa ny key
+    const want = empNoComparable(emp);
+    if (!want) return null;
+
+    const keys = assignmentsObj && typeof assignmentsObj === "object" ? Object.keys(assignmentsObj) : [];
+    for (const k of keys) {
+      if (empNoComparable(k) === want) {
+        return assignmentsObj[k] || null;
+      }
+    }
+    return null;
   }
 
   // ---- Build current access snapshot ----
@@ -360,8 +437,9 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
 
     const roles = loadRoles();
     const asg = loadAssignmentsV2();
+
     const empNo = getEmpNoFromAuth(auth);
-    const rec = empNo ? asg[empNo] : null;
+    const rec = empNo ? lookupAssignment(asg, empNo) : null;
 
     const roleId = String(rec?.roleId || "").trim();
     const scopeId = String(rec?.scopeId || "").trim();
@@ -372,9 +450,11 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
       ? resolveRoleEffectiveScopes(roleId, roles)
       : { effective: {}, warnings: ["no-assignment"] };
 
-    const adminUIByModules = isAdminUIAllowedByModules(effective);
+    // DIAGNOSTIK ENDAST: styr INTE routing/branch
+    const adminUIByModulesDiagnostic = isAdminUIAllowedByModules(effective);
 
-    const orgRaw = loadOrg();
+    // Org: stöd array eller wrapper {nodes:[...]}
+    const orgRaw = safeParseLocal(ORG_KEY, null);
     const orgVal = validateOrg(orgRaw);
 
     const scopeExists = !!scopeId && orgVal.ok && orgVal.nodes.some((n) => n.id === scopeId);
@@ -389,7 +469,10 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
       roleId: roleId || "",
       effectiveModules: effective,
       warnings: warnings.slice(),
-      adminUIByModules,
+
+      // DIAGNOSTIK ENDAST (styr inte routing):
+      adminUIByModules: adminUIByModulesDiagnostic,
+
       scopeId: scopeId || "",
       org: {
         ok: orgVal.ok,
@@ -397,14 +480,12 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
         rootId: orgVal.rootId,
       },
       scopeOk: scopeExists,
-      scopeSet, // Set<string> (kan användas av sidor för filtrering)
-      // Klassning görs sist:
+      scopeSet,
       roleClass: ROLE_CLASS.EMPLOYEE,
     };
 
     access.roleClass = classifyRoleClass(access);
 
-    // Extra policy-warnings
     if (!orgVal.ok) access.warnings.push("org-corrupt");
     if (orgVal.ok && orgVal.reason === "ok-root-unknown") access.warnings.push("org-root-unknown");
     if (!access.assignment) access.warnings.push("missing-assignment");
@@ -415,7 +496,6 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
 
   // ---- Central policy checks ----
   function canEnterAdminBranch(access) {
-    // K2: SYSTEM_ADMIN/ADMIN/MANAGER -> admin/*
     return (
       access.roleClass === ROLE_CLASS.SYSTEM_ADMIN ||
       access.roleClass === ROLE_CLASS.ADMIN ||
@@ -424,72 +504,61 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
   }
 
   function mustBlockSystemViews(access, pathname) {
-    // K3: MANAGER block system pages, ADMIN block system pages, SYSTEM_ADMIN allow
     if (!isSystemAdminPageByPathname(pathname)) return false;
     if (access.roleClass === ROLE_CLASS.SYSTEM_ADMIN) return false;
-    return true; // ADMIN + MANAGER + EMPLOYEE block
+    return true;
   }
 
   function managerScopeFailClosed(access) {
-    // K4: MANAGER måste ha giltig scope, annars blockera åtgärder (och gärna redirect från admin-sidor som kräver scope)
     if (access.roleClass !== ROLE_CLASS.MANAGER) return false;
-    // Om org korrupt eller scope saknas => fail-closed
     if (!access.org.ok) return true;
     if (!access.scopeOk) return true;
     return false;
   }
 
   function hasAccessManage(access) {
-    // AO-019 4/8: endast moduler med ACCESS_MANAGE får skriva assignments
     return hasModule(access.effectiveModules, "ACCESS_MANAGE", "manage");
   }
 
-  // ---- Public API: requireAuth (P0 fix: returnera access-objekt, inte boolean) ----
+  // ---- Public API: requireAuth ----
   function requireAuth(opts) {
     const options = opts && typeof opts === "object" ? opts : {};
     const pageRole = String(options.pageRole || "any"); // "admin" | "employee" | "any"
-    const loginUrl = String(options.loginUrl || defaultLoginUrl());
 
     const access = getCurrentAccess();
     if (!access.ok) {
-      redirect(loginUrl);
+      redirect(loginUrl());
       return null;
     }
 
     // K3: systemvyer block
     if (mustBlockSystemViews(access, window.location.pathname)) {
-      // fail-closed: skicka till admin/home (om admin-branch) annars employee/home
-      if (canEnterAdminBranch(access)) redirect("../admin/home.html");
-      else redirect("../employee/home.html");
+      if (canEnterAdminBranch(access)) redirect(adminHomeUrl());
+      else redirect(employeeHomeUrl());
       return null;
     }
 
     // K2: gren-policy + pageRole
     if (pageRole === "admin") {
       if (!canEnterAdminBranch(access)) {
-        redirect("../employee/home.html");
+        redirect(employeeHomeUrl());
         return null;
       }
 
       // MANAGER: scope måste vara ok (fail-closed)
       if (managerScopeFailClosed(access)) {
-        // Tillåt admin/home som “landningsplats”, men blocka actions (sidor ska använda requireScopeForAdminOps)
-        // Om du står på annan admin-sida => tillbaka till admin/home.
         const file = normalizePath(window.location.pathname);
-        if (file !== "home.html") redirect("../admin/home.html");
-        return access; // access returneras så sidan kan visa tydlig lock-info
+        if (file !== "home.html") redirect(adminHomeUrl());
+        return access;
       }
 
-      // ADMIN/SYSTEM_ADMIN: admin-branch ok
       return access;
     }
 
     if (pageRole === "employee") {
-      // Employee-sidor kräver bara giltig session; adminish får också se employee om ni vill.
       return access;
     }
 
-    // "any": bara session krävs
     return access;
   }
 
@@ -497,31 +566,28 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
   function routeAfterLogin() {
     const access = getCurrentAccess();
     if (!access.ok) {
-      redirect(defaultLoginUrl());
+      redirect(loginUrl());
       return;
     }
 
     if (canEnterAdminBranch(access)) {
-      // Blocka systemvyer alltid via requireAuth/soft guard — landa på admin/home.
-      redirect("../admin/home.html");
+      redirect(adminHomeUrl());
       return;
     }
 
-    // EMPLOYEE
-    redirect("../employee/home.html");
+    redirect(employeeHomeUrl());
   }
 
   function logout() {
     sessionStorage.removeItem(SESSION_KEY);
     localStorage.removeItem(SESSION_KEY);
-    redirect(defaultLoginUrl());
+    redirect(loginUrl());
   }
 
-  // ---- Scope helpers (K4): sidor använder detta istället för egna checks ----
+  // ---- Scope helpers (K4) ----
   function requireManagerScope(access, opts) {
-    // Returnerar { ok:boolean, reason?:string }
     const options = opts && typeof opts === "object" ? opts : {};
-    const failRedirect = options.failRedirect; // ex "../admin/home.html" eller null
+    const failRedirect = options.failRedirect;
 
     if (!access || !access.ok) return { ok: false, reason: "no-access" };
 
@@ -541,14 +607,11 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
   }
 
   function isWithinScope(access, nodeId) {
-    // För filtrering i admin-UI: MANAGER ser bara inom subtree.
-    // ADMIN/SYSTEM_ADMIN: true.
     const id = String(nodeId || "").trim();
     if (!id) return false;
     if (!access || !access.ok) return false;
 
     if (access.roleClass === ROLE_CLASS.MANAGER) {
-      // fail-closed: om scope saknas/korrupt => false
       if (!access.scopeOk) return false;
       return access.scopeSet instanceof Set ? access.scopeSet.has(id) : false;
     }
@@ -556,68 +619,93 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
   }
 
   // ---- Nav visibility (K3): göm systemlänkar för ADMIN/MANAGER/EMPLOYEE ----
-  function applyNavVisibility(opts) {
-    const options = opts && typeof opts === "object" ? opts : {};
-    const systemLinkSelector =
-      options.systemLinkSelector ||
-      'a[href$="/roles.html"],a[href$="/org.html"],a[href$="/access.html"],a[href$="./roles.html"],a[href$="./org.html"],a[href$="./access.html"]';
+  function isSystemAdminHref(attrHref) {
+    // Breddad variant-match (AO-019 5/8-FIX-01):
+    // - "./roles.html", "roles.html", "../admin/roles.html", "/admin/roles.html"
+    // - med query/hash
+    const raw = String(attrHref || "").trim();
+    if (!raw) return false;
 
+    // Använd endast attributets värde (inte a.href absolut) för att undvika repo-origin skillnader.
+    const h = raw.split("#")[0].split("?")[0].trim();
+
+    // Slutmatch på filnamn, med eller utan "admin/"-prefix
+    return (
+      /(^|\/)(admin\/)?roles\.html$/i.test(h) ||
+      /(^|\/)(admin\/)?org\.html$/i.test(h) ||
+      /(^|\/)(admin\/)?access\.html$/i.test(h)
+    );
+  }
+
+  function applyNavVisibility(opts) {
     const access = getCurrentAccess();
     if (!access.ok) return;
 
-    // SYSTEM_ADMIN: visa allt
     if (access.roleClass === ROLE_CLASS.SYSTEM_ADMIN) return;
 
-    // Göm systemvyer för alla andra
-    document.querySelectorAll(systemLinkSelector).forEach((a) => {
+    // Breddad: skanna alla länkar, hide om href pekar på systemvyer.
+    const links = document.querySelectorAll("a[href]");
+    links.forEach((a) => {
+      const attr = a.getAttribute("href");
+      if (!isSystemAdminHref(attr)) return;
+
       a.style.display = "none";
       a.setAttribute("aria-hidden", "true");
       a.setAttribute("tabindex", "-1");
     });
+
+    // Bakåtkompat: om någon sida skickar egen selector så kan vi fortfarande köra den också.
+    const options = opts && typeof opts === "object" ? opts : {};
+    const systemLinkSelector = String(options.systemLinkSelector || "").trim();
+    if (systemLinkSelector) {
+      document.querySelectorAll(systemLinkSelector).forEach((a) => {
+        a.style.display = "none";
+        a.setAttribute("aria-hidden", "true");
+        a.setAttribute("tabindex", "-1");
+      });
+    }
   }
 
-  // ---- Soft auto guard (hårdare policy än tidigare, men fortfarande “soft”) ----
+  // ---- Soft auto guard ----
   (function softAutoGuard() {
     const access = getCurrentAccess();
     if (!access.ok) {
-      if (isAdminPage() || isEmployeePage()) redirect(defaultLoginUrl());
+      if (isAdminPage() || isEmployeePage()) redirect(loginUrl());
       return;
     }
 
     // K2: om du är i admin/ men inte admin-branch => employee/home
     if (isAdminPage() && !canEnterAdminBranch(access)) {
-      redirect("../employee/home.html");
+      redirect(employeeHomeUrl());
       return;
     }
 
-    // K2: om du är i employee/ men admin-branch -> tillåt (v1), ingen redirect
-
     // K3: block system pages för alla utom SYSTEM_ADMIN
     if (isAdminPage() && mustBlockSystemViews(access, window.location.pathname)) {
-      redirect("../admin/home.html");
+      redirect(adminHomeUrl());
       return;
     }
 
     // K4: MANAGER utan scope/korrupt org får bara vara på admin/home
     if (isAdminPage() && managerScopeFailClosed(access)) {
       const file = normalizePath(window.location.pathname);
-      if (file !== "home.html") redirect("../admin/home.html");
+      if (file !== "home.html") redirect(adminHomeUrl());
     }
   })();
 
   // ---- Exponera minimal API (LÅST) ----
   window.HRApp = {
-    requireAuth,           // (opts) -> access|null  ✅ (bakåtkompatibel mot sidor som vill ha “objekt”)
-    routeAfterLogin,       // routing efter stam-login
-    getCurrentAccess,      // debug/diagnostik + policydata
+    requireAuth,
+    routeAfterLogin,
+    getCurrentAccess,
     logout,
     applyNavVisibility,
 
-    // Manager/scope-policy helpers (används av admin-sidor för filtrering och fail-closed)
+    // Manager/scope-policy helpers
     requireManagerScope,
     isWithinScope,
 
-    // Modul-check helpers (för t.ex. Access-sidan skriv-rätt)
+    // Modul-check helpers
     hasModuleAccess: function (moduleKey, minScope) {
       const access = getCurrentAccess();
       if (!access.ok) return false;
@@ -626,9 +714,19 @@ K5) Centralisering: Policy här. Inga duplicerade checks i sidor (sidor ska anv�
     canWriteAssignments: function () {
       const access = getCurrentAccess();
       if (!access.ok) return false;
-      // Systemansvarig ska alltid kunna MANAGE via moduler (AO-019 2/8).
-      // ADMIN/MANAGER utan ACCESS_MANAGE => false (fail-closed).
       return hasAccessManage(access) || access.roleClass === ROLE_CLASS.SYSTEM_ADMIN;
+    },
+
+    // Diagnostik: robusta paths (för debugging i console)
+    _paths: {
+      appRoot: getAppRootPathname,
+      loginUrl,
+      adminHomeUrl,
+      employeeHomeUrl,
+    },
+    _empNo: {
+      canonical: canonicalEmpNo,
+      comparable: empNoComparable,
     },
   };
 })();
