@@ -1,21 +1,19 @@
 <!-- ============================================================
-AO-050 | FIL-ID: admin/questions.html
+AO-019 7/8 (PATCH) | FIL-ID: admin/questions.html
 Projekt: HR-System
-Syfte: Admin – Frågor (skapa/tilldela batch) – UI-only v1 (nivå 3)
-Krav:
-- Admin skapar och tilldelar frågor (batch)
-- Mottagare: en employee, alla (från grupper), eller grupp
-- Admin kan välja om svar får vara anonyma (allowAnonymous)
-- Employee-sidan kan bara se tilldelade frågor och svara
-- Svar visas på separat admin-sida (admin/answers.html)
+Syfte: Admin/Manager – Frågor (skapa/tilldela batch) – UI-only v1.0 (scope-styrt)
+Krav (AO-019 7/8):
+- Skapa frågor med scopeId (default = användarens scopeId)
+- Admin kan välja scope i dropdown (org)
+- Manager kan bara välja scope inom sin subtree
+- Saknat/korrupt scope/org/assignments → blockera skapande (fail-closed)
 Policy:
 - Ingen backend
-- Ingen känslig data lagras
-- Robust guard: sessionStorage först, fallback localStorage
-Lagring:
-- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
-- AO-017_GROUPS_V1 (localStorage) – grupper
-- AO-015_QUESTIONS_V1 (localStorage) – frågor
+- sessionStorage först, fallback localStorage (fail-closed)
+- Ingen känslig persondata (anst.nr)
+- Inga nya storage-keys
+- Hel-filsleverans
+- XSS-escape på all rendering
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -89,6 +87,20 @@ Lagring:
 
     .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
     code{ font-size:.95em; }
+
+    .guardbox{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: #fff;
+      color: var(--muted);
+    }
+    .guardbox.err{
+      border-color: rgba(239,68,68,.35);
+      background: rgba(254,226,226,.55);
+      color: #7f1d1d;
+    }
   </style>
 </head>
 
@@ -112,13 +124,13 @@ Lagring:
 </header>
 
 <main class="container">
-  <h1 class="tight">Frågor (Admin)</h1>
+  <h1 class="tight">Frågor (Admin/Manager)</h1>
   <p class="muted">Skapa och tilldela frågor. Svar visas på <code>admin/answers.html</code>.</p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
       <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
       </div>
       <div class="row wrap">
         <a class="btn secondary" href="../employee/questions.html">Öppna employee/questions (demo)</a>
@@ -153,6 +165,11 @@ Lagring:
           </label>
 
           <label>
+            Scope (org)
+            <select id="scopeSelect"></select>
+          </label>
+
+          <label>
             Anonyma svar?
             <select id="allowAnon">
               <option value="false" selected>Nej</option>
@@ -183,8 +200,10 @@ Lagring:
 
         <p id="msg" class="message" aria-live="polite"></p>
 
+        <div id="guardPanel" class="guardbox" style="display:none;"></div>
+
         <div class="smallnote">
-          Batch: en rad = en fråga. Skapas per mottagare.
+          Batch: en rad = en fråga. Skapas per mottagare. <span class="muted">Scope krävs (fail-closed).</span>
         </div>
       </section>
 
@@ -204,15 +223,15 @@ Lagring:
           </label>
 
           <label>
-            Sök (text/anst.nr)
-            <input id="search" type="text" placeholder="t.ex. vecka eller 1234" />
+            Sök (text/anst.nr/scope)
+            <input id="search" type="text" placeholder="t.ex. vecka eller 1234 eller SCOPE" />
           </label>
         </div>
 
         <div id="list"></div>
 
         <div class="smallnote">
-          Medarbetaren svarar på <code>employee/questions.html</code>.
+          Medarbetaren svarar på <code>employee/questions.html</code>. Frågor utan <code>scopeId</code> blir osynliga för employee (policy).
         </div>
       </section>
 
@@ -222,14 +241,19 @@ Lagring:
 
 <script>
 /* ============================================================
-AO-050 | FIL-ID: admin/questions.html (inline JS)
+AO-019 7/8 | FIL-ID: admin/questions.html (inline JS)
+Scope-styrt Q&A (Admin/Manager)
 ============================================================ */
 (function(){
   "use strict";
 
-  const SESSION_KEY   = "AO-001_LOGIN_V1";
-  const GROUPS_KEY    = "AO-017_GROUPS_V1";
-  const QUESTIONS_KEY = "AO-015_QUESTIONS_V1";
+  const SESSION_KEY     = "AO-001_LOGIN_V1";
+  const GROUPS_KEY      = "AO-017_GROUPS_V1";
+  const QUESTIONS_KEY   = "AO-015_QUESTIONS_V1";
+
+  // AO-019 7/8 (LÄS)
+  const ORG_KEY         = "AO-020_ORG_V1";
+  const ASSIGNMENTS_KEY = "AO-020_ROLE_ASSIGNMENTS_V2"; // defensivt: tydligt namn för att undvika typo-P0
 
   const $ = (s) => document.querySelector(s);
 
@@ -243,27 +267,15 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
     return null;
   }
 
-  function readAuth(){
+  function safeParseFrom(storage, key, fallback){
     try{
-      const raw = readRawSession();
-      if(!raw) return null;
-      const data = JSON.parse(raw);
-      if(!data?.auth?.isAuthed) return null;
-      if(data.auth.role !== "admin") return null;
-      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-      return data.auth;
-    }catch{
-      return null;
-    }
-  }
-
-  function safeParse(key, fallback){
-    try{
-      const v = JSON.parse(localStorage.getItem(key) || "null");
+      const v = JSON.parse(storage.getItem(key) || "null");
       return (v === null || v === undefined) ? fallback : v;
     }catch{ return fallback; }
   }
-  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
+  function safeParse(key, fallback){
+    return safeParseFrom(localStorage, key, fallback);
+  }
 
   function escapeHtml(s){
     return String(s ?? "")
@@ -278,6 +290,16 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
     const m = $("#msg");
     m.className = "message" + (kind ? " " + kind : "");
     m.textContent = text || "";
+  }
+
+  // P0: fail-closed save (kvot/blockerade skrivningar)
+  function saveFailClosed(key, value){
+    try{
+      localStorage.setItem(key, JSON.stringify(value));
+      return { ok:true };
+    }catch(err){
+      return { ok:false, err: err ? String(err) : "unknown" };
+    }
   }
 
   function genId(prefix){
@@ -296,10 +318,130 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
     return { ok:true, empNo: emp };
   }
 
+  function normalizeRole(r){
+    return String(r || "").trim().toLowerCase();
+  }
+
+  function readAuth(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+
+      const role = normalizeRole(data.auth.role);
+      if(role !== "admin" && role !== "manager") return null;
+
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+
+      // empNo behövs för manager-scope (fail-closed om saknas)
+      const empNo = normalizeEmpNo(
+        data.auth.empNo ?? data.auth.employeeNo ?? data.auth.emp ?? data.auth.userId ?? ""
+      );
+
+      return {
+        ...data.auth,
+        role,
+        empNo
+      };
+    }catch{
+      return null;
+    }
+  }
+
+  // --- Org helpers (subtree) ---
+  function normalizeOrgTree(raw){
+    const arr =
+      Array.isArray(raw) ? raw :
+      (Array.isArray(raw?.nodes) ? raw.nodes :
+      (Array.isArray(raw?.items) ? raw.items : null));
+
+    if(!Array.isArray(arr)) return [];
+
+    return arr
+      .filter(n => n && (n.id !== undefined && n.id !== null))
+      .map(n => ({
+        id: String(n.id),
+        parentId: (n.parentId === null || n.parentId === undefined) ? null : String(n.parentId),
+        name: String(n.name ?? n.title ?? n.label ?? n.id)
+      }));
+  }
+
+  function buildOrgIndex(nodes){
+    const byId = new Map();
+    const children = new Map();
+    nodes.forEach(n => {
+      byId.set(n.id, n);
+      if(!children.has(n.id)) children.set(n.id, []);
+    });
+    nodes.forEach(n => {
+      if(n.parentId && byId.has(n.parentId)){
+        children.get(n.parentId).push(n.id);
+      }
+    });
+    return { byId, children };
+  }
+
+  function getSubtreeIds(index, rootId){
+    const out = [];
+    const seen = new Set();
+    const stack = [String(rootId)];
+    while(stack.length){
+      const id = stack.pop();
+      if(seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+      const kids = index.children.get(id) || [];
+      kids.forEach(k => stack.push(k));
+    }
+    return out;
+  }
+
+  function isDescendant(index, nodeId, ancestorId){
+    const a = String(ancestorId);
+    const n = String(nodeId);
+    if(n === a) return true;
+    let cur = index.byId.get(n);
+    let hops = 0;
+    while(cur && cur.parentId && hops < 5000){
+      if(cur.parentId === a) return true;
+      cur = index.byId.get(String(cur.parentId));
+      hops++;
+    }
+    return false;
+  }
+
+  // --- Assignments helpers ---
+  function normalizeAssignments(raw){
+    const arr =
+      Array.isArray(raw) ? raw :
+      (Array.isArray(raw?.assignments) ? raw.assignments :
+      (Array.isArray(raw?.items) ? raw.items : null));
+
+    if(!Array.isArray(arr)) return [];
+
+    return arr
+      .filter(a => a && (a.empNo !== undefined && a.empNo !== null))
+      .map(a => ({
+        empNo: normalizeEmpNo(a.empNo),
+        roleId: String(a.roleId ?? a.role ?? ""),
+        scopeId: (a.scopeId === undefined || a.scopeId === null) ? "" : String(a.scopeId)
+      }))
+      .filter(a => a.empNo);
+  }
+
+  function getMyScopeId(auth, assignments){
+    if(!auth?.empNo) return "";
+    const row = assignments.find(x => x.empNo === auth.empNo);
+    return String(row?.scopeId || "").trim();
+  }
+
   // --- Guard ---
   const auth = readAuth();
   if(!auth){ redirectLogin(); return; }
-  $("#whoName").textContent = auth.displayName || "Admin";
+
+  $("#whoName").textContent = auth.displayName || (auth.role === "manager" ? "Manager" : "Admin");
+  $("#whoRole").textContent = auth.role;
 
   function doLogout(){
     sessionStorage.removeItem(SESSION_KEY);
@@ -307,6 +449,64 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
     redirectLogin();
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  // --- Load org + assignments ---
+  const orgNodes = normalizeOrgTree(safeParse(ORG_KEY, null));
+  const orgIndex = buildOrgIndex(orgNodes);
+
+  const assignments = normalizeAssignments(safeParse(ASSIGNMENTS_KEY, null));
+  const myScopeId = getMyScopeId(auth, assignments);
+
+  // org validation light (dup-id)
+  function orgHasDuplicateIds(nodes){
+    const seen = new Set();
+    for(const n of nodes){
+      if(seen.has(n.id)) return true;
+      seen.add(n.id);
+    }
+    return false;
+  }
+
+  function guardCreateState(){
+    const problems = [];
+
+    if(!orgNodes.length){
+      problems.push("Saknar eller kan inte läsa org-träd (AO-020_ORG_V1). Skapande låst.");
+    }else{
+      if(orgHasDuplicateIds(orgNodes)){
+        problems.push("Org-trädet är korrupt (duplicerade id). Skapande låst (fail-closed).");
+      }
+    }
+
+    if(auth.role === "manager"){
+      if(!assignments.length){
+        problems.push("Saknar eller kan inte läsa role assignments (AO-020_ROLE_ASSIGNMENTS_V2). Skapande låst.");
+      }
+      if(!myScopeId){
+        problems.push("Din scopeId saknas i assignments (empNo→scopeId). Skapande låst (fail-closed).");
+      }else if(orgNodes.length && !orgIndex.byId.has(String(myScopeId))){
+        problems.push("Din scopeId finns inte i org-trädet. Skapande låst (fail-closed).");
+      }
+    }
+
+    const ok = (problems.length === 0);
+
+    const panel = $("#guardPanel");
+    if(!ok){
+      panel.style.display = "block";
+      panel.className = "guardbox err";
+      panel.textContent = problems.join(" ");
+    }else{
+      panel.style.display = "none";
+      panel.className = "guardbox";
+      panel.textContent = "";
+    }
+
+    $("#btnCreate").disabled = !ok;
+    $("#scopeSelect").disabled = !ok;
+
+    return ok;
+  }
 
   // --- Groups ---
   function loadGroups(){
@@ -332,6 +532,62 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
     });
   }
 
+  // --- Scope dropdown ---
+  function renderScopeSelect(){
+    const sel = $("#scopeSelect");
+    sel.innerHTML = "";
+
+    if(!orgNodes.length || orgHasDuplicateIds(orgNodes)){
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "(Org saknas/korrupt)";
+      sel.appendChild(opt);
+      return;
+    }
+
+    let allowedIds = orgNodes.map(n => n.id);
+
+    if(auth.role === "manager"){
+      if(myScopeId && orgIndex.byId.has(String(myScopeId))){
+        allowedIds = getSubtreeIds(orgIndex, String(myScopeId));
+      }else{
+        allowedIds = [];
+      }
+    }
+
+    allowedIds.forEach(id => {
+      const n = orgIndex.byId.get(String(id));
+      if(!n) return;
+      const opt = document.createElement("option");
+      opt.value = String(n.id);
+      opt.textContent = `${n.name} (${n.id})`;
+      sel.appendChild(opt);
+    });
+
+    if(!sel.options.length){
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "(Inga scopes tillgängliga)";
+      sel.appendChild(opt);
+    }
+
+    if(myScopeId && Array.from(sel.options).some(o => o.value === String(myScopeId))){
+      sel.value = String(myScopeId);
+    }else{
+      sel.selectedIndex = 0;
+    }
+  }
+
+  function getSelectedScopeId(){
+    const sid = String($("#scopeSelect").value || "").trim();
+    if(!sid) return "";
+    if(!orgIndex.byId.has(sid)) return "";
+    if(auth.role === "manager" && myScopeId){
+      if(!isDescendant(orgIndex, sid, String(myScopeId))) return "";
+    }
+    return sid;
+  }
+
   // --- Target mode UI ---
   function syncTargetUI(){
     const mode = $("#targetMode").value;
@@ -347,7 +603,6 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
   }
 
   function computeAllTargets(){
-    // “Alla” = union av gruppmedlemmar (primärt). Fallback: empNo som redan finns i frågor.
     const set = new Set();
     loadGroups().forEach(g => (g.members||[]).forEach(m => {
       const v = validateEmpNo(m);
@@ -368,12 +623,22 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
     const all = loadQuestions();
     let count = 0;
 
+    const originMode = (payload.originTargetMode === "all" || payload.originTargetMode === "group" || payload.originTargetMode === "one")
+      ? payload.originTargetMode
+      : "one";
+
     targetEmpNos.forEach(empNo => {
       payload.prompts.forEach(prompt => {
         all.push({
           id: genId("q"),
-          targetMode: "one",
+
+          // P1: behåll origin-mode så listfilter inte ljuger (ingen ny key; targetMode finns redan)
+          targetMode: originMode,
+
           targetEmpNo: String(empNo),
+
+          scopeId: String(payload.scopeId),
+
           title: payload.title || "Fråga",
           prompt,
           note: payload.note || "",
@@ -385,13 +650,13 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
       });
     });
 
-    save(QUESTIONS_KEY, all);
-    return count;
+    const res = saveFailClosed(QUESTIONS_KEY, all);
+    if(!res.ok){
+      return { ok:false, count:0, err: res.err };
+    }
+    return { ok:true, count };
   }
 
-  // Admin kan också skapa “till alla” och “till grupp” utan att expandera,
-  // men employee/questions.html är fail-safe och visar då INTE group om inte empNo explicit.
-  // För att allt ska funka nu direkt i UI-only v1: vi EXPANDERAR alltid till empNo-lista.
   function expandTargets(mode){
     if(mode === "one"){
       const v = validateEmpNo($("#targetEmpNo").value);
@@ -426,6 +691,17 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
   $("#btnCreate").addEventListener("click", () => {
     setMsg("", "");
 
+    if($("#btnCreate").disabled){
+      setMsg("err", "Skapande är låst p.g.a. saknad/korrupt scope/org/assignments.");
+      return;
+    }
+
+    const scopeId = getSelectedScopeId();
+    if(!scopeId){
+      setMsg("err", "Välj giltigt scope. Saknat/otillåtet scope blockerar skapande (fail-closed).");
+      return;
+    }
+
     const mode = $("#targetMode").value;
     const title = String($("#title").value || "").trim();
     const note = String($("#note").value || "").trim();
@@ -447,8 +723,13 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
       return;
     }
 
-    const created = pushQuestions(ex.targets, { title, note, allowAnonymous, prompts });
-    setMsg("ok", `Skapat ${created} fråga(or).`);
+    const created = pushQuestions(ex.targets, { title, note, allowAnonymous, prompts, scopeId, originTargetMode: mode });
+    if(!created.ok){
+      setMsg("err", "Kunde inte spara (localStorage är full/blockerad). Inget skapades. Rensa lagring eller prova igen.");
+      return;
+    }
+
+    setMsg("ok", `Skapat ${created.count} fråga(or) med scope ${scopeId}.`);
     renderList();
   });
 
@@ -462,6 +743,14 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
   });
 
   // --- List ---
+  function canManagerSeeScope(scopeId){
+    const qs = String(scopeId || "").trim();
+    if(!qs) return false;
+    if(!orgIndex.byId.has(qs)) return false;
+    if(!myScopeId) return false;
+    return isDescendant(orgIndex, qs, String(myScopeId));
+  }
+
   function renderList(){
     const list = $("#list");
     list.innerHTML = "";
@@ -477,9 +766,13 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
     if(filter === "all") shown = shown.filter(x => (x.targetMode||"") === "all");
     if(filter === "group") shown = shown.filter(x => (x.targetMode||"") === "group");
 
+    if(auth.role === "manager"){
+      shown = shown.filter(x => canManagerSeeScope(x.scopeId));
+    }
+
     if(q){
       shown = shown.filter(x => {
-        const blob = `${x.targetEmpNo||""} ${x.title||""} ${x.prompt||""} ${x.note||""}`.toLowerCase();
+        const blob = `${x.targetEmpNo||""} ${x.scopeId||""} ${x.targetMode||""} ${x.title||""} ${x.prompt||""} ${x.note||""}`.toLowerCase();
         return blob.includes(q);
       });
     }
@@ -494,15 +787,28 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
     shown.forEach(x => {
       const el = document.createElement("div");
       el.className = "item";
+
+      const scopeLabel = (() => {
+        const sid = String(x.scopeId || "").trim();
+        if(!sid) return "—";
+        const n = orgIndex.byId.get(sid);
+        return n ? `${n.name} (${sid})` : sid;
+      })();
+
+      const tm = String(x.targetMode || "one");
+
       el.innerHTML = `
         <div style="min-width:260px;">
           <p class="item-title">${escapeHtml(x.title || "Fråga")}</p>
           <div class="meta">
             <span><strong>Till:</strong> ${escapeHtml(x.targetEmpNo || "—")}</span>
+            <span><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</span>
+            <span><strong>Läge:</strong> ${escapeHtml(tm)}</span>
             ${x.allowAnonymous ? `<span class="pill">Anonymt tillåtet</span>` : ``}
           </div>
           <div class="meta"><span><strong>Fråga:</strong> ${escapeHtml(x.prompt || "—")}</span></div>
           ${x.note ? `<div class="meta"><span><strong>Info:</strong> ${escapeHtml(x.note)}</span></div>` : ``}
+          ${!String(x.scopeId||"").trim() ? `<div class="meta"><span class="pill">⚠ Saknar scopeId (osynlig för employee)</span></div>` : ``}
         </div>
         <div class="row" style="gap:8px;">
           <button type="button" class="secondary" data-del="${escapeHtml(x.id)}">Ta bort</button>
@@ -515,8 +821,28 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
       btn.addEventListener("click", () => {
         const id = btn.getAttribute("data-del");
         if(!confirm("Ta bort frågan?")) return;
-        const next = loadQuestions().filter(x => x.id !== id);
-        save(QUESTIONS_KEY, next);
+
+        const all = loadQuestions();
+        const item = all.find(x => String(x.id) === String(id));
+        if(!item){
+          setMsg("err", "Hittar inte frågan (korrupt data).");
+          return;
+        }
+
+        // P1 defensivt: manager får aldrig radera utanför scope även om DOM manipuleras
+        if(auth.role === "manager"){
+          if(!canManagerSeeScope(item.scopeId)){
+            setMsg("err", "Åtkomst nekad: du kan inte ta bort frågor utanför din scope-subtree.");
+            return;
+          }
+        }
+
+        const next = all.filter(x => x.id !== id);
+        const res = saveFailClosed(QUESTIONS_KEY, next);
+        if(!res.ok){
+          setMsg("err", "Kunde inte spara borttagning (localStorage är full/blockerad). Inget ändrades.");
+          return;
+        }
         renderList();
       });
     });
@@ -528,6 +854,8 @@ AO-050 | FIL-ID: admin/questions.html (inline JS)
   // init
   renderGroupSelect();
   syncTargetUI();
+  renderScopeSelect();
+  guardCreateState();
   renderList();
 
 })();
