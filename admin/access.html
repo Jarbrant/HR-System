@@ -296,13 +296,15 @@ Behörighet (LÅST):
 
 <script>
 /* ============================================================
-AO-019 4/8 | admin/access.html (inline JS) – AUTOPATCH v1.1
-Viktiga autopatchar från BUGHUNT:
-- Root-ID kompatibilitet: härled root från org-data (parentId:null) + acceptera kända fallbacks
-- Rollformat kompatibilitet: stöd för modules som objekt-träd (view/act/manage) + explicita flags
-- Prototype-pollution hårdning: assignments lagras i Object.create(null) och kopieras säkert
-- Logout: rensa session (sessionStorage + localStorage) och redirect
-- Init: render först, resetForm sist utan att skriva över vald rad
+AO-019 4/8 | admin/access.html (inline JS) – FIX v1.2
+Fix-krav (AO-019 4/8-FIX-01):
+- Init får inte nolla state efter render: resetForm() körs ej sist om selection finns
+- Skrivning låses när roles/org saknar faktiska poster:
+  - roles ok men 0 roller => write-lock
+  - org ok men rootId saknas => write-lock
+- KPI/lockbox ska spegla faktisk möjlighet att spara
+- Scope-filter: ogiltigt selectedScope hanteras deterministiskt (fallback till "Alla")
+  - ingen "fake subtree"-status
 ============================================================ */
 (function(){
   "use strict";
@@ -373,6 +375,14 @@ Viktiga autopatchar från BUGHUNT:
 
   $("#navLogout").addEventListener("click", (e) => {
     e.preventDefault();
+    // System-logout via core (fail-closed)
+    try{
+      if(window.HRApp && typeof window.HRApp.logout === "function"){
+        window.HRApp.logout();
+        return;
+      }
+    }catch{}
+    // Fallback: rensa session-key och redirect (endast SESSION_KEY)
     try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
     try{ localStorage.removeItem(SESSION_KEY); }catch{}
     redirectLogin();
@@ -396,7 +406,10 @@ Viktiga autopatchar från BUGHUNT:
   // --- Validators / normalizers ---
   function normalizeRoles(raw){
     // roles builder kan variera; vi kräver id+name, och behåller "modules" i vilken form den än är.
-    if(!Array.isArray(raw)) return { ok:false, roles: [], issues:["Roles saknas eller fel format (förväntar array)."] };
+    if(!Array.isArray(raw)) return { ok:false, parseOk:false, roles: [], issues:["Roles saknas eller fel format (förväntar array)."] };
+
+    // parseOk: data var läsbar, men kan vara tom => ska låsa skrivning enligt AO
+    const parseOk = true;
 
     const roles = raw
       .map(r => ({
@@ -404,13 +417,17 @@ Viktiga autopatchar från BUGHUNT:
         name: String(r?.name || r?.title || "").trim(),
         modules: (r && (typeof r.modules === "object")) ? r.modules : null,
         permissions: (r && typeof r.permissions === "object" && !Array.isArray(r.permissions)) ? r.permissions : null,
-        // ibland: { access: { ACCESS_MANAGE:true } } eller { flags:{...} }
         access: (r && typeof r.access === "object" && !Array.isArray(r.access)) ? r.access : null,
         flags: (r && typeof r.flags === "object" && !Array.isArray(r.flags)) ? r.flags : null
       }))
       .filter(r => r.id && r.name);
 
-    if(roles.length === 0) return { ok:false, roles: [], issues:["Roles saknas eller har inga giltiga poster (kräver id + name)."] };
+    if(raw.length === 0){
+      return { ok:false, parseOk, roles: [], issues:["Roles är tomt (0 roller). Skrivning måste låsas tills roller finns."] };
+    }
+    if(roles.length === 0){
+      return { ok:false, parseOk, roles: [], issues:["Roles har 0 giltiga poster (kräver id + name)."] };
+    }
 
     const seen = new Set();
     const dedup = [];
@@ -419,11 +436,13 @@ Viktiga autopatchar från BUGHUNT:
       seen.add(r.id);
       dedup.push(r);
     }
-    return { ok:true, roles: dedup, issues: [] };
+    return { ok:true, parseOk, roles: dedup, issues: [] };
   }
 
   function normalizeOrg(raw){
-    if(!Array.isArray(raw)) return { ok:false, nodes: [], issues:["Org saknas eller fel format (förväntar array)."], loop:false };
+    if(!Array.isArray(raw)) return { ok:false, parseOk:false, nodes: [], issues:["Org saknas eller fel format (förväntar array)."], loop:false, rootId:null };
+
+    const parseOk = true;
 
     const nodes = raw
       .map(n => ({
@@ -434,14 +453,19 @@ Viktiga autopatchar från BUGHUNT:
       }))
       .filter(n => n.id && n.name);
 
-    if(nodes.length === 0) return { ok:false, nodes: [], issues:["Org saknas eller har inga giltiga noder."], loop:false };
+    if(raw.length === 0){
+      return { ok:false, parseOk, nodes: [], issues:["Org är tomt (0 noder). Skrivning måste låsas tills org finns."], loop:false, rootId:null };
+    }
+    if(nodes.length === 0){
+      return { ok:false, parseOk, nodes: [], issues:["Org saknas eller har inga giltiga noder."], loop:false, rootId:null };
+    }
 
     const ids = new Set(nodes.map(n => n.id));
 
     // Root härledning:
     // 1) node med parentId:null (prefer)
     // 2) fallback id in ["org_root_v1","org_root"] om exakt en finns
-    // Fail-closed om oklart.
+    // OBS: om rootId saknas men org i övrigt ser "läsbar" ut => skrivning låses (AO-krav)
     const rootCandidates = nodes.filter(n => n.parentId === null);
     let rootId = null;
 
@@ -453,7 +477,7 @@ Viktiga autopatchar från BUGHUNT:
       if(hits.length === 1){
         rootId = hits[0];
       }else{
-        return { ok:false, nodes, issues:["Org root-kontrakt oklart (kräver exakt 1 root med parentId:null)."], loop:false, rootId:null };
+        return { ok:false, parseOk, nodes, issues:["Org rootId saknas/oklar (kräver exakt 1 root med parentId:null)."], loop:false, rootId:null };
       }
     }
 
@@ -461,7 +485,7 @@ Viktiga autopatchar från BUGHUNT:
     for(const n of nodes){
       if(n.id === rootId) continue;
       if(!n.parentId || !ids.has(n.parentId)){
-        return { ok:false, nodes, issues:["Org har orphans/ogiltiga parentId."], loop:false, rootId };
+        return { ok:false, parseOk, nodes, issues:["Org har orphans/ogiltiga parentId."], loop:false, rootId };
       }
     }
 
@@ -484,10 +508,10 @@ Viktiga autopatchar från BUGHUNT:
     }
     const loop = nodes.some(n => n.id !== rootId && chainHasLoop(n.id));
     if(loop){
-      return { ok:false, nodes, issues:["Org loop/cykel upptäckt."], loop:true, rootId };
+      return { ok:false, parseOk, nodes, issues:["Org loop/cykel upptäckt."], loop:true, rootId };
     }
 
-    return { ok:true, nodes, issues:[], loop:false, rootId };
+    return { ok:true, parseOk, nodes, issues:[], loop:false, rootId };
   }
 
   function normalizeAssignments(raw){
@@ -513,7 +537,7 @@ Viktiga autopatchar från BUGHUNT:
     return nodes.find(n => n.id === sid) || null;
   }
 
-  // --- Module permission check (AUTOPATCH: stöd för modul-objekt) ---
+  // --- Module permission check (stöder modul-objekt) ---
   function hasAccessManage(authObj, roles){
     // Fail-closed default
     if(!authObj) return false;
@@ -540,18 +564,10 @@ Viktiga autopatchar från BUGHUNT:
     if(r.access && r.access[flag] === true) return true;
     if(r.flags && r.flags[flag] === true) return true;
 
-    // 3b) role.modules kan vara:
-    // - array: ["ACCESS_MANAGE", ...]
-    // - objekt-träd: { ACCESS_MANAGE:true } eller { access:{manage:true} } eller { admin:{ accessManage:true } } etc.
+    // 3b) role.modules kan vara array eller objekt-träd
     if(Array.isArray(r.modules) && r.modules.map(String).includes(flag)) return true;
 
     if(r.modules && typeof r.modules === "object"){
-      // Sök flera realistiska vägar utan att kräva ny datamodell:
-      // - modules.ACCESS_MANAGE === true
-      // - modules.access.ACCESS_MANAGE === true
-      // - modules.access.manage === true (generiskt)
-      // - modules.admin.ACCESS_MANAGE === true (generiskt)
-      // - modules.anything.manage === true (generiskt, men strikt)
       const m = r.modules;
 
       if(m[flag] === true) return true;
@@ -565,16 +581,14 @@ Viktiga autopatchar från BUGHUNT:
         if(m.admin.manage === true) return true;
       }
 
-      // Sista fallback (strikt): djup-scan max 2 nivåer efter boolean "manage" eller "ACCESS_MANAGE"
-      // (för att matcha vanliga { module:{view,act,manage} } format utan att öppna för felaktiga true).
+      // Strikt fallback-scan max 2 nivåer (begränsad till access/admin)
       try{
         const level1Keys = Object.keys(m);
         for(const k1 of level1Keys){
           const v1 = m[k1];
           if(v1 && typeof v1 === "object" && !Array.isArray(v1)){
             if(v1[flag] === true) return true;
-            if(v1.manage === true && (k1 === "access" || k1 === "admin")) return true; // begränsa
-            // 2nd level
+            if(v1.manage === true && (k1 === "access" || k1 === "admin")) return true;
             for(const k2 of Object.keys(v1)){
               const v2 = v1[k2];
               if(v2 && typeof v2 === "object" && !Array.isArray(v2)){
@@ -697,24 +711,43 @@ Viktiga autopatchar från BUGHUNT:
     }
     if(!orgV.ok && orgV.loop) issues.push("Org loop-varning: subtree-filter kan inte användas och skrivning blockeras (fail-closed).");
 
-    // Write permission
+    // Write permission + write-lock reasons (konsekvent med KPI)
     dataLockReasons = [];
-    if(!rolesV.ok) dataLockReasons.push("Skrivning blockerad: Roller saknas/korrupt. Öppna Roller och åtgärda.");
-    if(!orgV.ok) dataLockReasons.push("Skrivning blockerad: Org saknas/korrupt. Öppna Org och åtgärda.");
-    if(!asgV.ok) dataLockReasons.push("Skrivning blockerad: Assignments-format är korrupt.");
+
+    // Krav: skrivning låses om roles/org saknar faktiska poster även om "läsning" funkar
+    if(!rolesV.ok){
+      dataLockReasons.push("Skrivning blockerad: Roller saknas/korrupt eller 0 roller. Öppna Roller och åtgärda.");
+    }
+    if(!orgV.ok){
+      // inkluderar rootId saknas/oklar, orphans, loop, tom org
+      dataLockReasons.push("Skrivning blockerad: Org saknas/korrupt eller root saknas. Öppna Org och åtgärda.");
+    }
+    if(!asgV.ok){
+      dataLockReasons.push("Skrivning blockerad: Assignments-format är korrupt.");
+    }
 
     const rightsOk = rolesV.ok && orgV.ok && asgV.ok;
-    const hasManage = rightsOk ? hasAccessManage(auth, cached.roles) : false;
 
-    if(!hasManage) dataLockReasons.push("Skrivning blockerad: saknar modulrättighet ACCESS_MANAGE.");
+    // Extra krav: om orgV.ok men rootId saknas (ska inte inträffa ofta, men fail-closed)
+    if(rightsOk && (!cached.rootId)){
+      dataLockReasons.push("Skrivning blockerad: Org rootId saknas (fail-closed).");
+    }
+    if(rightsOk && cached.roles.length === 0){
+      dataLockReasons.push("Skrivning blockerad: 0 roller (fail-closed).");
+    }
 
-    canWrite = rightsOk && hasManage;
+    const manageOk = rightsOk ? hasAccessManage(auth, cached.roles) : false;
+    if(!manageOk) dataLockReasons.push("Skrivning blockerad: saknar modulrättighet ACCESS_MANAGE.");
+
+    canWrite = rightsOk && !!cached.rootId && (cached.roles.length > 0) && manageOk;
     return issues;
   }
 
   function fillRoleDropdown(){
     const sel = $("#roleSelect");
+    const prev = String(sel.value || "").trim();
     sel.innerHTML = "";
+
     if(!cached.roles.length){
       const opt = document.createElement("option");
       opt.value = "";
@@ -728,11 +761,19 @@ Viktiga autopatchar från BUGHUNT:
       opt.textContent = `${r.name} • ${r.id}`;
       sel.appendChild(opt);
     }
+
+    // restore if possible
+    if(prev && cached.roles.some(r => r.id === prev)){
+      sel.value = prev;
+    }
   }
 
   function fillScopeDropdowns(){
     const scopeSel = $("#scopeSelect");
     const filterSel = $("#scopeFilter");
+    const prevScope = String(scopeSel.value || "").trim();
+    const prevFilter = String(filterSel.value || "").trim();
+
     scopeSel.innerHTML = "";
     filterSel.innerHTML = "";
 
@@ -793,6 +834,20 @@ Viktiga autopatchar från BUGHUNT:
     }
 
     walk(rootId, 1, new Set([rootId]));
+
+    // restore deterministiskt: om tidigare val saknas -> fallback till ""
+    if(prevScope && getOrgNodeById(nodes, prevScope)){
+      scopeSel.value = prevScope;
+    }else{
+      // om vi hade en selection via row, men org har ändrats -> lämna default (root)
+      // (scopeSel default blir första option: root)
+    }
+
+    if(prevFilter && getOrgNodeById(nodes, prevFilter)){
+      filterSel.value = prevFilter;
+    }else{
+      filterSel.value = "";
+    }
   }
 
   function resetForm(){
@@ -813,7 +868,25 @@ Viktiga autopatchar från BUGHUNT:
     lastPickedEmpNo = String(empNo || "");
   }
 
+  function ensureDeterministicScopeFilter(){
+    // Krav: om selectedScope inte finns i org => fallback till "Alla" (ingen fake subtree-status)
+    const sel = $("#scopeFilter");
+    const v = String(sel.value || "").trim();
+    if(!v) return;
+    if(!cached.orgOk || !cached.rootId){
+      sel.value = "";
+      return;
+    }
+    if(!getOrgNodeById(cached.orgNodes, v)){
+      sel.value = "";
+      // valfritt: vi visar inte modal, men gör deterministiskt fallback
+      setMsg("err", "Valt scope i filter finns inte längre i org. Filter återställt till 'Alla'.");
+    }
+  }
+
   function renderTable(){
+    ensureDeterministicScopeFilter();
+
     const tbody = $("#tbody");
     tbody.innerHTML = "";
 
@@ -828,27 +901,30 @@ Viktiga autopatchar från BUGHUNT:
       };
     });
 
-    // Filter by scope
+    // Filter by scope (deterministiskt)
     const selectedScope = String($("#scopeFilter").value || "").trim();
     let allowedScopeSet = null;
+    let filterMode = "Alla";
 
-    if(selectedScope && cached.orgOk && cached.rootId){
-      allowedScopeSet = subtreeSet(cached.orgNodes, selectedScope);
+    if(selectedScope){
+      // Bara subtree om org är frisk OCH selectedScope finns i org
+      if(cached.orgOk && cached.rootId && getOrgNodeById(cached.orgNodes, selectedScope)){
+        allowedScopeSet = subtreeSet(cached.orgNodes, selectedScope);
+        filterMode = "Subtree";
+      }else{
+        // deterministiskt: fallback => Alla (och undvik fake status)
+        $("#scopeFilter").value = "";
+        filterMode = "Alla";
+      }
     }
 
     let filtered = rows;
 
-    if(selectedScope){
-      if(allowedScopeSet){
-        filtered = filtered.filter(r => allowedScopeSet.has(r.scopeId));
-        $("#kpiFilter").textContent = "Subtree";
-      }else{
-        filtered = filtered.filter(r => r.scopeId === selectedScope);
-        $("#kpiFilter").textContent = "Exakt";
-      }
-    }else{
-      $("#kpiFilter").textContent = "Alla";
+    if(String($("#scopeFilter").value || "").trim()){
+      filtered = filtered.filter(r => allowedScopeSet ? allowedScopeSet.has(r.scopeId) : false);
     }
+
+    $("#kpiFilter").textContent = filterMode;
 
     // Search
     const q = String($("#search").value || "").trim().toLowerCase();
@@ -975,9 +1051,12 @@ Viktiga autopatchar från BUGHUNT:
 
     // Re-check vid save (no stale writes)
     const issues = loadAll();
+    fillRoleDropdown();
+    fillScopeDropdowns();
     renderRiskPanel(issues);
     setWriteState();
     showLockIfNeeded();
+
     if(!canWrite){
       setMsg("err", "Skrivning blockerad (fail-closed): data eller rättighet saknas.");
       return;
@@ -1014,9 +1093,12 @@ Viktiga autopatchar från BUGHUNT:
 
     setMsg("ok", "Assignment sparad.");
     $("#updatedAt").value = toDateTime(now);
+    lastPickedEmpNo = vEmp.val;
 
     // refresh view
     const issues2 = loadAll();
+    fillRoleDropdown();
+    fillScopeDropdowns();
     renderRiskPanel(issues2);
     setWriteState();
     showLockIfNeeded();
@@ -1026,7 +1108,12 @@ Viktiga autopatchar från BUGHUNT:
   $("#scopeFilter").addEventListener("change", renderTable);
   $("#search").addEventListener("input", renderTable);
 
-  // --- init ---
+  // --- init (FIX: nolla inte state efter render) ---
+  // Rensa bara före första render eller när ingen selection finns.
+  if(!lastPickedEmpNo){
+    resetForm();
+  }
+
   const issuesInit = loadAll();
   fillRoleDropdown();
   fillScopeDropdowns();
@@ -1035,8 +1122,8 @@ Viktiga autopatchar från BUGHUNT:
   renderRiskPanel(issuesInit);
   renderTable();
 
-  // (Autopatch: vi lämnar formuläret tomt vid init, men vi skriver inte över en ev. vald rad)
-  resetForm();
+  // FIX: ingen resetForm() sist som rensar vald rad/form.
+  // Om du senare vill "auto-välj" en rad kan det ske här – men inte i denna AO.
 
 })();
 </script>
