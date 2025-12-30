@@ -1,21 +1,26 @@
 <!-- ============================================================
-AO-051 | FIL-ID: admin/answers.html
+AO-019 7/8 (PATCH) | FIL-ID: admin/answers.html
 Projekt: HR-System
-Syfte: Admin – Svar (se inkomna svar på frågor) – UI-only v1 (nivå 3)
-Krav:
-- Svar ska ligga på EGEN sida (blandas inte med frågor)
-- Admin kan filtrera och söka
-- Visa tydligt: vem svarat (eller anonymt), fråga, svar, tidsstämpel
+Syfte: Admin/Manager – Svar (scope-styrt) – UI-only v1 (nivå 3)
+Krav (AO-019 7/8):
+- Admin/Manager ser svar scope-baserat
+- Koppling: fråga ↔ svar ↔ empNo
+- Manager ser endast sin subtree
+- Fail-closed vid saknad org/assignments
 Policy:
 - Ingen backend
-- Ingen känslig data lagras
-- Robust guard: sessionStorage först, fallback localStorage
+- sessionStorage först, fallback localStorage (fail-closed)
+- Ingen känslig persondata (anst.nr)
+- Inga nya storage-keys
+- Hel-filsleverans
+- XSS-escape på all rendering
 Lagring (läser):
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
-- AO-015_QUESTIONS_V1 (localStorage) – frågor
-- AO-016_ANSWERS_V1 (localStorage) – svar (skapas av employee/questions.html)
-Kompatibilitet (fallback om äldre keys används i repo):
-- AO-015_QA_V1 (localStorage) – kombinerad frågor+svar (äldre)
+- AO-020_ORG_V1 (localStorage) – org-träd
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – empNo→scopeId
+- Frågor: AO-012_QUESTIONS_V1 (primär i flera filer), fallback AO-015_QUESTIONS_V1
+- Svar: AO-013_ANSWERS_V1 (employee), fallback AO-016_ANSWERS_V1 (äldre)
+- Äldre fallback: AO-015_QA_V1 (kombinerad)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -94,6 +99,20 @@ Kompatibilitet (fallback om äldre keys används i repo):
     .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
     code{ font-size:.95em; }
     .pill.warn{ border-color: rgba(244,63,94,.35); background: rgba(244,63,94,.10); }
+
+    .guardbox{
+      margin: 10px 0 0;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: #fff;
+      color: var(--muted);
+    }
+    .guardbox.err{
+      border-color: rgba(239,68,68,.35);
+      background: rgba(254,226,226,.55);
+      color: #7f1d1d;
+    }
   </style>
 </head>
 
@@ -117,18 +136,20 @@ Kompatibilitet (fallback om äldre keys används i repo):
 </header>
 
 <main class="container">
-  <h1 class="tight">Svar (Admin)</h1>
-  <p class="muted">Inkomna svar från medarbetare. Frågor ligger i <code>admin/questions.html</code>.</p>
+  <h1 class="tight">Svar (Admin/Manager)</h1>
+  <p class="muted">Inkomna svar från medarbetare. Scope-styrt enligt org-trädet.</p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
       <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
       </div>
       <div class="row wrap">
         <a class="btn secondary" href="./questions.html">Skapa frågor</a>
       </div>
     </div>
+
+    <div id="guardPanel" class="guardbox" style="display:none;"></div>
 
     <div class="layout">
       <section class="panel list" aria-label="Lista svar">
@@ -170,8 +191,9 @@ Kompatibilitet (fallback om äldre keys används i repo):
         <div id="list"></div>
 
         <div class="smallnote">
-          Svar lagras i <code>AO-016_ANSWERS_V1</code> (v1). Om listan är tom: be employee svara i <code>employee/questions.html</code>.
-          <br/>Fallback: om repo råkar använda äldre kombinerad nyckel <code>AO-015_QA_V1</code> så läses svar därifrån.
+          Scope: admin ser alla, manager ser endast sin subtree.
+          <br/>Keys (kompat): frågor läses från <code>AO-012_QUESTIONS_V1</code> eller <code>AO-015_QUESTIONS_V1</code>. Svar läses från <code>AO-013_ANSWERS_V1</code> eller <code>AO-016_ANSWERS_V1</code>.
+          <br/>Äldre fallback: <code>AO-015_QA_V1</code>.
         </div>
       </section>
     </div>
@@ -180,19 +202,23 @@ Kompatibilitet (fallback om äldre keys används i repo):
 
 <script>
 /* ============================================================
-AO-051 | FIL-ID: admin/answers.html (inline JS)
+AO-019 7/8 | FIL-ID: admin/answers.html (inline JS)
 ============================================================ */
 (function(){
   "use strict";
 
-  const SESSION_KEY   = "AO-001_LOGIN_V1";
+  const SESSION_KEY        = "AO-001_LOGIN_V1";
 
-  // Primär kontrakt (denna AO):
-  const QUESTIONS_KEY = "AO-015_QUESTIONS_V1";
-  const ANSWERS_KEY   = "AO-016_ANSWERS_V1";
+  // Org/scope
+  const ORG_KEY            = "AO-020_ORG_V1";
+  const ASSIGNMENTS_KEY    = "AO-020_ROLE_ASSIGNMENTS_V2";
 
-  // Kompatibilitet med äldre admin/home.html i repo (kombinerad Q/A):
-  const QA_FALLBACK_KEY = "AO-015_QA_V1";
+  // Q/A keys (kompat utan nya keys)
+  const QUESTIONS_KEY_A    = "AO-012_QUESTIONS_V1";
+  const QUESTIONS_KEY_B    = "AO-015_QUESTIONS_V1";
+  const ANSWERS_KEY_A      = "AO-013_ANSWERS_V1";
+  const ANSWERS_KEY_B      = "AO-016_ANSWERS_V1";
+  const QA_FALLBACK_KEY    = "AO-015_QA_V1";
 
   const $ = (s) => document.querySelector(s);
 
@@ -206,15 +232,32 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
     return null;
   }
 
+  function normalizeRole(r){
+    return String(r || "").trim().toLowerCase();
+  }
+
+  function normalizeEmpNo(v){
+    const s = String(v || "").trim();
+    return s.replace(/[^\d]/g, "");
+  }
+
   function readAuth(){
     try{
       const raw = readRawSession();
       if(!raw) return null;
       const data = JSON.parse(raw);
       if(!data?.auth?.isAuthed) return null;
-      if(data.auth.role !== "admin") return null;
+
+      const role = normalizeRole(data.auth.role);
+      if(role !== "admin" && role !== "manager") return null;
+
       if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-      return data.auth;
+
+      const empNo = normalizeEmpNo(
+        data.auth.empNo ?? data.auth.employeeNo ?? data.auth.emp ?? data.auth.userId ?? ""
+      );
+
+      return { ...data.auth, role, empNo };
     }catch{
       return null;
     }
@@ -242,6 +285,19 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
     m.textContent = text || "";
   }
 
+  function setGuard(kind, text){
+    const box = $("#guardPanel");
+    if(!text){
+      box.style.display = "none";
+      box.className = "guardbox";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "block";
+    box.className = "guardbox" + (kind ? " " + kind : "");
+    box.textContent = text;
+  }
+
   function fmtTime(ts){
     const t = Number(ts);
     if(!Number.isFinite(t)) return "—";
@@ -255,13 +311,7 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
     return `${y}-${m}-${day} ${hh}:${mm}`;
   }
 
-  function normalizeEmpNo(v){
-    const s = String(v || "").trim();
-    return s.replace(/[^\d]/g, "");
-  }
-
   function tryWriteClipboard(text){
-    // Fail-closed: om clipboard inte finns / blockeras, fall tillbaka.
     if(!text) return Promise.reject(new Error("empty"));
     if(navigator && navigator.clipboard && typeof navigator.clipboard.writeText === "function"){
       return navigator.clipboard.writeText(text);
@@ -269,10 +319,92 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
     return Promise.reject(new Error("clipboard_unavailable"));
   }
 
+  // Org helpers
+  function normalizeOrgTree(raw){
+    const arr =
+      Array.isArray(raw) ? raw :
+      (Array.isArray(raw?.nodes) ? raw.nodes :
+      (Array.isArray(raw?.items) ? raw.items : null));
+
+    if(!Array.isArray(arr)) return [];
+
+    return arr
+      .filter(n => n && (n.id !== undefined && n.id !== null))
+      .map(n => ({
+        id: String(n.id),
+        parentId: (n.parentId === null || n.parentId === undefined) ? null : String(n.parentId),
+        name: String(n.name ?? n.title ?? n.label ?? n.id)
+      }));
+  }
+
+  function buildOrgIndex(nodes){
+    const byId = new Map();
+    const children = new Map();
+    nodes.forEach(n => {
+      byId.set(n.id, n);
+      if(!children.has(n.id)) children.set(n.id, []);
+    });
+    nodes.forEach(n => {
+      if(n.parentId && byId.has(n.parentId)){
+        children.get(n.parentId).push(n.id);
+      }
+    });
+    return { byId, children };
+  }
+
+  function orgHasDuplicateIds(nodes){
+    const seen = new Set();
+    for(const n of nodes){
+      if(seen.has(n.id)) return true;
+      seen.add(n.id);
+    }
+    return false;
+  }
+
+  function isDescendant(index, nodeId, ancestorId){
+    const a = String(ancestorId);
+    const n = String(nodeId);
+    if(n === a) return true;
+    let cur = index.byId.get(n);
+    let hops = 0;
+    while(cur && cur.parentId && hops < 5000){
+      if(cur.parentId === a) return true;
+      cur = index.byId.get(String(cur.parentId));
+      hops++;
+    }
+    return false;
+  }
+
+  // Assignments helpers
+  function normalizeAssignments(raw){
+    const arr =
+      Array.isArray(raw) ? raw :
+      (Array.isArray(raw?.assignments) ? raw.assignments :
+      (Array.isArray(raw?.items) ? raw.items : null));
+
+    if(!Array.isArray(arr)) return [];
+
+    return arr
+      .filter(a => a && (a.empNo !== undefined && a.empNo !== null))
+      .map(a => ({
+        empNo: normalizeEmpNo(a.empNo),
+        roleId: String(a.roleId ?? a.role ?? ""),
+        scopeId: (a.scopeId === undefined || a.scopeId === null) ? "" : String(a.scopeId)
+      }))
+      .filter(a => a.empNo);
+  }
+
+  function getMyScopeId(empNo, assignments){
+    const row = assignments.find(x => x.empNo === empNo);
+    return String(row?.scopeId || "").trim();
+  }
+
   // --- Guard ---
   const auth = readAuth();
   if(!auth){ redirectLogin(); return; }
-  $("#whoName").textContent = auth.displayName || "Admin";
+
+  $("#whoName").textContent = auth.displayName || (auth.role === "manager" ? "Manager" : "Admin");
+  $("#whoRole").textContent = auth.role;
 
   function doLogout(){
     sessionStorage.removeItem(SESSION_KEY);
@@ -281,20 +413,74 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
+  // Org/scope state (fail-closed för manager, och även för admin för att undvika läckage om scope krävs)
+  const orgNodes = normalizeOrgTree(safeParse(ORG_KEY, null));
+  const orgIndex = buildOrgIndex(orgNodes);
+  const assignments = normalizeAssignments(safeParse(ASSIGNMENTS_KEY, null));
+  const myScopeId = (auth.role === "manager" && auth.empNo) ? getMyScopeId(String(auth.empNo), assignments) : "";
+
+  function scopeReady(){
+    const problems = [];
+    if(!orgNodes.length) problems.push("Org-träd saknas (AO-020_ORG_V1).");
+    if(orgNodes.length && orgHasDuplicateIds(orgNodes)) problems.push("Org-trädet är korrupt (duplicerade id).");
+
+    // Manager måste ha assignments+scopeId för att filtrera
+    if(auth.role === "manager"){
+      if(!auth.empNo) problems.push("Manager saknar anst.nr i sessionen.");
+      if(!assignments.length) problems.push("Role assignments saknas (AO-020_ROLE_ASSIGNMENTS_V2).");
+      if(!myScopeId) problems.push("Manager saknar scopeId i assignments.");
+      if(myScopeId && orgNodes.length && !orgIndex.byId.has(String(myScopeId))) problems.push("Manager scopeId finns inte i org-trädet.");
+    }
+
+    if(problems.length){
+      setGuard("err", "Svar är låsta (fail-closed): " + problems.join(" "));
+      return false;
+    }
+    setGuard("", "");
+    return true;
+  }
+
   // --- Data loaders ---
-  function loadQuestionsPrimary(){
-    const arr = safeParse(QUESTIONS_KEY, []);
+  function loadArray(key){
+    const arr = safeParse(key, []);
     return Array.isArray(arr) ? arr : [];
   }
 
-  function loadAnswersPrimary(){
-    const arr = safeParse(ANSWERS_KEY, []);
-    return Array.isArray(arr) ? arr : [];
+  function loadQuestionsUnified(){
+    const a = loadArray(QUESTIONS_KEY_A);
+    const b = loadArray(QUESTIONS_KEY_B);
+
+    // Om båda har data: slå ihop på id (senast vinner)
+    const map = new Map();
+    a.forEach(q => map.set(String(q.id), q));
+    b.forEach(q => map.set(String(q.id), q));
+    return Array.from(map.values());
+  }
+
+  function loadAnswersUnified(){
+    const a = loadArray(ANSWERS_KEY_A);
+    const b = loadArray(ANSWERS_KEY_B);
+
+    // Välj den som faktiskt används (oftast AO-013). Om båda har data -> slå ihop på id.
+    const map = new Map();
+    a.forEach(x => map.set(String(x.id || ""), x));
+    b.forEach(x => map.set(String(x.id || ""), x));
+
+    // Om id saknas i något objekt: lägg en stabil synthetic nyckel
+    const out = [];
+    const seen = new Set();
+    [...a, ...b].forEach(x => {
+      const k = String(x?.id || `${x?.questionId || "q"}_${x?.empNo || "e"}_${x?.createdAt || ""}`);
+      if(seen.has(k)) return;
+      seen.add(k);
+      out.push(x);
+    });
+
+    return out.length ? out : Array.from(map.values()).filter(x => x && (x.id || x.questionId));
   }
 
   function loadQaFallback(){
-    const arr = safeParse(QA_FALLBACK_KEY, []);
-    return Array.isArray(arr) ? arr : [];
+    return loadArray(QA_FALLBACK_KEY);
   }
 
   function indexQuestionsById(questions){
@@ -303,44 +489,51 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
     return map;
   }
 
+  function questionText(q){
+    return String(q?.prompt ?? q?.text ?? q?.question ?? q?.q ?? "—");
+  }
+
+  function isInManagerScope(questionScopeId){
+    const qs = String(questionScopeId || "").trim();
+    if(!qs) return false; // saknat scope => osynlig
+    if(!orgIndex.byId.has(qs)) return false;
+    return isDescendant(orgIndex, qs, String(myScopeId));
+  }
+
   function buildRows(){
-    // 1) Försök läsa enligt AO-051 (separata keys)
-    const questions = loadQuestionsPrimary();
+    // fail-closed: om manager och scope inte är redo => lås
+    if(!scopeReady()) return [];
+
+    const questions = loadQuestionsUnified();
     const qById = indexQuestionsById(questions);
 
-    const primaryAnswers = loadAnswersPrimary();
+    const primaryAnswers = loadAnswersUnified();
 
-    // 2) Om inga svar finns i AO-016_ANSWERS_V1, försök fallback till AO-015_QA_V1 (kombinerat)
     let answers = Array.isArray(primaryAnswers) ? primaryAnswers.slice() : [];
-
     let source = "primary";
+
     if(answers.length === 0){
       const qa = loadQaFallback();
-
-      // Tolka “answered” frågor som svarsposter
       answers = qa
         .filter(q => {
           const hasA = !!(q && q.answer && String(q.answer).trim().length);
           return (q && (q.status === "answered" || hasA));
         })
-        .map(q => {
-          // Normalisera till answers-shape
-          return {
-            id: q.id || ("qa_" + Math.random().toString(16).slice(2)),
-            questionId: q.id,
-            createdAt: q.answeredAt || q.updatedAt || q.createdAt || Date.now(),
-            answer: q.answer,
-            anonymous: (q.answerAnonymous === true),
-            empNo: q.empNo || "",
-            questionTitle: q.title || "Fråga",
-            prompt: q.prompt || "—"
-          };
-        });
-
+        .map(q => ({
+          id: q.id || ("qa_" + Math.random().toString(16).slice(2)),
+          questionId: q.id,
+          createdAt: q.answeredAt || q.updatedAt || q.createdAt || Date.now(),
+          answerText: q.answer,
+          anonymous: (q.answerAnonymous === true),
+          empNo: q.empNo || "",
+          employeeName: q.employeeName || "",
+          questionTitle: q.title || "Fråga",
+          prompt: q.prompt || "—",
+          scopeId: q.scopeId || ""
+        }));
       source = "fallback";
     }
 
-    // Sort
     const sortMode = $("#sort").value;
     answers.sort((a,b) => {
       const ta = (a.createdAt || a.answeredAt || a.updatedAt || 0);
@@ -351,12 +544,22 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
     const rows = answers.map(a => {
       const q = qById.get(String(a.questionId)) || null;
 
+      // scope kommer primärt från frågan (kontrakt), fallback från answer/qa
+      const scopeId = String(q?.scopeId || a.scopeId || "").trim();
+
+      // manager scope-filter
+      if(auth.role === "manager"){
+        if(!isInManagerScope(scopeId)) return null;
+      }
+
       const isAnon = (a.anonymous === true);
+
       const empNo = isAnon ? "" : normalizeEmpNo(a.empNo);
-      const who = isAnon ? "Anonym" : (empNo ? `Anst.nr ${empNo}` : "Okänd");
+      const name = isAnon ? "" : String(a.employeeName || "").trim();
+      const who = isAnon ? "Anonym" : (name ? name : (empNo ? `Anst.nr ${empNo}` : "Okänd"));
 
       const title = q?.title || a.questionTitle || "Fråga";
-      const prompt = q?.prompt || a.prompt || "—";
+      const prompt = questionText(q) || String(a.prompt || "—");
       const allowAnon = (q?.allowAnonymous === true) || (a.allowAnonymous === true);
 
       return {
@@ -368,10 +571,11 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
         allowAnon,
         title,
         prompt,
-        answerText: String(a.answer || ""),
+        answerText: String(a.answerText ?? a.answer ?? ""),
+        scopeId,
         _source: source
       };
-    });
+    }).filter(Boolean);
 
     return rows;
   }
@@ -387,7 +591,7 @@ AO-051 | FIL-ID: admin/answers.html (inline JS)
 
     if(q){
       out = out.filter(r => {
-        const blob = `${r.empNo||""} ${r.title||""} ${r.prompt||""} ${r.answerText||""}`.toLowerCase();
+        const blob = `${r.empNo||""} ${r.who||""} ${r.title||""} ${r.prompt||""} ${r.answerText||""}`.toLowerCase();
         return blob.includes(q);
       });
     }
@@ -412,15 +616,19 @@ Tid: ${fmtTime(row.createdAt)}`
     setMsg("", "");
 
     const allRows = buildRows();
-    const shown = filterRows(allRows).slice(0, 100);
+    const shown = filterRows(allRows).slice(0, 120);
 
-    // Hjälptext om vi kör fallback så admin förstår varför
     if(allRows.length > 0 && allRows[0]._source === "fallback"){
-      setMsg("warn", "Obs: Visar svar från AO-015_QA_V1 (fallback). Om ni vill köra strikt AO-051: säkerställ att employee/questions.html skriver AO-016_ANSWERS_V1.");
+      setMsg("warn", "Obs: Visar svar från AO-015_QA_V1 (fallback). För strikt AO-019: säkerställ att employee skriver AO-013_ANSWERS_V1 och admin skriver frågor med scopeId.");
+    }
+
+    if(!scopeReady()){
+      list.innerHTML = `<div class="empty">Svar är låsta (fail-closed).</div>`;
+      return;
     }
 
     if(shown.length === 0){
-      list.innerHTML = `<div class="empty">Inga svar matchar filtret.</div>`;
+      list.innerHTML = `<div class="empty">Inga svar matchar filtret (eller inga svar inom din scope).</div>`;
       return;
     }
 
@@ -463,7 +671,6 @@ Tid: ${fmtTime(row.createdAt)}`
           btn.textContent = "Kopierat!";
           setTimeout(() => { btn.textContent = old; }, 900);
         }catch{
-          // Fail-closed fallback: visa prompt i alert
           alert("Kunde inte kopiera automatiskt. Markera och kopiera manuellt:\n\n" + text);
         }
       });
@@ -473,7 +680,12 @@ Tid: ${fmtTime(row.createdAt)}`
   async function copySummary(){
     setMsg("", "");
 
-    const rows = filterRows(buildRows()).slice(0, 50);
+    if(!scopeReady()){
+      setMsg("err", "Kan inte skapa sammanfattning: scope/org saknas.");
+      return;
+    }
+
+    const rows = filterRows(buildRows()).slice(0, 60);
 
     const filter = $("#filter").value;
     const q = String($("#search").value || "").trim();
