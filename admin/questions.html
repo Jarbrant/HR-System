@@ -1,12 +1,18 @@
 <!-- ============================================================
-AO-019 7/8 (PATCH) | FIL-ID: admin/questions.html
+AO-019 7/8-FIX-03 | FIL-ID: admin/questions.html
 Projekt: HR-System
 Syfte: Admin/Manager – Frågor (skapa/tilldela batch) – UI-only v1.0 (scope-styrt)
+PATCH: v1.1 (KEY align + assignments V2 map+array + org-loop fail-fast)
 Krav (AO-019 7/8):
 - Skapa frågor med scopeId (default = användarens scopeId)
 - Admin kan välja scope i dropdown (org)
 - Manager kan bara välja scope inom sin subtree
 - Saknat/korrupt scope/org/assignments → blockera skapande (fail-closed)
+FIX-03 (PRC):
+- Questions-key align: skriv primärt till AO-012_QUESTIONS_V1
+- AO-015_QUESTIONS_V1 får vara read-only/compat (merge vid läsning, dedupe på id)
+- Assignments V2 stöd för map + array
+- Org-loop fail-fast: visited-set (ingen 5000-hop hängning)
 Policy:
 - Ingen backend
 - sessionStorage först, fallback localStorage (fail-closed)
@@ -243,17 +249,25 @@ Policy:
 /* ============================================================
 AO-019 7/8 | FIL-ID: admin/questions.html (inline JS)
 Scope-styrt Q&A (Admin/Manager)
+FIX-03:
+- KEY align: skriv primärt till AO-012_QUESTIONS_V1
+- merge read: AO-012 + AO-015 (dedupe på id)
+- Assignments V2 map+array
+- Org-loop fail-fast: visited-set
 ============================================================ */
 (function(){
   "use strict";
 
-  const SESSION_KEY     = "AO-001_LOGIN_V1";
-  const GROUPS_KEY      = "AO-017_GROUPS_V1";
-  const QUESTIONS_KEY   = "AO-015_QUESTIONS_V1";
+  const SESSION_KEY        = "AO-001_LOGIN_V1";
+  const GROUPS_KEY         = "AO-017_GROUPS_V1";
+
+  // FIX-03: key align
+  const QUESTIONS_KEY      = "AO-012_QUESTIONS_V1"; // primär sanning (skriv hit)
+  const QUESTIONS_KEY_COMP = "AO-015_QUESTIONS_V1"; // read-only/compat (läs/merge)
 
   // AO-019 7/8 (LÄS)
-  const ORG_KEY         = "AO-020_ORG_V1";
-  const ASSIGNMENTS_KEY = "AO-020_ROLE_ASSIGNMENTS_V2"; // defensivt: tydligt namn för att undvika typo-P0
+  const ORG_KEY            = "AO-020_ORG_V1";
+  const ASSIGNMENTS_KEY    = "AO-020_ROLE_ASSIGNMENTS_V2";
 
   const $ = (s) => document.querySelector(s);
 
@@ -292,7 +306,7 @@ Scope-styrt Q&A (Admin/Manager)
     m.textContent = text || "";
   }
 
-  // P0: fail-closed save (kvot/blockerade skrivningar)
+  // fail-closed save (kvot/blockerade skrivningar)
   function saveFailClosed(key, value){
     try{
       localStorage.setItem(key, JSON.stringify(value));
@@ -397,43 +411,84 @@ Scope-styrt Q&A (Admin/Manager)
     return out;
   }
 
+  // FIX-03: visited-set (fail-fast vid loop/korrup kedja)
   function isDescendant(index, nodeId, ancestorId){
     const a = String(ancestorId);
     const n = String(nodeId);
     if(n === a) return true;
+
+    const visited = new Set();
+    visited.add(n);
+
     let cur = index.byId.get(n);
-    let hops = 0;
-    while(cur && cur.parentId && hops < 5000){
-      if(cur.parentId === a) return true;
-      cur = index.byId.get(String(cur.parentId));
-      hops++;
+
+    while(cur && cur.parentId){
+      const pid = String(cur.parentId);
+
+      if(pid === a) return true;
+
+      if(visited.has(pid)){
+        // loop/korrup kedja → fail-closed snabbt
+        return false;
+      }
+      visited.add(pid);
+
+      cur = index.byId.get(pid);
     }
     return false;
   }
 
-  // --- Assignments helpers ---
+  // org validation light (dup-id)
+  function orgHasDuplicateIds(nodes){
+    const seen = new Set();
+    for(const n of nodes){
+      if(seen.has(n.id)) return true;
+      seen.add(n.id);
+    }
+    return false;
+  }
+
+  // --- Assignments helpers (FIX-03: map + array) ---
   function normalizeAssignments(raw){
+    // Array-format (legacy/nuvarande)
     const arr =
       Array.isArray(raw) ? raw :
       (Array.isArray(raw?.assignments) ? raw.assignments :
       (Array.isArray(raw?.items) ? raw.items : null));
 
-    if(!Array.isArray(arr)) return [];
+    if(Array.isArray(arr)){
+      return arr
+        .filter(a => a && (a.empNo !== undefined && a.empNo !== null))
+        .map(a => ({
+          empNo: normalizeEmpNo(a.empNo),
+          roleId: String(a.roleId ?? a.role ?? ""),
+          scopeId: (a.scopeId === undefined || a.scopeId === null) ? "" : String(a.scopeId)
+        }))
+        .filter(a => a.empNo);
+    }
 
-    return arr
-      .filter(a => a && (a.empNo !== undefined && a.empNo !== null))
-      .map(a => ({
-        empNo: normalizeEmpNo(a.empNo),
-        roleId: String(a.roleId ?? a.role ?? ""),
-        scopeId: (a.scopeId === undefined || a.scopeId === null) ? "" : String(a.scopeId)
-      }))
-      .filter(a => a.empNo);
+    // Map-format: { "123": { roleId, scopeId } }
+    if(raw && typeof raw === "object"){
+      const out = [];
+      for(const [k, v] of Object.entries(raw)){
+        const empNo = normalizeEmpNo(k);
+        if(!empNo) continue;
+        const scopeId = (v && (v.scopeId !== undefined && v.scopeId !== null)) ? String(v.scopeId) : "";
+        const roleId = (v && (v.roleId !== undefined && v.roleId !== null)) ? String(v.roleId) : String(v?.role ?? "");
+        out.push({ empNo, roleId, scopeId });
+      }
+      return out.filter(x => x.empNo);
+    }
+
+    return [];
   }
 
   function getMyScopeId(auth, assignments){
     if(!auth?.empNo) return "";
-    const row = assignments.find(x => x.empNo === auth.empNo);
-    return String(row?.scopeId || "").trim();
+    const rows = assignments.filter(x => x.empNo === auth.empNo);
+    if(!rows.length) return "";
+    const withScope = rows.find(r => String(r.scopeId || "").trim());
+    return String((withScope || rows[0])?.scopeId || "").trim();
   }
 
   // --- Guard ---
@@ -454,18 +509,9 @@ Scope-styrt Q&A (Admin/Manager)
   const orgNodes = normalizeOrgTree(safeParse(ORG_KEY, null));
   const orgIndex = buildOrgIndex(orgNodes);
 
-  const assignments = normalizeAssignments(safeParse(ASSIGNMENTS_KEY, null));
+  const assignmentsRaw = safeParse(ASSIGNMENTS_KEY, null);
+  const assignments = normalizeAssignments(assignmentsRaw);
   const myScopeId = getMyScopeId(auth, assignments);
-
-  // org validation light (dup-id)
-  function orgHasDuplicateIds(nodes){
-    const seen = new Set();
-    for(const n of nodes){
-      if(seen.has(n.id)) return true;
-      seen.add(n.id);
-    }
-    return false;
-  }
 
   function guardCreateState(){
     const problems = [];
@@ -596,10 +642,41 @@ Scope-styrt Q&A (Admin/Manager)
   }
   $("#targetMode").addEventListener("change", syncTargetUI);
 
-  // --- Questions store ---
-  function loadQuestions(){
-    const arr = safeParse(QUESTIONS_KEY, []);
+  // --- Questions store (FIX-03: merge read, write to 012) ---
+  function loadQuestionsFromKey(key){
+    const arr = safeParse(key, []);
     return Array.isArray(arr) ? arr : [];
+  }
+
+  function mergeQuestionsForRead(){
+    // Läs: merge 012 + 015 (dedupe på id). Skriv aldrig till 015.
+    const a = loadQuestionsFromKey(QUESTIONS_KEY);
+    const b = loadQuestionsFromKey(QUESTIONS_KEY_COMP);
+    if(!b.length) return a;
+
+    const seen = new Set();
+    const out = [];
+    // Prioritera 012 vid id-krock
+    a.forEach(x => {
+      const id = String(x?.id || "");
+      if(!id) return;
+      if(seen.has(id)) return;
+      seen.add(id);
+      out.push(x);
+    });
+    b.forEach(x => {
+      const id = String(x?.id || "");
+      if(!id) return;
+      if(seen.has(id)) return;
+      seen.add(id);
+      out.push(x);
+    });
+    return out;
+  }
+
+  function loadQuestionsForWrite(){
+    // Skriv-flöde: endast 012
+    return loadQuestionsFromKey(QUESTIONS_KEY);
   }
 
   function computeAllTargets(){
@@ -610,7 +687,8 @@ Scope-styrt Q&A (Admin/Manager)
     }));
     if(set.size > 0) return Array.from(set);
 
-    loadQuestions().forEach(q => {
+    // fallback: utgå från primär 012 (inte merge) för att undvika att “compat”-data styr skapande
+    loadQuestionsForWrite().forEach(q => {
       const v = validateEmpNo(q.targetEmpNo);
       if(v.ok) set.add(v.empNo);
     });
@@ -620,7 +698,9 @@ Scope-styrt Q&A (Admin/Manager)
 
   function pushQuestions(targetEmpNos, payload){
     const now = Date.now();
-    const all = loadQuestions();
+
+    // FIX-03: skriv endast till 012
+    const all = loadQuestionsForWrite();
     let count = 0;
 
     const originMode = (payload.originTargetMode === "all" || payload.originTargetMode === "group" || payload.originTargetMode === "one")
@@ -631,14 +711,9 @@ Scope-styrt Q&A (Admin/Manager)
       payload.prompts.forEach(prompt => {
         all.push({
           id: genId("q"),
-
-          // P1: behåll origin-mode så listfilter inte ljuger (ingen ny key; targetMode finns redan)
           targetMode: originMode,
-
           targetEmpNo: String(empNo),
-
           scopeId: String(payload.scopeId),
-
           title: payload.title || "Fråga",
           prompt,
           note: payload.note || "",
@@ -758,7 +833,8 @@ Scope-styrt Q&A (Admin/Manager)
     const filter = $("#listFilter").value;
     const q = String($("#search").value || "").trim().toLowerCase();
 
-    const all = loadQuestions().slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    // FIX-03: merge read (dedupe), men sort på createdAt
+    const all = mergeQuestionsForRead().slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
 
     let shown = all;
 
@@ -797,6 +873,10 @@ Scope-styrt Q&A (Admin/Manager)
 
       const tm = String(x.targetMode || "one");
 
+      // Markera kompatkälla read-only i listan (utan att ändra UX-flöde i övrigt)
+      const isCompat = !loadQuestionsFromKey(QUESTIONS_KEY).some(q2 => String(q2?.id||"") === String(x?.id||""))
+        && loadQuestionsFromKey(QUESTIONS_KEY_COMP).some(q3 => String(q3?.id||"") === String(x?.id||""));
+
       el.innerHTML = `
         <div style="min-width:260px;">
           <p class="item-title">${escapeHtml(x.title || "Fråga")}</p>
@@ -805,13 +885,14 @@ Scope-styrt Q&A (Admin/Manager)
             <span><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</span>
             <span><strong>Läge:</strong> ${escapeHtml(tm)}</span>
             ${x.allowAnonymous ? `<span class="pill">Anonymt tillåtet</span>` : ``}
+            ${isCompat ? `<span class="pill">Compat (read-only)</span>` : ``}
           </div>
           <div class="meta"><span><strong>Fråga:</strong> ${escapeHtml(x.prompt || "—")}</span></div>
           ${x.note ? `<div class="meta"><span><strong>Info:</strong> ${escapeHtml(x.note)}</span></div>` : ``}
           ${!String(x.scopeId||"").trim() ? `<div class="meta"><span class="pill">⚠ Saknar scopeId (osynlig för employee)</span></div>` : ``}
         </div>
         <div class="row" style="gap:8px;">
-          <button type="button" class="secondary" data-del="${escapeHtml(x.id)}">Ta bort</button>
+          <button type="button" class="secondary" data-del="${escapeHtml(x.id)}" ${isCompat ? "disabled" : ""}>Ta bort</button>
         </div>
       `;
       list.appendChild(el);
@@ -820,16 +901,19 @@ Scope-styrt Q&A (Admin/Manager)
     list.querySelectorAll("button[data-del]").forEach(btn => {
       btn.addEventListener("click", () => {
         const id = btn.getAttribute("data-del");
+        if(!id) return;
+
         if(!confirm("Ta bort frågan?")) return;
 
-        const all = loadQuestions();
+        // FIX-03: radera endast från 012 (primär). Compat är read-only.
+        const all = loadQuestionsForWrite();
         const item = all.find(x => String(x.id) === String(id));
         if(!item){
-          setMsg("err", "Hittar inte frågan (korrupt data).");
+          setMsg("err", "Kan inte ta bort: frågan finns inte i primär-listan (compat/read-only eller korrupt data).");
           return;
         }
 
-        // P1 defensivt: manager får aldrig radera utanför scope även om DOM manipuleras
+        // defensivt: manager får aldrig radera utanför scope även om DOM manipuleras
         if(auth.role === "manager"){
           if(!canManagerSeeScope(item.scopeId)){
             setMsg("err", "Åtkomst nekad: du kan inte ta bort frågor utanför din scope-subtree.");
@@ -837,7 +921,7 @@ Scope-styrt Q&A (Admin/Manager)
           }
         }
 
-        const next = all.filter(x => x.id !== id);
+        const next = all.filter(x => String(x.id) !== String(id));
         const res = saveFailClosed(QUESTIONS_KEY, next);
         if(!res.ok){
           setMsg("err", "Kunde inte spara borttagning (localStorage är full/blockerad). Inget ändrades.");
