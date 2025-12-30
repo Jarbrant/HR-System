@@ -173,7 +173,7 @@ Lagring:
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
       <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
       </div>
       <div class="row wrap">
         <a class="btn secondary" href="./roles.html">Öppna Roller (demo)</a>
@@ -277,6 +277,10 @@ Lagring:
 <script>
 /* ============================================================
 AO-020 | FIL-ID: admin/org.html (inline JS)
+Autopatch:
+- Tillåt admin + systemadmin (i linje med access.html)
+- Fail-closed: om assignments har scopeId som saknas i org -> blocka ALL radering
+- Health visar även assignment-scope-problem
 ============================================================ */
 (function(){
   "use strict";
@@ -306,7 +310,8 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
       if(!raw) return null;
       const data = JSON.parse(raw);
       if(!data?.auth?.isAuthed) return null;
-      if(data.auth.role !== "admin") return null;
+      // Tillåt admin + systemadmin (linje med admin/access.html)
+      if(data.auth.role !== "admin" && data.auth.role !== "systemadmin") return null;
       if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
       return data.auth;
     }catch{
@@ -345,12 +350,30 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
   const auth = readAuth();
   if(!auth){ redirectLogin(); return; }
   $("#whoName").textContent = auth.displayName || "Admin";
+  $("#whoRole").textContent = auth.role || "admin";
+
   $("#navLogout").addEventListener("click", (e) => {
     e.preventDefault();
     sessionStorage.removeItem(SESSION_KEY);
     localStorage.removeItem(SESSION_KEY);
     redirectLogin();
   });
+
+  // --- Assignments (för scope-block) ---
+  function loadAssignmentsV2(){
+    const raw = safeParse(ASSIGN_V2_KEY, {});
+    return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
+  }
+
+  function extractScopeIds(assignments){
+    const set = new Set();
+    for(const empNo of Object.keys(assignments || {})){
+      const v = assignments[empNo];
+      const sid = String(v?.scopeId || "").trim();
+      if(sid) set.add(sid);
+    }
+    return Array.from(set);
+  }
 
   // --- Org model ---
   function normalizeNode(n){
@@ -363,6 +386,7 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     if(!id || !name) return null;
 
     if(id === ROOT_ID){
+      // Root har alltid parent=null
       return { id: ROOT_ID, name: name || "Koncern (Root)", type: type || "Root", parentId: null, createdAt, updatedAt };
     }
 
@@ -454,7 +478,7 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
 
   // --- Data health checks + repair ---
   function validateAndFix(nodes){
-    // returns { nodes, issues: string[], needsRepair: boolean }
+    // returns { nodes, issues: string[], needsRepair: boolean, cycleNodes: string[] }
     let arr = Array.isArray(nodes) ? nodes.slice() : [];
     const issues = [];
     let needsRepair = false;
@@ -467,8 +491,8 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     }
     arr = seedRootIfMissing(norm);
 
-    // Dedup IDs (keep first)
-    const { byId, dupes } = buildById(arr);
+    // Dedup IDs (keep first) => säkerställ exakt 1 root-id
+    const { dupes } = buildById(arr);
     if(dupes.length){
       issues.push(`Dublett-ID upptäckt: ${dupes.slice(0,6).join(", ")}${dupes.length>6?"…":""}.`);
       needsRepair = true;
@@ -480,23 +504,18 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
       });
     }
 
-    // Ensure parent exists (orphans -> root)
+    // Ensure parent exists (orphans -> root) + tvinga parent under root
     const ids = new Set(arr.map(x => x.id));
-    const fixedParents = arr.map(n => {
+    arr = arr.map(n => {
       if(n.id === ROOT_ID) return n;
-      if(!n.parentId || !ids.has(n.parentId)){
+      const pid = String(n.parentId || "").trim();
+      if(!pid || !ids.has(pid)){
         issues.push(`Orphan parent för ${n.id} → flyttas till root vid reparation.`);
-        needsRepair = true;
-        return { ...n, parentId: ROOT_ID };
-      }
-      if(n.parentId === null){
-        issues.push(`Nod ${n.id} hade parent=null → tvingas under root (kontrakt).`);
         needsRepair = true;
         return { ...n, parentId: ROOT_ID };
       }
       return n;
     });
-    arr = fixedParents;
 
     // Detect cycles via parent-chain per node (fail-closed)
     const parentOf = new Map(arr.map(n => [n.id, n.parentId]));
@@ -512,13 +531,13 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
         cur = p || ROOT_ID;
         steps++;
       }
-      // If we hit guard, treat as corruption risk
+      // guard hit => treat as corruption
       return true;
     }
 
     const cycleNodes = arr.filter(n => n.id !== ROOT_ID && chainHasCycle(n.id)).map(n => n.id);
     if(cycleNodes.length){
-      issues.push(`Loop/cykel upptäckt i org-data. Vissa noder kan döljas tills reparation körs.`);
+      issues.push("Loop/cykel upptäckt i org-data. Vissa noder kan döljas tills reparation körs.");
       needsRepair = true;
     }
 
@@ -529,7 +548,7 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     const raw = safeParse(ORG_KEY, []);
     const { nodes, cycleNodes } = validateAndFix(raw);
 
-    // Bryt cykler: flytta markerade cykel-noder direkt under root (fail-safe)
+    // Bryt cykler: flytta cykel-noder direkt under root (fail-safe)
     if(Array.isArray(cycleNodes) && cycleNodes.length){
       const cycleSet = new Set(cycleNodes);
       for(let i=0;i<nodes.length;i++){
@@ -543,27 +562,16 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     save(ORG_KEY, nodes);
   }
 
-  // --- Assignments + subtree blocking ---
-  function loadAssignmentsV2(){
-    const raw = safeParse(ASSIGN_V2_KEY, {});
-    return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
-  }
-
-  function extractScopeIds(assignments){
-    const set = new Set();
-    for(const empNo of Object.keys(assignments || {})){
-      const v = assignments[empNo];
-      const sid = String(v?.scopeId || "").trim();
-      if(sid) set.add(sid);
-    }
-    return Array.from(set);
-  }
-
+  // --- Scope-block: ancestor-scope (fail-closed) ---
   function computeBlockedByScopes(nodes, scopeIds){
-    // Block if:
-    // - nodeId is an exact scopeId, OR
-    // - some scopeId is an ancestor of nodeId (subtree scope safety)
-    const scopes = new Set(scopeIds.map(String));
+    // Fail-closed: om någon scopeId inte finns i org => blocka ALL radering
+    const nodeIds = new Set(nodes.map(n => n.id));
+    const invalidScopes = (scopeIds || []).map(String).filter(sid => sid && !nodeIds.has(sid));
+    if(invalidScopes.length){
+      return { blockedAll: true, invalidScopes: invalidScopes.slice(0, 20), blocked: new Set(nodes.map(n => n.id)) };
+    }
+
+    const scopes = new Set((scopeIds || []).map(String));
     const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
 
     const memo = new Map(); // nodeId -> boolean
@@ -588,14 +596,14 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
       const seen = new Set([cur]);
       while(cur && steps < MAX_CHAIN_GUARD){
         const p = parentOf.get(cur) || ROOT_ID;
-        if(!p) break;
         if(scopes.has(p)){
           memo.set(id, true);
           return true;
         }
         if(p === ROOT_ID){
-          memo.set(id, scopes.has(ROOT_ID));
-          return memo.get(id);
+          const v = scopes.has(ROOT_ID);
+          memo.set(id, v);
+          return v;
         }
         if(seen.has(p)){
           // corruption -> fail-closed: treat as blocked
@@ -613,7 +621,7 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
 
     const blocked = new Set();
     nodes.forEach(n => { if(isBlocked(n.id)) blocked.add(n.id); });
-    return blocked;
+    return { blockedAll: false, invalidScopes: [], blocked };
   }
 
   // --- UI state ---
@@ -668,14 +676,23 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     return seen; // excludes startId
   }
 
-  function renderHealth(health){
+  function renderHealth(health, scopeBlockInfo){
     const box = $("#healthBox");
-    if(!health || !health.needsRepair){
+    const issues = (health?.issues || []).slice();
+
+    if(scopeBlockInfo?.blockedAll && scopeBlockInfo.invalidScopes?.length){
+      issues.push(`Assignments pekar på scopeId som saknas i org: ${scopeBlockInfo.invalidScopes.join(", ")}. Fail-closed: ALL radering blockeras tills det är fixat i Access.`);
+    }
+
+    const needs = !!health?.needsRepair || !!(scopeBlockInfo?.blockedAll);
+
+    if(!needs){
       box.style.display = "none";
       return;
     }
+
     box.style.display = "block";
-    const msg = health.issues.length ? health.issues.join(" ") : "Org-data ser korrupt ut och kan behöva reparation.";
+    const msg = issues.length ? issues.join(" ") : "Org-data ser korrupt ut och kan behöva reparation.";
     $("#healthText").textContent = msg;
   }
 
@@ -694,13 +711,13 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     const sel = $("#orgParent");
     sel.innerHTML = "";
 
-    // Root option (standard parent)
     const optRoot = document.createElement("option");
     optRoot.value = ROOT_ID;
     optRoot.textContent = "Root (högst upp)";
     sel.appendChild(optRoot);
 
     const flat = flattenTree(nodes);
+
     const descendants = (editingId && editingId !== ROOT_ID) ? getDescendants(nodes, editingId) : new Set();
 
     flat.forEach(row => {
@@ -711,7 +728,6 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
       const indent = "—".repeat(Math.min(row.depth - 1, 10));
       opt.textContent = `${indent} ${row.name}${row.type ? " • " + row.type : ""}`;
 
-      // Disable invalid parents (self + descendants) ✅
       if(editingId && (row.id === editingId || descendants.has(row.id))){
         opt.disabled = true;
       }
@@ -744,13 +760,22 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     const raw = safeParse(ORG_KEY, []);
     const health = validateAndFix(raw);
 
-    // Vi visar varning om korrupt data (loop/dupes/orphans) ✅
-    renderHealth(health);
+    // fail-closed scope-block baserat på assignments
+    const assignments = loadAssignmentsV2();
+    const scopeIds = extractScopeIds(assignments);
+    const scopeBlockInfo = computeBlockedByScopes(health.nodes, scopeIds);
 
-    // För render: använd validerad/fail-closed data, men spara INTE automatiskt (bara på Repair)
+    // visa datahälsa + assignment-scope risker
+    renderHealth(health, scopeBlockInfo);
+
+    // För render: använd validerad/fail-closed data, men spara INTE automatiskt (bara via Repair eller Save)
     const nodes = health.nodes;
 
-    // Parent-select ska bygga på det vi faktiskt renderar
+    // Om editingId pekar på nod som inte finns i normaliserad data: reset (guard)
+    if(editingId && !nodes.some(n => n.id === editingId)){
+      resetForm();
+    }
+
     renderParentSelect(nodes);
     updateKpis(nodes);
 
@@ -762,16 +787,10 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     const children = buildChildrenMap(nodes);
     const childCount = (id) => (children.get(id) || []).length;
 
-    const assignments = loadAssignmentsV2();
-    const scopeIds = extractScopeIds(assignments);
-    const blockedByScope = computeBlockedByScopes(nodes, scopeIds);
-
     let rows = flat;
 
     if(filter === "top"){
-      rows = rows.filter(r => r.parentId === ROOT_ID);
-      // Top: exkludera root själv
-      rows = rows.filter(r => r.id !== ROOT_ID);
+      rows = rows.filter(r => r.parentId === ROOT_ID && r.id !== ROOT_ID);
     }
     if(filter === "leaf"){
       rows = rows.filter(r => r.id !== ROOT_ID && childCount(r.id) === 0);
@@ -794,14 +813,16 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
       const isEditing = (editingId && r.id === editingId);
       const kids = childCount(r.id);
 
+      const withinScope = (!isRoot && scopeBlockInfo.blocked.has(r.id));
+
       // Block delete rules:
       // - root never
       // - has children
       // - within-scope safety (exact scope OR under scope) ✅
-      const blocked = isRoot || (kids > 0) || blockedByScope.has(r.id);
+      // - fail-closed: om invalid scopes => blocka ALL radering
+      const blocked = (scopeBlockInfo.blockedAll) || isRoot || (kids > 0) || scopeBlockInfo.blocked.has(r.id);
 
       const indentPx = Math.min((r.depth - 1) * 14, 140);
-      const withinScope = (!isRoot && blockedByScope.has(r.id));
 
       const el = document.createElement("div");
       el.className = "item";
@@ -816,6 +837,7 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
               <span class="pill">ID: ${escapeHtml(r.id)}</span>
               ${r.type ? `<span class="pill">${escapeHtml(r.type)}</span>` : ``}
               <span class="pill">Barn: ${kids}</span>
+              ${scopeBlockInfo.blockedAll ? `<span class="pill warnpill">Fail-closed: scope-korrupt</span>` : ``}
               ${withinScope ? `<span class="pill warnpill">Scope-skydd</span>` : ``}
               ${isRoot ? `<span class="pill">Root</span>` : ``}
               ${isEditing ? `<span class="pill">Redigeras</span>` : ``}
@@ -841,7 +863,6 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
         setEditing(node);
         renderParentSelect(nodes);
 
-        // sync parent value
         if(editingId === ROOT_ID){
           $("#orgParent").disabled = true;
           $("#orgParent").value = ROOT_ID;
@@ -857,6 +878,11 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
         const id = btn.getAttribute("data-del");
         if(!id) return;
 
+        if(scopeBlockInfo.blockedAll){
+          setMsg("err", "Radering stoppas (fail-closed): assignments har scopeId som saknas i org. Öppna Access och rätta scopes först.");
+          return;
+        }
+
         const node = nodes.find(x => x.id === id);
         if(!node) return;
 
@@ -871,7 +897,7 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
           return;
         }
 
-        if(blockedByScope.has(id)){
+        if(scopeBlockInfo.blocked.has(id)){
           setMsg("err", "Radering stoppas: noden ligger inom en aktiv scope (subtree-skydd). Ändra assignments först.");
           return;
         }
@@ -888,7 +914,6 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
       });
     });
 
-    // Ensure form parent select has reasonable default when not editing
     if(!editingId){
       $("#orgParent").disabled = false;
       $("#orgParent").value = ROOT_ID;
@@ -901,7 +926,6 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     const pid = newParentId || ROOT_ID;
     if(pid === nodeId) return true;
 
-    // prevent selecting descendant (should be prevented already in UI)
     const desc = getDescendants(nodes, nodeId);
     if(desc.has(pid)) return true;
     return false;
@@ -941,7 +965,6 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
         return;
       }
 
-      // Loop-check (should always be ok for new)
       if(wouldCreateLoop(nodes, newNode.id, newNode.parentId)){
         setMsg("err", "Ogiltig parent (skulle skapa loop).");
         return;
@@ -956,7 +979,6 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
       return;
     }
 
-    // Update
     const idx = nodes.findIndex(x => x.id === editingId);
     if(idx < 0){
       setMsg("err", "Vald nod hittades inte.");
@@ -966,7 +988,6 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     }
 
     if(editingId === ROOT_ID){
-      // Root: parent locked null
       const cur = nodes[idx];
       nodes[idx] = { ...cur, name: vName.val, type: type || cur.type, parentId: null, updatedAt: now };
       save(ORG_KEY, nodes);
@@ -1002,7 +1023,6 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
     renderList();
     setEditing(nextNode);
 
-    // keep select options correct
     renderParentSelect(validateAndFix(safeParse(ORG_KEY, [])).nodes);
   });
 
@@ -1023,4 +1043,3 @@ AO-020 | FIL-ID: admin/org.html (inline JS)
 
 </body>
 </html>
-
