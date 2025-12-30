@@ -1,39 +1,36 @@
 <!-- ============================================================
-AO-019 7/8-FIX-03 | FIL-ID: admin/questions.html
+AO-009/22 | FIL-ID: admin/questions.html
 Projekt: HR-System
-Syfte: Admin/Manager – Frågor (skapa/tilldela batch) – UI-only v1.0 (scope-styrt)
-PATCH: v1.1 (KEY align + assignments V2 map+array + org-loop fail-fast)
-Krav (AO-019 7/8):
-- Skapa frågor med scopeId (default = användarens scopeId)
-- Admin kan välja scope i dropdown (org)
-- Manager kan bara välja scope inom sin subtree
-- Saknat/korrupt scope/org/assignments → blockera skapande (fail-closed)
-FIX-03 (PRC):
-- Questions-key align: skriv primärt till AO-012_QUESTIONS_V1
-- AO-015_QUESTIONS_V1 får vara read-only/compat (merge vid läsning, dedupe på id)
-- Assignments V2 stöd för map + array
-- Org-loop fail-fast: visited-set (ingen 5000-hop hängning)
-Policy:
+Syfte: Admin/Manager – Frågor (batch) – UI-only v1 (nivå 3)
+Implementerat enligt AO-009/22:
+- ADMIN/MANAGER kan skapa frågor (endast scale 1–6)
+- scopeId obligatoriskt (ADMIN valfri scope, MANAGER endast subtree)
+- batch: lägg till flera frågor → spara batch
+- lista befintliga frågor (read-only metadata)
+- ta bort fråga endast om den saknar svar (fail-closed om svar ej kan verifieras)
+Policy (LÅST):
 - Ingen backend
 - sessionStorage först, fallback localStorage (fail-closed)
-- Ingen känslig persondata (anst.nr)
-- Inga nya storage-keys
-- Hel-filsleverans
-- XSS-escape på all rendering
+- Ingen känslig persondata (endast empNo)
+- Inga nya storage-keys • Ingen datamodelländring
+- XSS-escape / ingen innerHTML för användardata
+Keys (LÅST):
+- Läs: AO-001_LOGIN_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-012_QUESTIONS_V1 (+ ev AO-015 read-only/compat)
+- Skriv: AO-012_QUESTIONS_V1 (endast)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Admin • Frågor</title>
+  <title>HR-System – Admin/Manager • Frågor</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
   <style>
     .layout{
       display:grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1.1fr .9fr;
       gap: 12px;
       align-items:start;
     }
@@ -44,6 +41,7 @@ Policy:
     .panel{
       border: 1px solid var(--line);
       transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      background: rgba(255,255,255,.8);
     }
     .panel:hover{
       transform: translateY(-1px);
@@ -58,41 +56,20 @@ Policy:
       grid-template-columns: 1fr 1fr;
       gap: 10px;
     }
-    @media (max-width: 620px){
+    @media (max-width: 680px){
       .row2{ grid-template-columns: 1fr; }
     }
 
-    .item{
-      border:1px solid var(--line);
+    .hint{
+      margin-top:10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
       border-radius: var(--r14);
-      padding: 12px;
-      background:#fff;
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
-      display:flex;
-      gap:10px;
-      justify-content:space-between;
-      align-items:flex-start;
-      flex-wrap:wrap;
-    }
-    .item:hover{
-      transform: var(--lift);
-      box-shadow: var(--shadow-soft);
-      filter: brightness(1.02);
-    }
-
-    .item-title{ font-weight: 950; margin:0; }
-    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
-    .empty{
-      padding:18px;
-      border:1px dashed var(--line);
-      border-radius: var(--r14);
+      background: rgba(255,255,255,.75);
       color: var(--muted);
-      background:#fff;
-      text-align:center;
+      font-size: .95rem;
     }
-
-    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
-    code{ font-size:.95em; }
+    .hint strong{ color:#111; }
 
     .guardbox{
       margin-top: 10px;
@@ -107,6 +84,61 @@ Policy:
       background: rgba(254,226,226,.55);
       color: #7f1d1d;
     }
+
+    .batch{
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: #fff;
+      padding: 12px;
+    }
+    .batch h3{ margin:0 0 8px; }
+    .batchItem{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 10px;
+      background:#fff;
+      display:flex;
+      justify-content:space-between;
+      gap:10px;
+      align-items:flex-start;
+      margin-top:10px;
+      flex-wrap:wrap;
+    }
+    .batchItem p{ margin:0; font-weight: 800; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+
+    .item{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background:#fff;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+    .item:hover{
+      transform: var(--lift);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.02);
+    }
+    .item-title{ font-weight: 950; margin:0; }
+
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+      margin-top:10px;
+    }
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+    code{ font-size:.95em; }
   </style>
 </head>
 
@@ -115,7 +147,7 @@ Policy:
 <header class="top">
   <div class="brand">
     <strong>HR-System</strong>
-    <span class="muted">• Admin • Frågor</span>
+    <span class="muted">• Admin/Manager • Frågor</span>
   </div>
 
   <nav class="nav" aria-label="Meny">
@@ -131,12 +163,15 @@ Policy:
 
 <main class="container">
   <h1 class="tight">Frågor (Admin/Manager)</h1>
-  <p class="muted">Skapa och tilldela frågor. Svar visas på <code>admin/answers.html</code>.</p>
+  <p class="muted">
+    Skapa frågor som medarbetare besvarar på <code>employee/questions.html</code>.
+    Endast svarstyp <strong>skala 1–6</strong> (låst).
+  </p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
       <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span> • Anst.nr <span id="whoEmpNo">—</span>
       </div>
       <div class="row wrap">
         <a class="btn secondary" href="../employee/questions.html">Öppna employee/questions (demo)</a>
@@ -146,98 +181,82 @@ Policy:
 
     <div class="layout">
 
-      <!-- SKAPA -->
+      <!-- CREATE / BATCH -->
       <section class="panel create" aria-label="Skapa frågor">
         <div class="panel-title">Skapa frågor (batch)</div>
 
-        <div class="row2">
+        <div id="guardPanel" class="guardbox" style="display:none;"></div>
+
+        <div class="row2" style="margin-top:10px;">
           <label>
-            Mottagare
-            <select id="targetMode">
-              <option value="one">En medarbetare</option>
-              <option value="all">Alla (från grupper)</option>
-              <option value="group">Grupp</option>
-            </select>
-          </label>
-
-          <label id="oneWrap">
-            Anst.nr (employee)
-            <input id="targetEmpNo" type="text" inputmode="numeric" placeholder="t.ex. 1234" />
-          </label>
-
-          <label id="groupWrap" style="display:none;">
-            Grupp
-            <select id="targetGroup"></select>
-          </label>
-
-          <label>
-            Scope (org)
+            Scope (obligatoriskt)
             <select id="scopeSelect"></select>
           </label>
 
           <label>
-            Anonyma svar?
-            <select id="allowAnon">
-              <option value="false" selected>Nej</option>
-              <option value="true">Ja</option>
-            </select>
+            Svarstyp (låst)
+            <input type="text" value="Skala 1–6 (kryssruta)" disabled />
           </label>
         </div>
 
         <label style="margin-top:10px;">
-          Titel (valfri)
-          <input id="title" type="text" placeholder="t.ex. Check-in vecka 1" />
-        </label>
-
-        <label style="margin-top:10px;">
-          Frågor (en per rad)
-          <textarea id="prompts" placeholder="Skriv en fråga per rad..."></textarea>
-        </label>
-
-        <label style="margin-top:10px;">
-          Info till medarbetaren (valfri)
-          <input id="note" type="text" placeholder="t.ex. Svara senast fredag" />
+          Frågetext
+          <input id="qText" type="text" placeholder="t.ex. Jag känner mig trygg i rutinerna." />
         </label>
 
         <div class="row-actions" style="margin-top:10px;">
-          <button id="btnCreate" type="button">Skapa & tilldela</button>
-          <button id="btnClear" class="secondary" type="button">Rensa</button>
+          <button id="btnAdd" type="button">Lägg till i batch</button>
+          <button id="btnClearOne" class="secondary" type="button">Rensa fält</button>
         </div>
 
-        <p id="msg" class="message" aria-live="polite"></p>
+        <div class="batch" aria-label="Batch-lista">
+          <h3 class="tight">Batch</h3>
+          <div class="meta">
+            <span><strong>Scope:</strong> <span id="batchScopeLabel">—</span></span>
+            <span><strong>Antal:</strong> <span id="batchCount">0</span></span>
+          </div>
 
-        <div id="guardPanel" class="guardbox" style="display:none;"></div>
+          <div id="batchList"></div>
 
-        <div class="smallnote">
-          Batch: en rad = en fråga. Skapas per mottagare. <span class="muted">Scope krävs (fail-closed).</span>
+          <div class="row-actions" style="margin-top:10px;">
+            <button id="btnSaveBatch" type="button">Spara batch</button>
+            <button id="btnClearBatch" class="secondary" type="button">Töm batch</button>
+          </div>
+
+          <p id="msg" class="message" aria-live="polite"></p>
+
+          <div class="smallnote">
+            Policy: <strong>scopeId krävs</strong>. MANAGER kan bara välja scope inom sin subtree. Ingen redigering efter skapande.
+          </div>
         </div>
+
+        <div id="delPolicy" class="hint" style="display:none;"></div>
       </section>
 
-      <!-- LISTA -->
-      <section class="panel list" aria-label="Översikt">
-        <div class="panel-title">Översikt</div>
+      <!-- LIST -->
+      <section class="panel list" aria-label="Lista frågor">
+        <div class="panel-title">Befintliga frågor (metadata)</div>
 
-        <div class="row2" style="margin-bottom:10px;">
+        <div class="row2" style="margin-top:10px;">
           <label>
             Visa
             <select id="listFilter">
-              <option value="last50">Senaste 50</option>
-              <option value="one">Till en medarbetare</option>
-              <option value="all">Till alla</option>
-              <option value="group">Till grupp</option>
+              <option value="last50" selected>Senaste 50</option>
+              <option value="myScope">Min scope</option>
+              <option value="allScopes">Alla scopes</option>
             </select>
           </label>
 
           <label>
-            Sök (text/anst.nr/scope)
-            <input id="search" type="text" placeholder="t.ex. vecka eller 1234 eller SCOPE" />
+            Sök (text/scope/skapad av)
+            <input id="search" type="text" placeholder="t.ex. trygg eller SCOPE eller 1234" />
           </label>
         </div>
 
         <div id="list"></div>
 
         <div class="smallnote">
-          Medarbetaren svarar på <code>employee/questions.html</code>. Frågor utan <code>scopeId</code> blir osynliga för employee (policy).
+          Ta bort är endast möjligt om frågan <strong>saknar svar</strong>. Om systemet inte kan verifiera svar → blockeras borttagning (fail-closed).
         </div>
       </section>
 
@@ -247,43 +266,60 @@ Policy:
 
 <script>
 /* ============================================================
-AO-019 7/8 | FIL-ID: admin/questions.html (inline JS)
-Scope-styrt Q&A (Admin/Manager)
-FIX-03:
-- KEY align: skriv primärt till AO-012_QUESTIONS_V1
-- merge read: AO-012 + AO-015 (dedupe på id)
-- Assignments V2 map+array
-- Org-loop fail-fast: visited-set
+AO-009/22 | admin/questions.html (inline JS) – AUTOPATCH v1.3
+GUARD:
+- Endast ADMIN/MANAGER
+- scopeId obligatoriskt
+- type låst: "scale_1_6"
+- Manager scope = subtree (org + assignments)
+STORAGE:
+- Session: sessionStorage -> localStorage (fail-closed)
+- Org/Assignments/Questions: localStorage (keys låsta)
+DELETE POLICY:
+- Delete endast om vi kan verifiera answers-key + frågan saknar svar + finns i primär AO-012
+XSS:
+- Ingen innerHTML för användardata (endast textContent / DOM)
+PATCH (AUTOPATCH):
+- P0: tryLoadAnswers() fortsätter över kandidater tills giltigt format hittas (undvik onödig delete-lock).
+- P1: Stabil sortering + datumrender guard för createdAt.
+- P2: Batch remove-index valideras hårdare.
 ============================================================ */
 (function(){
   "use strict";
 
   const SESSION_KEY        = "AO-001_LOGIN_V1";
-  const GROUPS_KEY         = "AO-017_GROUPS_V1";
-
-  // FIX-03: key align
-  const QUESTIONS_KEY      = "AO-012_QUESTIONS_V1"; // primär sanning (skriv hit)
-  const QUESTIONS_KEY_COMP = "AO-015_QUESTIONS_V1"; // read-only/compat (läs/merge)
-
-  // AO-019 7/8 (LÄS)
   const ORG_KEY            = "AO-020_ORG_V1";
   const ASSIGNMENTS_KEY    = "AO-020_ROLE_ASSIGNMENTS_V2";
+  const QUESTIONS_KEY      = "AO-012_QUESTIONS_V1";
+  const QUESTIONS_KEY_COMP = "AO-015_QUESTIONS_V1"; // read-only compat (om finns)
 
+  const ANSWERS_KEYS_CANDIDATES = [
+    "AO-013_ANSWERS_V1",
+    "AO-014_ANSWERS_V1",
+    "AO-019_ANSWERS_V1"
+  ];
+
+  const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
   const $ = (s) => document.querySelector(s);
 
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
   function readRawSession(){
-    const s1 = sessionStorage.getItem(SESSION_KEY);
-    if (s1) return s1;
-    const s2 = localStorage.getItem(SESSION_KEY);
-    if (s2) return s2;
+    try{
+      const s1 = sessionStorage.getItem(SESSION_KEY);
+      if (s1) return s1;
+    }catch{}
+    try{
+      const s2 = localStorage.getItem(SESSION_KEY);
+      if (s2) return s2;
+    }catch{}
     return null;
   }
 
   function safeParseFrom(storage, key, fallback){
     try{
-      const v = JSON.parse(storage.getItem(key) || "null");
+      const raw = storage.getItem(key);
+      const v = JSON.parse(raw || "null");
       return (v === null || v === undefined) ? fallback : v;
     }catch{ return fallback; }
   }
@@ -291,22 +327,6 @@ FIX-03:
     return safeParseFrom(localStorage, key, fallback);
   }
 
-  function escapeHtml(s){
-    return String(s ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
-  }
-
-  function setMsg(kind, text){
-    const m = $("#msg");
-    m.className = "message" + (kind ? " " + kind : "");
-    m.textContent = text || "";
-  }
-
-  // fail-closed save (kvot/blockerade skrivningar)
   function saveFailClosed(key, value){
     try{
       localStorage.setItem(key, JSON.stringify(value));
@@ -316,42 +336,38 @@ FIX-03:
     }
   }
 
-  function genId(prefix){
-    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  function normalizeRole(r){
+    return String(r || "").trim().toLowerCase();
   }
 
   function normalizeEmpNo(v){
     const s = String(v || "").trim();
-    const digits = s.replace(/[^\d]/g, "");
-    return digits;
-  }
-  function validateEmpNo(v){
-    const emp = normalizeEmpNo(v);
-    if(!emp) return { ok:false, empNo:"" };
-    if(emp.length > 10) return { ok:false, empNo: emp };
-    return { ok:true, empNo: emp };
-  }
-
-  function normalizeRole(r){
-    return String(r || "").trim().toLowerCase();
+    return s.replace(/[^\d]/g, "").slice(0, 10);
   }
 
   function readAuth(){
     try{
       const raw = readRawSession();
       if(!raw) return null;
+
       const data = JSON.parse(raw);
       if(!data?.auth?.isAuthed) return null;
+
+      if (data.auth.expiresAt && Number(data.auth.expiresAt) < Date.now()) return null;
 
       const role = normalizeRole(data.auth.role);
       if(role !== "admin" && role !== "manager") return null;
 
-      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-
-      // empNo behövs för manager-scope (fail-closed om saknas)
       const empNo = normalizeEmpNo(
-        data.auth.empNo ?? data.auth.employeeNo ?? data.auth.emp ?? data.auth.userId ?? ""
+        data.auth.empNo ??
+        data.auth.employeeNo ??
+        data.auth.emp ??
+        data.auth.userId ??
+        data.auth.username ??
+        ""
       );
+
+      if(!empNo) return null;
 
       return {
         ...data.auth,
@@ -363,7 +379,40 @@ FIX-03:
     }
   }
 
-  // --- Org helpers (subtree) ---
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function showGuard(problems){
+    const panel = $("#guardPanel");
+    if(!problems.length){
+      panel.style.display = "none";
+      panel.className = "guardbox";
+      panel.textContent = "";
+      return;
+    }
+    panel.style.display = "block";
+    panel.className = "guardbox err";
+    panel.textContent = problems.join(" ");
+  }
+
+  function textNode(el, text){
+    el.textContent = String(text ?? "");
+    return el;
+  }
+
+  function genId(){
+    return "q_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function normalizeQuestionText(s){
+    const v = String(s || "").trim().replace(/\s+/g, " ");
+    return v;
+  }
+
+  // ---- Org helpers ----
   function normalizeOrgTree(raw){
     const arr =
       Array.isArray(raw) ? raw :
@@ -375,10 +424,20 @@ FIX-03:
     return arr
       .filter(n => n && (n.id !== undefined && n.id !== null))
       .map(n => ({
-        id: String(n.id),
-        parentId: (n.parentId === null || n.parentId === undefined) ? null : String(n.parentId),
-        name: String(n.name ?? n.title ?? n.label ?? n.id)
-      }));
+        id: String(n.id).trim(),
+        parentId: (n.parentId === null || n.parentId === undefined) ? null : String(n.parentId).trim(),
+        name: String(n.name ?? n.title ?? n.label ?? n.id).trim()
+      }))
+      .filter(n => n.id && n.name);
+  }
+
+  function orgHasDuplicateIds(nodes){
+    const seen = new Set();
+    for(const n of nodes){
+      if(seen.has(n.id)) return true;
+      seen.add(n.id);
+    }
+    return false;
   }
 
   function buildOrgIndex(nodes){
@@ -396,6 +455,26 @@ FIX-03:
     return { byId, children };
   }
 
+  function isDescendant(index, nodeId, ancestorId){
+    const a = String(ancestorId);
+    const n = String(nodeId);
+    if(n === a) return true;
+
+    const visited = new Set([n]);
+    let cur = index.byId.get(n);
+
+    while(cur && cur.parentId){
+      const pid = String(cur.parentId);
+
+      if(pid === a) return true;
+      if(visited.has(pid)) return false;
+      visited.add(pid);
+
+      cur = index.byId.get(pid);
+    }
+    return false;
+  }
+
   function getSubtreeIds(index, rootId){
     const out = [];
     const seen = new Set();
@@ -406,51 +485,13 @@ FIX-03:
       seen.add(id);
       out.push(id);
       const kids = index.children.get(id) || [];
-      kids.forEach(k => stack.push(k));
+      for(const k of kids) stack.push(k);
     }
     return out;
   }
 
-  // FIX-03: visited-set (fail-fast vid loop/korrup kedja)
-  function isDescendant(index, nodeId, ancestorId){
-    const a = String(ancestorId);
-    const n = String(nodeId);
-    if(n === a) return true;
-
-    const visited = new Set();
-    visited.add(n);
-
-    let cur = index.byId.get(n);
-
-    while(cur && cur.parentId){
-      const pid = String(cur.parentId);
-
-      if(pid === a) return true;
-
-      if(visited.has(pid)){
-        // loop/korrup kedja → fail-closed snabbt
-        return false;
-      }
-      visited.add(pid);
-
-      cur = index.byId.get(pid);
-    }
-    return false;
-  }
-
-  // org validation light (dup-id)
-  function orgHasDuplicateIds(nodes){
-    const seen = new Set();
-    for(const n of nodes){
-      if(seen.has(n.id)) return true;
-      seen.add(n.id);
-    }
-    return false;
-  }
-
-  // --- Assignments helpers (FIX-03: map + array) ---
+  // ---- Assignments helpers ----
   function normalizeAssignments(raw){
-    // Array-format (legacy/nuvarande)
     const arr =
       Array.isArray(raw) ? raw :
       (Array.isArray(raw?.assignments) ? raw.assignments :
@@ -461,51 +502,133 @@ FIX-03:
         .filter(a => a && (a.empNo !== undefined && a.empNo !== null))
         .map(a => ({
           empNo: normalizeEmpNo(a.empNo),
-          roleId: String(a.roleId ?? a.role ?? ""),
-          scopeId: (a.scopeId === undefined || a.scopeId === null) ? "" : String(a.scopeId)
+          scopeId: (a.scopeId === undefined || a.scopeId === null) ? "" : String(a.scopeId).trim()
         }))
         .filter(a => a.empNo);
     }
 
-    // Map-format: { "123": { roleId, scopeId } }
+    // Map-format { "123": { scopeId } }
     if(raw && typeof raw === "object"){
       const out = [];
       for(const [k, v] of Object.entries(raw)){
-        const empNo = normalizeEmpNo(k);
+        const key = String(k);
+        if(SPECIAL_KEYS.has(key)) continue;
+        const empNo = normalizeEmpNo(key);
         if(!empNo) continue;
-        const scopeId = (v && (v.scopeId !== undefined && v.scopeId !== null)) ? String(v.scopeId) : "";
-        const roleId = (v && (v.roleId !== undefined && v.roleId !== null)) ? String(v.roleId) : String(v?.role ?? "");
-        out.push({ empNo, roleId, scopeId });
+        const scopeId = (v && (v.scopeId !== undefined && v.scopeId !== null)) ? String(v.scopeId).trim() : "";
+        out.push({ empNo, scopeId });
       }
-      return out.filter(x => x.empNo);
+      return out;
     }
-
     return [];
   }
 
   function getMyScopeId(auth, assignments){
-    if(!auth?.empNo) return "";
-    const rows = assignments.filter(x => x.empNo === auth.empNo);
-    if(!rows.length) return "";
-    const withScope = rows.find(r => String(r.scopeId || "").trim());
-    return String((withScope || rows[0])?.scopeId || "").trim();
+    const row = assignments.find(x => x.empNo === auth.empNo && String(x.scopeId || "").trim());
+    return String(row?.scopeId || "").trim();
   }
 
-  // --- Guard ---
+  // ---- Questions storage (read merge + write 012) ----
+  function loadQuestionsFromKey(key){
+    const arr = safeParse(key, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function mergeQuestionsForRead(){
+    const a = loadQuestionsFromKey(QUESTIONS_KEY);
+    const b = loadQuestionsFromKey(QUESTIONS_KEY_COMP);
+    if(!b.length) return a;
+
+    const out = [];
+    const seen = new Set();
+
+    for(const x of a){
+      const id = String(x?.id || "");
+      if(!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(x);
+    }
+    for(const x of b){
+      const id = String(x?.id || "");
+      if(!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(x);
+    }
+    return out;
+  }
+
+  function loadQuestionsForWrite(){
+    return loadQuestionsFromKey(QUESTIONS_KEY);
+  }
+
+  // ---- Answers verify (delete policy) ----
+  function tryGetLocalItem(key){
+    try{ return localStorage.getItem(key); }catch{ return null; }
+  }
+
+  // P0: fortsätt över kandidater (fail-closed, men undvik "för tidigt stopp")
+  function tryLoadAnswers(){
+    let sawAnyRaw = false;
+
+    for(const k of ANSWERS_KEYS_CANDIDATES){
+      const raw = tryGetLocalItem(k);
+      if(!raw) continue;
+
+      sawAnyRaw = true;
+
+      try{
+        const v = JSON.parse(raw);
+
+        if(Array.isArray(v)) return { ok:true, data:v, keyUsed:k };
+
+        if(v && typeof v === "object"){
+          if(Array.isArray(v.items)) return { ok:true, data:v.items, keyUsed:k };
+          if(Array.isArray(v.answers)) return { ok:true, data:v.answers, keyUsed:k };
+        }
+
+        // okänt format -> fortsätt till nästa kandidat
+        continue;
+      }catch{
+        // korrupt json -> fortsätt till nästa kandidat
+        continue;
+      }
+    }
+
+    // fail-closed: om vi såg någon raw men ingen var i känt format = ok:false
+    return { ok:false, data:null, keyUsed: sawAnyRaw ? "(found-but-invalid)" : "" };
+  }
+
+  function questionHasAnyAnswer(questionId, answersArr){
+    const qid = String(questionId || "");
+    if(!qid) return true; // fail-safe
+    if(!Array.isArray(answersArr)) return true; // fail-safe
+
+    for(const a of answersArr){
+      const direct = String(a?.questionId ?? a?.qId ?? "");
+      if(direct && direct === qid) return true;
+
+      const nested = String(a?.question?.id ?? a?.q?.id ?? "");
+      if(nested && nested === qid) return true;
+    }
+    return false;
+  }
+
+  // ---- RBAC guard ----
   const auth = readAuth();
   if(!auth){ redirectLogin(); return; }
 
   $("#whoName").textContent = auth.displayName || (auth.role === "manager" ? "Manager" : "Admin");
   $("#whoRole").textContent = auth.role;
+  $("#whoEmpNo").textContent = auth.empNo;
 
   function doLogout(){
-    sessionStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
+    try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
+    try{ localStorage.removeItem(SESSION_KEY); }catch{}
     redirectLogin();
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  // --- Load org + assignments ---
+  // ---- Load deps ----
   const orgNodes = normalizeOrgTree(safeParse(ORG_KEY, null));
   const orgIndex = buildOrgIndex(orgNodes);
 
@@ -513,15 +636,13 @@ FIX-03:
   const assignments = normalizeAssignments(assignmentsRaw);
   const myScopeId = getMyScopeId(auth, assignments);
 
-  function guardCreateState(){
+  function computeCreateGuardProblems(){
     const problems = [];
 
     if(!orgNodes.length){
       problems.push("Saknar eller kan inte läsa org-träd (AO-020_ORG_V1). Skapande låst.");
-    }else{
-      if(orgHasDuplicateIds(orgNodes)){
-        problems.push("Org-trädet är korrupt (duplicerade id). Skapande låst (fail-closed).");
-      }
+    }else if(orgHasDuplicateIds(orgNodes)){
+      problems.push("Org-trädet är korrupt (duplicerade id). Skapande låst (fail-closed).");
     }
 
     if(auth.role === "manager"){
@@ -535,53 +656,27 @@ FIX-03:
       }
     }
 
+    return problems;
+  }
+
+  function applyCreateGuardUI(){
+    const problems = computeCreateGuardProblems();
     const ok = (problems.length === 0);
 
-    const panel = $("#guardPanel");
-    if(!ok){
-      panel.style.display = "block";
-      panel.className = "guardbox err";
-      panel.textContent = problems.join(" ");
-    }else{
-      panel.style.display = "none";
-      panel.className = "guardbox";
-      panel.textContent = "";
-    }
+    showGuard(problems);
 
-    $("#btnCreate").disabled = !ok;
+    $("#btnAdd").disabled = !ok;
+    $("#btnSaveBatch").disabled = !ok;
     $("#scopeSelect").disabled = !ok;
+    $("#qText").disabled = !ok;
 
     return ok;
   }
 
-  // --- Groups ---
-  function loadGroups(){
-    const arr = safeParse(GROUPS_KEY, []);
-    return Array.isArray(arr) ? arr : [];
-  }
-  function renderGroupSelect(){
-    const sel = $("#targetGroup");
-    sel.innerHTML = "";
-    const groups = loadGroups();
-    if(!groups.length){
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "(Skapa grupp först)";
-      sel.appendChild(opt);
-      return;
-    }
-    groups.forEach(g => {
-      const opt = document.createElement("option");
-      opt.value = g.id;
-      opt.textContent = `${g.name} (${(g.members||[]).length})`;
-      sel.appendChild(opt);
-    });
-  }
-
-  // --- Scope dropdown ---
+  // ---- Scope select ----
   function renderScopeSelect(){
     const sel = $("#scopeSelect");
-    sel.innerHTML = "";
+    while(sel.firstChild) sel.removeChild(sel.firstChild);
 
     if(!orgNodes.length || orgHasDuplicateIds(orgNodes)){
       const opt = document.createElement("option");
@@ -592,7 +687,6 @@ FIX-03:
     }
 
     let allowedIds = orgNodes.map(n => n.id);
-
     if(auth.role === "manager"){
       if(myScopeId && orgIndex.byId.has(String(myScopeId))){
         allowedIds = getSubtreeIds(orgIndex, String(myScopeId));
@@ -601,14 +695,14 @@ FIX-03:
       }
     }
 
-    allowedIds.forEach(id => {
+    for(const id of allowedIds){
       const n = orgIndex.byId.get(String(id));
-      if(!n) return;
+      if(!n) continue;
       const opt = document.createElement("option");
       opt.value = String(n.id);
       opt.textContent = `${n.name} (${n.id})`;
       sel.appendChild(opt);
-    });
+    }
 
     if(!sel.options.length){
       const opt = document.createElement("option");
@@ -628,318 +722,413 @@ FIX-03:
     const sid = String($("#scopeSelect").value || "").trim();
     if(!sid) return "";
     if(!orgIndex.byId.has(sid)) return "";
-    if(auth.role === "manager" && myScopeId){
+    if(auth.role === "manager"){
+      if(!myScopeId) return "";
       if(!isDescendant(orgIndex, sid, String(myScopeId))) return "";
     }
     return sid;
   }
 
-  // --- Target mode UI ---
-  function syncTargetUI(){
-    const mode = $("#targetMode").value;
-    $("#oneWrap").style.display = (mode === "one") ? "block" : "none";
-    $("#groupWrap").style.display = (mode === "group") ? "block" : "none";
-  }
-  $("#targetMode").addEventListener("change", syncTargetUI);
-
-  // --- Questions store (FIX-03: merge read, write to 012) ---
-  function loadQuestionsFromKey(key){
-    const arr = safeParse(key, []);
-    return Array.isArray(arr) ? arr : [];
+  function scopeLabel(scopeId){
+    const sid = String(scopeId || "").trim();
+    if(!sid) return "—";
+    const n = orgIndex.byId.get(sid);
+    return n ? `${n.name} (${sid})` : sid;
   }
 
-  function mergeQuestionsForRead(){
-    // Läs: merge 012 + 015 (dedupe på id). Skriv aldrig till 015.
-    const a = loadQuestionsFromKey(QUESTIONS_KEY);
-    const b = loadQuestionsFromKey(QUESTIONS_KEY_COMP);
-    if(!b.length) return a;
+  // ---- Batch state (in-memory only) ----
+  const batch = []; // { text }
+  let batchScopeId = ""; // lås scope för batchen när första item läggs till
 
-    const seen = new Set();
-    const out = [];
-    // Prioritera 012 vid id-krock
-    a.forEach(x => {
-      const id = String(x?.id || "");
-      if(!id) return;
-      if(seen.has(id)) return;
-      seen.add(id);
-      out.push(x);
+  function updateBatchUI(){
+    $("#batchCount").textContent = String(batch.length);
+    $("#batchScopeLabel").textContent = scopeLabel(batchScopeId || getSelectedScopeId());
+
+    const wrap = $("#batchList");
+    wrap.textContent = "";
+
+    if(batch.length === 0){
+      const d = document.createElement("div");
+      d.className = "empty";
+      d.textContent = "Batchen är tom. Lägg till en eller flera frågor.";
+      wrap.appendChild(d);
+      return;
+    }
+
+    batch.forEach((b, idx) => {
+      const row = document.createElement("div");
+      row.className = "batchItem";
+
+      const left = document.createElement("div");
+      const p = document.createElement("p");
+      p.textContent = b.text;
+      left.appendChild(p);
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.appendChild(textNode(document.createElement("span"), "Typ: scale 1–6"));
+      meta.appendChild(textNode(document.createElement("span"), "Scope: " + scopeLabel(batchScopeId)));
+      left.appendChild(meta);
+
+      const right = document.createElement("div");
+      right.className = "row";
+      right.style.gap = "8px";
+
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "secondary";
+      btn.textContent = "Ta bort";
+      btn.dataset.rm = String(idx);
+
+      right.appendChild(btn);
+
+      row.appendChild(left);
+      row.appendChild(right);
+      wrap.appendChild(row);
     });
-    b.forEach(x => {
-      const id = String(x?.id || "");
-      if(!id) return;
-      if(seen.has(id)) return;
-      seen.add(id);
-      out.push(x);
-    });
-    return out;
   }
 
-  function loadQuestionsForWrite(){
-    // Skriv-flöde: endast 012
-    return loadQuestionsFromKey(QUESTIONS_KEY);
+  // event delegation för batch remove
+  $("#batchList").addEventListener("click", (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest("button[data-rm]") : null;
+    if(!btn) return;
+
+    const idxRaw = btn.dataset.rm;
+    const idx = Number(idxRaw);
+
+    // P2: hårdare validering
+    if(!Number.isFinite(idx)) return;
+    const i = Math.trunc(idx);
+    if(i !== idx) return;
+    if(i < 0 || i >= batch.length) return;
+
+    batch.splice(i, 1);
+    if(batch.length === 0) batchScopeId = "";
+    updateBatchUI();
+  });
+
+  function enforceBatchScopeOnSelectChange(){
+    if(!batch.length || !batchScopeId) return;
+    const sel = $("#scopeSelect");
+    const chosen = String(sel.value || "").trim();
+    if(chosen && chosen !== String(batchScopeId)){
+      sel.value = String(batchScopeId);
+      setMsg("err", "Batchen är låst till valt scope. Töm batchen för att byta scope.");
+    }
   }
 
-  function computeAllTargets(){
-    const set = new Set();
-    loadGroups().forEach(g => (g.members||[]).forEach(m => {
-      const v = validateEmpNo(m);
-      if(v.ok) set.add(v.empNo);
-    }));
-    if(set.size > 0) return Array.from(set);
+  // ---- Create actions ----
+  $("#btnAdd").addEventListener("click", () => {
+    setMsg("", "");
 
-    // fallback: utgå från primär 012 (inte merge) för att undvika att “compat”-data styr skapande
-    loadQuestionsForWrite().forEach(q => {
-      const v = validateEmpNo(q.targetEmpNo);
-      if(v.ok) set.add(v.empNo);
-    });
+    if(!applyCreateGuardUI()){
+      setMsg("err", "Skapande är låst (fail-closed).");
+      return;
+    }
 
-    return Array.from(set);
-  }
+    const sid = getSelectedScopeId();
+    if(!sid){
+      setMsg("err", "Välj giltigt scope (obligatoriskt).");
+      return;
+    }
 
-  function pushQuestions(targetEmpNos, payload){
+    const text = normalizeQuestionText($("#qText").value || "");
+    if(!text){
+      setMsg("err", "Skriv en frågetext.");
+      return;
+    }
+
+    if(text.length > 600){
+      setMsg("err", "Frågan är för lång (max 600 tecken i v1).");
+      return;
+    }
+
+    if(!batchScopeId){
+      batchScopeId = String(sid);
+    }else if(String(batchScopeId) !== String(sid)){
+      setMsg("err", "Batchen är låst till ett scope. Töm batchen för att byta scope.");
+      return;
+    }
+
+    const normLower = text.toLowerCase();
+    if(batch.some(b => String(b.text || "").trim().toLowerCase() === normLower)){
+      setMsg("err", "Dubblett: samma fråga finns redan i batchen.");
+      return;
+    }
+
+    batch.push({ text });
+    $("#qText").value = "";
+    updateBatchUI();
+    setMsg("ok", "Lagd i batch.");
+  });
+
+  $("#btnClearOne").addEventListener("click", () => {
+    $("#qText").value = "";
+    setMsg("", "");
+  });
+
+  $("#btnClearBatch").addEventListener("click", () => {
+    batch.splice(0, batch.length);
+    batchScopeId = "";
+    updateBatchUI();
+    setMsg("", "");
+  });
+
+  $("#btnSaveBatch").addEventListener("click", () => {
+    setMsg("", "");
+
+    if(!applyCreateGuardUI()){
+      setMsg("err", "Skapande är låst (fail-closed).");
+      return;
+    }
+
+    const sid = batchScopeId || getSelectedScopeId();
+    if(!sid){
+      setMsg("err", "Välj giltigt scope (obligatoriskt).");
+      return;
+    }
+
+    if(batch.length === 0){
+      setMsg("err", "Batchen är tom.");
+      return;
+    }
+
     const now = Date.now();
+    const existing = loadQuestionsForWrite();
 
-    // FIX-03: skriv endast till 012
-    const all = loadQuestionsForWrite();
-    let count = 0;
+    const added = [];
+    for(const b of batch){
+      const q = {
+        id: genId(),
+        type: "scale_1_6",
+        text: String(b.text),
+        scopeId: String(sid),
+        createdAt: now,
+        createdBy: String(auth.empNo),
+        isActive: true
+      };
+      added.push(q);
+    }
 
-    const originMode = (payload.originTargetMode === "all" || payload.originTargetMode === "group" || payload.originTargetMode === "one")
-      ? payload.originTargetMode
-      : "one";
+    const next = existing.concat(added);
 
-    targetEmpNos.forEach(empNo => {
-      payload.prompts.forEach(prompt => {
-        all.push({
-          id: genId("q"),
-          targetMode: originMode,
-          targetEmpNo: String(empNo),
-          scopeId: String(payload.scopeId),
-          title: payload.title || "Fråga",
-          prompt,
-          note: payload.note || "",
-          allowAnonymous: payload.allowAnonymous === true,
-          createdAt: now,
-          updatedAt: now
-        });
-        count++;
-      });
-    });
-
-    const res = saveFailClosed(QUESTIONS_KEY, all);
+    const res = saveFailClosed(QUESTIONS_KEY, next);
     if(!res.ok){
-      return { ok:false, count:0, err: res.err };
-    }
-    return { ok:true, count };
-  }
-
-  function expandTargets(mode){
-    if(mode === "one"){
-      const v = validateEmpNo($("#targetEmpNo").value);
-      if(!v.ok) return { ok:false, msg:"Skriv ett giltigt anst.nr (bara siffror, max 10)." };
-      return { ok:true, targets:[v.empNo] };
-    }
-
-    if(mode === "all"){
-      const t = computeAllTargets();
-      if(!t.length) return { ok:false, msg:"‘Alla’ kräver att grupper har minst en medlem." };
-      return { ok:true, targets:t };
-    }
-
-    if(mode === "group"){
-      const gid = $("#targetGroup").value;
-      const g = loadGroups().find(x => x.id === gid);
-      if(!g) return { ok:false, msg:"Välj en grupp." };
-      const set = new Set();
-      (g.members||[]).forEach(m => {
-        const v = validateEmpNo(m);
-        if(v.ok) set.add(v.empNo);
-      });
-      const t = Array.from(set);
-      if(!t.length) return { ok:false, msg:"Gruppen har inga giltiga medlemmar (anst.nr)." };
-      return { ok:true, targets:t };
-    }
-
-    return { ok:false, msg:"Okänt mottagarläge." };
-  }
-
-  // --- Create ---
-  $("#btnCreate").addEventListener("click", () => {
-    setMsg("", "");
-
-    if($("#btnCreate").disabled){
-      setMsg("err", "Skapande är låst p.g.a. saknad/korrupt scope/org/assignments.");
+      setMsg("err", "Kunde inte spara (localStorage full/blockerad). Inget sparades. Rensa lagring och prova igen.");
       return;
     }
 
-    const scopeId = getSelectedScopeId();
-    if(!scopeId){
-      setMsg("err", "Välj giltigt scope. Saknat/otillåtet scope blockerar skapande (fail-closed).");
-      return;
-    }
-
-    const mode = $("#targetMode").value;
-    const title = String($("#title").value || "").trim();
-    const note = String($("#note").value || "").trim();
-    const allowAnonymous = ($("#allowAnon").value === "true");
-
-    const prompts = String($("#prompts").value || "")
-      .split("\n")
-      .map(x => String(x).trim())
-      .filter(Boolean);
-
-    if(prompts.length === 0){
-      setMsg("err", "Skriv minst en fråga (en per rad).");
-      return;
-    }
-
-    const ex = expandTargets(mode);
-    if(!ex.ok){
-      setMsg("err", ex.msg || "Kunde inte välja mottagare.");
-      return;
-    }
-
-    const created = pushQuestions(ex.targets, { title, note, allowAnonymous, prompts, scopeId, originTargetMode: mode });
-    if(!created.ok){
-      setMsg("err", "Kunde inte spara (localStorage är full/blockerad). Inget skapades. Rensa lagring eller prova igen.");
-      return;
-    }
-
-    setMsg("ok", `Skapat ${created.count} fråga(or) med scope ${scopeId}.`);
+    batch.splice(0, batch.length);
+    batchScopeId = "";
+    updateBatchUI();
     renderList();
+    setMsg("ok", `Sparat ${added.length} fråga(or) i scope ${sid}.`);
   });
 
-  $("#btnClear").addEventListener("click", () => {
-    $("#title").value = "";
-    $("#prompts").value = "";
-    $("#note").value = "";
-    $("#targetEmpNo").value = "";
-    $("#allowAnon").value = "false";
-    setMsg("", "");
-  });
+  // ---- List / Delete ----
+  function isValidQuestion(q){
+    const id = String(q?.id || "").trim();
+    const type = String(q?.type || "").trim();
+    const scopeId = String(q?.scopeId || "").trim();
+    const text = String(q?.text || "").trim();
 
-  // --- List ---
-  function canManagerSeeScope(scopeId){
-    const qs = String(scopeId || "").trim();
-    if(!qs) return false;
-    if(!orgIndex.byId.has(qs)) return false;
+    if(!id || !scopeId || !text) return false;
+    if(type !== "scale_1_6") return false;
+    return true;
+  }
+
+  function managerCanSeeScope(scopeId){
+    const sid = String(scopeId || "").trim();
+    if(!sid) return false;
+    if(!orgIndex.byId.has(sid)) return false;
     if(!myScopeId) return false;
-    return isDescendant(orgIndex, qs, String(myScopeId));
+    return isDescendant(orgIndex, sid, String(myScopeId));
+  }
+
+  function renderDeletePolicyHint(canVerifyAnswers){
+    const box = $("#delPolicy");
+    if(!box) return;
+
+    if(canVerifyAnswers){
+      box.style.display = "none";
+      box.textContent = "";
+      return;
+    }
+
+    box.style.display = "block";
+    while(box.firstChild) box.removeChild(box.firstChild);
+
+    const strong = document.createElement("strong");
+    strong.textContent = "Info:";
+    box.appendChild(strong);
+    box.appendChild(document.createTextNode(" Borttagning är låst eftersom systemet inte kan verifiera answers-key. (Fail-closed)"));
   }
 
   function renderList(){
     const list = $("#list");
-    list.innerHTML = "";
+    list.textContent = "";
 
     const filter = $("#listFilter").value;
     const q = String($("#search").value || "").trim().toLowerCase();
 
-    // FIX-03: merge read (dedupe), men sort på createdAt
-    const all = mergeQuestionsForRead().slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
-
-    let shown = all;
-
-    if(filter === "one") shown = shown.filter(x => (x.targetMode||"one") === "one");
-    if(filter === "all") shown = shown.filter(x => (x.targetMode||"") === "all");
-    if(filter === "group") shown = shown.filter(x => (x.targetMode||"") === "group");
+    const allRaw = mergeQuestionsForRead();
+    let all = allRaw.filter(isValidQuestion);
 
     if(auth.role === "manager"){
-      shown = shown.filter(x => canManagerSeeScope(x.scopeId));
+      all = all.filter(x => managerCanSeeScope(x.scopeId));
+    }
+
+    if(filter === "myScope"){
+      const sid = String(myScopeId || "").trim();
+      all = sid ? all.filter(x => String(x.scopeId) === sid) : [];
     }
 
     if(q){
-      shown = shown.filter(x => {
-        const blob = `${x.targetEmpNo||""} ${x.scopeId||""} ${x.targetMode||""} ${x.title||""} ${x.prompt||""} ${x.note||""}`.toLowerCase();
+      all = all.filter(x => {
+        const blob = `${x.text||""} ${x.scopeId||""} ${x.createdBy||""}`.toLowerCase();
         return blob.includes(q);
       });
     }
 
-    shown = shown.slice(0, 50);
+    // P1: stabil sort
+    all.sort((a,b) => (Number(b?.createdAt) || 0) - (Number(a?.createdAt) || 0));
+    if(filter === "last50") all = all.slice(0, 50);
 
-    if(shown.length === 0){
-      list.innerHTML = `<div class="empty">Inga frågor för vald filter/sök.</div>`;
+    const answersLoad = tryLoadAnswers();
+    const canVerifyAnswers = !!answersLoad.ok;
+    const answersArr = canVerifyAnswers ? answersLoad.data : null;
+    renderDeletePolicyHint(canVerifyAnswers);
+
+    if(all.length === 0){
+      const e = document.createElement("div");
+      e.className = "empty";
+      e.textContent = "Inga frågor att visa för vald filter/sök.";
+      list.appendChild(e);
       return;
     }
 
-    shown.forEach(x => {
+    const primaryArr = loadQuestionsFromKey(QUESTIONS_KEY);
+    const compatArr  = loadQuestionsFromKey(QUESTIONS_KEY_COMP);
+    const primaryIds = new Set(primaryArr.map(x => String(x?.id||"")));
+    const compatIds  = new Set(compatArr.map(x => String(x?.id||"")));
+
+    for(const x of all){
       const el = document.createElement("div");
       el.className = "item";
 
-      const scopeLabel = (() => {
-        const sid = String(x.scopeId || "").trim();
-        if(!sid) return "—";
-        const n = orgIndex.byId.get(sid);
-        return n ? `${n.name} (${sid})` : sid;
-      })();
+      const left = document.createElement("div");
+      left.style.minWidth = "260px";
 
-      const tm = String(x.targetMode || "one");
+      const title = document.createElement("p");
+      title.className = "item-title";
+      title.textContent = x.text;
+      left.appendChild(title);
 
-      // Markera kompatkälla read-only i listan (utan att ändra UX-flöde i övrigt)
-      const isCompat = !loadQuestionsFromKey(QUESTIONS_KEY).some(q2 => String(q2?.id||"") === String(x?.id||""))
-        && loadQuestionsFromKey(QUESTIONS_KEY_COMP).some(q3 => String(q3?.id||"") === String(x?.id||""));
+      const meta = document.createElement("div");
+      meta.className = "meta";
 
-      el.innerHTML = `
-        <div style="min-width:260px;">
-          <p class="item-title">${escapeHtml(x.title || "Fråga")}</p>
-          <div class="meta">
-            <span><strong>Till:</strong> ${escapeHtml(x.targetEmpNo || "—")}</span>
-            <span><strong>Scope:</strong> ${escapeHtml(scopeLabel)}</span>
-            <span><strong>Läge:</strong> ${escapeHtml(tm)}</span>
-            ${x.allowAnonymous ? `<span class="pill">Anonymt tillåtet</span>` : ``}
-            ${isCompat ? `<span class="pill">Compat (read-only)</span>` : ``}
-          </div>
-          <div class="meta"><span><strong>Fråga:</strong> ${escapeHtml(x.prompt || "—")}</span></div>
-          ${x.note ? `<div class="meta"><span><strong>Info:</strong> ${escapeHtml(x.note)}</span></div>` : ``}
-          ${!String(x.scopeId||"").trim() ? `<div class="meta"><span class="pill">⚠ Saknar scopeId (osynlig för employee)</span></div>` : ``}
-        </div>
-        <div class="row" style="gap:8px;">
-          <button type="button" class="secondary" data-del="${escapeHtml(x.id)}" ${isCompat ? "disabled" : ""}>Ta bort</button>
-        </div>
-      `;
-      list.appendChild(el);
-    });
+      const nCreated = Number(x.createdAt);
+      const createdAt = Number.isFinite(nCreated) && nCreated > 0 ? new Date(nCreated).toLocaleString("sv-SE") : "—";
 
-    list.querySelectorAll("button[data-del]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const id = btn.getAttribute("data-del");
-        if(!id) return;
+      meta.appendChild(textNode(document.createElement("span"), "Typ: scale 1–6"));
+      meta.appendChild(textNode(document.createElement("span"), "Scope: " + scopeLabel(x.scopeId)));
+      meta.appendChild(textNode(document.createElement("span"), "Skapad av: " + String(x.createdBy || "—")));
+      meta.appendChild(textNode(document.createElement("span"), "Datum: " + createdAt));
+      left.appendChild(meta);
 
-        if(!confirm("Ta bort frågan?")) return;
+      const right = document.createElement("div");
+      right.className = "row";
+      right.style.gap = "8px";
 
-        // FIX-03: radera endast från 012 (primär). Compat är read-only.
-        const all = loadQuestionsForWrite();
-        const item = all.find(x => String(x.id) === String(id));
-        if(!item){
-          setMsg("err", "Kan inte ta bort: frågan finns inte i primär-listan (compat/read-only eller korrupt data).");
+      const btnDel = document.createElement("button");
+      btnDel.type = "button";
+      btnDel.className = "secondary";
+      btnDel.textContent = "Ta bort";
+
+      const idStr = String(x?.id || "");
+      const inPrimary = primaryIds.has(idStr);
+      const inCompatOnly = !inPrimary && compatIds.has(idStr);
+
+      let delDisabledReason = "";
+      if(!canVerifyAnswers){
+        delDisabledReason = "Borttagning låst (kan ej verifiera svar).";
+      }else if(inCompatOnly){
+        delDisabledReason = "Compat (read-only) kan inte tas bort här.";
+      }else{
+        const hasAnswer = questionHasAnyAnswer(x.id, answersArr);
+        if(hasAnswer){
+          delDisabledReason = "Kan inte ta bort: frågan har svar.";
+        }
+      }
+
+      if(delDisabledReason){
+        btnDel.disabled = true;
+        btnDel.title = delDisabledReason;
+      }
+
+      btnDel.addEventListener("click", () => {
+        if(btnDel.disabled) return;
+
+        if(auth.role === "manager" && !managerCanSeeScope(x.scopeId)){
+          setMsg("err", "Åtkomst nekad: du kan inte ta bort frågor utanför din scope-subtree.");
           return;
         }
 
-        // defensivt: manager får aldrig radera utanför scope även om DOM manipuleras
-        if(auth.role === "manager"){
-          if(!canManagerSeeScope(item.scopeId)){
-            setMsg("err", "Åtkomst nekad: du kan inte ta bort frågor utanför din scope-subtree.");
-            return;
-          }
+        const re = tryLoadAnswers();
+        if(!re.ok){
+          setMsg("err", "Borttagning låst: kan inte verifiera svar (fail-closed).");
+          renderDeletePolicyHint(false);
+          renderList();
+          return;
+        }
+        if(questionHasAnyAnswer(x.id, re.data)){
+          setMsg("err", "Kan inte ta bort: frågan har svar.");
+          renderList();
+          return;
         }
 
-        const next = all.filter(x => String(x.id) !== String(id));
+        if(!confirm("Ta bort frågan? Detta kan inte ångras.")) return;
+
+        const primary = loadQuestionsForWrite();
+        const exists = primary.find(q2 => String(q2?.id||"") === String(x?.id||""));
+        if(!exists){
+          setMsg("err", "Kan inte ta bort: frågan finns inte i primärlistan (read-only/compat eller korrupt data).");
+          return;
+        }
+
+        const next = primary.filter(q2 => String(q2?.id||"") !== String(x?.id||""));
         const res = saveFailClosed(QUESTIONS_KEY, next);
         if(!res.ok){
-          setMsg("err", "Kunde inte spara borttagning (localStorage är full/blockerad). Inget ändrades.");
+          setMsg("err", "Kunde inte spara borttagning (localStorage full/blockerad). Inget ändrades.");
           return;
         }
+
+        setMsg("ok", "Frågan är borttagen.");
         renderList();
       });
-    });
+
+      right.appendChild(btnDel);
+
+      el.appendChild(left);
+      el.appendChild(right);
+
+      list.appendChild(el);
+    }
   }
 
   $("#listFilter").addEventListener("change", renderList);
   $("#search").addEventListener("input", renderList);
 
+  $("#scopeSelect").addEventListener("change", () => {
+    enforceBatchScopeOnSelectChange();
+    updateBatchUI();
+    applyCreateGuardUI();
+  });
+
   // init
-  renderGroupSelect();
-  syncTargetUI();
   renderScopeSelect();
-  guardCreateState();
+  applyCreateGuardUI();
+  updateBatchUI();
   renderList();
 
 })();
