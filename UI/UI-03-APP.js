@@ -1,365 +1,339 @@
 /* ============================================================
-AO-001 | FIL-ID: UI/UI-03-APP.js
+AO-022 | FIL-ID: UI/UI-03-APP.js
 Projekt: HR-System
-Syfte: Stam-login + roll-routing (admin, employee) v1
-Krav:
-- En ingång (UI-01)
-- Generiskt fel (ingen kontoläckage)
-- Cooldown efter X fel (client-only)
-- URL-parametrar (autofyll + auto-login om komplett)
-- PIN ej implementerad (hook pinRequired=false + TODO)
+Syfte: Central Auth Guard + Routing (UI-only v1)
+Kontrakt:
+- Ingen backend
+- Robust guard: sessionStorage först, fallback localStorage (fail-closed)
+- Inga nya storage-keys
+Lagring (läser):
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-019_ROLES_V1 (localStorage) – roller
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – assignments (empNo -> { roleId, scopeId })
+Obs:
+- Används av sidor för att:
+  (1) blockera obehöriga,
+  (2) välja “gren” (admin vs employee),
+  (3) kunna gömma admin-nav om man vill (valfritt).
 ============================================================ */
 
 (function () {
   "use strict";
 
-  // ---- Storage (1 nyckel, inget lösenord sparas)
-  const STORAGE_KEY = "AO-001_LOGIN_V1";
-  const SESSION_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const ROLES_KEY = "AO-019_ROLES_V1";
+  const ASG_V2_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
 
-  // ---- Abuse/cooldown
-  const MAX_FAILS = 5;
-  const COOLDOWN_MS = 30 * 1000;
+  const MAX_ROLE_INHERIT_DEPTH = 15;
 
-  const APP_STATE = {
-    auth: {
-      isAuthed: false,
-      role: null,         // "admin" | "employee"
-      displayName: null,
-      empNo: null,
-      pinRequired: false  // AO-001 hook (ingen PIN i v1)
-      // TODO (AO-001): Om pinRequired true -> route till PIN-steg (ej nu)
-    },
-    abuse: {
-      attempts: 0,
-      cooldownUntil: 0
+  // --- Helpers ---
+  const SCOPE_ORDER = ["none", "view", "act", "manage"];
+
+  function normalizeScope(v) {
+    const s = String(v || "none");
+    return SCOPE_ORDER.includes(s) ? s : "none";
+  }
+
+  function readRawSession() {
+    // Robust guard: sessionStorage först, fallback localStorage
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
+  function safeParseJson(raw, fallback) {
+    try {
+      const v = JSON.parse(raw);
+      return v === null || v === undefined ? fallback : v;
+    } catch {
+      return fallback;
     }
-  };
-
-  const $ = (sel) => document.querySelector(sel);
-
-  // Views
-  const viewLogin = $("#view-login");
-  const viewAdmin = $("#view-admin");
-
-  // Login form
-  const loginForm = $("#loginForm");
-  const inpName = $("#inpName");
-  const inpEmpNo = $("#inpEmpNo");
-  const inpPassword = $("#inpPassword");
-  const btnLogin = $("#btnLogin");
-  const btnReset = $("#btnReset");
-  const loginMessage = $("#loginMessage");
-
-  // Admin placeholder
-  const adminWho = $("#adminWho");
-  const adminRole = $("#adminRole");
-  const btnLogoutAdmin = $("#btnLogoutAdmin");
-
-  function now() { return Date.now(); }
-
-  function showMessage(kind, text) {
-    loginMessage.className = "message" + (kind ? " " + kind : "");
-    loginMessage.textContent = text || "";
   }
 
-  function sanitizeText(s) {
-    return String(s || "").trim().replace(/\s+/g, " ");
+  function safeParseLocal(key, fallback) {
+    return safeParseJson(localStorage.getItem(key) || "null", fallback);
   }
 
-  function sanitizeEmpNo(s) {
-    return String(s || "").trim().replace(/[^\d]/g, "");
+  function redirect(url) {
+    window.location.replace(url);
   }
 
-  function isCoolingDown() {
-    return APP_STATE.abuse.cooldownUntil > now();
+  function getAuth() {
+    // Fail-closed: om nåt är minsta fel => null
+    const raw = readRawSession();
+    if (!raw) return null;
+
+    const data = safeParseJson(raw, null);
+    if (!data?.auth?.isAuthed) return null;
+
+    const auth = data.auth;
+    if (auth.expiresAt && Number(auth.expiresAt) < Date.now()) return null;
+
+    // role kan vara "admin", "systemadmin", "employee", etc.
+    if (!auth.role) return null;
+
+    return auth;
   }
 
-  function remainingCooldownMs() {
-    return Math.max(0, APP_STATE.abuse.cooldownUntil - now());
+  function getEmpNoFromAuth(auth) {
+    // Flexibel: olika trådar kan ha olika fältnamn
+    const candidates = [
+      auth.empNo,
+      auth.employeeNo,
+      auth.empno,
+      auth.userId,
+      auth.username,
+      auth.login,
+      auth.identifier,
+    ];
+
+    for (const c of candidates) {
+      const s = String(c || "").trim();
+      if (!s) continue;
+      // Om strängen innehåller siffror, ta bara siffror (empNo policy)
+      const digits = s.replace(/[^\d]/g, "");
+      if (digits) return digits.slice(0, 10);
+    }
+    return "";
   }
 
-  function disableLoginUI(disabled) {
-    inpName.disabled = disabled;
-    inpEmpNo.disabled = disabled;
-    inpPassword.disabled = disabled;
-    btnLogin.disabled = disabled;
-    btnReset.disabled = disabled;
+  function loadRoles() {
+    const arr = safeParseLocal(ROLES_KEY, []);
+    return Array.isArray(arr) ? arr : [];
   }
 
-  function persistState() {
-    const payload = {
-      v: 1,
-      savedAt: now(),
-      auth: {
-        isAuthed: APP_STATE.auth.isAuthed,
-        role: APP_STATE.auth.role,
-        displayName: APP_STATE.auth.displayName,
-        empNo: APP_STATE.auth.empNo,
-        pinRequired: !!APP_STATE.auth.pinRequired,
-        expiresAt: APP_STATE.auth.isAuthed ? (now() + SESSION_TTL_MS) : 0
-      },
-      abuse: {
-        attempts: APP_STATE.abuse.attempts,
-        cooldownUntil: APP_STATE.abuse.cooldownUntil
+  function loadAssignmentsV2() {
+    const obj = safeParseLocal(ASG_V2_KEY, {});
+    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
+  }
+
+  // --- Role effective resolver (parent -> child, child overrides) ---
+  function resolveRoleEffectiveScopes(roleId, roles) {
+    const map = new Map(roles.map((r) => [String(r.id || ""), r]));
+    const warnings = [];
+    const seen = new Set();
+
+    function walk(id, depth) {
+      if (depth > MAX_ROLE_INHERIT_DEPTH) {
+        warnings.push("depth-limit");
+        return {};
       }
+      if (seen.has(id)) {
+        warnings.push("inherit-loop");
+        return {};
+      }
+      seen.add(id);
+
+      const role = map.get(id);
+      if (!role) {
+        warnings.push("missing-role");
+        return {};
+      }
+
+      let base = {};
+      const parentId = String(role.inherits || "").trim();
+      if (parentId) {
+        if (!map.has(parentId)) {
+          warnings.push("missing-inherits");
+        } else {
+          base = walk(parentId, depth + 1);
+        }
+      }
+
+      // merge: parent -> child (child overrides)
+      const next = Object.assign({}, base);
+      const mods = role.modules && typeof role.modules === "object" ? role.modules : {};
+      Object.keys(mods).forEach((k) => {
+        next[k] = normalizeScope(mods[k]);
+      });
+
+      return next;
+    }
+
+    const effective = walk(String(roleId || ""), 0);
+    return { effective, warnings };
+  }
+
+  function isAdminishEffective(effectiveModules) {
+    const eff = effectiveModules || {};
+    return Object.keys(eff).some(
+      (k) => k.startsWith("ADMIN_") && normalizeScope(eff[k]) !== "none"
+    );
+  }
+
+  function pickLandingFromEffective(effectiveModules) {
+    // Minsta “gren”-logik: om admin-moduler finns => admin/home, annars employee/home
+    if (isAdminishEffective(effectiveModules)) return "../admin/home.html";
+    return "../employee/home.html";
+  }
+
+  function normalizePath(pathname) {
+    const p = String(pathname || "");
+    const idx = p.lastIndexOf("/");
+    return idx >= 0 ? p.slice(idx + 1) : p;
+  }
+
+  function isAdminPage() {
+    // Enkel heuristik: ligger du i /admin/ så räknas det som adminvy
+    return String(window.location.pathname || "").includes("/admin/");
+  }
+
+  function isEmployeePage() {
+    return String(window.location.pathname || "").includes("/employee/");
+  }
+
+  function defaultLoginUrl() {
+    return "../UI/UI-01-SKELETON.html";
+  }
+
+  // --- Public API ---
+  function getCurrentAccess() {
+    const auth = getAuth();
+    if (!auth) return { ok: false, reason: "no-auth" };
+
+    const roles = loadRoles();
+    const asg = loadAssignmentsV2();
+
+    const empNo = getEmpNoFromAuth(auth);
+    const rec = empNo ? asg[empNo] : null;
+
+    const roleId = String(rec?.roleId || "").trim();
+    const scopeId = String(rec?.scopeId || "").trim();
+
+    // Om ingen assignment finns: fail-soft i UI (men access guard fail-closed per pageRole)
+    const role = roleId ? roles.find((r) => String(r.id) === roleId) : null;
+
+    const { effective, warnings } = role
+      ? resolveRoleEffectiveScopes(roleId, roles)
+      : { effective: {}, warnings: ["no-assignment"] };
+
+    const adminish = isAdminishEffective(effective);
+
+    return {
+      ok: true,
+      auth,
+      empNo,
+      assignment: rec || null,
+      role: role || null,
+      effectiveModules: effective,
+      warnings,
+      adminish,
+      // scopeId används senare av vyer (subtree)
+      scopeId: scopeId || "",
     };
+  }
 
-    try {
-      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
-    } catch (e) {
-      // fail-closed: kör utan persist om sessionStorage blockeras
+  function requireAuth(opts) {
+    const options = opts && typeof opts === "object" ? opts : {};
+    const pageRole = String(options.pageRole || "any"); // "admin" | "employee" | "any"
+    const loginUrl = String(options.loginUrl || defaultLoginUrl());
+
+    const access = getCurrentAccess();
+    if (!access.ok) {
+      redirect(loginUrl);
+      return false;
     }
-  }
 
-  function loadState() {
-    try {
-      const raw = sessionStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const data = JSON.parse(raw);
-      if (!data || data.v !== 1) return;
-
-      if (data.abuse) {
-        APP_STATE.abuse.attempts = Number(data.abuse.attempts || 0);
-        APP_STATE.abuse.cooldownUntil = Number(data.abuse.cooldownUntil || 0);
-      }
-
-      const a = data.auth || null;
-      if (a && a.isAuthed && a.expiresAt && a.expiresAt > now()) {
-        APP_STATE.auth.isAuthed = true;
-        APP_STATE.auth.role = a.role || null;
-        APP_STATE.auth.displayName = a.displayName || null;
-        APP_STATE.auth.empNo = a.empNo || null;
-        APP_STATE.auth.pinRequired = !!a.pinRequired;
-      } else {
-        APP_STATE.auth.isAuthed = false;
-        APP_STATE.auth.role = null;
-        APP_STATE.auth.displayName = null;
-        APP_STATE.auth.empNo = null;
-        APP_STATE.auth.pinRequired = false;
-      }
-    } catch (e) {}
-  }
-
-  function clearState() {
-    APP_STATE.auth.isAuthed = false;
-    APP_STATE.auth.role = null;
-    APP_STATE.auth.displayName = null;
-    APP_STATE.auth.empNo = null;
-    APP_STATE.auth.pinRequired = false;
-
-    APP_STATE.abuse.attempts = 0;
-    APP_STATE.abuse.cooldownUntil = 0;
-
-    try { sessionStorage.removeItem(STORAGE_KEY); } catch (e) {}
-  }
-
-  // ---- Demo auth rules (v1, ingen backend)
-  function demoAuth(empNo, password) {
-    // admin: empNo 9999, lösen "admin"
-    // employee: empNo != 9999, lösen "employee"
-    const isAdmin = empNo === "9999" && password === "admin";
-    const isEmployee = empNo !== "9999" && password === "employee";
-    if (isAdmin) return { ok: true, role: "admin" };
-    if (isEmployee) return { ok: true, role: "employee" };
-    return { ok: false, role: null };
-  }
-
-  function bumpFail() {
-    APP_STATE.abuse.attempts += 1;
-    if (APP_STATE.abuse.attempts >= MAX_FAILS) {
-      APP_STATE.abuse.cooldownUntil = now() + COOLDOWN_MS;
-      APP_STATE.abuse.attempts = 0;
-    }
-    persistState();
-  }
-
-  function goEmployeeHome() {
-    // Vi står i /UI/ -> employee-grenen ligger i repo-root
-    window.location.assign("../employee/home.html");
-  }
-
-  function render() {
-    const hash = window.location.hash || "#login";
-
-    // Views
-    if (viewLogin) viewLogin.hidden = true;
-    if (viewAdmin) viewAdmin.hidden = true;
-
-    // Authed routing
-    if (APP_STATE.auth.isAuthed) {
-      if (APP_STATE.auth.role === "employee") {
-        goEmployeeHome();
-        return;
-      }
-      if (APP_STATE.auth.role === "admin") {
-        window.location.hash = "#admin";
+    // Rollkrav (fail-closed)
+    if (pageRole === "admin") {
+      // Kräver att sessionens auth.role är admin/systemadmin OCH att rollen är adminish
+      const roleOk =
+        access.auth.role === "admin" || access.auth.role === "systemadmin";
+      if (!roleOk || !access.adminish) {
+        // Om du inte ska vara här => skicka till employee/home
+        redirect("../employee/home.html");
+        return false;
       }
     }
 
-    // Admin placeholder
-    if (hash === "#admin") {
-      if (viewAdmin) viewAdmin.hidden = false;
-      if (adminWho) adminWho.textContent = APP_STATE.auth.displayName || "—";
-      if (adminRole) adminRole.textContent = APP_STATE.auth.role || "—";
+    if (pageRole === "employee") {
+      // Om du är adminish kan du fortfarande läsa employee, men kräver giltig session
+      // (Inget extra krav)
+    }
+
+    return true;
+  }
+
+  function routeAfterLogin() {
+    // Kallas efter lyckad inloggning från UI-01-SKELETON.html (stam-login)
+    const access = getCurrentAccess();
+    if (!access.ok) {
+      redirect(defaultLoginUrl());
       return;
     }
 
-    // Login default
-    if (viewLogin) viewLogin.hidden = false;
-
-    // Cooldown handling
-    if (isCoolingDown()) {
-      const sec = Math.ceil(remainingCooldownMs() / 1000);
-      disableLoginUI(true);
-      showMessage("warn", `För många försök. Vänta ${sec} sekunder och försök igen.`);
-      startCooldownTicker();
-    } else {
-      disableLoginUI(false);
-      // lämna ev felmeddelande kvar
+    // Om assignments saknas men auth.role är admin/systemadmin: gå admin ändå
+    if (
+      (access.auth.role === "admin" || access.auth.role === "systemadmin") &&
+      access.adminish
+    ) {
+      redirect("../admin/home.html");
+      return;
     }
+
+    // Om admin/systemadmin men inga roller/assignments än: fail-safe => admin/home
+    if (access.auth.role === "admin" || access.auth.role === "systemadmin") {
+      redirect("../admin/home.html");
+      return;
+    }
+
+    // Annars: employee
+    redirect("../employee/home.html");
   }
 
-  let cooldownTimer = null;
-  function startCooldownTicker() {
-    if (cooldownTimer) return;
-    cooldownTimer = window.setInterval(() => {
-      if (!isCoolingDown()) {
-        window.clearInterval(cooldownTimer);
-        cooldownTimer = null;
-        showMessage("", "");
-        disableLoginUI(false);
-        persistState();
-        return;
+  function logout() {
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirect(defaultLoginUrl());
+  }
+
+  function applyNavVisibility(opts) {
+    // Valfritt: göm adminlänkar för icke-adminish
+    const options = opts && typeof opts === "object" ? opts : {};
+    const adminLinkSelector = options.adminLinkSelector || 'a[href*="/admin/"], a[href^="./"][href*="admin"], a[href*="./roles.html"], a[href*="./org.html"], a[href*="./access.html"]';
+
+    const access = getCurrentAccess();
+    if (!access.ok) return;
+
+    const isAdminish = access.adminish && (access.auth.role === "admin" || access.auth.role === "systemadmin");
+
+    if (isAdminish) return; // visa allt
+
+    document.querySelectorAll(adminLinkSelector).forEach((a) => {
+      // fail-safe: om länken uttryckligen pekar på admin-område, göm den
+      a.style.display = "none";
+      a.setAttribute("aria-hidden", "true");
+      a.setAttribute("tabindex", "-1");
+    });
+  }
+
+  // --- Auto-guard (om någon inkluderar filen utan att kalla requireAuth) ---
+  // Vi gör INTE hård redirect här, bara om du redan står på admin/employee.
+  // Detta minskar “överraskningar” och passar v1.
+  (function softAutoGuard() {
+    const access = getCurrentAccess();
+    if (!access.ok) {
+      if (isAdminPage() || isEmployeePage()) redirect(defaultLoginUrl());
+      return;
+    }
+    // Om du är på admin-sida men inte adminish: redirect fail-closed
+    if (isAdminPage()) {
+      const roleOk =
+        access.auth.role === "admin" || access.auth.role === "systemadmin";
+      if (!roleOk || !access.adminish) {
+        redirect("../employee/home.html");
       }
-      const sec = Math.ceil(remainingCooldownMs() / 1000);
-      showMessage("warn", `För många försök. Vänta ${sec} sekunder och försök igen.`);
-    }, 250);
-  }
-
-  function onLoginSubmit(e) {
-    e.preventDefault();
-
-    if (isCoolingDown()) {
-      render();
-      return;
     }
+  })();
 
-    const name = sanitizeText(inpName.value);
-    const empNo = sanitizeEmpNo(inpEmpNo.value);
-    const password = String(inpPassword.value || "");
-
-    if (!name || !empNo || !password) {
-      showMessage("err", "Felaktiga inloggningsuppgifter.");
-      return;
-    }
-
-    const res = demoAuth(empNo, password);
-    if (!res.ok) {
-      bumpFail();
-      if (isCoolingDown()) { render(); return; }
-      showMessage("err", "Felaktiga inloggningsuppgifter.");
-      return;
-    }
-
-    // Success
-    APP_STATE.auth.isAuthed = true;
-    APP_STATE.auth.role = res.role;
-    APP_STATE.auth.displayName = name;
-    APP_STATE.auth.empNo = empNo;
-    APP_STATE.auth.pinRequired = false; // hook only
-
-    APP_STATE.abuse.attempts = 0;
-    APP_STATE.abuse.cooldownUntil = 0;
-
-    persistState();
-
-    if (res.role === "employee") {
-      goEmployeeHome();
-      return;
-    }
-
-    window.location.hash = "#admin";
-  }
-
-  function onReset() {
-    inpName.value = "";
-    inpEmpNo.value = "";
-    inpPassword.value = "";
-    showMessage("", "");
-  }
-
-  function onLogout() {
-    clearState();
-    showMessage("", "");
-    window.location.hash = "#login";
-    render();
-  }
-
-  // ---- URL params support
-  function getLoginParams() {
-    try {
-      const u = new URL(window.location.href);
-      const sp = u.searchParams;
-      const hasAny = sp.has("name") || sp.has("empNo") || sp.has("password");
-      return {
-        hasAny,
-        name: sanitizeText(sp.get("name")),
-        empNo: sanitizeEmpNo(sp.get("empNo")),
-        password: String(sp.get("password") || "")
-      };
-    } catch (e) {
-      return { hasAny: false, name: "", empNo: "", password: "" };
-    }
-  }
-
-  function fillFormFromParams(p) {
-    if (!p || !p.hasAny) return;
-    if (inpName) inpName.value = p.name || "";
-    if (inpEmpNo) inpEmpNo.value = p.empNo || "";
-    if (inpPassword) inpPassword.value = p.password || "";
-  }
-
-  function tryAutoLoginFromParams() {
-    if (APP_STATE.auth.isAuthed) return;
-
-    const p = getLoginParams();
-    if (!p.hasAny) return;
-
-    fillFormFromParams(p);
-
-    const canAuto = !!(p.name && p.empNo && p.password);
-    if (!canAuto) {
-      showMessage("err", "Felaktiga inloggningsuppgifter.");
-      return;
-    }
-
-    // auto-submit
-    onLoginSubmit({ preventDefault: function () {} });
-  }
-
-  function init() {
-    loadState();
-
-    if (loginForm) loginForm.addEventListener("submit", onLoginSubmit);
-    if (btnReset) btnReset.addEventListener("click", onReset);
-    if (btnLogoutAdmin) btnLogoutAdmin.addEventListener("click", onLogout);
-
-    window.addEventListener("hashchange", render);
-
-    // Refresh efter login
-    if (APP_STATE.auth.isAuthed && APP_STATE.auth.role === "employee") {
-      goEmployeeHome();
-      return;
-    }
-
-    if (!window.location.hash) window.location.hash = "#login";
-
-    render();
-
-    // efter render: URL-parametrar
-    tryAutoLoginFromParams();
-  }
-
-  init();
+  // Exponera minimal API
+  window.HRApp = {
+    requireAuth,
+    routeAfterLogin,
+    getCurrentAccess,
+    logout,
+    applyNavVisibility,
+  };
 })();
