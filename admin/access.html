@@ -1,21 +1,25 @@
 <!-- ============================================================
-PRC/ARBETORDER: AO-019 4/8 | FIL-ID: admin/access.html (NY)
+AO-005 | FIL-ID: admin/access.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: Tilldelningscenter (Assignments V2) – UI-only v1
 Risk: Medel (assignments + integritetskontroller)
+
+POLICY (LÅST):
+- Endast SYSTEM_ADMIN får hantera Access-tilldelningar (maskinrum: empNo → role/scope)
+- Datamodell + storage-keys får INTE ändras
 
 LÅSTA REGLER:
 - Ingen backend
 - sessionStorage först, fallback localStorage (fail-closed) [för session]
 - Ingen känslig persondata (endast anst.nr/empNo)
-- Inga nya storage-keys (i denna AO: inga nya keys)
+- Inga nya storage-keys
 - Hel-filsleverans
 - XSS-escape på allt från storage
-- Enkel, tydlig admin-UI (ingen redesign utanför AO)
+- Ingen UX-redesign utanför AO
 
 Keys (LÅST):
 Läs:
-- AO-001_LOGIN_V1 (sessionStorage/localStorage) — session
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) — session (fallback)
 - AO-019_ROLES_V1 (localStorage) — roller
 - AO-020_ORG_V1 (localStorage) — org-träd
 - AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) — assignments
@@ -23,9 +27,16 @@ Skriv:
 - AO-020_ROLE_ASSIGNMENTS_V2 (localStorage)
 
 Behörighet (LÅST):
-- HRApp.requireAuth({ pageRole: "admin" })
-- Endast användare med modulrättighet "ACCESS_MANAGE" (eller motsvarande) får skriva
-  (fail-closed om oklart)
+- HRApp.requireAuth({ allowRoles: ["SYSTEM_ADMIN"], loginUrl })
+- Skrivning: ACCESS_MANAGE krävs om permission-struktur finns (i session eller roll). Om ingen struktur finns alls → tillåt (bootstrap).
+  (fail-closed om struktur finns men oklart)
+
+EXTRA TESTFALL (PRC):
+- parentId = " null " → behandlas som root
+- role.modules = {} → bootstrap allow
+- role.modules = { ACCESS_MANAGE:false } → structure exists → skrivning låst
+- subtree cache → byta scope → korrekt invalidation
+
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -292,34 +303,42 @@ Behörighet (LÅST):
   </section>
 </main>
 
+<!-- CONFIG före CORE -->
+<script src="../UI/UI-04-CONFIG.js"></script>
 <script src="../UI/UI-03-APP.js"></script>
 
 <script>
 /* ============================================================
-AO-019 4/8 | admin/access.html (inline JS) – FIX v1.2
-Fix-krav (AO-019 4/8-FIX-01):
-- Init får inte nolla state efter render: resetForm() körs ej sist om selection finns
-- Skrivning låses när roles/org saknar faktiska poster:
-  - roles ok men 0 roller => write-lock
-  - org ok men rootId saknas => write-lock
-- KPI/lockbox ska spegla faktisk möjlighet att spara
-- Scope-filter: ogiltigt selectedScope hanteras deterministiskt (fallback till "Alla")
-  - ingen "fake subtree"-status
+AO-005 | admin/access.html (inline JS) – PATCH v1.4 (AO-005 v1.1)
+MÅSTE ändras (PRC):
+- Central parentId-normalisering → använd överallt
+- Skärp detectPermissionStructure enligt beslut:
+  - role.modules = {} → bootstrap allow (ingen struktur)
+  - role.modules = { ACCESS_MANAGE:false } → struktur finns → skrivning låst
+- Förtydliga repair-instruktion vid badKeys
+- Cache subtreeSet per scopeId (in-memory) + korrekt invalidation när org ändras
+- Visa varning vid val av trasig assignment (okänd roll/scope)
 ============================================================ */
 (function(){
   "use strict";
 
-  // Keys (LÅST)
   const SESSION_KEY   = "AO-001_LOGIN_V1";
   const ROLES_KEY     = "AO-019_ROLES_V1";
   const ORG_KEY       = "AO-020_ORG_V1";
   const ASSIGN_V2_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
 
+  const ROOT_ID = "org_root_v1";
   const MAX_CHAIN_GUARD = 250;
 
   const $ = (s) => document.querySelector(s);
 
-  // --- XSS-safe helpers ---
+  function safeReplace(url){
+    try{ window.location.replace(url); }catch{ window.location.href = url; }
+  }
+  function redirectLogin(){
+    safeReplace("../UI/UI-01-SKELETON.html");
+  }
+
   function setMsg(kind, text){
     const m = $("#msg");
     m.className = "message" + (kind ? " " + kind : "");
@@ -332,12 +351,25 @@ Fix-krav (AO-019 4/8-FIX-01):
     try{ return new Date(n).toLocaleString("sv-SE"); }catch{ return "—"; }
   }
 
-  // --- Session (sessionStorage först, fallback localStorage) ---
+  // --- Central parentId-normalisering (PRC) ---
+  // GUARD: behandla null/undefined/" null "/"null"/""/whitespace som root (null).
+  function normalizeParentId(v){
+    if(v === null || v === undefined) return null;
+    const s = String(v).trim();
+    if(!s) return null;
+    if(s.toLowerCase() === "null") return null;
+    return s;
+  }
+
   function readRawSession(){
-    const s1 = sessionStorage.getItem(SESSION_KEY);
-    if(s1) return s1;
-    const s2 = localStorage.getItem(SESSION_KEY);
-    if(s2) return s2;
+    try{
+      const s1 = sessionStorage.getItem(SESSION_KEY);
+      if(s1) return s1;
+    }catch{}
+    try{
+      const s2 = localStorage.getItem(SESSION_KEY);
+      if(s2) return s2;
+    }catch{}
     return null;
   }
   function readAuthFallback(){
@@ -353,42 +385,65 @@ Fix-krav (AO-019 4/8-FIX-01):
       return null;
     }
   }
-  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
-  // --- requireAuth (LÅST) ---
-  if(!window.HRApp || typeof window.HRApp.requireAuth !== "function"){
+  // --- Core guard (SYSTEM_ADMIN-only) ---
+  const HRApp = window.HRApp;
+  if(!HRApp || typeof HRApp.requireAuth !== "function"){
     redirectLogin();
     return;
   }
-  let auth = null;
+
+  let ctx = null;
   try{
-    auth = window.HRApp.requireAuth({ pageRole: "admin" }) || null;
+    ctx = HRApp.requireAuth({
+      allowRoles: ["SYSTEM_ADMIN"],
+      loginUrl: "../UI/UI-01-SKELETON.html"
+    });
   }catch{
     redirectLogin();
     return;
   }
-  if(!auth) auth = readAuthFallback();
-  if(!auth){ redirectLogin(); return; }
+  if(ctx === false){
+    return;
+  }
 
-  $("#whoName").textContent = auth.displayName || "Admin";
-  $("#whoRole").textContent = auth.role || "admin";
+  const auth =
+    (ctx && typeof ctx === "object" && (ctx.auth || ctx.session?.auth || ctx.user)) ||
+    (ctx && typeof ctx === "object" && ctx.isAuthed ? ctx : null) ||
+    readAuthFallback();
 
-  $("#navLogout").addEventListener("click", (e) => {
-    e.preventDefault();
-    // System-logout via core (fail-closed)
-    try{
-      if(window.HRApp && typeof window.HRApp.logout === "function"){
-        window.HRApp.logout();
-        return;
-      }
-    }catch{}
-    // Fallback: rensa session-key och redirect (endast SESSION_KEY)
-    try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
-    try{ localStorage.removeItem(SESSION_KEY); }catch{}
+  if(!auth || auth.isAuthed !== true){
     redirectLogin();
-  });
+    return;
+  }
 
-  // --- Storage read/write (endast localStorage för data-keys) ---
+  $("#whoName").textContent = auth.displayName || auth.name || auth.empNo || "SYSTEM_ADMIN";
+  $("#whoRole").textContent = auth.roleLabel || auth.role || auth.roleId || "SYSTEM_ADMIN";
+
+  // --- Logout ---
+  const navLogout = $("#navLogout");
+  if(navLogout){
+    navLogout.addEventListener("click", (e) => {
+      e.preventDefault();
+      try{
+        if(window.HRApp && typeof window.HRApp.logout === "function"){
+          window.HRApp.logout();
+          return;
+        }
+      }catch{}
+      try{
+        if(window.HRApp && typeof window.HRApp.clearSession === "function"){
+          window.HRApp.clearSession();
+          redirectLogin();
+          return;
+        }
+      }catch{}
+      try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
+      try{ localStorage.removeItem(SESSION_KEY); }catch{}
+      redirectLogin();
+    });
+  }
+
   function safeParseLocal(key, fallback){
     try{
       const raw = localStorage.getItem(key);
@@ -403,12 +458,8 @@ Fix-krav (AO-019 4/8-FIX-01):
     localStorage.setItem(key, JSON.stringify(value));
   }
 
-  // --- Validators / normalizers ---
   function normalizeRoles(raw){
-    // roles builder kan variera; vi kräver id+name, och behåller "modules" i vilken form den än är.
     if(!Array.isArray(raw)) return { ok:false, parseOk:false, roles: [], issues:["Roles saknas eller fel format (förväntar array)."] };
-
-    // parseOk: data var läsbar, men kan vara tom => ska låsa skrivning enligt AO
     const parseOk = true;
 
     const roles = raw
@@ -440,52 +491,57 @@ Fix-krav (AO-019 4/8-FIX-01):
   }
 
   function normalizeOrg(raw){
-    if(!Array.isArray(raw)) return { ok:false, parseOk:false, nodes: [], issues:["Org saknas eller fel format (förväntar array)."], loop:false, rootId:null };
-
+    if(!Array.isArray(raw)) return { ok:false, parseOk:false, nodes: [], issues:["Org saknas eller fel format (förväntar array)."], loop:false, rootId:null, token:"" };
     const parseOk = true;
 
+    // STORAGE/GUARD: normalisera parentId centralt och spara i nodstrukturen
     const nodes = raw
       .map(n => ({
         id: String(n?.id || "").trim(),
         name: String(n?.name || "").trim(),
         type: String(n?.type || "").trim(),
-        parentId: (n?.parentId === null || n?.parentId === undefined) ? null : String(n.parentId).trim()
+        parentId: normalizeParentId(n?.parentId)
       }))
       .filter(n => n.id && n.name);
 
     if(raw.length === 0){
-      return { ok:false, parseOk, nodes: [], issues:["Org är tomt (0 noder). Skrivning måste låsas tills org finns."], loop:false, rootId:null };
+      return { ok:false, parseOk, nodes: [], issues:["Org är tomt (0 noder). Skrivning måste låsas tills org finns."], loop:false, rootId:null, token:"" };
     }
     if(nodes.length === 0){
-      return { ok:false, parseOk, nodes: [], issues:["Org saknas eller har inga giltiga noder."], loop:false, rootId:null };
+      return { ok:false, parseOk, nodes: [], issues:["Org saknas eller har inga giltiga noder."], loop:false, rootId:null, token:"" };
     }
 
     const ids = new Set(nodes.map(n => n.id));
 
-    // Root härledning:
-    // 1) node med parentId:null (prefer)
-    // 2) fallback id in ["org_root_v1","org_root"] om exakt en finns
-    // OBS: om rootId saknas men org i övrigt ser "läsbar" ut => skrivning låses (AO-krav)
-    const rootCandidates = nodes.filter(n => n.parentId === null);
+    // Primärt kontrakt: ROOT_ID
     let rootId = null;
-
-    if(rootCandidates.length === 1){
-      rootId = rootCandidates[0].id;
-    }else{
-      const known = ["org_root_v1","org_root"];
-      const hits = known.filter(k => ids.has(k));
-      if(hits.length === 1){
-        rootId = hits[0];
+    if(ids.has(ROOT_ID)){
+      const rootNode = nodes.find(n => n.id === ROOT_ID) || null;
+      if(rootNode && rootNode.parentId === null){
+        rootId = ROOT_ID;
       }else{
-        return { ok:false, parseOk, nodes, issues:["Org rootId saknas/oklar (kräver exakt 1 root med parentId:null)."], loop:false, rootId:null };
+        return { ok:false, parseOk, nodes, issues:[`Org rootId '${ROOT_ID}' finns men parentId är inte root (kräver null/empty/"null"). Kör repair i Org.`], loop:false, rootId:null, token:"" };
       }
     }
 
-    // Orphans (fail-closed för skriv)
+    // Sekundärt: exakt en root med parentId===null
+    if(!rootId){
+      const rootCandidates = nodes.filter(n => n.parentId === null);
+      if(rootCandidates.length === 1){
+        rootId = rootCandidates[0].id;
+      }else{
+        return { ok:false, parseOk, nodes, issues:["Org rootId saknas/oklar (kräver exakt 1 root). Kör repair i Org."], loop:false, rootId:null, token:"" };
+      }
+    }
+
+    // Orphans + multi-root (fail-closed)
     for(const n of nodes){
       if(n.id === rootId) continue;
-      if(!n.parentId || !ids.has(n.parentId)){
-        return { ok:false, parseOk, nodes, issues:["Org har orphans/ogiltiga parentId."], loop:false, rootId };
+      if(n.parentId === null){
+        return { ok:false, parseOk, nodes, issues:["Org har flera root-noder (oklar root). Kör repair i Org."], loop:false, rootId, token:"" };
+      }
+      if(!ids.has(n.parentId)){
+        return { ok:false, parseOk, nodes, issues:["Org har orphans/ogiltiga parentId. Kör repair i Org."], loop:false, rootId, token:"" };
       }
     }
 
@@ -500,7 +556,8 @@ Fix-krav (AO-019 4/8-FIX-01):
         if(seen.has(cur)) return true;
         seen.add(cur);
         const p = parentOf.get(cur);
-        if(!p) return true;
+        if(p === undefined) return true;
+        if(p === null) return true; // borde bara gälla root
         cur = p;
         steps++;
       }
@@ -508,24 +565,32 @@ Fix-krav (AO-019 4/8-FIX-01):
     }
     const loop = nodes.some(n => n.id !== rootId && chainHasLoop(n.id));
     if(loop){
-      return { ok:false, parseOk, nodes, issues:["Org loop/cykel upptäckt."], loop:true, rootId };
+      return { ok:false, parseOk, nodes, issues:["Org loop/cykel upptäckt. Kör repair i Org."], loop:true, rootId, token:"" };
     }
 
-    return { ok:true, parseOk, nodes, issues:[], loop:false, rootId };
+    // DEBUG/TOKEN: in-memory invalidation för subtree-cache
+    const token = `${rootId}|len:${nodes.length}|ids:${nodes.map(n=>n.id).slice(0,6).join(",")}`;
+    return { ok:true, parseOk, nodes, issues:[], loop:false, rootId, token };
   }
 
   function normalizeAssignments(raw){
-    if(raw === null || raw === undefined) return { ok:true, map: Object.create(null), issues:[] };
+    if(raw === null || raw === undefined) return { ok:true, map: Object.create(null), issues:[], badKeys:[] };
     if(!raw || typeof raw !== "object" || Array.isArray(raw)){
-      return { ok:false, map: Object.create(null), issues:["Assignments korrupt (förväntar objekt: { [empNo]: { roleId, scopeId, updatedAt } })."] };
+      return { ok:false, map: Object.create(null), issues:["Assignments korrupt (förväntar objekt: { [empNo]: { roleId, scopeId, updatedAt } })."], badKeys:[] };
     }
 
-    // Hardening: kopiera bara "egna" keys till Object.create(null)
     const out = Object.create(null);
+    const badKeys = [];
     for(const k of Object.keys(raw)){
+      const lk = String(k).toLowerCase();
+      if(lk === "__proto__" || lk === "prototype" || lk === "constructor"){
+        badKeys.push(k);
+        continue;
+      }
       out[k] = raw[k];
     }
-    return { ok:true, map: out, issues:[] };
+
+    return { ok:true, map: out, issues:[], badKeys };
   }
 
   function getRoleById(roles, id){
@@ -537,84 +602,115 @@ Fix-krav (AO-019 4/8-FIX-01):
     return nodes.find(n => n.id === sid) || null;
   }
 
-  // --- Module permission check (stöder modul-objekt) ---
-  function hasAccessManage(authObj, roles){
-    // Fail-closed default
-    if(!authObj) return false;
+  // --- ACCESS_MANAGE policy: kräv endast om permission-struktur finns (PRC skärpning) ---
+  function hasOwnKeys(obj){
+    try{
+      return !!obj && typeof obj === "object" && !Array.isArray(obj) && Object.keys(obj).length > 0;
+    }catch{
+      return false;
+    }
+  }
+  function isNonEmptyArray(a){
+    return Array.isArray(a) && a.length > 0;
+  }
 
+  function detectPermissionStructure(authObj, roleRecord){
+    // Skärpt enligt PRC:
+    // - tom array/objekt räknas som "ingen struktur"
+    // - om någon struktur finns och vi kan tolka den → krävs ACCESS_MANAGE=true
+    const found = { exists:false, sources:[] };
+
+    if(authObj){
+      if(isNonEmptyArray(authObj.modules)){ found.exists = true; found.sources.push("session.modules"); }
+      if(hasOwnKeys(authObj.permissions)){ found.exists = true; found.sources.push("session.permissions"); }
+      if(hasOwnKeys(authObj.access)){ found.exists = true; found.sources.push("session.access"); }
+      if(hasOwnKeys(authObj.flags)){ found.exists = true; found.sources.push("session.flags"); }
+    }
+
+    if(roleRecord){
+      const rm = roleRecord.modules;
+      if(isNonEmptyArray(rm)){ found.exists = true; found.sources.push("role.modules[array]"); }
+      if(hasOwnKeys(rm)){ found.exists = true; found.sources.push("role.modules[obj]"); }
+      if(hasOwnKeys(roleRecord.permissions)){ found.exists = true; found.sources.push("role.permissions"); }
+      if(hasOwnKeys(roleRecord.access)){ found.exists = true; found.sources.push("role.access"); }
+      if(hasOwnKeys(roleRecord.flags)){ found.exists = true; found.sources.push("role.flags"); }
+    }
+
+    return found;
+  }
+
+  function readAccessManageFlagFromAny(authObj, roleRecord){
     const flag = "ACCESS_MANAGE";
 
-    // 1) explicit systemadmin shortcut (om ni använder det)
-    if(authObj.role === "systemadmin") return true;
+    try{
+      if(Array.isArray(authObj?.modules) && authObj.modules.map(String).includes(flag)) return true;
+      if(authObj?.permissions && typeof authObj.permissions === "object" && authObj.permissions[flag] === true) return true;
+      if(authObj?.access && typeof authObj.access === "object" && authObj.access[flag] === true) return true;
+      if(authObj?.flags && typeof authObj.flags === "object" && authObj.flags[flag] === true) return true;
+    }catch{}
 
-    // 2) session: modules array / permissions object / access object
-    if(Array.isArray(authObj.modules) && authObj.modules.map(String).includes(flag)) return true;
-    if(authObj.permissions && typeof authObj.permissions === "object" && authObj.permissions[flag] === true) return true;
-    if(authObj.access && typeof authObj.access === "object" && authObj.access[flag] === true) return true;
+    try{
+      if(Array.isArray(roleRecord?.modules) && roleRecord.modules.map(String).includes(flag)) return true;
+      if(roleRecord?.permissions && typeof roleRecord.permissions === "object" && roleRecord.permissions[flag] === true) return true;
+      if(roleRecord?.access && typeof roleRecord.access === "object" && roleRecord.access[flag] === true) return true;
+      if(roleRecord?.flags && typeof roleRecord.flags === "object" && roleRecord.flags[flag] === true) return true;
 
-    // 3) lookup roleId -> role record
-    const roleId = String(authObj.roleId || "").trim();
-    if(!roleId) return false;
-
-    const r = getRoleById(roles, roleId);
-    if(!r) return false;
-
-    // 3a) role.permissions/access/flags
-    if(r.permissions && r.permissions[flag] === true) return true;
-    if(r.access && r.access[flag] === true) return true;
-    if(r.flags && r.flags[flag] === true) return true;
-
-    // 3b) role.modules kan vara array eller objekt-träd
-    if(Array.isArray(r.modules) && r.modules.map(String).includes(flag)) return true;
-
-    if(r.modules && typeof r.modules === "object"){
-      const m = r.modules;
-
-      if(m[flag] === true) return true;
-      if(m.access && typeof m.access === "object"){
-        if(m.access[flag] === true) return true;
-        if(m.access.manage === true) return true;
-        if(m.access.admin === true) return true;
+      if(roleRecord?.modules && typeof roleRecord.modules === "object" && !Array.isArray(roleRecord.modules)){
+        const m = roleRecord.modules;
+        if(m[flag] === true) return true;
+        if(m.access && typeof m.access === "object" && (m.access[flag] === true || m.access.manage === true)) return true;
+        if(m.admin && typeof m.admin === "object" && (m.admin[flag] === true || m.admin.manage === true)) return true;
       }
-      if(m.admin && typeof m.admin === "object"){
-        if(m.admin[flag] === true) return true;
-        if(m.admin.manage === true) return true;
-      }
-
-      // Strikt fallback-scan max 2 nivåer (begränsad till access/admin)
-      try{
-        const level1Keys = Object.keys(m);
-        for(const k1 of level1Keys){
-          const v1 = m[k1];
-          if(v1 && typeof v1 === "object" && !Array.isArray(v1)){
-            if(v1[flag] === true) return true;
-            if(v1.manage === true && (k1 === "access" || k1 === "admin")) return true;
-            for(const k2 of Object.keys(v1)){
-              const v2 = v1[k2];
-              if(v2 && typeof v2 === "object" && !Array.isArray(v2)){
-                if(v2[flag] === true) return true;
-                if(v2.manage === true && (k2 === "access" || k2 === "admin")) return true;
-              }
-            }
-          }
-        }
-      }catch{}
-    }
+    }catch{}
 
     return false;
   }
 
-  // --- Org util: subtree set ---
+  function hasAccessManage(authObj, roles){
+    if(!authObj) return { ok:false, reason:"Saknar session/auth." };
+
+    const roleId = String(authObj.roleId || "").trim();
+    const roleRecord = roleId ? getRoleById(roles, roleId) : null;
+
+    const struct = detectPermissionStructure(authObj, roleRecord);
+
+    if(!struct.exists){
+      // BOOTSTRAP ALLOW (PRC): inga permission-strukturer alls → allow
+      return { ok:true, reason:"Ingen permission-struktur hittad (bootstrap allow)." };
+    }
+
+    // Struktur finns → kräv flagga, annars fail-closed
+    const allowed = readAccessManageFlagFromAny(authObj, roleRecord) === true;
+    if(!allowed){
+      return { ok:false, reason:"Permission-struktur finns men ACCESS_MANAGE saknas/false." };
+    }
+    return { ok:true, reason:"ACCESS_MANAGE verifierad." };
+  }
+
+  // --- Org util: children map + subtree cache (in-memory) ---
   function buildChildrenMap(nodes){
     const map = new Map();
     nodes.forEach(n => map.set(n.id, []));
     nodes.forEach(n => {
-      if(!n.parentId) return;
+      // parentId är redan normaliserad (null eller id)
+      if(n.parentId === null) return;
       if(map.has(n.parentId)) map.get(n.parentId).push(n.id);
     });
     return map;
   }
-  function subtreeSet(nodes, startId){
+
+  // CACHE: subtree per scopeId, invalidated när org-token ändras
+  const subtreeCache = new Map(); // scopeId -> Set
+  let subtreeCacheToken = "";     // org token
+
+  function invalidateSubtreeCacheIfNeeded(orgToken){
+    if(orgToken !== subtreeCacheToken){
+      subtreeCacheToken = orgToken;
+      subtreeCache.clear();
+    }
+  }
+
+  function computeSubtreeSet(nodes, startId){
     const id = String(startId || "").trim();
     const children = buildChildrenMap(nodes);
     const seen = new Set([id]);
@@ -631,16 +727,34 @@ Fix-krav (AO-019 4/8-FIX-01):
     return seen;
   }
 
+  function getSubtreeSetCached(nodes, orgToken, scopeId){
+    invalidateSubtreeCacheIfNeeded(orgToken);
+    const sid = String(scopeId || "").trim();
+    if(!sid) return null;
+    if(subtreeCache.has(sid)) return subtreeCache.get(sid);
+    const set = computeSubtreeSet(nodes, sid);
+    subtreeCache.set(sid, set);
+    return set;
+  }
+
   // --- UI state ---
   let canWrite = false;
   let dataLockReasons = [];
-  let cached = { roles: [], orgNodes: [], assignments: Object.create(null), orgOk: false, rootId: null };
+  let cached = {
+    roles: [],
+    orgNodes: [],
+    assignments: Object.create(null),
+    orgOk: false,
+    rootId: null,
+    orgToken: ""
+  };
   let lastPickedEmpNo = null;
 
   function setWriteState(){
     $("#kpiWrite").textContent = canWrite ? "Tillåten" : "Read-only";
     $("#btnSave").disabled = !canWrite;
   }
+
   function showLockIfNeeded(){
     const box = $("#lockBox");
     if(canWrite){
@@ -649,9 +763,10 @@ Fix-krav (AO-019 4/8-FIX-01):
       return;
     }
     box.style.display = "block";
-    const reasons = dataLockReasons.length ? dataLockReasons.join(" ") : "Du saknar rättighet att hantera access.";
+    const reasons = dataLockReasons.length ? dataLockReasons.join(" ") : "Skrivning blockerad (fail-closed).";
     $("#lockText").textContent = reasons;
   }
+
   function renderRiskPanel(issues){
     const list = $("#riskList");
     list.innerHTML = "";
@@ -661,6 +776,7 @@ Fix-krav (AO-019 4/8-FIX-01):
       summary.textContent = "Inga problem detekterade.";
       return;
     }
+
     summary.textContent = `Upptäckta varningar: ${issues.length}`;
     for(const msg of issues){
       const li = document.createElement("li");
@@ -689,38 +805,51 @@ Fix-krav (AO-019 4/8-FIX-01):
     cached.assignments = asgV.map || Object.create(null);
     cached.orgOk = orgV.ok === true;
     cached.rootId = orgV.rootId || null;
+    cached.orgToken = orgV.token || "";
 
-    // Risk: assignments refer to missing role/scope
-    if(asgV.ok && rolesV.ok){
-      for(const empNo of Object.keys(cached.assignments)){
-        const a = cached.assignments[empNo];
+    // subtree cache invalidation
+    invalidateSubtreeCacheIfNeeded(cached.orgToken);
+
+    // P1: farliga keys i lagrat objekt → varning + blockera skrivning (PRC: förtydliga repair)
+    if(asgV.ok && asgV.badKeys && asgV.badKeys.length){
+      issues.push(
+        `Säkerhetsvarning: Assignments innehåller otillåtna nycklar (${asgV.badKeys.join(", ")}). ` +
+        `Repair: Öppna DevTools → Application → Local Storage → hitta key '${ASSIGN_V2_KEY}' → ta bort dessa keys → spara → ladda om sidan.`
+      );
+    }
+
+    // Gruppera okända roller/scopes
+    let unknownRoles = 0;
+    let unknownScopes = 0;
+
+    if(asgV.ok){
+      const empNos = Object.keys(cached.assignments);
+      for(const empNo of empNos){
+        const a = cached.assignments[empNo] || {};
         const rid = String(a?.roleId || "").trim();
-        if(!rid || !getRoleById(cached.roles, rid)){
-          issues.push(`Assignment empNo ${empNo}: roleId saknas eller finns inte (${rid || "—"}).`);
-        }
-      }
-    }
-    if(asgV.ok && orgV.ok){
-      for(const empNo of Object.keys(cached.assignments)){
-        const a = cached.assignments[empNo];
         const sid = String(a?.scopeId || "").trim();
-        if(!sid || !getOrgNodeById(cached.orgNodes, sid)){
-          issues.push(`Assignment empNo ${empNo}: scopeId saknas eller finns inte (${sid || "—"}).`);
+
+        if(rolesV.ok){
+          if(!rid || !getRoleById(cached.roles, rid)) unknownRoles++;
+        }
+        if(orgV.ok){
+          if(!sid || !getOrgNodeById(cached.orgNodes, sid)) unknownScopes++;
         }
       }
+
+      if(unknownRoles > 0) issues.push(`${unknownRoles} assignments har okänd/ogiltig roll (roleId).`);
+      if(unknownScopes > 0) issues.push(`${unknownScopes} assignments har okänd/ogiltig scope (scopeId).`);
     }
+
     if(!orgV.ok && orgV.loop) issues.push("Org loop-varning: subtree-filter kan inte användas och skrivning blockeras (fail-closed).");
 
-    // Write permission + write-lock reasons (konsekvent med KPI)
     dataLockReasons = [];
 
-    // Krav: skrivning låses om roles/org saknar faktiska poster även om "läsning" funkar
     if(!rolesV.ok){
       dataLockReasons.push("Skrivning blockerad: Roller saknas/korrupt eller 0 roller. Öppna Roller och åtgärda.");
     }
     if(!orgV.ok){
-      // inkluderar rootId saknas/oklar, orphans, loop, tom org
-      dataLockReasons.push("Skrivning blockerad: Org saknas/korrupt eller root saknas. Öppna Org och åtgärda.");
+      dataLockReasons.push("Skrivning blockerad: Org saknas/korrupt eller root oklar. Öppna Org och kör repair.");
     }
     if(!asgV.ok){
       dataLockReasons.push("Skrivning blockerad: Assignments-format är korrupt.");
@@ -728,18 +857,28 @@ Fix-krav (AO-019 4/8-FIX-01):
 
     const rightsOk = rolesV.ok && orgV.ok && asgV.ok;
 
-    // Extra krav: om orgV.ok men rootId saknas (ska inte inträffa ofta, men fail-closed)
     if(rightsOk && (!cached.rootId)){
-      dataLockReasons.push("Skrivning blockerad: Org rootId saknas (fail-closed).");
+      dataLockReasons.push("Skrivning blockerad: Org rootId saknas (fail-closed). Öppna Org och kör repair.");
     }
     if(rightsOk && cached.roles.length === 0){
       dataLockReasons.push("Skrivning blockerad: 0 roller (fail-closed).");
     }
 
-    const manageOk = rightsOk ? hasAccessManage(auth, cached.roles) : false;
-    if(!manageOk) dataLockReasons.push("Skrivning blockerad: saknar modulrättighet ACCESS_MANAGE.");
+    // P1: blockera skrivning om farliga keys upptäcks
+    const hasBadKeys = !!(asgV.ok && asgV.badKeys && asgV.badKeys.length);
+    if(hasBadKeys){
+      dataLockReasons.push(
+        `Skrivning blockerad: otillåtna keys i '${ASSIGN_V2_KEY}'. Repair: rensa keys (__proto__/prototype/constructor) i localStorage och ladda om.`
+      );
+    }
 
-    canWrite = rightsOk && !!cached.rootId && (cached.roles.length > 0) && manageOk;
+    // ACCESS_MANAGE enligt policy (skärpt struktur-detektion)
+    const access = rightsOk ? hasAccessManage(auth, cached.roles) : { ok:false, reason:"Data ej frisk." };
+    if(rightsOk && !access.ok){
+      dataLockReasons.push("Skrivning blockerad: " + access.reason);
+    }
+
+    canWrite = rightsOk && !!cached.rootId && (cached.roles.length > 0) && access.ok && !hasBadKeys;
     return issues;
   }
 
@@ -761,8 +900,6 @@ Fix-krav (AO-019 4/8-FIX-01):
       opt.textContent = `${r.name} • ${r.id}`;
       sel.appendChild(opt);
     }
-
-    // restore if possible
     if(prev && cached.roles.some(r => r.id === prev)){
       sel.value = prev;
     }
@@ -835,14 +972,9 @@ Fix-krav (AO-019 4/8-FIX-01):
 
     walk(rootId, 1, new Set([rootId]));
 
-    // restore deterministiskt: om tidigare val saknas -> fallback till ""
     if(prevScope && getOrgNodeById(nodes, prevScope)){
       scopeSel.value = prevScope;
-    }else{
-      // om vi hade en selection via row, men org har ändrats -> lämna default (root)
-      // (scopeSel default blir första option: root)
     }
-
     if(prevFilter && getOrgNodeById(nodes, prevFilter)){
       filterSel.value = prevFilter;
     }else{
@@ -869,7 +1001,6 @@ Fix-krav (AO-019 4/8-FIX-01):
   }
 
   function ensureDeterministicScopeFilter(){
-    // Krav: om selectedScope inte finns i org => fallback till "Alla" (ingen fake subtree-status)
     const sel = $("#scopeFilter");
     const v = String(sel.value || "").trim();
     if(!v) return;
@@ -879,7 +1010,6 @@ Fix-krav (AO-019 4/8-FIX-01):
     }
     if(!getOrgNodeById(cached.orgNodes, v)){
       sel.value = "";
-      // valfritt: vi visar inte modal, men gör deterministiskt fallback
       setMsg("err", "Valt scope i filter finns inte längre i org. Filter återställt till 'Alla'.");
     }
   }
@@ -901,18 +1031,15 @@ Fix-krav (AO-019 4/8-FIX-01):
       };
     });
 
-    // Filter by scope (deterministiskt)
     const selectedScope = String($("#scopeFilter").value || "").trim();
     let allowedScopeSet = null;
     let filterMode = "Alla";
 
     if(selectedScope){
-      // Bara subtree om org är frisk OCH selectedScope finns i org
       if(cached.orgOk && cached.rootId && getOrgNodeById(cached.orgNodes, selectedScope)){
-        allowedScopeSet = subtreeSet(cached.orgNodes, selectedScope);
+        allowedScopeSet = getSubtreeSetCached(cached.orgNodes, cached.orgToken, selectedScope);
         filterMode = "Subtree";
       }else{
-        // deterministiskt: fallback => Alla (och undvik fake status)
         $("#scopeFilter").value = "";
         filterMode = "Alla";
       }
@@ -926,7 +1053,6 @@ Fix-krav (AO-019 4/8-FIX-01):
 
     $("#kpiFilter").textContent = filterMode;
 
-    // Search
     const q = String($("#search").value || "").trim().toLowerCase();
     if(q){
       filtered = filtered.filter(r => {
@@ -992,6 +1118,19 @@ Fix-krav (AO-019 4/8-FIX-01):
       btn.textContent = "Välj";
       btn.addEventListener("click", () => {
         const a = (cached.assignments || Object.create(null))[r.empNo];
+
+        // PRC: varna vid trasig assignment (okänd roll/scope) – utan UX-redesign
+        const roleOk = !!getRoleById(cached.roles, String(a?.roleId || "").trim());
+        const scopeOk = !!getOrgNodeById(cached.orgNodes, String(a?.scopeId || "").trim());
+        if(!roleOk || !scopeOk){
+          const parts = [];
+          if(!roleOk) parts.push("okänd roll");
+          if(!scopeOk) parts.push("okänd scope");
+          setMsg("err", `Varning: den valda assignmenten har ${parts.join(" + ")}. Öppna Roller/Org och reparera, eller uppdatera assignmenten här.`);
+        }else{
+          setMsg("", "");
+        }
+
         setFormFromAssignment(r.empNo, a);
       });
       tdAct.appendChild(btn);
@@ -1006,21 +1145,18 @@ Fix-krav (AO-019 4/8-FIX-01):
     }
   }
 
+  // AO-003 policy: empNo = endast siffror
   function validateEmpNo(v){
     const s = String(v || "").trim();
-
     if(!s) return { ok:false, val:s, msg:"empNo krävs." };
     if(s.length > 24) return { ok:false, val:s, msg:"empNo är för långt." };
 
-    // Prototype-pollution hårdning (fail-closed)
     const lower = s.toLowerCase();
     if(lower === "__proto__" || lower === "prototype" || lower === "constructor"){
       return { ok:false, val:s, msg:"Ogiltigt empNo." };
     }
 
-    // Strict: börja med siffra, följt av siffror och ev _/-
-    if(!/^[0-9][0-9_-]*$/.test(s)) return { ok:false, val:s, msg:"empNo får bara innehålla siffror (ev. _ eller -)." };
-
+    if(!/^[0-9]+$/.test(s)) return { ok:false, val:s, msg:"empNo får bara innehålla siffror." };
     return { ok:true, val:s };
   }
 
@@ -1033,83 +1169,92 @@ Fix-krav (AO-019 4/8-FIX-01):
   function safeCloneAssignmentsMap(mapLike){
     const out = Object.create(null);
     for(const k of Object.keys(mapLike || {})){
+      const lk = String(k).toLowerCase();
+      if(lk === "__proto__" || lk === "prototype" || lk === "constructor") continue;
       out[k] = mapLike[k];
     }
     return out;
   }
 
-  $("#btnClear").addEventListener("click", () => resetForm());
+  const btnClear = $("#btnClear");
+  if(btnClear){
+    btnClear.addEventListener("click", () => resetForm());
+  }
 
-  $("#btnSave").addEventListener("click", () => {
-    setMsg("", "");
+  const btnSave = $("#btnSave");
+  if(btnSave){
+    btnSave.addEventListener("click", () => {
+      setMsg("", "");
 
-    if(!canWrite){
-      setMsg("err", "Skrivning blockerad (fail-closed).");
+      if(!canWrite){
+        setMsg("err", "Skrivning blockerad (fail-closed).");
+        showLockIfNeeded();
+        return;
+      }
+
+      const issues = loadAll();
+      fillRoleDropdown();
+      fillScopeDropdowns();
+      renderRiskPanel(issues);
+      setWriteState();
       showLockIfNeeded();
-      return;
-    }
 
-    // Re-check vid save (no stale writes)
-    const issues = loadAll();
-    fillRoleDropdown();
-    fillScopeDropdowns();
-    renderRiskPanel(issues);
-    setWriteState();
-    showLockIfNeeded();
+      if(!canWrite){
+        setMsg("err", "Skrivning blockerad (fail-closed): data eller rättighet saknas.");
+        return;
+      }
 
-    if(!canWrite){
-      setMsg("err", "Skrivning blockerad (fail-closed): data eller rättighet saknas.");
-      return;
-    }
+      const vEmp = validateEmpNo($("#empNo").value);
+      if(!vEmp.ok){ setMsg("err", vEmp.msg); return; }
 
-    const vEmp = validateEmpNo($("#empNo").value);
-    if(!vEmp.ok){ setMsg("err", vEmp.msg); return; }
+      const vRole = validateSelectValue($("#roleSelect"));
+      const vScope = validateSelectValue($("#scopeSelect"));
+      if(!vRole.ok){ setMsg("err", "Roll krävs."); return; }
+      if(!vScope.ok){ setMsg("err", "Scope krävs."); return; }
 
-    const vRole = validateSelectValue($("#roleSelect"));
-    const vScope = validateSelectValue($("#scopeSelect"));
-    if(!vRole.ok){ setMsg("err", "Roll krävs."); return; }
-    if(!vScope.ok){ setMsg("err", "Scope krävs."); return; }
+      const role = getRoleById(cached.roles, vRole.val);
+      if(!role){ setMsg("err", "Vald roll finns inte (roles ej synkade)."); return; }
 
-    // Validate existence
-    const role = getRoleById(cached.roles, vRole.val);
-    if(!role){ setMsg("err", "Vald roll finns inte (roles ej synkade)."); return; }
+      const scope = getOrgNodeById(cached.orgNodes, vScope.val);
+      if(!scope){ setMsg("err", "Vald scope finns inte (org ej synkad)."); return; }
 
-    const scope = getOrgNodeById(cached.orgNodes, vScope.val);
-    if(!scope){ setMsg("err", "Vald scope finns inte (org ej synkad)."); return; }
+      const now = Date.now();
 
-    const now = Date.now();
+      const raw = safeParseLocal(ASSIGN_V2_KEY, {});
+      const asgV = normalizeAssignments(raw);
+      if(!asgV.ok){
+        setMsg("err", "Assignments är korrupt. Skrivning stoppas (fail-closed).");
+        return;
+      }
+      if(asgV.badKeys && asgV.badKeys.length){
+        setMsg("err", `Skrivning stoppad: '${ASSIGN_V2_KEY}' innehåller otillåtna keys. Repair: rensa keys i DevTools → Local Storage → ladda om.`);
+        return;
+      }
 
-    const raw = safeParseLocal(ASSIGN_V2_KEY, {});
-    const asgV = normalizeAssignments(raw);
-    if(!asgV.ok){
-      setMsg("err", "Assignments är korrupt. Skrivning stoppas (fail-closed).");
-      return;
-    }
+      const next = safeCloneAssignmentsMap(asgV.map);
+      next[vEmp.val] = { roleId: role.id, scopeId: scope.id, updatedAt: now };
 
-    const next = safeCloneAssignmentsMap(asgV.map);
-    next[vEmp.val] = { roleId: role.id, scopeId: scope.id, updatedAt: now };
+      saveLocal(ASSIGN_V2_KEY, next);
 
-    saveLocal(ASSIGN_V2_KEY, next);
+      setMsg("ok", "Assignment sparad.");
+      $("#updatedAt").value = toDateTime(now);
+      lastPickedEmpNo = vEmp.val;
 
-    setMsg("ok", "Assignment sparad.");
-    $("#updatedAt").value = toDateTime(now);
-    lastPickedEmpNo = vEmp.val;
+      const issues2 = loadAll();
+      fillRoleDropdown();
+      fillScopeDropdowns();
+      renderRiskPanel(issues2);
+      setWriteState();
+      showLockIfNeeded();
+      renderTable();
+    });
+  }
 
-    // refresh view
-    const issues2 = loadAll();
-    fillRoleDropdown();
-    fillScopeDropdowns();
-    renderRiskPanel(issues2);
-    setWriteState();
-    showLockIfNeeded();
-    renderTable();
-  });
+  const scopeFilter = $("#scopeFilter");
+  if(scopeFilter) scopeFilter.addEventListener("change", renderTable);
+  const search = $("#search");
+  if(search) search.addEventListener("input", renderTable);
 
-  $("#scopeFilter").addEventListener("change", renderTable);
-  $("#search").addEventListener("input", renderTable);
-
-  // --- init (FIX: nolla inte state efter render) ---
-  // Rensa bara före första render eller när ingen selection finns.
   if(!lastPickedEmpNo){
     resetForm();
   }
@@ -1121,9 +1266,6 @@ Fix-krav (AO-019 4/8-FIX-01):
   showLockIfNeeded();
   renderRiskPanel(issuesInit);
   renderTable();
-
-  // FIX: ingen resetForm() sist som rensar vald rad/form.
-  // Om du senare vill "auto-välj" en rad kan det ske här – men inte i denna AO.
 
 })();
 </script>
