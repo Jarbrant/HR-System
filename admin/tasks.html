@@ -1,29 +1,22 @@
 <!-- ============================================================
-AO-046 + AO-019 6/8 | FIL-ID: admin/tasks.html
+AO-046 + AO-019 6/8 (FIX-01) | FIL-ID: admin/tasks.html
 Projekt: HR-System
-Syfte: Admin/Manager – Uppgifter (tilldela) – UI-only v1.1 (nivå 3)
-Krav:
-- Admin/Manager skapar/tilldelar uppgifter (batch)
-- Mottagare: en employee, alla, eller grupp
-- Status + kommentar (admin-notis)
-- Employee uppdaterar status + kommentar på employee/tasks.html
-NYTT (AO-019 6/8 – Scope-policy):
-- Alla uppgifter MÅSTE ha scopeId (fail-closed)
-- Default scope = inloggads eget scopeId
-- Manager får bara skapa/lista/ta bort inom sin scope-subtree
-- Fail-closed: om org/assignments saknas/korrupt -> blockera skapande
-Policy:
-- Ingen backend
-- Ingen känslig data lagras (endast anst.nr)
-- Robust guard: sessionStorage först, fallback localStorage (fail-closed)
-- XSS-escape på all rendering från storage
-Lagring:
-- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
-- AO-020_ORG_V1 (localStorage) – org-träd (nodes) [LÄS]
-- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – assignments (empNo -> { roleId, scopeId }) [LÄS]
-- AO-017_GROUPS_V1 (localStorage) – grupper
-- AO-014_TASKS_V1 (localStorage) – uppgifter (befintlig key; nu krävs scopeId)
-- AO-047_TASK_TEMPLATES_V1 (localStorage) – mallar (admin-metadata)
+Syfte: Admin/Manager – Uppgifter (tilldela) – UI-only v1.2 (nivå 3)
+
+FIX-01 (PRC/FIX-ARBETORDER – AO-019 6/8-FIX-01):
+- Org-integritetscheck: särskilj root/orphan/loop utan falska positives
+  - Root (parentId=null) = OK
+  - Missing parentId target = orphan/korrupt (inte “loop”)
+  - Loop = återbesök i kedjan
+- Harden assignmentsV2:
+  - Normalisera till Object.create(null)
+  - Kopiera endast egna keys
+  - Blockera special-keys (__proto__, constructor, prototype) om de dyker upp (fail-closed)
+- ViewerScope-krav policy:
+  - MANAGER: kräver viewerScopeId (fail-closed om saknas)
+  - ADMIN/SYSTEM: får skapa även om viewerScopeId saknas, men:
+    - inget default-scope (scope måste väljas manuellt innan spara)
+    - org + assignments måste vara friska
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -277,7 +270,7 @@ Lagring:
             <select id="scopeSelect"></select>
           </label>
           <div class="smallnote" style="margin-top:0; align-self:end;">
-            Default: ditt scope. Manager kan bara välja inom sin subtree.
+            Manager: endast inom din subtree. Admin/System: välj scope manuellt.
           </div>
         </div>
 
@@ -446,7 +439,7 @@ Lagring:
         <div id="list"></div>
 
         <div class="smallnote">
-          Scope-policy: tasks utan scope visas inte för employee (fail-closed). Manager ser endast sin subtree.
+          Scope-policy: tasks utan scope visas inte för employee. Manager ser/hanterar endast sin subtree.
         </div>
       </section>
 
@@ -456,15 +449,11 @@ Lagring:
 
 <script>
 /* ============================================================
-AO-046 + AO-019 6/8 | FIL-ID: admin/tasks.html (inline JS)
-v1.1 patch:
-- Source of truth: HRApp.getCurrentAccess() (fallback till lokal session)
-- ScopeId krävs på tasks (create) + scope-dropdown (org)
-- Manager-policy: list/create/delete scope-filtreras till viewer subtree
-- Fail-closed: saknat/korrupt org/assignments => skapa blockeras (lockbox)
-- Preflight recipients: blocka om någon mottagare saknar scope/eller scope-mismatch (med tydlig lista)
-- Dedupe: byWeekday normaliseras (sort+unique) innan signatur
-- Templates: visa fel om localStorage-set failar
+AO-046 + AO-019 6/8 | admin/tasks.html (inline JS) – AUTOPATCH v1.2
+FIX-01:
+- Org-integritetscheck utan falska positives (root/orphan/loop)
+- Harden assignmentsV2 (Object.create(null) + blockera special-keys)
+- ViewerScope policy: Manager kräver viewerScopeId; Admin/System kan skapa utan viewerScopeId men ingen default-scope
 ============================================================ */
 (function(){
   "use strict";
@@ -479,11 +468,16 @@ v1.1 patch:
   const ASG_V2_KEY    = "AO-020_ROLE_ASSIGNMENTS_V2";
 
   const MAX_CHAIN_GUARD = 200;
+  const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => Array.from(document.querySelectorAll(s));
 
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function hasLocalKey(key){
+    try{ return localStorage.getItem(key) !== null; }catch{ return false; }
+  }
 
   function safeParseLocal(key, fallback){
     try{
@@ -626,17 +620,57 @@ v1.1 patch:
     return "";
   }
 
-  function loadAssignmentsV2(){
-    const obj = safeParseLocal(ASG_V2_KEY, {});
-    return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : {};
-  }
-
   function roleClassFromAuthRole(role){
     const r = String(role || "").toLowerCase();
     if(r === "systemadmin") return "SYSTEM_ADMIN";
     if(r === "admin") return "ADMIN";
     if(r === "manager") return "MANAGER";
     return "UNKNOWN";
+  }
+
+  // Hardened assignments V2: Object.create(null) + block special keys
+  function normalizeAssignmentsV2(raw, opts){
+    const requireKeyPresent = !!(opts && opts.requireKeyPresent);
+    const issues = [];
+
+    if(requireKeyPresent && !hasLocalKey(ASG_V2_KEY)){
+      return { ok:false, map: Object.create(null), issues: ["Assignments saknas (key finns inte)."] };
+    }
+
+    if(raw === null || raw === undefined){
+      // Om key är närvarande men null/undefined efter parse => korrupt
+      if(requireKeyPresent) return { ok:false, map: Object.create(null), issues: ["Assignments är korrupt (null/undefined)."] };
+      return { ok:true, map: Object.create(null), issues: [] };
+    }
+
+    if(typeof raw !== "object" || Array.isArray(raw)){
+      return { ok:false, map: Object.create(null), issues: ["Assignments korrupt (förväntar objekt)."] };
+    }
+
+    const out = Object.create(null);
+    let blocked = false;
+
+    for(const k of Object.keys(raw)){
+      const key = String(k);
+      if(SPECIAL_KEYS.has(key)){
+        blocked = true;
+        continue; // blockera
+      }
+      out[key] = raw[key];
+    }
+
+    if(blocked){
+      issues.push("Assignments innehåller blockerade special-keys (__proto__/constructor/prototype).");
+      // Fail-closed för skapande: behandla som korrupt
+      return { ok:false, map: out, issues };
+    }
+
+    return { ok:true, map: out, issues };
+  }
+
+  function loadAssignmentsV2Hardened(){
+    const parsed = safeParseLocal(ASG_V2_KEY, null);
+    return normalizeAssignmentsV2(parsed, { requireKeyPresent: true });
   }
 
   function getAccessCtx(){
@@ -661,8 +695,11 @@ v1.1 patch:
     if(!auth) return null;
 
     const empNo = pickEmpNoFromAuth(auth);
-    const asg = loadAssignmentsV2();
-    const rec = empNo ? asg[empNo] : null;
+
+    // Använd hardened loader här också, men Fallback ska inte krascha om key saknas.
+    const parsed = safeParseLocal(ASG_V2_KEY, null);
+    const asgV = normalizeAssignmentsV2(parsed, { requireKeyPresent: false });
+    const rec = empNo ? (asgV.map[empNo] || null) : null;
 
     return {
       source: "fallback",
@@ -670,7 +707,8 @@ v1.1 patch:
       auth,
       empNo,
       viewerScopeId: String(rec?.scopeId || "").trim(),
-      assignment: rec || null
+      assignment: rec || null,
+      _asgIssues: asgV.ok ? [] : asgV.issues
     };
   }
 
@@ -690,14 +728,14 @@ v1.1 patch:
       window.HRApp.logout();
       return;
     }
-    sessionStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
+    try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
+    try{ localStorage.removeItem(SESSION_KEY); }catch{}
     redirectLogin();
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
   // ------------------------------------------------------------
-  // Org helpers (AO-019 6/8)
+  // Org helpers (AO-019 6/8) – FIX-01 integrity check
   // ------------------------------------------------------------
   function normalizeOrgNodes(raw){
     const arr = Array.isArray(raw) ? raw : [];
@@ -716,6 +754,7 @@ v1.1 patch:
   function buildOrgIndex(nodes){
     const byId = new Map();
     for(const n of nodes){ if(!byId.has(n.id)) byId.set(n.id, n); }
+
     const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
     const children = new Map();
     nodes.forEach(n => children.set(n.id, []));
@@ -725,26 +764,78 @@ v1.1 patch:
     return { byId, parentOf, children };
   }
 
-  function detectOrgLoop(nodes){
-    const { parentOf } = buildOrgIndex(nodes);
-    function chainHasLoop(startId){
-      let cur = startId;
+  // FIX-01: tydlig, deterministisk integritetscheck
+  function validateOrgIntegrity(nodes){
+    const issues = [];
+    if(!Array.isArray(nodes) || nodes.length === 0){
+      return { ok:false, issues:["Org saknas/korrupt (tom eller fel format)."], rootIds: [], hasOrphans:false, hasLoop:false };
+    }
+
+    const idx = buildOrgIndex(nodes);
+    const ids = new Set(nodes.map(n => n.id));
+    const rootIds = nodes.filter(n => n.parentId === null).map(n => n.id);
+
+    // Root: parentId=null => OK (men AO-020 kontraktet är 1 root; här gör vi tydlig varning/lock om avvikelse)
+    if(rootIds.length === 0){
+      issues.push("Org saknar root (ingen nod med parentId=null).");
+    }
+    if(rootIds.length > 1){
+      issues.push("Org har flera root-noder (förväntar exakt 1).");
+    }
+
+    // Orphans: parentId pekar på saknad nod (inte loop)
+    let hasOrphans = false;
+    for(const n of nodes){
+      if(n.parentId === null) continue;
+      if(!n.parentId || !ids.has(n.parentId)){
+        hasOrphans = true;
+        break;
+      }
+    }
+    if(hasOrphans){
+      issues.push("Org har orphan-noder (parentId pekar på saknad nod).");
+    }
+
+    // Loop: återbesök i kedjan (separat från orphan)
+    let hasLoop = false;
+    for(const n of nodes){
+      let cur = n.id;
       let steps = 0;
-      const seen = new Set();
-      while(cur && steps < MAX_CHAIN_GUARD){
-        if(seen.has(cur)) return true;
-        seen.add(cur);
-        const p = parentOf.get(cur);
-        if(!p) return false;
+      const seen = new Set([cur]);
+
+      while(steps < MAX_CHAIN_GUARD){
+        const p = idx.parentOf.get(cur);
+
+        // Root/chain end => OK
+        if(p === null) break;
+
+        // Missing parent target => orphan (inte loop)
+        if(!p || !idx.byId.has(p)) break;
+
+        // Loop => återbesök
+        if(seen.has(p)){
+          hasLoop = true;
+          break;
+        }
+
+        seen.add(p);
         cur = p;
         steps++;
       }
-      return true; // guard hit => treat as loop/corrupt
+
+      if(hasLoop) break;
+      if(steps >= MAX_CHAIN_GUARD){
+        hasLoop = true;
+        break;
+      }
     }
-    for(const n of nodes){
-      if(chainHasLoop(n.id)) return true;
+    if(hasLoop){
+      issues.push("Org har loop i parent-kedjan (återbesök upptäckt).");
     }
-    return false;
+
+    // Healthy: exakt 1 root, inga orphans, ingen loop
+    const ok = (rootIds.length === 1) && !hasOrphans && !hasLoop;
+    return { ok, issues, rootIds, hasOrphans, hasLoop };
   }
 
   function isInScope(viewerScopeId, itemScopeId, orgIndex){
@@ -764,10 +855,15 @@ v1.1 patch:
     const seen = new Set([cur]);
     while(cur && steps < MAX_CHAIN_GUARD){
       const p = parentOf.get(cur);
-      if(!p) return false;
+
+      if(p === null) return false; // nådde root utan att träffa v
+      if(!p || !byId.has(p)) return false; // orphan => fail-closed
+
       if(p === v) return true;
+
       if(seen.has(p)) return false; // loop => fail-closed
       seen.add(p);
+
       cur = p;
       steps++;
     }
@@ -793,7 +889,6 @@ v1.1 patch:
   }
 
   function flattenOrgForSelect(nodes, orgIndex){
-    // Depth-first from detected roots (parentId=null). If none, fallback to all nodes sorted.
     const roots = nodes.filter(n => n.parentId === null).map(n => n.id);
     const visited = new Set();
     const out = [];
@@ -819,34 +914,48 @@ v1.1 patch:
         return na.localeCompare(nb, "sv");
       }).forEach(r => walk(r, 1));
     }else{
-      nodes.slice().sort((a,b)=>a.name.localeCompare(b.name,"sv")).forEach(n => out.push({ id:n.id, name:n.name, type:n.type, depth:1 }));
+      nodes.slice().sort((a,b)=>a.name.localeCompare(b.name,"sv"))
+        .forEach(n => out.push({ id:n.id, name:n.name, type:n.type, depth:1 }));
     }
 
     return out;
   }
 
+  // ------------------------------------------------------------
   // Load org + assignments (fail-closed for create)
+  // ------------------------------------------------------------
   const orgRaw = safeParseLocal(ORG_KEY, []);
   const orgNodes = normalizeOrgNodes(orgRaw);
   const orgIndex = buildOrgIndex(orgNodes);
-  const orgHasLoop = orgNodes.length ? detectOrgLoop(orgNodes) : true;
+  const orgIntegrity = validateOrgIntegrity(orgNodes);
 
-  const assignmentsV2 = loadAssignmentsV2();
+  const asgV2 = loadAssignmentsV2Hardened();
+  const assignmentsV2 = asgV2.map;
 
-  // Basic data health
+  // Basic data health -> create lock
   const lockReasons = [];
-  if(!orgNodes.length) lockReasons.push("Org saknas/korrupt.");
-  if(orgHasLoop) lockReasons.push("Org har loop/korrupt parent-chain.");
-  if(!assignmentsV2 || typeof assignmentsV2 !== "object") lockReasons.push("Assignments saknas/korrupt.");
 
-  // viewer scope
+  if(!orgIntegrity.ok){
+    // Tydlig: orphan ≠ loop
+    lockReasons.push(...orgIntegrity.issues);
+  }
+
+  if(!asgV2.ok){
+    lockReasons.push(...asgV2.issues);
+  }
+
   const viewerScopeId = String(access.viewerScopeId || "").trim();
-  if(!viewerScopeId) lockReasons.push("Ditt scope saknas (assignment saknar scopeId).");
-  if(viewerScopeId && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("Ditt scopeId finns inte i org.");
 
-  // Manager-specific safety (still allow list, but create must be locked if scope invalid)
+  // ViewerScope policy FIX-01
+  if(access.roleClass === "MANAGER"){
+    if(!viewerScopeId) lockReasons.push("MANAGER: ditt viewerScopeId saknas (assignment saknar scopeId).");
+    if(viewerScopeId && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("MANAGER: ditt viewerScopeId finns inte i org.");
+  }else{
+    // ADMIN/SYSTEM: viewerScopeId får saknas (men org+assignments måste vara friska och scope måste väljas manuellt)
+    // Inga lockReasons här för saknat viewerScopeId.
+  }
+
   const canCreate = (lockReasons.length === 0);
-
   showLockBox(lockReasons);
 
   // ------------------------------------------------------------
@@ -876,13 +985,13 @@ v1.1 patch:
   }
 
   // ------------------------------------------------------------
-  // Scope select
+  // Scope select (FIX-01: Admin/System ingen default-scope)
   // ------------------------------------------------------------
   function renderScopeSelect(){
     const sel = $("#scopeSelect");
     sel.innerHTML = "";
 
-    if(!orgNodes.length || orgHasLoop){
+    if(!orgIntegrity.ok){
       const opt = document.createElement("option");
       opt.value = "";
       opt.textContent = "— Org saknas/korrupt —";
@@ -893,7 +1002,6 @@ v1.1 patch:
 
     sel.disabled = false;
 
-    // Allowed scopes
     let allowed = null;
     if(access.roleClass === "MANAGER"){
       allowed = computeSubtreeSet(viewerScopeId, orgIndex);
@@ -916,9 +1024,15 @@ v1.1 patch:
       sel.appendChild(opt);
     });
 
-    // default
-    if(viewerScopeId && (!allowed || allowed.has(viewerScopeId))){
-      sel.value = viewerScopeId;
+    // Default:
+    // - MANAGER: default = viewerScopeId (om giltigt)
+    // - ADMIN/SYSTEM: inget default (måste välja manuellt)
+    if(access.roleClass === "MANAGER"){
+      if(viewerScopeId && (!allowed || allowed.has(viewerScopeId))){
+        sel.value = viewerScopeId;
+      }
+    }else{
+      sel.value = ""; // ingen default
     }
   }
 
@@ -1055,7 +1169,7 @@ v1.1 patch:
     const byW = normalizeByWeekday(t?.recurring?.byWeekday || []);
     const parts = [
       String(t.empNo||""),
-      String(t.scopeId||""), // scope ingår: olika scope => inte dublett
+      String(t.scopeId||""),
       String(t.kind||"oneoff"),
       normalizeLine(t.title||"", 240),
       normalizeLine(t.text||"", 2000),
@@ -1161,10 +1275,7 @@ v1.1 patch:
       }
     ];
 
-    const res = saveFailClosed(TEMPLATES_KEY, seeds);
-    if(!res.ok){
-      // Templates är nice-to-have, men vi signalerar inte hårt här.
-    }
+    saveFailClosed(TEMPLATES_KEY, seeds);
   }
 
   function loadTemplates(){
@@ -1296,7 +1407,6 @@ v1.1 patch:
     setMsg("ok", `Mall laddad: ${tpl.name || tpl.id}`);
   });
 
-  // Spara som mall skapar ALLTID en NY mall
   $("#btnTplSave").addEventListener("click", () => {
     setMsg("", "");
 
@@ -1372,14 +1482,12 @@ v1.1 patch:
     if(!sid) return { ok:false, scopeId:"" };
     if(!orgIndex.byId.has(sid)) return { ok:false, scopeId:sid };
     if(access.roleClass === "MANAGER"){
-      // Manager får bara jobba inom sin subtree
       if(!isInScope(viewerScopeId, sid, orgIndex)) return { ok:false, scopeId:sid };
     }
     return { ok:true, scopeId:sid };
   }
 
   function preflightTargetsAgainstScope(targets, taskScopeId){
-    // Fail-closed: blocka om någon mottagare saknar assignment/scope eller om task scope inte ligger i mottagarens subtree
     const missing = [];
     const mismatch = [];
     const invalidEmpScope = [];
@@ -1395,7 +1503,6 @@ v1.1 patch:
         invalidEmpScope.push(`${empNo}(${empScope})`);
         continue;
       }
-      // För att mottagaren ska SE tasken: taskScopeId måste ligga i empScope subtree.
       if(!isInScope(empScope, taskScopeId, orgIndex)){
         mismatch.push(`${empNo}(${empScope})`);
       }
@@ -1425,7 +1532,7 @@ v1.1 patch:
     setMsg("", "");
 
     if(!canCreate){
-      setMsg("err", "Skapande är låst (fail-closed). Åtgärda org/assignments/scope först.");
+      setMsg("err", "Skapande är låst (fail-closed). Åtgärda org/assignments först.");
       return;
     }
 
@@ -1557,7 +1664,6 @@ v1.1 patch:
       }
     }
 
-    // Preflight: fail-closed recipients must be able to SEE the task scope
     const blockers = preflightTargetsAgainstScope(targets, vScope.scopeId);
     if(blockers.missing.length || blockers.invalidEmpScope.length || blockers.mismatch.length){
       const msg = summarizeBlockers(blockers);
@@ -1646,17 +1752,22 @@ v1.1 patch:
 
   function canSeeTask(task){
     const sid = String(task?.scopeId || "").trim();
-    if(!sid) return (access.roleClass !== "MANAGER"); // Manager: fail-closed (hide). Admin/System: may see legacy with warning.
-    if(!orgIndex.byId.has(sid)) return (access.roleClass !== "MANAGER"); // Manager hide.
+
+    // Manager: alltid fail-closed på saknat/ogiltigt scope
     if(access.roleClass === "MANAGER"){
+      if(!sid) return false;
+      if(!orgIndex.byId.has(sid)) return false;
       if(!viewerScopeId || !orgIndex.byId.has(viewerScopeId)) return false;
       return isInScope(viewerScopeId, sid, orgIndex);
     }
+
+    // Admin/System: får se legacy (men UI visar varning)
+    if(!sid) return true;
+    if(!orgIndex.byId.has(sid)) return true;
     return true;
   }
 
   function canDeleteTask(task){
-    // Manager får bara ta bort inom sin subtree; Admin/System kan ta bort (men vi respekterar synlighet).
     if(!canSeeTask(task)) return false;
     if(access.roleClass === "MANAGER"){
       const sid = String(task?.scopeId || "").trim();
@@ -1675,7 +1786,6 @@ v1.1 patch:
 
     const raw = loadTasks().slice().sort((a,b) => (b?.createdAt||0) - (a?.createdAt||0));
 
-    // Apply visibility (manager scoped)
     let allVisible = raw.filter(canSeeTask);
 
     updateKpis(allVisible);
