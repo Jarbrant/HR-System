@@ -7,24 +7,10 @@ Policy (LÅST):
 - Ingen backend
 - Inga storage-keys/datamodell utan AO (AO-002: skriver inget)
 - Fail-closed (okänd roll = nekad)
-- Public route ska vara explicit (endast allowlist), inte implicit via /UI/
-- Authed rollers får inte ha /UI/ som route-prefix (minskar risk för “verktyg i UI-mappen”)
-- XSS-escape hanteras i kärna (UI-03-APP.js); config innehåller inga user-data
-Debug-notes:
-- DEBUG är AV som default
-- Logga aldrig PII/empNo (kärnan ansvarar)
-Senaste sanning: 2025-12-30 (AO-002 v1.3 PATCH för GitHub Pages stabil BASE_PATH)
-Ändringslogg:
-- v1.2: ADMIN_VIEW_QUESTIONS + bort /UI/ från ROUTES_BY_ROLE + PUBLIC_ROUTES determinism (/index.html only)
-- v1.3 (PATCH): BASE_PATH hårdlåses till "/HR-System" för deterministisk routing/guard på GitHub Pages
+- Public route ska vara explicit (endast allowlist)
+- Authed rollers får inte ha /UI/ som route-prefix
+Senaste sanning: 2025-12-30 (AO-002 v1.3)
 ============================================================ */
-
-/*
-  SCOPE (GitHub Pages):
-  - Repo körs under /HR-System/ på jarbrant.github.io
-  - För att undvika baspath-regressioner (guards/routing) hårdlåser vi BASE_PATH="/HR-System"
-  - Lokalt kan man byta till "" vid behov, men prod ska vara "/HR-System"
-*/
 
 (function () {
   "use strict";
@@ -32,7 +18,8 @@ Senaste sanning: 2025-12-30 (AO-002 v1.3 PATCH för GitHub Pages stabil BASE_PAT
   // -------------------------
   // Base-path (GitHub Pages)
   // -------------------------
-  // PRC: default får vara tom sträng i teori, men för er drift på GitHub Pages ska detta vara hårdlåst.
+  // FIX (prod): Repo heter "HR-System" => GitHub Pages kör under /HR-System
+  // Detta gör att core kan trimma "/HR-System" och matcha "/admin/" korrekt.
   const BASE_PATH = "/HR-System";
 
   // -------------------------
@@ -125,7 +112,6 @@ Senaste sanning: 2025-12-30 (AO-002 v1.3 PATCH för GitHub Pages stabil BASE_PAT
   // -------------------------
   const DEBUG = false;
 
-  // Export (global)
   window.HR_CONFIG = Object.freeze({
     DEBUG,
     BASE_PATH,
