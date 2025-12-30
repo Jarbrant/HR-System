@@ -1,16 +1,20 @@
 <!-- ============================================================
-AO-044 | FIL-ID: admin/home.html
+AO-044 (PATCH v2.0) | FIL-ID: admin/home.html
 Projekt: HR-System
 Syfte: Admin – startsida (Dashboard) – UI-only v1 (nivå 3 genvägar)
 Innehåll:
 - Återinför: Uppgifter + Frågor (create/tilldela)
 - Behåller: Felrapporter + Svar + Integrationer
 - PATCH: Lägg till Dokument (admin/docs.html)
+VIKTIGT (PATCH v2.0):
+- Byter till AO-002 CORE-guard (HRApp.requireAuth) och tar bort legacy auth-guard
+- Fixar roll-case: ADMIN/SYSTEM_ADMIN (inte "admin")
 Policy:
 - Ingen backend
 - Ingen känslig persondata lagras
-Lagring:
-- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- Fail-closed (core)
+Lagring (läser):
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session (via core)
 - AO-013_REPORTS_V1 (localStorage) – felrapporter
 - AO-015_QA_V1 (localStorage) – frågor/svar (legacy)
 - (tålig läsning): AO-012_QUESTIONS_V1 + AO-013_ANSWERS_V1 (om de finns)
@@ -109,7 +113,7 @@ Lagring:
       <div>
         <h1 class="tight">Admin</h1>
         <div class="muted">
-          Inloggad: <strong id="whoName">—</strong> • Roll <span>admin</span>
+          Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
         </div>
       </div>
 
@@ -210,48 +214,28 @@ Lagring:
 
 </main>
 
+<!-- AO-002 CORE (LÅST): config före app -->
+<script src="../UI/UI-04-CONFIG.js"></script>
+<script src="../UI/UI-03-APP.js"></script>
+
 <script>
 /* ============================================================
-AO-044 | FIL-ID: admin/home.html (inline JS) – PATCH
-- Lägg till docs-ruta + docs-panel (AO-018_DOCS_V1)
-- Tålig answers-läsning: QA_KEY (legacy) + ANSWERS_KEY (om finns)
+AO-044 (PATCH v2.0) | admin/home.html (inline JS)
+- Byter till HRApp.requireAuth() (core) och tar bort legacy auth-guard
+- Behåller tålig läsning: QA_KEY + ANSWERS/QUESTIONS om de finns
+- Behåller docs-panel + reports + answers
 ============================================================ */
 (function(){
   "use strict";
 
-  const SESSION_KEY   = "AO-001_LOGIN_V1";
-  const QA_KEY        = "AO-015_QA_V1";          // legacy: frågor+svar i en lista
+  // ---- Keys (LÅST enligt header) ----
+  const QA_KEY        = "AO-015_QA_V1";
   const REPORTS_KEY   = "AO-013_REPORTS_V1";
-
-  // nya (kan finnas)
   const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
   const ANSWERS_KEY   = "AO-013_ANSWERS_V1";
-
   const DOCS_KEY      = "AO-018_DOCS_V1";
 
-  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
-
-  function readRawSession(){
-    const s1 = sessionStorage.getItem(SESSION_KEY);
-    if (s1) return s1;
-    const s2 = localStorage.getItem(SESSION_KEY);
-    if (s2) return s2;
-    return null;
-  }
-
-  function readAuth(){
-    try{
-      const raw = readRawSession();
-      if(!raw) return null;
-      const data = JSON.parse(raw);
-      if(!data?.auth?.isAuthed) return null;
-      if(data.auth.role !== "admin") return null;
-      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-      return data.auth;
-    }catch{
-      return null;
-    }
-  }
+  const $ = (s) => document.querySelector(s);
 
   function safeParse(key, fallback){
     try{
@@ -280,18 +264,41 @@ AO-044 | FIL-ID: admin/home.html (inline JS) – PATCH
     }catch{ return "—"; }
   }
 
-  const auth = readAuth();
-  if(!auth){ redirectLogin(); return; }
+  // ---- CORE GUARD (fail-closed) ----
+  if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+    // om core saknas: fail-closed till login
+    window.location.replace("../UI/UI-01-SKELETON.html?err=core");
+    return;
+  }
 
-  document.getElementById("whoName").textContent = auth.displayName || "Admin";
+  // Admin-branch: ADMIN + SYSTEM_ADMIN får vara här (policy: SYSTEM_ADMIN är steward men får se)
+  const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN","SYSTEM_ADMIN"] });
+  if (!session) return; // core redirectar redan
 
-  const doLogout = () => {
-    sessionStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
-    redirectLogin();
-  };
-  document.getElementById("btnLogout").addEventListener("click", doLogout);
-  document.getElementById("navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+  const auth = window.HRApp.getAuth(session);
+  if (!auth || !auth.role) {
+    window.location.replace("../UI/UI-01-SKELETON.html?err=unauth");
+    return;
+  }
+
+  // UI: visa vem/roll (ingen loggning)
+  const empNo = String((session.auth && session.auth.empNo) || "").trim();
+  $("#whoName").textContent = empNo ? ("Anst.nr " + empNo) : "—";
+  $("#whoRole").textContent = auth.role;
+
+  // Logout via core (om finns)
+  function doLogout(){
+    if (window.HRApp && typeof window.HRApp.logout === "function") {
+      window.HRApp.logout();
+    } else {
+      // fallback
+      try { sessionStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
+      try { localStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
+      window.location.replace("../UI/UI-01-SKELETON.html?err=logout");
+    }
+  }
+  $("#btnLogout").addEventListener("click", doLogout);
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
   // ---- Answers: tolerant collector ----
   function collectAnswered(){
@@ -300,15 +307,15 @@ AO-044 | FIL-ID: admin/home.html (inline JS) – PATCH
     const qa = safeParse(QA_KEY, []);
     if(Array.isArray(qa) && qa.length){
       qa.forEach(q => {
-        const hasA = !!(q.answer && String(q.answer).trim().length);
-        const answered = (q.status === "answered" || hasA);
+        const hasA = !!(q && q.answer && String(q.answer).trim().length);
+        const answered = (q && (q.status === "answered" || hasA));
         if(!answered) return;
         out.push({
-          title: q.title || "Fråga",
-          empNo: q.empNo || "",
-          answerAnonymous: q.answerAnonymous === true,
-          answeredAt: q.answeredAt || q.updatedAt || 0,
-          updatedAt: q.updatedAt || 0
+          title: (q && q.title) || "Fråga",
+          empNo: (q && q.empNo) || "",
+          answerAnonymous: q && q.answerAnonymous === true,
+          answeredAt: (q && (q.answeredAt || q.updatedAt)) || 0,
+          updatedAt: (q && q.updatedAt) || 0
         });
       });
       return out;
@@ -343,9 +350,9 @@ AO-044 | FIL-ID: admin/home.html (inline JS) – PATCH
   const since = now - (24*60*60*1000);
   const answered24h = answered.filter(x => (x.answeredAt || x.updatedAt || 0) >= since);
 
-  const line = document.getElementById("answers24hLine");
-  const none = document.getElementById("answersNoneText");
-  const txt  = document.getElementById("answers24hText");
+  const line = $("#answers24hLine");
+  const none = $("#answersNoneText");
+  const txt  = $("#answers24hText");
 
   if(answered24h.length === 0){
     line.classList.add("hide");
@@ -357,7 +364,7 @@ AO-044 | FIL-ID: admin/home.html (inline JS) – PATCH
   }
 
   // ---- Latest answers list (top 5) ----
-  const answersList = document.getElementById("answersList");
+  const answersList = $("#answersList");
   answersList.innerHTML = "";
 
   const sortedAns = answered.slice().sort((a,b) => (b.answeredAt||b.updatedAt||0) - (a.answeredAt||a.updatedAt||0));
@@ -376,7 +383,7 @@ AO-044 | FIL-ID: admin/home.html (inline JS) – PATCH
 
   // ---- Latest reports list (top 5) ----
   const allReports = safeParse(REPORTS_KEY, []);
-  const reportsList = document.getElementById("reportsList");
+  const reportsList = $("#reportsList");
   reportsList.innerHTML = "";
 
   if(!Array.isArray(allReports) || allReports.length === 0){
@@ -393,8 +400,8 @@ AO-044 | FIL-ID: admin/home.html (inline JS) – PATCH
   }
 
   // ---- Docs summary + latest docs list (top 5) ----
-  const docsLine = document.getElementById("docsLine");
-  const docsList = document.getElementById("docsList");
+  const docsLine = $("#docsLine");
+  const docsList = $("#docsList");
 
   const docs = safeParse(DOCS_KEY, []);
   const arr = Array.isArray(docs) ? docs : [];
