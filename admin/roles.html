@@ -109,14 +109,6 @@ Integration (kommentar):
       min-width: 180px;
     }
     .muted{ color: var(--muted); }
-    .actionsRow{
-      display:flex;
-      gap:8px;
-      flex-wrap: wrap;
-      align-items:center;
-      justify-content: space-between;
-      margin-top: 10px;
-    }
     .rightActions{
       display:flex;
       gap:8px;
@@ -214,11 +206,18 @@ Integration (kommentar):
 
 <script src="../UI/UI-03-APP.js"></script>
 <script>
+/* ============================================================
+AO-006/22 | admin/roles.html (inline JS) – PATCH v1.1
+BUGHUNT autopatch:
+- P0: Kräver label (kan inte sparas tomt)
+- P0: Try/catch på storage I/O (fail-closed istället för crash)
+- P1: Lock-state disable Save (reset/repair fortsatt möjligt)
+- P2: Ingen “debug-varning” vid frisk drift
+============================================================ */
 (function(){
   "use strict";
 
   const ROLES_KEY = "AO-020_ROLES_V1";
-
   const ROLE_ORDER = ["SYSTEM_ADMIN","ADMIN","MANAGER","EMPLOYEE"];
 
   const DEFAULTS = [
@@ -232,11 +231,11 @@ Integration (kommentar):
 
   function escapeHtml(s){
     return String(s ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
+      .replace(/&/g,"&amp;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;")
+      .replace(/'/g,"&#039;");
   }
 
   function setMsg(kind, text){
@@ -252,14 +251,21 @@ Integration (kommentar):
     return "./UI/UI-01-SKELETON.html";
   }
 
+  function setLockedUI(isLocked){
+    // Save blockeras i lock-läge (P1). Reset/repair är alltid tillåtet.
+    $("#btnSaveAll").disabled = !!isLocked;
+  }
+
   function showLock(reason){
     $("#lockbox").style.display = "block";
     $("#lockmsg").textContent = reason || "Låst läge.";
+    setLockedUI(true);
   }
   function hideLock(){
     $("#lockbox").style.display = "none";
     $("#lockmsg").textContent = "";
     $("#repairBox").style.display = "none";
+    setLockedUI(false);
   }
 
   function showWarn(text){
@@ -271,10 +277,17 @@ Integration (kommentar):
     $("#warnmsg").textContent = "";
   }
 
+  function safeReplace(url){
+    try{ window.location.replace(url); }
+    catch{
+      try{ window.location.href = url; }catch{}
+    }
+  }
+
   function hardFailClosed(reason){
     showLock(reason);
     const url = computeLoginUrl();
-    setTimeout(() => { window.location.replace(url); }, 80);
+    setTimeout(() => safeReplace(url), 80);
   }
 
   // ---------- AUTH (SYSTEM_ADMIN-only, fail-closed) ----------
@@ -284,11 +297,8 @@ Integration (kommentar):
   }
 
   const loginUrl = computeLoginUrl();
-
-  // GUARD: försök med allowRoles om core stödjer det (ok om ignoreras)
   const access = window.HRApp.requireAuth({ pageRole: "admin", allowRoles: ["SYSTEM_ADMIN"], loginUrl });
 
-  // Fail-closed om core returnerar något “truthy” men utan riktig auth
   const isAuthed = !!(access && access.auth && access.auth.isAuthed === true);
   const roleId = String((access && (access.roleId || access.auth.roleId || access.auth.role)) || "").trim();
 
@@ -306,7 +316,7 @@ Integration (kommentar):
       window.HRApp.logout();
       return;
     }
-    window.location.replace(loginUrl);
+    safeReplace(loginUrl);
   });
 
   // ---------- STORAGE (session först, fallback local) ----------
@@ -314,9 +324,27 @@ Integration (kommentar):
     try{ return JSON.parse(str); }catch{ return null; }
   }
 
+  function safeGet(storage, key){
+    try{
+      const raw = storage.getItem(key);
+      return (raw === null || raw === undefined) ? null : raw;
+    }catch{
+      return null;
+    }
+  }
+
+  function safeSet(storage, key, value){
+    try{
+      storage.setItem(key, value);
+      return { ok:true };
+    }catch{
+      return { ok:false };
+    }
+  }
+
   function readRaw(storage, key){
-    const raw = storage.getItem(key);
-    if(raw === null || raw === undefined) return { ok:false, value:null, raw:null, reason:"missing" };
+    const raw = safeGet(storage, key);
+    if(raw === null) return { ok:false, value:null, raw:null, reason:"missing" };
     const v = parseJson(raw);
     if(v === null) return { ok:false, value:null, raw, reason:"bad_json" };
     return { ok:true, value:v, raw, reason:"" };
@@ -324,9 +352,18 @@ Integration (kommentar):
 
   function writeBoth(key, value){
     const s = JSON.stringify(value);
-    // STORAGE: skriv local först (minskar risk att session “vinner” med halvskrivning)
-    localStorage.setItem(key, s);
-    sessionStorage.setItem(key, s);
+
+    // STORAGE: skriv local först, sen session (minskar risk för “split-brain” vid delvis skrivning)
+    const a = safeSet(localStorage, key, s);
+    const b = safeSet(sessionStorage, key, s);
+
+    if(!a.ok || !b.ok){
+      // Fail-closed: informera och lås (utan nya keys)
+      showWarn("Kunde inte skriva till webblagring (local/session). Kontrollera webbläsarens lagringsinställningar.");
+      showLock("Skrivning misslyckades (fail-closed).");
+      return { ok:false };
+    }
+    return { ok:true };
   }
 
   function buildDefaults(now){
@@ -348,6 +385,9 @@ Integration (kommentar):
     const label = String(o.label ?? "").trim();
     const description = String(o.description ?? "").trim();
     const updatedAt = Number(o.updatedAt || 0);
+
+    // P0: label måste finnas
+    if(!label) return null;
 
     // isSystem låst per policy
     const mustSystem = (role === "SYSTEM_ADMIN" || role === "ADMIN");
@@ -371,7 +411,7 @@ Integration (kommentar):
 
     for(const item of arr){
       const n = normalizeRoleObj(item);
-      if(!n) return { ok:false, reason:"Innehållsfel: en eller flera roller har fel role/isSystem/updatedAt eller okända fältformat." };
+      if(!n) return { ok:false, reason:"Innehållsfel: rollobjekt är ogiltigt (role/isSystem/updatedAt/label)." };
       if(seen.has(n.role)) return { ok:false, reason:"Innehållsfel: dubblett av role upptäckt." };
       seen.add(n.role);
       norm.push(n);
@@ -381,13 +421,11 @@ Integration (kommentar):
       if(!seen.has(r)) return { ok:false, reason:`Innehållsfel: saknar roll '${r}'.` };
     }
 
-    // Canonical order
     norm.sort((a,b) => ROLE_ORDER.indexOf(a.role) - ROLE_ORDER.indexOf(b.role));
     return { ok:true, roles:norm };
   }
 
   function getStoreState(){
-    // session först
     const s = readRaw(sessionStorage, ROLES_KEY);
     const l = readRaw(localStorage, ROLES_KEY);
 
@@ -402,14 +440,17 @@ Integration (kommentar):
 
   function ensureSeedIfMissing(){
     const st = getStoreState();
-
     if(st.session.read.reason === "missing" && st.local.read.reason === "missing"){
       const now = Date.now();
       const def = buildDefaults(now);
-      writeBoth(ROLES_KEY, def);
-      return { seeded:true, note:"Seeder standardroller (key saknades)." };
+      const wr = writeBoth(ROLES_KEY, def);
+      if(wr.ok){
+        setMsg("ok", "Standardroller initierade (key saknades).");
+        return { seeded:true };
+      }
+      return { seeded:false };
     }
-    return { seeded:false, note:"" };
+    return { seeded:false };
   }
 
   // ---------- UI render ----------
@@ -484,7 +525,6 @@ Integration (kommentar):
       const idx = next.findIndex(x => x.role === role);
       if(idx < 0) return;
 
-      // SCOPE: endast metadata
       next[idx][field] = v;
     });
 
@@ -513,7 +553,6 @@ Integration (kommentar):
   function lockWithRepair(reason, state){
     showLock(reason);
 
-    // Visa repair-knappar om vi kan guida exakt (utan nya keys)
     const canSyncFromLocal = state && state.local && state.local.valid && state.local.valid.ok === true &&
                             state && state.session && state.session.valid && state.session.valid.ok !== true;
 
@@ -522,7 +561,7 @@ Integration (kommentar):
     if(canSyncFromLocal || canReset){
       $("#repairBox").style.display = "block";
       $("#repairText").textContent = canSyncFromLocal
-        ? "Instruktion: sessionStorage-versionen är trasig men localStorage är frisk. Du kan reparera genom att synka från localStorage (ingen datamodell ändras)."
+        ? "Instruktion: sessionStorage-versionen är trasig men localStorage är frisk. Reparera genom att synka från localStorage (ingen datamodell ändras)."
         : "Instruktion: lagringen är korrupt. Reparera genom att återställa standardroller (ingen datamodell ändras).";
       $("#btnRepairSync").style.display = canSyncFromLocal ? "inline-flex" : "none";
       $("#btnRepairReset").style.display = canReset ? "inline-flex" : "none";
@@ -542,14 +581,11 @@ Integration (kommentar):
     const sOk = st.session.valid && st.session.valid.ok === true;
     const lOk = st.local.valid && st.local.valid.ok === true;
 
-    // session först – men om session trasig och local frisk: fail-closed med repair-option (policy-kompatibelt)
     if(sOk){
-      const roles = st.session.valid.roles;
-      return { ok:true, roles, source:"sessionStorage" };
+      return { ok:true, roles: st.session.valid.roles, source:"sessionStorage" };
     }
 
     if(!sOk && lOk){
-      // policy: session först. Men vi kan inte “fail-open” till local utan att tydliggöra.
       lockWithRepair(
         "Lagringen är inkonsekvent: sessionStorage-versionen av AO-020_ROLES_V1 är trasig, men localStorage är frisk. Sidan är låst (fail-closed) tills du reparerar.",
         st
@@ -557,8 +593,7 @@ Integration (kommentar):
       return { ok:false, roles:null, source:"locked_split_brain" };
     }
 
-    // båda trasiga eller saknas i praktiken
-    const reason = st.session.read.reason === "missing" && st.local.read.reason === "missing"
+    const reason = (st.session.read.reason === "missing" && st.local.read.reason === "missing")
       ? "Rollmetadata saknas. Du kan återställa standardroller."
       : "Rollmetadata är korrupt eller i fel format. Sidan är låst (fail-closed) tills du reparerar.";
 
@@ -569,7 +604,9 @@ Integration (kommentar):
   function doReset(){
     const now = Date.now();
     const def = buildDefaults(now);
-    writeBoth(ROLES_KEY, def);
+    const wr = writeBoth(ROLES_KEY, def);
+    if(!wr.ok) return;
+
     hideLock();
     hideWarn();
     setMsg("ok", "Standardroller återställda.");
@@ -582,9 +619,16 @@ Integration (kommentar):
       setMsg("err", "Kan inte synka: localStorage-versionen är inte giltig.");
       return;
     }
-    // Reparera: kopiera local → session (policy: session först)
     const roles = st.local.valid.roles;
-    sessionStorage.setItem(ROLES_KEY, JSON.stringify(roles));
+
+    const s = JSON.stringify(roles);
+    const wr = safeSet(sessionStorage, ROLES_KEY, s);
+    if(!wr.ok){
+      showWarn("Kunde inte skriva till sessionStorage. Kontrollera webbläsarens lagringsinställningar.");
+      showLock("Reparera misslyckades (fail-closed).");
+      return;
+    }
+
     hideLock();
     hideWarn();
     setMsg("ok", "Reparerat: sessionStorage synkad från localStorage.");
@@ -598,6 +642,7 @@ Integration (kommentar):
   });
 
   $("#btnSaveAll").addEventListener("click", () => {
+    hideWarn();
     setMsg("", "");
 
     const load = loadOrFailClosed();
@@ -608,15 +653,27 @@ Integration (kommentar):
 
     const next = collectEdits(load.roles);
 
-    // Validations: must match schema exactly
+    // P0: label får inte vara tom (fail-closed)
+    for(const r of next){
+      if(!String(r.label || "").trim()){
+        showWarn(`Label krävs för ${r.role}.`);
+        setMsg("err", "Kan inte spara: minst ett label är tomt (fail-closed).");
+        return;
+      }
+    }
+
     const check = validateRolesArray(next);
     if(!check.ok){
-      setMsg("err", "Kan inte spara: data blev ogiltig. Tips: återställ standardroller.");
+      showWarn("Data validerade inte mot låst modell. Tips: återställ standardroller.");
+      setMsg("err", "Kan inte spara (fail-closed).");
       return;
     }
 
-    writeBoth(ROLES_KEY, check.roles);
-    setMsg("ok", `Sparat. Källa: ${load.source} → synkad till sessionStorage + localStorage.`);
+    const wr = writeBoth(ROLES_KEY, check.roles);
+    if(!wr.ok) return;
+
+    hideWarn();
+    setMsg("ok", `Sparat. (${load.source} → synkad till sessionStorage + localStorage.)`);
     render(check.roles);
   });
 
@@ -633,11 +690,11 @@ Integration (kommentar):
   // ---------- INIT ----------
   const initial = loadOrFailClosed();
   if(initial.ok){
-    showWarn(`Datakälla: ${initial.source}. (Detta är en debug-hint – inga nya keys används.)`);
+    hideWarn(); // P2: ingen debug-varning vid frisk drift
     render(initial.roles);
   }else{
-    // Låst: rendera ingenting (fail-closed). Reset/repair finns i lockbox.
-    render(buildDefaults(Date.now())); // UI-stöd: visa defaults som referens, men ingen auto-write
+    // Låst: visa defaults som referens, men ingen auto-write
+    render(buildDefaults(Date.now()));
     showWarn("Sidan är låst. Reparera via knapparna ovan (fail-closed).");
   }
 
