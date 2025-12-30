@@ -1,6 +1,11 @@
 <!-- =========================
 FILE: admin/roles.html
-AO-019 | FIL-ID: admin/roles.html
+AO-019 2/8 | FIL-ID: admin/roles.html
+Syfte: Role motor + Assignments V2 + systemroller + V1→V2 migration (LÅST)
+Policy: UI-only • Fail-closed • sessionStorage först • fallback localStorage • XSS-escape • Inga nya keys
+Keys (LÅST):
+- Läs: AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, (migration) AO-020_ROLE_ASSIGNMENTS_V1
+- Skriv: AO-019_ROLES_V1 (autoseed systemroller om saknas), AO-020_ROLE_ASSIGNMENTS_V2
 ========================= -->
 <!doctype html>
 <html lang="sv">
@@ -152,6 +157,16 @@ AO-019 | FIL-ID: admin/roles.html
       align-items:end;
     }
     .assignRow label{ flex: 1 1 220px; margin:0; }
+
+    .lockPanel{
+      margin-top: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(254,226,226,.55);
+    }
+    .lockPanel .title{ font-weight: 900; margin: 0 0 6px; }
+    .lockPanel .muted{ color: var(--muted); }
   </style>
 </head>
 
@@ -177,7 +192,7 @@ AO-019 | FIL-ID: admin/roles.html
 
 <main class="container">
   <h1 class="tight">Roller (Admin)</h1>
-  <p class="muted">Bygg roller med modul-scope och arv. Tilldela till anst.nr. UI-only v1.</p>
+  <p class="muted">Bygg roller med modul-scope och arv. Tilldela till anst.nr med scope (org). UI-only.</p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
@@ -187,6 +202,11 @@ AO-019 | FIL-ID: admin/roles.html
       <div class="row wrap">
         <button id="btnNew" type="button" class="secondary">Ny roll</button>
       </div>
+    </div>
+
+    <div id="lockbox" class="lockPanel" style="display:none;" aria-live="polite">
+      <p class="title">Låst läge (fail-closed)</p>
+      <div id="lockmsg" class="muted">—</div>
     </div>
 
     <div class="layout">
@@ -215,19 +235,7 @@ AO-019 | FIL-ID: admin/roles.html
             <input id="roleDesc" type="text" placeholder="Kort beskrivning..." />
           </label>
 
-          <div class="row2" style="margin-top:10px;">
-            <label>
-              Locale (AO-023)
-              <input id="roleLocale" type="text" placeholder="t.ex. sv-SE" />
-            </label>
-            <label>
-              Supportprofil (AO-023)
-              <select id="roleSupport"></select>
-            </label>
-          </div>
-
           <div id="inheritWarn" class="warnbox" style="display:none;" aria-live="polite"></div>
-          <div id="metaWarn" class="warnbox" style="display:none;" aria-live="polite"></div>
         </div>
 
         <div class="subcard" aria-label="Moduler">
@@ -257,7 +265,7 @@ AO-019 | FIL-ID: admin/roles.html
         <p id="msgRole" class="message" aria-live="polite"></p>
 
         <div class="smallnote">
-          Lagring: <code>AO-019_ROLES_V1</code> + assignments <code>AO-020_ROLE_ASSIGNMENTS_V1</code>.
+          Lagring: <code>AO-019_ROLES_V1</code> • Assignments: <code>AO-020_ROLE_ASSIGNMENTS_V2</code> (migration från <code>AO-020_ROLE_ASSIGNMENTS_V1</code> om behövs).
         </div>
       </section>
 
@@ -267,7 +275,7 @@ AO-019 | FIL-ID: admin/roles.html
 
         <div class="kpis" aria-label="Sammanfattning">
           <div class="kpi">Roller: <strong id="kpiRoles">0</strong></div>
-          <div class="kpi">Admin-ish: <strong id="kpiAdmin">0</strong></div>
+          <div class="kpi">Admin-ish: <strong id="kpiAdminish">0</strong></div>
           <div class="kpi">Tilldelningar: <strong id="kpiAssign">0</strong></div>
         </div>
 
@@ -276,9 +284,9 @@ AO-019 | FIL-ID: admin/roles.html
             Visa
             <select id="filter">
               <option value="all" selected>Alla roller</option>
-              <option value="adminish">Admin-ish</option>
               <option value="system">Systemroller</option>
               <option value="custom">Egna roller</option>
+              <option value="adminish">Admin-ish</option>
             </select>
           </label>
 
@@ -291,7 +299,7 @@ AO-019 | FIL-ID: admin/roles.html
         <div id="list"></div>
 
         <div class="subcard" aria-label="Tilldelning">
-          <p class="title">Tilldela roll</p>
+          <p class="title">Tilldela roll + scope</p>
 
           <div class="assignRow">
             <label>
@@ -304,11 +312,16 @@ AO-019 | FIL-ID: admin/roles.html
               <select id="asgRole"></select>
             </label>
 
+            <label>
+              Scope (org)
+              <select id="asgScope"></select>
+            </label>
+
             <button id="btnAssign" type="button">Tilldela</button>
           </div>
 
           <div class="muted" style="margin-top:8px;">
-            Tilldelning används av routing (senare): empNo → roleId.
+            Tilldelning används av routing: <code>empNo → { roleId, scopeId, updatedAt }</code>.
           </div>
 
           <div id="asgList" style="margin-top:10px;"></div>
@@ -320,69 +333,32 @@ AO-019 | FIL-ID: admin/roles.html
   </section>
 </main>
 
+<!-- Kärna (stam) enligt AO-019 1/8 -->
+<script src="../UI/UI-03-APP.js"></script>
+
 <script>
 /* ============================================================
-AO-019 | FIL-ID: admin/roles.html (inline JS)
-Autopatch:
-- AO-023 metadata: role.locale + role.supportProfileId (seed + UI + val)
-- Lägg till saknade admin-moduler: ADMIN_ORG, ADMIN_ACCESS
-- Guard: admin + systemadmin
-- Stoppa arv-cykler vid save
-- child overrides parent
+AO-019 2/8 | admin/roles.html (inline JS)
+- Assignments V2 primär + migration V1->V2 fail-safe
+- Autoseed systemroller: SYSTEM_ADMIN / ADMIN / MANAGER / EMPLOYEE (om saknas)
+- Scope-dropdown från AO-020_ORG_V1 (fail-closed om saknas/korrupt)
+- Respektera modulbehörighet: ADMIN_ROLES manage krävs för att skriva (roll/assign)
+- XSS-escape på allt från storage
+Keys (LÅST): AO-019_ROLES_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-020_ROLE_ASSIGNMENTS_V1
 ============================================================ */
 (function(){
   "use strict";
 
   const SESSION_KEY = "AO-001_LOGIN_V1";
   const ROLES_KEY   = "AO-019_ROLES_V1";
-  const ASG_KEY     = "AO-020_ROLE_ASSIGNMENTS_V1";
+  const ORG_KEY     = "AO-020_ORG_V1";
+  const ASG_V2_KEY  = "AO-020_ROLE_ASSIGNMENTS_V2";
+  const ASG_V1_KEY  = "AO-020_ROLE_ASSIGNMENTS_V1";
 
-  // AO-023
-  const SUPPORT_KEY = "AO-023_SUPPORT_PROFILES_V1";
-  const DEFAULT_LOCALE = "sv-SE";
-  const DEFAULT_SUPPORT_ID = "support_default_v1";
-
-  const SYSTEM_ROLE_IDS = new Set(["role_employee", "role_admin"]);
   const MAX_DEPTH = 15;
+  const DEFAULT_LOCALE = "sv-SE";
 
-  const $  = (s) => document.querySelector(s);
-
-  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
-
-  function readRawSession(){
-    const s1 = sessionStorage.getItem(SESSION_KEY);
-    if (s1) return s1;
-    const s2 = localStorage.getItem(SESSION_KEY);
-    if (s2) return s2;
-    return null;
-  }
-
-  function readAuth(){
-    try{
-      const raw = readRawSession();
-      if(!raw) return null;
-      const data = JSON.parse(raw);
-      if(!data?.auth?.isAuthed) return null;
-      // Tillåt admin + systemadmin
-      if(data.auth.role !== "admin" && data.auth.role !== "systemadmin") return null;
-      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-      return data.auth;
-    }catch{
-      return null;
-    }
-  }
-
-  function safeParse(key, fallback){
-    try{
-      const v = JSON.parse(localStorage.getItem(key) || "null");
-      return (v === null || v === undefined) ? fallback : v;
-    }catch{
-      return fallback;
-    }
-  }
-  function save(key, value){
-    localStorage.setItem(key, JSON.stringify(value));
-  }
+  const $ = (s) => document.querySelector(s);
 
   function escapeHtml(s){
     return String(s ?? "")
@@ -398,59 +374,83 @@ Autopatch:
     el.textContent = text || "";
   }
 
-  function genId(prefix){
-    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  function redirectLogin(){
+    // Prefer core routing if present; fallback to existing skeleton
+    try{
+      if(window.HRApp && typeof window.HRApp.redirectToLogin === "function"){
+        window.HRApp.redirectToLogin();
+        return;
+      }
+    }catch{}
+    window.location.replace("../UI/UI-01-SKELETON.html");
   }
 
-  function normalizeEmpNo(v){
-    return String(v || "").trim().replace(/[^\d]/g, "");
-  }
-  function validateEmpNo(v){
-    const empNo = normalizeEmpNo(v);
-    if(!empNo) return { ok:false, empNo:"" };
-    if(empNo.length > 10) return { ok:false, empNo };
-    return { ok:true, empNo };
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
   }
 
-  // ----- AO-023 seed support profiles -----
-  function seedSupportProfilesIfEmpty(){
-    const raw = safeParse(SUPPORT_KEY, null);
-    const okArr = Array.isArray(raw) ? raw : null;
-    if(okArr && okArr.length) return;
-
-    const now = Date.now();
-    const seed = [
-      { id: "support_default_v1", name: "Support • Standard", kind: "default", locale: DEFAULT_LOCALE, notes: "Bas-support. Neutral, kort, saklig.", createdAt: now, updatedAt: now },
-      { id: "support_employee_v1", name: "Support • Medarbetare", kind: "employee", locale: DEFAULT_LOCALE, notes: "Fokus: uppgifter, frågor, dokument, felrapport.", createdAt: now, updatedAt: now },
-      { id: "support_admin_v1", name: "Support • Admin", kind: "admin", locale: DEFAULT_LOCALE, notes: "Fokus: tilldelning, uppföljning, översikter.", createdAt: now, updatedAt: now },
-      { id: "support_systemadmin_v1", name: "Support • Systemadmin", kind: "systemadmin", locale: DEFAULT_LOCALE, notes: "Fokus: roller/org/access/policy.", createdAt: now, updatedAt: now },
-    ];
-    save(SUPPORT_KEY, seed);
+  function safeParseLocal(key, fallback){
+    try{
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{
+      return fallback;
+    }
+  }
+  function saveLocal(key, value){
+    localStorage.setItem(key, JSON.stringify(value));
   }
 
-  function loadSupportProfiles(){
-    const raw = safeParse(SUPPORT_KEY, []);
-    const arr = Array.isArray(raw) ? raw : [];
-    const map = new Map();
-    arr.forEach(p => {
-      if(!p || typeof p !== "object") return;
-      const id = String(p.id || "").trim();
-      if(!id) return;
-      map.set(id, p);
-    });
-    return { arr, byId: map };
+  // ---- Auth/Guard (core-first) ----
+  function requireAdminAccess(){
+    try{
+      if(window.HRApp && typeof window.HRApp.requireAuth === "function"){
+        // AO-019 policy: admin pages must call requireAuth({ pageRole:"admin" })
+        const ok = window.HRApp.requireAuth({ pageRole: "admin" });
+        if(ok === false) return null;
+        // Try to read session from core if exposed
+        if(typeof window.HRApp.getSession === "function"){
+          const ses = window.HRApp.getSession();
+          return ses?.auth || null;
+        }
+      }
+    }catch{
+      // fallthrough to local guard
+    }
+
+    // Fallback: fail-closed
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+      // Back-compat: old roles "admin"/"systemadmin" still allowed to enter page
+      if(data.auth.role !== "admin" && data.auth.role !== "systemadmin") return null;
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+      return data.auth;
+    }catch{
+      return null;
+    }
   }
 
-  function normalizeLocale(v){
-    const s = String(v || "").trim();
-    return s || DEFAULT_LOCALE;
-  }
-  function normalizeSupportId(v){
-    const s = String(v || "").trim();
-    return s || DEFAULT_SUPPORT_ID;
-  }
+  const auth = requireAdminAccess();
+  if(!auth){ redirectLogin(); return; }
 
-  // ----- Modules catalog (v1) -----
+  $("#whoName").textContent = auth.displayName || "Admin";
+  $("#whoRole").textContent = auth.role || "admin";
+
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  // ---- Modules catalog (existing model) ----
   // scope: none | view | act | manage
   const MODULES = [
     { key:"EMP_HOME",      label:"Employee • Dashboard", hint:"employee/home.html", defaultScope:"view" },
@@ -472,64 +472,123 @@ Autopatch:
     { key:"ADMIN_ORG",          label:"Admin • Org",          hint:"admin/org.html", defaultScope:"manage" },
     { key:"ADMIN_ACCESS",       label:"Admin • Access",       hint:"admin/access.html (AO-021)", defaultScope:"manage" },
   ];
-
   const SCOPE_ORDER = ["none","view","act","manage"];
-
   function normalizeScope(scope){
     const s = String(scope || "none");
     return SCOPE_ORDER.includes(s) ? s : "none";
   }
-
+  function scopeRank(scope){
+    return SCOPE_ORDER.indexOf(normalizeScope(scope));
+  }
   function isAdminishEffective(effectiveModules){
     return Object.keys(effectiveModules || {}).some(k => k.startsWith("ADMIN_") && normalizeScope(effectiveModules[k]) !== "none");
   }
 
-  // ----- Roles store -----
-  function seedRolesIfEmpty(){
-    const raw = safeParse(ROLES_KEY, null);
-    if(Array.isArray(raw) && raw.length) return;
+  // ---- Org load + scope dropdown ----
+  function loadOrgStrict(){
+    const raw = safeParseLocal(ORG_KEY, null);
+    if(!Array.isArray(raw) || raw.length === 0) return { ok:false, nodes:[], reason:"Org-data saknas eller är felaktig. Du måste skapa org i admin/org.html (AO-020) innan du kan tilldela scope." };
 
-    const now = Date.now();
+    const nodes = raw
+      .filter(n => n && typeof n === "object")
+      .map(n => ({
+        id: String(n.id || "").trim(),
+        name: String(n.name || "").trim(),
+        parentId: (n.parentId === null || n.parentId === undefined) ? null : String(n.parentId).trim()
+      }))
+      .filter(n => !!n.id);
 
-    const employee = {
-      id: "role_employee",
-      name: "Employee",
-      desc: "Standard medarbetare",
-      inherits: "",
-      isSystem: true,
-      locale: DEFAULT_LOCALE,
-      supportProfileId: "support_employee_v1",
-      modules: Object.fromEntries(MODULES.map(m => [m.key, (m.key.startsWith("EMP_") ? m.defaultScope : "none")])),
-      createdAt: now,
-      updatedAt: now
-    };
+    if(nodes.length === 0) return { ok:false, nodes:[], reason:"Org-data saknar giltiga noder (id). Kan inte tilldela scope." };
 
-    const admin = {
-      id: "role_admin",
-      name: "Admin",
-      desc: "Systemadmin (full access)",
-      inherits: "",
-      isSystem: true,
-      locale: DEFAULT_LOCALE,
-      supportProfileId: "support_admin_v1",
-      modules: Object.fromEntries(MODULES.map(m => [m.key, "manage"])),
-      createdAt: now,
-      updatedAt: now
-    };
+    // choose best root
+    const ids = new Set(nodes.map(n => n.id));
+    let rootId = null;
 
-    save(ROLES_KEY, [employee, admin]);
+    // Prefer common root ids if present
+    if(ids.has("org_root_v1")) rootId = "org_root_v1";
+    else if(ids.has("org_root")) rootId = "org_root";
+    else{
+      const anyRoot = nodes.find(n => n.parentId === null || n.parentId === "");
+      rootId = anyRoot ? anyRoot.id : nodes[0].id;
+    }
+
+    return { ok:true, nodes, rootId };
   }
 
-  function loadRoles(){
-    const arr = safeParse(ROLES_KEY, []);
-    if(!Array.isArray(arr)) return [];
-    return arr.map(r => normalizeRole(r)).filter(Boolean);
+  function buildOrgIndex(nodes){
+    const byId = new Map(nodes.map(n => [n.id, n]));
+    const children = new Map();
+    nodes.forEach(n => {
+      const pid = n.parentId === null ? null : String(n.parentId || "");
+      if(pid && byId.has(pid)){
+        if(!children.has(pid)) children.set(pid, []);
+        children.get(pid).push(n.id);
+      }
+    });
+    children.forEach((arr, pid) => {
+      arr.sort((a,b)=> String(byId.get(a)?.name||"").localeCompare(String(byId.get(b)?.name||""), "sv"));
+      children.set(pid, arr);
+    });
+    return { byId, children };
   }
 
-  function saveRoles(arr){
-    save(ROLES_KEY, Array.isArray(arr) ? arr : []);
+  function buildPathLabelCache(nodes){
+    const { byId } = buildOrgIndex(nodes);
+    const cache = new Map();
+
+    function labelFor(id){
+      const key = String(id || "");
+      if(cache.has(key)) return cache.get(key);
+      const parts = [];
+      const seen = new Set();
+      let cur = key;
+
+      while(cur && byId.has(cur) && !seen.has(cur)){
+        seen.add(cur);
+        const n = byId.get(cur);
+        parts.push(String(n.name || cur));
+        cur = (n.parentId === null) ? "" : String(n.parentId || "");
+      }
+      const lab = parts.reverse().join(" → ") || key || "—";
+      cache.set(key, lab);
+      return lab;
+    }
+
+    Array.from(byId.keys()).forEach(id => labelFor(id));
+    return { labelFor };
   }
 
+  function renderScopeSelect(org){
+    const sel = $("#asgScope");
+    sel.innerHTML = "";
+
+    if(!org.ok){
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "(Org saknas – låst)";
+      sel.appendChild(opt);
+      sel.disabled = true;
+      return;
+    }
+
+    const { byId } = buildOrgIndex(org.nodes);
+    const { labelFor } = buildPathLabelCache(org.nodes);
+
+    const ids = Array.from(byId.keys());
+    ids.sort((a,b)=> labelFor(a).localeCompare(labelFor(b), "sv"));
+
+    ids.forEach(id => {
+      const opt = document.createElement("option");
+      opt.value = id;
+      opt.textContent = labelFor(id);
+      sel.appendChild(opt);
+    });
+
+    sel.disabled = false;
+    sel.value = byId.has(org.rootId) ? org.rootId : (ids[0] || "");
+  }
+
+  // ---- Roles store + normalize ----
   function normalizeRole(r){
     if(!r || typeof r !== "object") return null;
     const id = String(r.id || "").trim();
@@ -539,42 +598,213 @@ Autopatch:
     const desc = String(r.desc || "").trim();
     const inherits = String(r.inherits || "").trim();
 
-    const isSystem = !!r.isSystem || SYSTEM_ROLE_IDS.has(id);
-
     const modules = (r.modules && typeof r.modules === "object") ? r.modules : {};
     const cleanModules = {};
     MODULES.forEach(m => {
       if(Object.prototype.hasOwnProperty.call(modules, m.key)){
         cleanModules[m.key] = normalizeScope(modules[m.key]);
+      }else{
+        // keep missing as none in normalized output
+        cleanModules[m.key] = "none";
       }
     });
 
     const now = Date.now();
-
     return {
       id,
       name,
       desc,
       inherits,
-      isSystem,
-      locale: normalizeLocale(r.locale),
-      supportProfileId: normalizeSupportId(r.supportProfileId),
+      isSystem: !!r.isSystem, // systemflag only advisory (do not enforce by id)
+      locale: String(r.locale || "").trim() || DEFAULT_LOCALE,
       modules: cleanModules,
       createdAt: Number(r.createdAt || now),
       updatedAt: Number(r.updatedAt || now)
     };
   }
 
-  // ----- Assignments store -----
-  function loadAssignments(){
-    const obj = safeParse(ASG_KEY, {});
-    return (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
+  function loadRoles(){
+    const arr = safeParseLocal(ROLES_KEY, []);
+    if(!Array.isArray(arr)) return [];
+    return arr.map(normalizeRole).filter(Boolean);
   }
-  function saveAssignments(obj){
-    save(ASG_KEY, (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {});
+  function saveRoles(arr){
+    saveLocal(ROLES_KEY, Array.isArray(arr) ? arr : []);
   }
 
-  // ----- Effective resolve (child overrides parent) -----
+  // ---- System roles (K1) ----
+  function ensureSystemRoles(){
+    const roles = loadRoles();
+    const byId = new Map(roles.map(r => [r.id, r]));
+
+    const now = Date.now();
+
+    function mkBaseModules(allScope){
+      // allScope: "none"/"view"/"act"/"manage" applied to all known modules
+      const o = {};
+      MODULES.forEach(m => { o[m.key] = normalizeScope(allScope); });
+      return o;
+    }
+
+    // Role definitions per AO (do not edit if already exists)
+    const want = [
+      {
+        id: "SYSTEM_ADMIN",
+        name: "SYSTEM_ADMIN",
+        desc: "Systemansvarig: kan hantera roller/org/access.",
+        isSystem: true,
+        modules: mkBaseModules("manage") // full
+      },
+      {
+        id: "ADMIN",
+        name: "ADMIN",
+        desc: "Operativ admin: kan driva adminflöden men ej roller/org/access.",
+        isSystem: true,
+        modules: (function(){
+          const m = mkBaseModules("none");
+          // Admin operational modules
+          m.ADMIN_HOME = "view";
+          m.ADMIN_TASKS = "manage";
+          m.ADMIN_QUESTIONS = "manage";
+          m.ADMIN_ANSWERS = "manage";
+          m.ADMIN_REPORTS = "manage";
+          m.ADMIN_INTEGRATIONS = "manage";
+          m.ADMIN_DOCS = "manage";
+          // Explicitly deny governance modules
+          m.ADMIN_ROLES = "none";
+          m.ADMIN_ORG = "none";
+          m.ADMIN_ACCESS = "none";
+          return m;
+        })()
+      },
+      {
+        id: "MANAGER",
+        name: "MANAGER",
+        desc: "Enhetschef: admin-ish inom scope-subtree. Ej roller/org/access.",
+        isSystem: true,
+        modules: (function(){
+          const m = mkBaseModules("none");
+          // Manager needs operational power in their branch; UI views may come later, but role must exist now
+          m.ADMIN_HOME = "view";
+          m.ADMIN_TASKS = "manage";
+          m.ADMIN_QUESTIONS = "manage";
+          m.ADMIN_ANSWERS = "manage";
+          m.ADMIN_REPORTS = "manage";
+          m.ADMIN_DOCS = "manage";
+          // Deny governance
+          m.ADMIN_ROLES = "none";
+          m.ADMIN_ORG = "none";
+          m.ADMIN_ACCESS = "none";
+          return m;
+        })()
+      },
+      {
+        id: "EMPLOYEE",
+        name: "EMPLOYEE",
+        desc: "Medarbetare: utförare.",
+        isSystem: true,
+        modules: (function(){
+          const m = mkBaseModules("none");
+          MODULES.forEach(mod => {
+            if(mod.key.startsWith("EMP_")){
+              m[mod.key] = normalizeScope(mod.defaultScope);
+            }
+          });
+          return m;
+        })()
+      }
+    ];
+
+    let changed = false;
+
+    want.forEach(w => {
+      if(byId.has(w.id)) return; // do not touch if exists
+      roles.push({
+        id: w.id,
+        name: w.name,
+        desc: w.desc,
+        inherits: "",
+        isSystem: true,
+        locale: DEFAULT_LOCALE,
+        modules: w.modules,
+        createdAt: now,
+        updatedAt: now
+      });
+      changed = true;
+    });
+
+    if(changed){
+      saveRoles(roles);
+    }
+  }
+
+  // ---- Assignments V2 + migration (K2, K3) ----
+  function loadAssignmentsV2(){
+    const obj = safeParseLocal(ASG_V2_KEY, {});
+    return (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
+  }
+  function saveAssignmentsV2(obj){
+    saveLocal(ASG_V2_KEY, (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {});
+  }
+
+  function loadAssignmentsV1(){
+    const obj = safeParseLocal(ASG_V1_KEY, {});
+    return (obj && typeof obj === "object" && !Array.isArray(obj)) ? obj : {};
+  }
+
+  function isEmptyObject(o){
+    return !o || typeof o !== "object" || Array.isArray(o) ? true : (Object.keys(o).length === 0);
+  }
+
+  function normalizeEmpNo(v){
+    return String(v || "").trim().replace(/[^\d]/g, "");
+  }
+  function validateEmpNo(v){
+    const empNo = normalizeEmpNo(v);
+    if(!empNo) return { ok:false, empNo:"" };
+    if(empNo.length > 10) return { ok:false, empNo };
+    return { ok:true, empNo };
+  }
+
+  function migrateV1toV2IfNeeded(org){
+    // If org invalid => fail-closed: block writes and do not migrate.
+    if(!org.ok){
+      return { ok:false, migrated:false, reason: org.reason };
+    }
+
+    const v2 = loadAssignmentsV2();
+    if(!isEmptyObject(v2)){
+      return { ok:true, migrated:false, reason:"" };
+    }
+
+    const v1 = loadAssignmentsV1();
+    if(isEmptyObject(v1)){
+      // nothing to migrate, but ensure v2 exists as object (safe)
+      saveAssignmentsV2({});
+      return { ok:true, migrated:false, reason:"" };
+    }
+
+    // Determine scopeId for migration
+    const scopeId = org.rootId || (org.nodes[0] ? org.nodes[0].id : "");
+    if(!scopeId){
+      return { ok:false, migrated:false, reason:"Org saknar giltig root/nod. Kan inte migrera assignments." };
+    }
+
+    const now = Date.now();
+    const next = {};
+    Object.keys(v1).forEach(empNoKey => {
+      const empNo = normalizeEmpNo(empNoKey);
+      if(!empNo) return;
+      const roleId = String(v1[empNoKey] || "").trim();
+      if(!roleId) return;
+      next[empNo] = { roleId, scopeId, updatedAt: now };
+    });
+
+    saveAssignmentsV2(next);
+    return { ok:true, migrated:true, reason:"" };
+  }
+
+  // ---- Effective resolve (child overrides parent) ----
   function resolveRoleEffective(roleId){
     const roles = loadRoles();
     const map = new Map(roles.map(r => [r.id, r]));
@@ -612,7 +842,7 @@ Autopatch:
         }
       }
 
-      // Apply this role's overrides (child wins)
+      // Child overrides parent
       const next = Object.assign({}, base.modules);
       Object.keys(role.modules || {}).forEach(k => {
         next[k] = normalizeScope(role.modules[k]);
@@ -631,46 +861,55 @@ Autopatch:
     return { effective, warnings, chain: res.chain };
   }
 
-  // Cykelkontroll vid save: om newInherits leder tillbaka till roleId => stoppa
-  function wouldCreateCycle(roleId, newInherits){
-    const roles = loadRoles();
-    const map = new Map(roles.map(r => [r.id, r]));
-    const start = String(newInherits || "").trim();
-    if(!start) return false;
-    if(start === roleId) return true;
+  // ---- Permission model for this page (K5) ----
+  // This page must respect module permission if present in session/HRApp.
+  // Rule: writing changes requires ADMIN_ROLES = manage (effective).
+  function deriveCurrentRoleId(){
+    // Prefer explicit roleId if core/session provides it
+    const rid = String(auth.roleId || auth.role_id || "").trim();
+    if(rid) return rid;
 
-    let cur = start;
-    const seen = new Set();
-    let depth = 0;
-
-    while(cur && depth <= MAX_DEPTH){
-      if(cur === roleId) return true;
-      if(seen.has(cur)) return true;
-      seen.add(cur);
-      const r = map.get(cur);
-      if(!r) return false; // saknad -> ingen cykel (varnas separat i UI)
-      cur = String(r.inherits || "").trim();
-      depth++;
-    }
-    // depth clip => unsafe
-    return true;
+    // Back-compat: if auth.role is systemadmin/admin, allow mapping
+    const r = String(auth.role || "").trim();
+    if(r === "systemadmin") return "SYSTEM_ADMIN";
+    if(r === "admin") return "ADMIN";
+    return "";
   }
 
-  // ----- UI state -----
-  const auth = readAuth();
-  if(!auth){ redirectLogin(); return; }
-  $("#whoName").textContent = auth.displayName || "Admin";
-  $("#whoRole").textContent = auth.role || "admin";
-
-  function doLogout(){
-    sessionStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
-    redirectLogin();
+  function canManageRoles(){
+    const roleId = deriveCurrentRoleId();
+    if(!roleId) return false;
+    const { effective } = resolveRoleEffective(roleId);
+    return scopeRank(effective.ADMIN_ROLES) >= scopeRank("manage");
   }
-  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
+  // ---- UI state ----
   let editingRoleId = null; // null = new
   let selectedRoleId = null;
+
+  function setLocked(message){
+    $("#lockbox").style.display = "block";
+    $("#lockmsg").textContent = message || "Låst läge.";
+  }
+  function clearLocked(){
+    $("#lockbox").style.display = "none";
+    $("#lockmsg").textContent = "";
+  }
+
+  function setWriteEnabled(isEnabled, reason){
+    const writeEls = [
+      $("#btnNew"), $("#btnSave"), $("#btnDelete"),
+      $("#btnAssign"), $("#asgEmpNo"), $("#asgRole"), $("#asgScope"),
+      $("#roleName"), $("#roleDesc"), $("#roleInherits")
+    ];
+    writeEls.forEach(el => { if(el) el.disabled = !isEnabled; });
+
+    if(!isEnabled && reason){
+      setLocked(reason);
+    }else{
+      clearLocked();
+    }
+  }
 
   function scopeOptionsHtml(current, ariaLabel){
     const cur = normalizeScope(current);
@@ -742,45 +981,27 @@ Autopatch:
       });
   }
 
-  function renderSupportSelect(){
-    const sel = $("#roleSupport");
-    sel.innerHTML = "";
-    const { arr } = loadSupportProfiles();
+  function wouldCreateCycle(roleId, newInherits){
+    const roles = loadRoles();
+    const map = new Map(roles.map(r => [r.id, r]));
+    const start = String(newInherits || "").trim();
+    if(!start) return false;
+    if(start === roleId) return true;
 
-    if(!arr.length){
-      const opt = document.createElement("option");
-      opt.value = DEFAULT_SUPPORT_ID;
-      opt.textContent = "(Inga profiler – default)";
-      sel.appendChild(opt);
-      return;
+    let cur = start;
+    const seen = new Set();
+    let depth = 0;
+
+    while(cur && depth <= MAX_DEPTH){
+      if(cur === roleId) return true;
+      if(seen.has(cur)) return true;
+      seen.add(cur);
+      const r = map.get(cur);
+      if(!r) return false;
+      cur = String(r.inherits || "").trim();
+      depth++;
     }
-
-    arr.slice().sort((a,b)=>String(a.name||a.id||"").localeCompare(String(b.name||b.id||""), "sv"))
-      .forEach(p => {
-        const opt = document.createElement("option");
-        opt.value = String(p.id);
-        opt.textContent = p.name ? `${p.name} (${p.id})` : String(p.id);
-        sel.appendChild(opt);
-      });
-
-    // säkerställ default finns som val även om seed saknas
-    if(!arr.some(p => String(p.id) === DEFAULT_SUPPORT_ID)){
-      const opt = document.createElement("option");
-      opt.value = DEFAULT_SUPPORT_ID;
-      opt.textContent = `Support • Default (${DEFAULT_SUPPORT_ID})`;
-      sel.appendChild(opt);
-    }
-  }
-
-  function setMetaWarn(text){
-    const el = $("#metaWarn");
-    if(!text){
-      el.style.display = "none";
-      el.textContent = "";
-      return;
-    }
-    el.style.display = "block";
-    el.textContent = text;
+    return true;
   }
 
   function setEditingRole(roleId){
@@ -789,20 +1010,16 @@ Autopatch:
 
     editingRoleId = role ? role.id : null;
 
-    $("#msgRole").textContent = "";
+    setMsg($("#msgRole"), "", "");
     $("#inheritWarn").style.display = "none";
     $("#depthWarn").style.display = "none";
-    setMetaWarn("");
 
     renderInheritsSelect(roles, editingRoleId);
-    renderSupportSelect();
 
     if(!role){
       $("#roleName").value = "";
       $("#roleDesc").value = "";
       $("#roleInherits").value = "";
-      $("#roleLocale").value = DEFAULT_LOCALE;
-      $("#roleSupport").value = DEFAULT_SUPPORT_ID;
 
       renderModulesGrid({ modules:{} });
       $("#btnDelete").disabled = true;
@@ -812,8 +1029,6 @@ Autopatch:
 
     $("#roleName").value = role.name || "";
     $("#roleDesc").value = role.desc || "";
-    $("#roleLocale").value = normalizeLocale(role.locale);
-    $("#roleSupport").value = normalizeSupportId(role.supportProfileId);
 
     const inherits = String(role.inherits || "").trim();
     if(inherits){
@@ -830,13 +1045,9 @@ Autopatch:
     }
 
     renderModulesGrid(role);
-    $("#btnDelete").disabled = role.isSystem === true || SYSTEM_ROLE_IDS.has(role.id);
-
-    // meta warns
-    const warns = [];
-    if(!String(role.locale || "").trim()) warns.push(`Rollen saknar locale. Default används (${DEFAULT_LOCALE}).`);
-    if(!String(role.supportProfileId || "").trim()) warns.push(`Rollen saknar supportProfileId. Default används (${DEFAULT_SUPPORT_ID}).`);
-    if(warns.length) setMetaWarn(warns.join(" "));
+    // Allow deleting even system-flag roles if user created them; but do not delete our seeded system roles by id:
+    const protectedIds = new Set(["SYSTEM_ADMIN","ADMIN","MANAGER","EMPLOYEE"]);
+    $("#btnDelete").disabled = protectedIds.has(role.id);
 
     updateEffectivePreview();
   }
@@ -855,8 +1066,7 @@ Autopatch:
       desc: String($("#roleDesc").value || "").trim(),
       inherits: inherits,
       isSystem: false,
-      locale: normalizeLocale($("#roleLocale").value),
-      supportProfileId: normalizeSupportId($("#roleSupport").value),
+      locale: DEFAULT_LOCALE,
       modules: collectModulesFromUI(),
       createdAt: Date.now(),
       updatedAt: Date.now()
@@ -923,7 +1133,7 @@ Autopatch:
     }
   }
 
-  // ----- List + KPIs -----
+  // ---- List + KPIs ----
   function renderRoleSelectForAssign(){
     const sel = $("#asgRole");
     sel.innerHTML = "";
@@ -938,14 +1148,15 @@ Autopatch:
       });
   }
 
-  function renderAssignments(){
+  function renderAssignmentsV2(org){
     const box = $("#asgList");
     box.innerHTML = "";
-    const asg = loadAssignments();
-    const roles = loadRoles();
-    const map = new Map(roles.map(r => [r.id, r]));
 
-    const entries = Object.entries(asg || {}).sort((a,b) => String(a[0]).localeCompare(String(b[0])));
+    const v2 = loadAssignmentsV2();
+    const roles = loadRoles();
+    const roleMap = new Map(roles.map(r => [r.id, r]));
+
+    const entries = Object.entries(v2 || {}).sort((a,b) => String(a[0]).localeCompare(String(b[0])));
 
     $("#kpiAssign").textContent = String(entries.length);
 
@@ -954,10 +1165,15 @@ Autopatch:
       return;
     }
 
+    const orgIndex = org && org.ok ? buildOrgIndex(org.nodes) : null;
+    const labeler = org && org.ok ? buildPathLabelCache(org.nodes) : null;
+
     entries.forEach(([empNo, rec]) => {
       const roleId = String(rec?.roleId || "");
-      const role = map.get(roleId);
-      const name = role ? role.name : "(saknas)";
+      const scopeId = String(rec?.scopeId || "");
+      const role = roleMap.get(roleId);
+      const roleName = role ? role.name : "(saknas)";
+      const scopeName = (orgIndex && labeler && orgIndex.byId.has(scopeId)) ? labeler.labelFor(scopeId) : "(saknas)";
 
       const row = document.createElement("div");
       row.className = "item";
@@ -965,8 +1181,9 @@ Autopatch:
         <div style="min-width:260px;">
           <p class="item-title">Anst.nr ${escapeHtml(empNo)}</p>
           <div class="meta">
-            <span class="pill">${escapeHtml(name)}</span>
+            <span class="pill">${escapeHtml(roleName)}</span>
             <span class="pill">${escapeHtml(roleId || "—")}</span>
+            <span class="pill">Scope: ${escapeHtml(scopeName)} <span class="muted">(${escapeHtml(scopeId || "—")})</span></span>
           </div>
         </div>
         <div class="row" style="gap:8px;">
@@ -979,10 +1196,12 @@ Autopatch:
     box.querySelectorAll("button[data-unassign]").forEach(btn => {
       btn.addEventListener("click", () => {
         const empNo = btn.getAttribute("data-unassign");
-        if(!confirm(`Ta bort roll för anst.nr ${empNo}?`)) return;
-        const asg2 = loadAssignments();
-        delete asg2[empNo];
-        saveAssignments(asg2);
+        if(!confirm(`Ta bort roll/scope för anst.nr ${empNo}?`)) return;
+
+        const v2 = loadAssignmentsV2();
+        delete v2[empNo];
+        saveAssignmentsV2(v2);
+
         setMsg($("#msgAssign"), "ok", "Tilldelning borttagen.");
         renderAll();
       });
@@ -1005,12 +1224,13 @@ Autopatch:
       const { effective } = resolveRoleEffective(r.id);
       if(isAdminishEffective(effective)) adminishCount++;
     });
-    $("#kpiAdmin").textContent = String(adminishCount);
+    $("#kpiAdminish").textContent = String(adminishCount);
 
     let shown = roles.slice();
 
-    if(filter === "system") shown = shown.filter(r => r.isSystem === true || SYSTEM_ROLE_IDS.has(r.id));
-    if(filter === "custom") shown = shown.filter(r => !(r.isSystem === true || SYSTEM_ROLE_IDS.has(r.id)));
+    const systemIds = new Set(["SYSTEM_ADMIN","ADMIN","MANAGER","EMPLOYEE"]);
+    if(filter === "system") shown = shown.filter(r => systemIds.has(r.id) || r.isSystem === true);
+    if(filter === "custom") shown = shown.filter(r => !(systemIds.has(r.id) || r.isSystem === true));
     if(filter === "adminish"){
       shown = shown.filter(r => {
         const { effective } = resolveRoleEffective(r.id);
@@ -1020,7 +1240,7 @@ Autopatch:
 
     if(q){
       shown = shown.filter(r => {
-        const blob = `${r.name||""} ${r.id||""} ${r.desc||""} ${r.inherits||""} ${r.locale||""} ${r.supportProfileId||""}`.toLowerCase();
+        const blob = `${r.name||""} ${r.id||""} ${r.desc||""} ${r.inherits||""}`.toLowerCase();
         return blob.includes(q);
       });
     }
@@ -1037,10 +1257,6 @@ Autopatch:
       const activeMods = Object.values(effective).filter(s => normalizeScope(s) !== "none").length;
       const isAdminish = isAdminishEffective(effective);
 
-      const metaIssues = [];
-      if(!String(r.locale||"").trim()) metaIssues.push("locale saknas");
-      if(!String(r.supportProfileId||"").trim()) metaIssues.push("supportProfileId saknas");
-
       const el = document.createElement("div");
       el.className = "item" + (r.id === selectedRoleId ? " active" : "");
       el.innerHTML = `
@@ -1048,15 +1264,12 @@ Autopatch:
           <p class="item-title">${escapeHtml(r.name || r.id)}</p>
           <div class="meta">
             <span class="pill">${escapeHtml(r.id)}</span>
-            <span class="pill">${r.isSystem ? "System" : "Egen"}</span>
+            <span class="pill">${(r.isSystem || ["SYSTEM_ADMIN","ADMIN","MANAGER","EMPLOYEE"].includes(r.id)) ? "System" : "Egen"}</span>
             <span class="pill">${isAdminish ? "Admin-ish" : "—"}</span>
             <span class="pill">Moduler: ${activeMods}</span>
-            <span class="pill">Locale: ${escapeHtml(normalizeLocale(r.locale))}</span>
-            <span class="pill">Support: ${escapeHtml(normalizeSupportId(r.supportProfileId))}</span>
           </div>
           ${r.desc ? `<div class="meta"><span>${escapeHtml(r.desc)}</span></div>` : ``}
           ${warnings.length ? `<div class="meta"><span class="pill">⚠ ${escapeHtml(warnings.join(" "))}</span></div>` : ``}
-          ${metaIssues.length ? `<div class="meta"><span class="pill">⚠ ${escapeHtml(metaIssues.join(", "))}</span></div>` : ``}
         </div>
         <div class="row" style="gap:8px;">
           <button type="button" class="secondary" data-edit="${escapeHtml(r.id)}">Öppna</button>
@@ -1076,17 +1289,48 @@ Autopatch:
   }
 
   function renderAll(){
+    const org = loadOrgStrict();
+
+    // Migration: V1 -> V2 (fail-safe)
+    const mig = migrateV1toV2IfNeeded(org);
+    if(!mig.ok){
+      // Hard fail-closed: lock writing and show why
+      setWriteEnabled(false, mig.reason || "Org-data saknas/korrupt. Sidan är låst (fail-closed).");
+    }
+
+    // Always render
     renderRoleSelectForAssign();
-    renderAssignments();
+    renderScopeSelect(org);
+    renderAssignmentsV2(org);
     renderList();
+
     const keep = editingRoleId;
     setEditingRole(keep);
+
+    // Write permission (K5)
+    const orgOk = org.ok;
+    const canWrite = orgOk && canManageRoles();
+    if(!canWrite){
+      const why = !orgOk
+        ? (org.reason || "Org-data saknas/korrupt. Kan inte skriva.")
+        : "Du saknar behörighet: kräver ADMIN_ROLES = manage för att skapa/ändra roller eller spara tilldelningar.";
+      setWriteEnabled(false, why);
+    }else{
+      setWriteEnabled(true, "");
+    }
+
+    // Note: even in locked mode, list rendering stays available.
   }
 
-  // ----- Save/Delete -----
+  // ---- Save/Delete (write guarded by setWriteEnabled) ----
   $("#btnSave").addEventListener("click", () => {
     const msg = $("#msgRole");
     setMsg(msg, "", "");
+
+    if($("#btnSave").disabled){
+      setMsg(msg, "err", "Åtgärden är låst (saknar behörighet eller org saknas).");
+      return;
+    }
 
     const roles = loadRoles();
     const name = String($("#roleName").value || "").trim();
@@ -1108,33 +1352,30 @@ Autopatch:
 
     let id = editingRoleId;
     const now = Date.now();
-    if(!id) id = genId("role");
+    if(!id){
+      id = "role_" + Math.random().toString(16).slice(2) + "_" + now.toString(16);
+    }
 
     if(inherits && wouldCreateCycle(id, inherits)){
       setMsg(msg, "err", "Ogiltigt arv: skulle skapa cykel eller för djup kedja. Välj en annan 'Ärver från'.");
       return;
     }
 
-    const modules = collectModulesFromUI();
-    const isSystem = SYSTEM_ROLE_IDS.has(id) ? true : false;
-
-    const locale = normalizeLocale($("#roleLocale").value);
-    const supportProfileId = normalizeSupportId($("#roleSupport").value);
-
-    const { byId: supportById } = loadSupportProfiles();
-    if(supportProfileId && !supportById.has(supportProfileId)){
-      setMsg(msg, "err", `Supportprofil saknas (${supportProfileId}). Välj en giltig profil.`);
+    const protectedIds = new Set(["SYSTEM_ADMIN","ADMIN","MANAGER","EMPLOYEE"]);
+    if(protectedIds.has(id)){
+      setMsg(msg, "err", "Systemroller kan inte ändras här.");
       return;
     }
+
+    const modules = collectModulesFromUI();
 
     const nextRole = {
       id,
       name,
       desc,
       inherits: inherits || "",
-      isSystem: isSystem,
-      locale,
-      supportProfileId,
+      isSystem: false,
+      locale: DEFAULT_LOCALE,
       modules,
       createdAt: (roles.find(r => r.id === id)?.createdAt) || now,
       updatedAt: now
@@ -1142,8 +1383,9 @@ Autopatch:
 
     const idx = roles.findIndex(r => r.id === id);
     if(idx >= 0){
-      if(roles[idx].isSystem === true || SYSTEM_ROLE_IDS.has(id)){
-        setMsg(msg, "err", "Systemroller kan inte ändras i v1.");
+      // prevent editing seeded system roles by id
+      if(protectedIds.has(roles[idx].id)){
+        setMsg(msg, "err", "Systemroller kan inte ändras.");
         return;
       }
       roles[idx] = nextRole;
@@ -1163,11 +1405,18 @@ Autopatch:
     const msg = $("#msgRole");
     setMsg(msg, "", "");
 
+    if($("#btnDelete").disabled){
+      setMsg(msg, "err", "Åtgärden är låst.");
+      return;
+    }
+
     if(!editingRoleId){
       setMsg(msg, "err", "Ingen roll vald.");
       return;
     }
-    if(SYSTEM_ROLE_IDS.has(editingRoleId)){
+
+    const protectedIds = new Set(["SYSTEM_ADMIN","ADMIN","MANAGER","EMPLOYEE"]);
+    if(protectedIds.has(editingRoleId)){
       setMsg(msg, "err", "Systemroller kan inte tas bort.");
       return;
     }
@@ -1184,13 +1433,13 @@ Autopatch:
     const nextRoles = roles.filter(r => r.id !== editingRoleId);
     saveRoles(nextRoles);
 
-    const asg = loadAssignments();
-    Object.keys(asg).forEach(empNo => {
-      if(String(asg[empNo]?.roleId || "") === String(editingRoleId)){
-        delete asg[empNo];
+    const v2 = loadAssignmentsV2();
+    Object.keys(v2).forEach(empNo => {
+      if(String(v2[empNo]?.roleId || "") === String(editingRoleId)){
+        delete v2[empNo];
       }
     });
-    saveAssignments(asg);
+    saveAssignmentsV2(v2);
 
     editingRoleId = null;
     selectedRoleId = null;
@@ -1200,16 +1449,28 @@ Autopatch:
     renderAll();
   });
 
-  // ----- Assign -----
+  // ---- Assign (K2, K4) ----
   $("#btnAssign").addEventListener("click", () => {
     const msg = $("#msgAssign");
     setMsg(msg, "", "");
+
+    if($("#btnAssign").disabled){
+      setMsg(msg, "err", "Åtgärden är låst (saknar behörighet eller org saknas).");
+      return;
+    }
+
+    const org = loadOrgStrict();
+    if(!org.ok){
+      setMsg(msg, "err", org.reason || "Org saknas/korrupt. Kan inte spara.");
+      return;
+    }
 
     const v = validateEmpNo($("#asgEmpNo").value);
     if(!v.ok){
       setMsg(msg, "err", "Skriv ett giltigt anst.nr (bara siffror, max 10).");
       return;
     }
+
     const roleId = String($("#asgRole").value || "").trim();
     const roles = loadRoles();
     const exists = roles.some(r => r.id === roleId);
@@ -1218,19 +1479,30 @@ Autopatch:
       return;
     }
 
-    const asg = loadAssignments();
-    asg[v.empNo] = { roleId, updatedAt: Date.now() };
-    saveAssignments(asg);
+    const scopeId = String($("#asgScope").value || "").trim();
+    const { byId } = buildOrgIndex(org.nodes);
+    if(!scopeId || !byId.has(scopeId)){
+      setMsg(msg, "err", "Välj ett giltigt scope (org-nod).");
+      return;
+    }
 
-    setMsg(msg, "ok", `Tilldelad: ${v.empNo} → ${roleId}`);
+    const v2 = loadAssignmentsV2();
+    v2[v.empNo] = {
+      roleId,
+      scopeId,
+      updatedAt: Date.now() // epoch ms (konsekvent)
+    };
+    saveAssignmentsV2(v2);
+
+    setMsg(msg, "ok", `Tilldelad: ${v.empNo} → { roleId: ${roleId}, scopeId: ${scopeId} }`);
     $("#asgEmpNo").value = "";
     renderAll();
   });
 
-  // ----- Live preview updates -----
-  ["roleName","roleDesc","roleInherits","roleLocale","roleSupport"].forEach(id => {
-    $( "#" + id ).addEventListener("input", updateEffectivePreview);
-    $( "#" + id ).addEventListener("change", updateEffectivePreview);
+  // ---- Live preview updates ----
+  ["roleName","roleDesc","roleInherits"].forEach(id => {
+    $("#" + id).addEventListener("input", updateEffectivePreview);
+    $("#" + id).addEventListener("change", updateEffectivePreview);
   });
 
   $("#mods").addEventListener("change", (e) => {
@@ -1239,6 +1511,7 @@ Autopatch:
   });
 
   $("#btnNew").addEventListener("click", () => {
+    if($("#btnNew").disabled) return;
     editingRoleId = null;
     selectedRoleId = null;
     setEditingRole(null);
@@ -1248,1256 +1521,11 @@ Autopatch:
   $("#filter").addEventListener("change", renderList);
   $("#search").addEventListener("input", renderList);
 
-  // init
-  seedSupportProfilesIfEmpty();
-  seedRolesIfEmpty();
+  // ---- Init ----
+  ensureSystemRoles();
   renderRoleSelectForAssign();
-  renderAssignments();
   setEditingRole(null);
-  renderList();
-
-})();
-</script>
-
-</body>
-</html>
-
-
-
-<!-- =========================
-FILE: admin/access.html
-AO-021 | FIL-ID: admin/access.html
-========================= -->
-<!doctype html>
-<html lang="sv">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Admin • Access</title>
-
-  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
-
-  <style>
-    .layout{
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      align-items:start;
-    }
-    @media (max-width: 980px){
-      .layout{ grid-template-columns: 1fr; }
-    }
-
-    .panel{
-      border: 1px solid var(--line);
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
-    }
-    .panel:hover{
-      transform: translateY(-1px);
-      box-shadow: var(--shadow-soft);
-      filter: brightness(1.01);
-    }
-    .panel.assign{ background: rgba(191,219,254,.18); }
-    .panel.overview{ background: rgba(167,243,208,.18); }
-
-    .row2{
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-    }
-    @media (max-width: 620px){
-      .row2{ grid-template-columns: 1fr; }
-    }
-
-    .summarybar{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-      padding: 10px;
-      border: 1px solid var(--line);
-      border-radius: var(--r14);
-      background: rgba(255,255,255,.7);
-      margin-bottom: 10px;
-    }
-    .kpi{
-      display:flex;
-      gap:8px;
-      align-items:center;
-      padding: 6px 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background:#fff;
-      font-size:.95rem;
-    }
-
-    .item{
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      padding: 12px;
-      background:#fff;
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
-      display:flex;
-      gap:10px;
-      justify-content:space-between;
-      align-items:flex-start;
-      flex-wrap:wrap;
-      margin-top:10px;
-    }
-    .item:hover{
-      transform: var(--lift);
-      box-shadow: var(--shadow-soft);
-      filter: brightness(1.02);
-    }
-    .item-title{ font-weight: 950; margin:0; }
-    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
-    .empty{
-      padding:18px;
-      border:1px dashed var(--line);
-      border-radius: var(--r14);
-      color: var(--muted);
-      background:#fff;
-      text-align:center;
-      margin-top:10px;
-    }
-
-    .chips{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
-    .chip{
-      display:inline-flex;
-      gap:6px;
-      align-items:center;
-      border:1px solid var(--line);
-      border-radius: 999px;
-      padding: 6px 10px;
-      background:#fff;
-      font-size:.92rem;
-    }
-    code{ font-size:.95em; }
-
-    .subcard{
-      margin-top: 10px;
-      padding: 10px;
-      border: 1px solid var(--line);
-      border-radius: var(--r14);
-      background: rgba(255,255,255,.7);
-    }
-    .subcard .title{
-      font-weight: 850;
-      margin: 0 0 8px;
-    }
-    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
-
-    .warnbox{
-      margin-top:10px;
-      padding:10px;
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      background: rgba(254,243,199,.45);
-    }
-    .warnbox .title{ font-weight:850; margin:0 0 6px; }
-    .warnlist{ margin:0; padding-left:18px; color: var(--muted); }
-    .warnlist li{ margin:4px 0; }
-
-    .previewWarn{
-      margin-top:10px;
-      padding:10px;
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      background: rgba(254,243,199,.35);
-      color: var(--muted);
-      display:none;
-    }
-  </style>
-</head>
-
-<body>
-
-<header class="top">
-  <div class="brand">
-    <strong>HR-System</strong>
-    <span class="muted">• Admin • Access</span>
-  </div>
-
-  <nav class="nav" aria-label="Meny">
-    <a href="./home.html">Hem</a>
-    <a href="./tasks.html">Uppgifter</a>
-    <a href="./questions.html">Frågor</a>
-    <a href="./reports.html">Felrapporter</a>
-    <a href="./answers.html">Svar</a>
-    <a href="./integrations.html">Integrationer</a>
-    <a href="./roles.html">Roller</a>
-    <a href="./org.html">Org</a>
-    <a href="./access.html" aria-current="page">Access</a>
-    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
-  </nav>
-</header>
-
-<main class="container">
-  <h1 class="tight">Access Matrix</h1>
-  <p class="muted">Tilldela roll + scope (org). Förhandsvisa effektiva moduler, locale och supportprofil. UI-only v1.</p>
-
-  <section class="card">
-    <div class="row space-between wrap" style="margin-bottom:10px;">
-      <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
-      </div>
-      <div class="row wrap">
-        <a class="btn secondary" href="./roles.html">Öppna roller</a>
-        <a class="btn secondary" href="./org.html">Öppna org</a>
-      </div>
-    </div>
-
-    <div class="layout">
-
-      <!-- TILLDELNING -->
-      <section class="panel assign" aria-label="Tilldela access">
-        <div class="panel-title">Tilldela (roll + scope)</div>
-
-        <div class="row2">
-          <label>
-            Anst.nr
-            <input id="empNo" type="text" inputmode="numeric" placeholder="t.ex. 1234" />
-          </label>
-          <label>
-            Roll
-            <select id="roleSelect"></select>
-          </label>
-        </div>
-
-        <label style="margin-top:10px;">
-          Scope (org-nod)
-          <select id="scopeSelect"></select>
-        </label>
-
-        <div class="subcard" aria-label="Preview">
-          <p class="title">Preview</p>
-          <div class="meta">
-            <span class="pill" id="pvRole">Roll: —</span>
-            <span class="pill" id="pvLocale">Locale: —</span>
-            <span class="pill" id="pvSupport">Support: —</span>
-            <span class="pill" id="pvScope">Scope: —</span>
-            <span class="pill" id="pvCovers">Täcker: —</span>
-          </div>
-
-          <div style="margin-top:8px;">
-            <div class="muted" style="font-size:.95rem; margin-bottom:6px;">Effektiva moduler:</div>
-            <div id="pvModules" class="chips"></div>
-          </div>
-
-          <div style="margin-top:10px;">
-            <div class="muted" style="font-size:.95rem; margin-bottom:6px;">Scope-subtree (förhandsvisning):</div>
-            <div id="pvNodes" class="muted" style="font-size:.95rem;">—</div>
-          </div>
-
-          <div id="pvWarn" class="previewWarn" aria-live="polite"></div>
-        </div>
-
-        <div class="row-actions" style="margin-top:10px;">
-          <button id="btnAssign" type="button">Spara tilldelning</button>
-          <button id="btnClear" type="button" class="secondary">Rensa</button>
-        </div>
-
-        <p id="msg" class="message" aria-live="polite"></p>
-
-        <div class="smallnote">
-          Lagring: <code>AO-020_ROLE_ASSIGNMENTS_V2</code>. Scope gäller nod + alla barn (subtree).
-        </div>
-      </section>
-
-      <!-- ÖVERSIKT -->
-      <section class="panel overview" aria-label="Översikt">
-        <div class="panel-title">Översikt</div>
-
-        <div class="summarybar" aria-label="Sammanfattning">
-          <div class="kpi">Roller: <strong id="kpiRoles">0</strong></div>
-          <div class="kpi">Org-noder: <strong id="kpiNodes">0</strong></div>
-          <div class="kpi">Tilldelningar: <strong id="kpiAsg">0</strong></div>
-          <div class="kpi">Risker: <strong id="kpiRisks">0</strong></div>
-        </div>
-
-        <div class="row2" style="margin-bottom:10px;">
-          <label>
-            Visa
-            <select id="filter">
-              <option value="assignments" selected>Tilldelningar</option>
-              <option value="roles">Roller (effektiv)</option>
-              <option value="risks">Riskpanel</option>
-            </select>
-          </label>
-
-          <label>
-            Sök (empNo/roll/scope)
-            <input id="search" type="text" placeholder="t.ex. 1234 eller admin eller kök" />
-          </label>
-        </div>
-
-        <div id="view"></div>
-      </section>
-
-    </div>
-  </section>
-</main>
-
-<script>
-/* ============================================================
-AO-021 | FIL-ID: admin/access.html (inline JS)
-Autopatch:
-- Stöd role.modules som scope-strängar (none/view/act/manage) OCH äldre bool-objekt
-- Resolve arv: parent -> child (child overrides) för att matcha AO-019
-- Chips bygger på effektiva scopes
-============================================================ */
-(function(){
-  "use strict";
-
-  const SESSION_KEY = "AO-001_LOGIN_V1";
-  const ROLES_KEY   = "AO-019_ROLES_V1";
-  const ORG_KEY     = "AO-020_ORG_V1";
-  const ASG_KEY     = "AO-020_ROLE_ASSIGNMENTS_V2";
-
-  // AO-023
-  const SUPPORT_KEY = "AO-023_SUPPORT_PROFILES_V1";
-  const DEFAULT_LOCALE = "sv-SE";
-  const DEFAULT_SUPPORT_ID = "support_default_v1";
-
-  const ROOT_ID_PRIMARY = "org_root_v1";
-  const ROOT_ID_FALLBACK = "org_root";
-
-  const MAX_ROLE_DEPTH = 80;
-
-  const $  = (s) => document.querySelector(s);
-
-  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
-
-  function readRawSession(){
-    const s1 = sessionStorage.getItem(SESSION_KEY);
-    if (s1) return s1;
-    const s2 = localStorage.getItem(SESSION_KEY);
-    if (s2) return s2;
-    return null;
-  }
-
-  function readAuth(){
-    try{
-      const raw = readRawSession();
-      if(!raw) return null;
-      const data = JSON.parse(raw);
-      if(!data?.auth?.isAuthed) return null;
-      if(data.auth.role !== "admin" && data.auth.role !== "systemadmin") return null;
-      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-      return data.auth;
-    }catch{
-      return null;
-    }
-  }
-
-  function safeParse(key, fallback){
-    try{
-      const v = JSON.parse(localStorage.getItem(key) || "null");
-      return (v === null || v === undefined) ? fallback : v;
-    }catch{
-      return fallback;
-    }
-  }
-  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
-
-  function escapeHtml(s){
-    return String(s ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
-  }
-
-  function setActionMsg(kind, text){
-    const m = $("#msg");
-    m.className = "message" + (kind ? " " + kind : "");
-    m.textContent = text || "";
-  }
-
-  function setPreviewWarn(text){
-    const el = $("#pvWarn");
-    if(!text){
-      el.style.display = "none";
-      el.textContent = "";
-      return;
-    }
-    el.style.display = "block";
-    el.textContent = text;
-  }
-
-  function normalizeEmpNo(v){
-    const s = String(v || "").trim();
-    return s.replace(/[^\d]/g, "");
-  }
-  function validateEmpNo(v){
-    const emp = normalizeEmpNo(v);
-    if(!emp) return { ok:false, empNo:"" };
-    if(emp.length > 10) return { ok:false, empNo: emp };
-    return { ok:true, empNo: emp };
-  }
-
-  // --- Guard ---
-  const auth = readAuth();
-  if(!auth){ redirectLogin(); return; }
-  $("#whoName").textContent = auth.displayName || "Admin";
-  $("#whoRole").textContent = auth.role || "admin";
-
-  function doLogout(){
-    sessionStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
-    redirectLogin();
-  }
-  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
-
-  // --- Seed (minimal) ---
-  function seedOrgIfEmpty(){
-    const raw = safeParse(ORG_KEY, null);
-    if(Array.isArray(raw) && raw.length) return;
-    const now = Date.now();
-    const root = { id: ROOT_ID_PRIMARY, name: "Root (Koncern)", type: "root", parentId: null, createdAt: now, updatedAt: now };
-    save(ORG_KEY, [root]);
-  }
-  function seedAssignmentsIfEmpty(){
-    const raw = safeParse(ASG_KEY, null);
-    if(raw && typeof raw === "object" && !Array.isArray(raw)) return;
-    save(ASG_KEY, {});
-  }
-  function seedSupportProfilesIfEmpty(){
-    const raw = safeParse(SUPPORT_KEY, null);
-    const okArr = Array.isArray(raw) ? raw : null;
-    if(okArr && okArr.length) return;
-
-    const now = Date.now();
-    const seed = [
-      { id: "support_default_v1", name: "Support • Standard", kind: "default", locale: DEFAULT_LOCALE, notes: "Bas-support. Neutral, kort, saklig.", createdAt: now, updatedAt: now },
-      { id: "support_employee_v1", name: "Support • Medarbetare", kind: "employee", locale: DEFAULT_LOCALE, notes: "Fokus: uppgifter, frågor, dokument, felrapport.", createdAt: now, updatedAt: now },
-      { id: "support_admin_v1", name: "Support • Admin", kind: "admin", locale: DEFAULT_LOCALE, notes: "Fokus: tilldelning, uppföljning, översikter.", createdAt: now, updatedAt: now },
-      { id: "support_systemadmin_v1", name: "Support • Systemadmin", kind: "systemadmin", locale: DEFAULT_LOCALE, notes: "Fokus: roller/org/access/policy.", createdAt: now, updatedAt: now },
-    ];
-    save(SUPPORT_KEY, seed);
-  }
-
-  seedOrgIfEmpty();
-  seedAssignmentsIfEmpty();
-  seedSupportProfilesIfEmpty();
-
-  // --- Data loaders + meta ---
-  function loadRoles(){
-    const arr = safeParse(ROLES_KEY, []);
-    return Array.isArray(arr) ? arr : [];
-  }
-
-  function loadSupportProfiles(){
-    const raw = safeParse(SUPPORT_KEY, []);
-    const arr = Array.isArray(raw) ? raw : [];
-    const map = new Map();
-    arr.forEach(p => {
-      if(!p || typeof p !== "object") return;
-      const id = String(p.id || "").trim();
-      if(!id) return;
-      map.set(id, p);
-    });
-    return { arr, byId: map };
-  }
-
-  function loadOrgEx(){
-    const raw = safeParse(ORG_KEY, []);
-    const arr = Array.isArray(raw) ? raw : [];
-    const idCounts = new Map();
-    arr.forEach(n => {
-      const id = n && typeof n === "object" && n.id ? String(n.id) : "";
-      if(!id) return;
-      idCounts.set(id, (idCounts.get(id) || 0) + 1);
-    });
-    const duplicates = Array.from(idCounts.entries()).filter(([,c]) => c > 1).map(([id]) => id);
-
-    const byId = new Map();
-    arr.forEach(n => {
-      if(n && typeof n === "object" && n.id) byId.set(String(n.id), n);
-    });
-
-    const ids = Array.from(byId.keys());
-    const hasPrimary = byId.has(ROOT_ID_PRIMARY);
-    const hasFallback = byId.has(ROOT_ID_FALLBACK);
-
-    let bestRootId = null;
-    if(hasPrimary) bestRootId = ROOT_ID_PRIMARY;
-    else if(hasFallback) bestRootId = ROOT_ID_FALLBACK;
-    else{
-      const anyRoot = ids.find(id => {
-        const n = byId.get(id);
-        return n && (n.parentId === null || n.parentId === undefined || String(n.parentId).trim() === "");
-      });
-      bestRootId = anyRoot || (ids[0] || ROOT_ID_PRIMARY);
-    }
-
-    const out = Array.from(byId.values()).map(n => {
-      const id = String(n.id);
-      let parentId = (n.parentId === null || n.parentId === undefined) ? null : String(n.parentId);
-      if(id === bestRootId){
-        parentId = null;
-      }else{
-        if(!parentId) parentId = bestRootId;
-        if(parentId && !byId.has(parentId)) parentId = bestRootId;
-      }
-      return { ...n, id, parentId };
-    });
-
-    return { nodes: out, meta: { duplicates, bestRootId, hasPrimary, hasFallback } };
-  }
-
-  function loadAssignments(){
-    const raw = safeParse(ASG_KEY, {});
-    return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
-  }
-  function saveAssignments(map){
-    save(ASG_KEY, (map && typeof map === "object" && !Array.isArray(map)) ? map : {});
-  }
-
-  // --- Org helpers ---
-  function buildOrgIndex(nodes){
-    const byId = new Map(nodes.map(n => [String(n.id), n]));
-    const children = new Map();
-    nodes.forEach(n => {
-      const pid = (n.parentId === null) ? null : String(n.parentId);
-      if(pid){
-        if(!children.has(pid)) children.set(pid, []);
-        children.get(pid).push(String(n.id));
-      }
-    });
-    children.forEach((arr, pid) => {
-      arr.sort((a,b) => String(byId.get(a)?.name||"").localeCompare(String(byId.get(b)?.name||""), "sv"));
-      children.set(pid, arr);
-    });
-    return { byId, children };
-  }
-
-  function buildPathLabelCache(nodes){
-    const { byId } = buildOrgIndex(nodes);
-    const cache = new Map();
-
-    function labelFor(id){
-      const key = String(id || "");
-      if(cache.has(key)) return cache.get(key);
-      const parts = [];
-      const seen = new Set();
-      let cur = key;
-
-      while(cur && byId.has(cur) && !seen.has(cur)){
-        seen.add(cur);
-        const n = byId.get(cur);
-        parts.push(String(n.name || cur));
-        cur = (n.parentId === null) ? "" : String(n.parentId || "");
-      }
-      const lab = parts.reverse().join(" → ") || "—";
-      cache.set(key, lab);
-      return lab;
-    }
-
-    Array.from(byId.keys()).forEach(id => labelFor(id));
-    return { labelFor };
-  }
-
-  function detectOrgParentCycles(nodes){
-    const { byId } = buildOrgIndex(nodes);
-    const seen = new Set();
-    const inStack = new Set();
-    let hint = "";
-
-    function dfs(id){
-      if(inStack.has(id)){ hint = id; return true; }
-      if(seen.has(id)) return false;
-      seen.add(id);
-      inStack.add(id);
-      const n = byId.get(id);
-      const pid = n ? (n.parentId === null ? null : String(n.parentId)) : null;
-      if(pid){
-        if(dfs(pid)) return true;
-      }
-      inStack.delete(id);
-      return false;
-    }
-
-    for(const id of byId.keys()){
-      if(dfs(id)) return { hasCycle:true, cycleHint: hint || id };
-    }
-    return { hasCycle:false, cycleHint:"" };
-  }
-
-  function getSubtreeIds(scopeId, nodes){
-    const { children } = buildOrgIndex(nodes);
-    const start = String(scopeId || "");
-    const out = [];
-    const seen = new Set();
-    const stack = [start];
-    while(stack.length){
-      const cur = stack.pop();
-      if(!cur || seen.has(cur)) continue;
-      seen.add(cur);
-      out.push(cur);
-      const kids = children.get(cur) || [];
-      for(let i=kids.length-1;i>=0;i--) stack.push(kids[i]);
-    }
-    return out;
-  }
-
-  // --- Role resolve (child overrides parent) + scope normalization ---
-  const SCOPE_ORDER = ["none","view","act","manage"];
-  function normalizeScope(s){
-    const v = String(s || "none");
-    return SCOPE_ORDER.includes(v) ? v : "none";
-  }
-
-  function scopeFromPermObj(v){
-    const view = !!v?.view;
-    const act = !!v?.act;
-    const manage = !!v?.manage;
-    if(manage) return "manage";
-    if(act) return "act";
-    if(view) return "view";
-    return "none";
-  }
-
-  function normalizeRoleModulesToScopes(mods){
-    const out = {};
-    if(!mods || typeof mods !== "object") return out;
-
-    Object.keys(mods).forEach(k => {
-      const v = mods[k];
-      if(typeof v === "string"){
-        out[k] = normalizeScope(v);
-      }else if(v && typeof v === "object"){
-        out[k] = normalizeScope(scopeFromPermObj(v));
-      }else{
-        out[k] = "none";
-      }
-    });
-    return out;
-  }
-
-  function resolveRoleEffectiveScopes(roleId, roles){
-    const byId = new Map(roles.map(r => [String(r.id), r]));
-    const seen = new Set();
-    let loop = false;
-    let depthClipped = false;
-
-    function walk(id, depth){
-      if(depth > MAX_ROLE_DEPTH){ depthClipped = true; return { scopes:{} }; }
-      if(seen.has(id)){ loop = true; return { scopes:{} }; }
-      seen.add(id);
-
-      const role = byId.get(String(id));
-      if(!role) return { scopes:{} };
-
-      let base = {};
-      const parentId = String(role.inherits || "").trim();
-      if(parentId && byId.has(parentId)){
-        base = walk(parentId, depth+1).scopes;
-      }
-
-      const next = Object.assign({}, base);
-      const local = normalizeRoleModulesToScopes(role.modules || {});
-      Object.keys(local).forEach(k => { next[k] = local[k]; });
-      return { scopes: next };
-    }
-
-    const res = walk(String(roleId||""), 0).scopes || {};
-    return { scopes: res, loop, depthClipped };
-  }
-
-  function roleScopesToChips(scopes){
-    const keys = Object.keys(scopes || {});
-    if(!keys.length) return [];
-    keys.sort((a,b)=>String(a).localeCompare(String(b),"sv"));
-    return keys.map(k => ({ key:k, lvl: normalizeScope(scopes[k]) })).filter(x => x.lvl !== "none");
-  }
-
-  // --- AO-023 role metadata resolve ---
-  function effectiveLocale(role){
-    const loc = String(role?.locale || "").trim();
-    return loc || DEFAULT_LOCALE;
-  }
-  function effectiveSupportId(role){
-    const sid = String(role?.supportProfileId || "").trim();
-    return sid || DEFAULT_SUPPORT_ID;
-  }
-  function supportNameById(supportById, supportId){
-    const p = supportById.get(String(supportId || "")) || null;
-    return p ? (p.name || p.id) : "(saknas)";
-  }
-
-  // --- UI: selects ---
-  function renderRoleSelect(){
-    const sel = $("#roleSelect");
-    sel.innerHTML = "";
-
-    const roles = loadRoles().slice().sort((a,b) => String(a.name||a.id||"").localeCompare(String(b.name||b.id||""), "sv"));
-
-    if(roles.length === 0){
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "(Inga roller – skapa i Roller)";
-      sel.appendChild(opt);
-      sel.disabled = true;
-      return;
-    }
-
-    sel.disabled = false;
-    roles.forEach(r => {
-      const opt = document.createElement("option");
-      opt.value = String(r.id);
-      opt.textContent = r.name ? `${r.name} (${r.id})` : String(r.id);
-      sel.appendChild(opt);
-    });
-  }
-
-  function renderScopeSelect(){
-    const sel = $("#scopeSelect");
-    sel.innerHTML = "";
-
-    const { nodes, meta } = loadOrgEx();
-    const { byId } = buildOrgIndex(nodes);
-    const { labelFor } = buildPathLabelCache(nodes);
-
-    const ids = Array.from(byId.keys());
-    ids.sort((a,b) => labelFor(a).localeCompare(labelFor(b), "sv"));
-
-    ids.forEach(id => {
-      const opt = document.createElement("option");
-      opt.value = id;
-      opt.textContent = labelFor(id);
-      sel.appendChild(opt);
-    });
-
-    const bestRoot = meta.bestRootId;
-    sel.value = byId.has(bestRoot) ? bestRoot : (ids[0] || "");
-  }
-
-  // --- Preview ---
-  function updatePreview(){
-    setPreviewWarn("");
-
-    const roles = loadRoles();
-    const { nodes, meta } = loadOrgEx();
-    const { byId } = buildOrgIndex(nodes);
-    const { labelFor } = buildPathLabelCache(nodes);
-    const { byId: supportById } = loadSupportProfiles();
-
-    const roleId = $("#roleSelect").value;
-    const scopeId = $("#scopeSelect").value || meta.bestRootId;
-
-    const role = roles.find(r => String(r.id) === String(roleId)) || null;
-    const scopeNode = byId.get(String(scopeId)) || null;
-
-    $("#pvRole").textContent = "Roll: " + (role ? (role.name || role.id) : "—");
-    $("#pvLocale").textContent = "Locale: " + (role ? effectiveLocale(role) : "—");
-
-    const sid = role ? effectiveSupportId(role) : "";
-    const sName = role ? supportNameById(supportById, sid) : "—";
-    $("#pvSupport").textContent = "Support: " + (role ? sName : "—");
-
-    $("#pvScope").textContent = "Scope: " + (scopeNode ? (scopeNode.name || scopeNode.id) : "—");
-
-    const subtree = scopeNode ? getSubtreeIds(scopeNode.id, nodes) : [];
-    $("#pvCovers").textContent = "Täcker: " + (subtree.length ? `${subtree.length} nod(er)` : "—");
-
-    const eff = role ? resolveRoleEffectiveScopes(role.id, roles) : { scopes:{}, loop:false, depthClipped:false };
-    const chips = role ? roleScopesToChips(eff.scopes) : [];
-
-    const pvModules = $("#pvModules");
-    pvModules.innerHTML = "";
-    if(!role){
-      pvModules.innerHTML = `<span class="muted">—</span>`;
-    }else if(chips.length === 0){
-      pvModules.innerHTML = `<span class="muted">Inga moduler i rollen</span>`;
-    }else{
-      chips.forEach(c => {
-        const el = document.createElement("span");
-        el.className = "chip";
-        el.innerHTML = `<strong>${escapeHtml(c.key)}</strong> <span class="muted">${escapeHtml(c.lvl)}</span>`;
-        pvModules.appendChild(el);
-      });
-    }
-
-    const nodeNames = subtree.slice(0, 14).map(id => escapeHtml(labelFor(id).split(" → ").slice(-1)[0] || id));
-    const moreText = subtree.length > 14 ? ` +${subtree.length-14} till` : "";
-    $("#pvNodes").textContent = subtree.length ? (nodeNames.join(", ") + moreText) : "—";
-
-    const warns = [];
-    if(!roles.length) warns.push("Inga roller finns ännu. Skapa roller i admin/roles.html.");
-    if(!nodes.length) warns.push("Org saknas. Skapa org i admin/org.html.");
-    if(meta.duplicates && meta.duplicates.length) warns.push(`Org har dublett-ID (${meta.duplicates.slice(0,3).join(", ")}${meta.duplicates.length>3 ? "…" : ""}). Noder kan döljas.`);
-    if(!meta.hasPrimary && meta.hasFallback) warns.push(`Root-id avviker (hittade "${ROOT_ID_FALLBACK}" men förväntar "${ROOT_ID_PRIMARY}"). Det är OK, men harmonisera gärna i org-builder.`);
-
-    if(role){
-      if(!String(role.locale || "").trim()) warns.push(`Rollen saknar locale. Default används (${DEFAULT_LOCALE}).`);
-      const spId = effectiveSupportId(role);
-      if(!String(role.supportProfileId || "").trim()) warns.push(`Rollen saknar supportProfileId. Default används (${DEFAULT_SUPPORT_ID}).`);
-      if(spId && !supportById.has(spId)) warns.push(`Supportprofil saknas i AO-023 (${spId}). Skapa/seed i ${SUPPORT_KEY}.`);
-      if(eff.loop || eff.depthClipped){
-        const parts = [];
-        if(eff.loop) parts.push("arv-loop");
-        if(eff.depthClipped) parts.push("arv för lång (klippt)");
-        warns.push(`Rollen har problem (${parts.join(", ")}). Preview kan vara ofullständig.`);
-      }
-    }
-
-    if(warns.length) setPreviewWarn(warns.join(" "));
-  }
-
-  // --- Assignments CRUD ---
-  function upsertAssignment(empNo, roleId, scopeId){
-    const map = loadAssignments();
-    const next = { ...map };
-
-    const existing = next[empNo] && typeof next[empNo] === "object" ? next[empNo] : {};
-    next[empNo] = {
-      ...existing,
-      roleId: String(roleId),
-      scopeId: String(scopeId),
-      updatedAt: Date.now()
-    };
-    saveAssignments(next);
-  }
-
-  function deleteAssignment(empNo){
-    const map = loadAssignments();
-    const next = { ...map };
-    delete next[empNo];
-    saveAssignments(next);
-  }
-
-  function fmtDate(ts){
-    try{
-      if(!ts) return "—";
-      const d = new Date(ts);
-      if(Number.isNaN(d.getTime())) return "—";
-      return d.toLocaleDateString("sv-SE");
-    }catch{
-      return "—";
-    }
-  }
-
-  // --- Risks ---
-  function computeRisks(roles, orgEx, asg){
-    const nodes = orgEx.nodes;
-    const meta = orgEx.meta;
-    const { byId: supportById } = loadSupportProfiles();
-
-    const roleById = new Map(roles.map(r => [String(r.id), r]));
-    const nodeById = new Map(nodes.map(n => [String(n.id), n]));
-
-    const risks = [];
-
-    if(!roles.length) risks.push("Inga roller finns. Skapa i admin/roles.html (AO-019).");
-    if(!nodes.length) risks.push("Org-data saknas. Skapa i admin/org.html (AO-020).");
-
-    if(meta.duplicates && meta.duplicates.length){
-      risks.push(`Org har dublett-ID: ${meta.duplicates.join(", ")}. En nod kan “försvinna” (sista vinner).`);
-    }
-
-    const cyc = detectOrgParentCycles(nodes);
-    if(cyc.hasCycle){
-      risks.push(`Org-data innehåller parent-loop/cykel (hint: ${cyc.cycleHint}). Vissa noder kan döljas i vyer.`);
-    }
-
-    if(!meta.hasPrimary && meta.hasFallback){
-      risks.push(`Root-id mismatch: hittade "${ROOT_ID_FALLBACK}" men inte "${ROOT_ID_PRIMARY}". Harmonisering rekommenderas.`);
-    }
-
-    Object.keys(asg || {}).forEach(empNo => {
-      const a = asg[empNo] || {};
-      const rid = String(a.roleId || "");
-      const sid = String(a.scopeId || "");
-      if(!rid || !roleById.has(rid)){
-        risks.push(`Tilldelning anst.nr ${empNo}: roll saknas/ogiltig (${rid || "—"}).`);
-      }
-      if(!sid || !nodeById.has(sid)){
-        risks.push(`Tilldelning anst.nr ${empNo}: scope saknas/ogiltig (${sid || "—"}).`);
-      }
-    });
-
-    roles.forEach(r => {
-      const eff = resolveRoleEffectiveScopes(r.id, roles);
-      if(eff.loop) risks.push(`Roll "${r.name || r.id}" har arv-loop. Åtgärda i admin/roles.html.`);
-      if(eff.depthClipped) risks.push(`Roll "${r.name || r.id}" har för lång arvkedja (klippt).`);
-      const inh = String(r.inherits || "").trim();
-      if(inh && !roleById.has(inh)){
-        risks.push(`Roll "${r.name || r.id}" ärver från roll som inte finns (${inh}).`);
-      }
-
-      const loc = String(r.locale || "").trim();
-      if(!loc) risks.push(`Roll "${r.name || r.id}" saknar locale. Default används (${DEFAULT_LOCALE}).`);
-
-      const spId = String(r.supportProfileId || "").trim() || DEFAULT_SUPPORT_ID;
-      if(!String(r.supportProfileId || "").trim()){
-        risks.push(`Roll "${r.name || r.id}" saknar supportProfileId. Default används (${DEFAULT_SUPPORT_ID}).`);
-      }
-      if(spId && !supportById.has(spId)){
-        risks.push(`Roll "${r.name || r.id}" pekar på supportprofil som inte finns (${spId}).`);
-      }
-    });
-
-    return risks;
-  }
-
-  // --- Views ---
-  function renderAssignmentsView(q){
-    const view = $("#view");
-    view.innerHTML = "";
-
-    const roles = loadRoles();
-    const orgEx = loadOrgEx();
-    const nodes = orgEx.nodes;
-
-    const { byId } = buildOrgIndex(nodes);
-    const { labelFor } = buildPathLabelCache(nodes);
-    const { byId: supportById } = loadSupportProfiles();
-
-    const asg = loadAssignments();
-    const roleById = new Map(roles.map(r => [String(r.id), r]));
-
-    const rows = Object.keys(asg || {})
-      .map(empNo => {
-        const a = asg[empNo] || {};
-        const role = roleById.get(String(a.roleId||"")) || null;
-        const scope = byId.get(String(a.scopeId||"")) || null;
-
-        const loc = role ? effectiveLocale(role) : DEFAULT_LOCALE;
-        const spId = role ? effectiveSupportId(role) : DEFAULT_SUPPORT_ID;
-        const spName = role ? supportNameById(supportById, spId) : "(—)";
-
-        return {
-          empNo: String(empNo),
-          roleId: String(a.roleId||""),
-          scopeId: String(a.scopeId||""),
-          roleName: role ? (role.name || role.id) : "(saknas)",
-          scopeName: scope ? labelFor(scope.id) : "(saknas)",
-          updatedAt: a.updatedAt || 0,
-          locale: loc,
-          supportId: spId,
-          supportName: spName
-        };
-      })
-      .sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
-
-    const query = String(q||"").trim().toLowerCase();
-    const filtered = query ? rows.filter(r => {
-      const blob = `${r.empNo} ${r.roleName} ${r.roleId} ${r.scopeName} ${r.scopeId} ${r.locale} ${r.supportName}`.toLowerCase();
-      return blob.includes(query);
-    }) : rows;
-
-    if(filtered.length === 0){
-      view.innerHTML = `<div class="empty">Inga tilldelningar att visa.</div>`;
-      return;
-    }
-
-    filtered.slice(0, 80).forEach(r => {
-      const role = roleById.get(r.roleId) || null;
-      const scopeNode = byId.get(r.scopeId) || null;
-
-      const eff = role ? resolveRoleEffectiveScopes(role.id, roles) : { scopes:{}, loop:false, depthClipped:false };
-      const chips = role ? roleScopesToChips(eff.scopes) : [];
-
-      const subtree = scopeNode ? getSubtreeIds(scopeNode.id, nodes) : [];
-      const subtreeHint = subtree.length ? `${subtree.length} nod(er)` : "—";
-
-      const supportMissing = role ? (!loadSupportProfiles().byId.has(r.supportId)) : false;
-
-      const el = document.createElement("div");
-      el.className = "item";
-      el.innerHTML = `
-        <div style="min-width:260px; flex:1 1 520px;">
-          <p class="item-title">Anst.nr ${escapeHtml(r.empNo)}</p>
-          <div class="meta">
-            <span class="pill"><strong>Roll:</strong> ${escapeHtml(r.roleName)} <span class="muted">(${escapeHtml(r.roleId || "—")})</span></span>
-            <span class="pill"><strong>Locale:</strong> ${escapeHtml(r.locale)}</span>
-            <span class="pill"><strong>Support:</strong> ${escapeHtml(r.supportName)} <span class="muted">(${escapeHtml(r.supportId)})</span></span>
-            <span class="pill"><strong>Scope:</strong> ${escapeHtml(r.scopeName)} <span class="muted">(${escapeHtml(r.scopeId || "—")})</span></span>
-            <span class="pill"><strong>Täcker:</strong> ${escapeHtml(subtreeHint)}</span>
-            <span class="pill"><strong>Uppdat:</strong> ${escapeHtml(fmtDate(r.updatedAt))}</span>
-          </div>
-
-          <div class="chips" style="margin-top:8px;">
-            ${chips.length ? chips.map(c => `<span class="chip"><strong>${escapeHtml(c.key)}</strong> <span class="muted">${escapeHtml(c.lvl)}</span></span>`).join("") : `<span class="muted">${role ? "Inga moduler" : "Roll saknas"}</span>`}
-          </div>
-
-          ${(supportMissing) ? `
-            <div class="warnbox" style="margin-top:10px;">
-              <div class="title">Varning</div>
-              <div class="muted" style="font-size:.95rem;">
-                Supportprofil saknas (${escapeHtml(r.supportId)}). Åtgärda i <code>${SUPPORT_KEY}</code> eller uppdatera roll i <code>admin/roles.html</code>.
-              </div>
-            </div>
-          ` : ``}
-
-          ${(role && (eff.loop || eff.depthClipped)) ? `
-            <div class="warnbox" style="margin-top:10px;">
-              <div class="title">Varning</div>
-              <div class="muted" style="font-size:.95rem;">
-                ${eff.loop ? "Arv-loop. " : ""}${eff.depthClipped ? "Arv för lång (klippt). " : ""}
-                Kontrollera i <code>admin/roles.html</code>.
-              </div>
-            </div>
-          ` : ``}
-        </div>
-
-        <div class="row" style="gap:8px;">
-          <button type="button" class="secondary" data-edit="${escapeHtml(r.empNo)}">Ladda i formulär</button>
-          <button type="button" class="secondary" data-del="${escapeHtml(r.empNo)}">Ta bort</button>
-        </div>
-      `;
-      view.appendChild(el);
-    });
-
-    view.querySelectorAll("button[data-del]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const empNo = btn.getAttribute("data-del");
-        if(!confirm(`Ta bort tilldelning för anst.nr ${empNo}?`)) return;
-        deleteAssignment(empNo);
-        renderAll({ reason: "action" });
-      });
-    });
-
-    view.querySelectorAll("button[data-edit]").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const empNo = btn.getAttribute("data-edit");
-        const asg = loadAssignments();
-        const a = asg[empNo];
-        if(!a) return;
-
-        $("#empNo").value = empNo;
-        if(a.roleId) $("#roleSelect").value = String(a.roleId);
-        if(a.scopeId) $("#scopeSelect").value = String(a.scopeId);
-
-        updatePreview();
-        setActionMsg("ok", `Laddad tilldelning för anst.nr ${empNo}.`);
-
-        try{ window.scrollTo({ top: 0, behavior: "smooth" }); }catch{ }
-      });
-    });
-  }
-
-  function renderRolesView(q){
-    const view = $("#view");
-    view.innerHTML = "";
-
-    const roles = loadRoles();
-    const { byId: supportById } = loadSupportProfiles();
-
-    const query = String(q||"").trim().toLowerCase();
-    const list = roles
-      .slice()
-      .sort((a,b) => String(a.name||a.id||"").localeCompare(String(b.name||b.id||""), "sv"))
-      .filter(r => {
-        if(!query) return true;
-        const blob = `${r.id||""} ${r.name||""} ${r.inherits||""} ${r.locale||""} ${r.supportProfileId||""}`.toLowerCase();
-        return blob.includes(query);
-      });
-
-    if(list.length === 0){
-      view.innerHTML = `<div class="empty">Inga roller att visa.</div>`;
-      return;
-    }
-
-    list.slice(0, 60).forEach(r => {
-      const eff = resolveRoleEffectiveScopes(r.id, roles);
-      const chips = roleScopesToChips(eff.scopes);
-
-      const loc = effectiveLocale(r);
-      const spId = effectiveSupportId(r);
-      const spName = supportNameById(supportById, spId);
-      const spMissing = !supportById.has(spId);
-
-      const el = document.createElement("div");
-      el.className = "item";
-      el.innerHTML = `
-        <div style="min-width:260px; flex:1 1 520px;">
-          <p class="item-title">${escapeHtml(r.name || r.id)}</p>
-          <div class="meta">
-            <span class="pill"><strong>ID:</strong> ${escapeHtml(r.id)}</span>
-            <span class="pill"><strong>Ärver:</strong> ${escapeHtml(String(r.inherits||"") || "—")}</span>
-            <span class="pill"><strong>Locale:</strong> ${escapeHtml(loc)}${String(r.locale||"").trim() ? "" : " (default)"}</span>
-            <span class="pill"><strong>Support:</strong> ${escapeHtml(spName)} <span class="muted">(${escapeHtml(spId)})</span>${spMissing ? " (saknas)" : ""}</span>
-          </div>
-
-          <div class="chips" style="margin-top:8px;">
-            ${chips.length ? chips.map(c => `<span class="chip"><strong>${escapeHtml(c.key)}</strong> <span class="muted">${escapeHtml(c.lvl)}</span></span>`).join("") : `<span class="muted">Inga moduler</span>`}
-          </div>
-
-          ${(eff.loop || eff.depthClipped || spMissing) ? `
-            <div class="warnbox" style="margin-top:10px;">
-              <div class="title">Varning</div>
-              <div class="muted" style="font-size:.95rem;">
-                ${eff.loop ? "Arv-loop. " : ""}${eff.depthClipped ? "Arv för lång (klippt). " : ""}
-                ${spMissing ? `Supportprofil saknas (${escapeHtml(spId)}). ` : ""}
-                Kontrollera i <code>admin/roles.html</code>.
-              </div>
-            </div>
-          ` : ``}
-        </div>
-        <div class="row" style="gap:8px;">
-          <a class="btn secondary" href="./roles.html">Öppna roller</a>
-        </div>
-      `;
-      view.appendChild(el);
-    });
-  }
-
-  function renderRisksView(q){
-    const view = $("#view");
-    view.innerHTML = "";
-
-    const roles = loadRoles();
-    const orgEx = loadOrgEx();
-    const asg   = loadAssignments();
-
-    const risks = computeRisks(roles, orgEx, asg);
-    const query = String(q||"").trim().toLowerCase();
-    const filtered = query ? risks.filter(x => String(x).toLowerCase().includes(query)) : risks;
-
-    if(filtered.length === 0){
-      view.innerHTML = `<div class="empty">Inga risker att visa.</div>`;
-      return;
-    }
-
-    const box = document.createElement("div");
-    box.className = "warnbox";
-    box.innerHTML = `
-      <div class="title">Riskpanel</div>
-      <ul class="warnlist" id="riskList"></ul>
-      <div class="smallnote">Obs: varningar (read-only). Åtgärda i <code>admin/roles.html</code>, <code>admin/org.html</code> och/eller <code>${SUPPORT_KEY}</code>.</div>
-    `;
-    view.appendChild(box);
-
-    const ul = box.querySelector("#riskList");
-    filtered.slice(0, 120).forEach(r => {
-      const li = document.createElement("li");
-      li.textContent = r;
-      ul.appendChild(li);
-    });
-  }
-
-  function updateKpis(){
-    const roles = loadRoles();
-    const orgEx = loadOrgEx();
-    const asg   = loadAssignments();
-    const risks = computeRisks(roles, orgEx, asg);
-
-    $("#kpiRoles").textContent = String(roles.length);
-    $("#kpiNodes").textContent = String(orgEx.nodes.length);
-    $("#kpiAsg").textContent   = String(Object.keys(asg||{}).length);
-    $("#kpiRisks").textContent = String(risks.length);
-  }
-
-  function renderViewOnly(){
-    updateKpis();
-    const mode = $("#filter").value;
-    const q = $("#search").value;
-
-    if(mode === "roles") renderRolesView(q);
-    else if(mode === "risks") renderRisksView(q);
-    else renderAssignmentsView(q);
-  }
-
-  function renderAll(opts){
-    const reason = (opts && opts.reason) ? String(opts.reason) : "";
-
-    renderRoleSelect();
-    renderScopeSelect();
-
-    const roles = loadRoles();
-    const orgEx = loadOrgEx();
-    const hasRoles = roles.length > 0;
-    const hasOrg = orgEx.nodes.length > 0;
-
-    $("#btnAssign").disabled = !(hasRoles && hasOrg);
-    if(!hasRoles || !hasOrg){
-      setPreviewWarn("För att spara tilldelning krävs både roller (AO-019) och org (AO-020).");
-    }
-
-    if(hasRoles){
-      const sel = $("#roleSelect");
-      if(!sel.value && roles[0]) sel.value = String(roles[0].id);
-    }
-    const scopeSel = $("#scopeSelect");
-    if(hasOrg && !scopeSel.value){
-      scopeSel.value = orgEx.meta.bestRootId || scopeSel.options?.[0]?.value || "";
-    }
-
-    if(reason !== "search"){
-      updatePreview();
-    }
-
-    renderViewOnly();
-  }
-
-  // --- Events ---
-  $("#roleSelect").addEventListener("change", () => { updatePreview(); });
-  $("#scopeSelect").addEventListener("change", () => { updatePreview(); });
-
-  $("#filter").addEventListener("change", () => { renderViewOnly(); });
-  $("#search").addEventListener("input", () => { renderAll({ reason: "search" }); });
-
-  $("#btnAssign").addEventListener("click", () => {
-    setActionMsg("", "");
-
-    const roles = loadRoles();
-    const orgEx = loadOrgEx();
-    const nodes = orgEx.nodes;
-    const { byId } = buildOrgIndex(nodes);
-
-    if(!roles.length){
-      setActionMsg("err", "Inga roller finns. Skapa roller i admin/roles.html först.");
-      return;
-    }
-    if(!nodes.length){
-      setActionMsg("err", "Org saknas. Skapa org i admin/org.html först.");
-      return;
-    }
-
-    const v = validateEmpNo($("#empNo").value);
-    if(!v.ok){
-      setActionMsg("err", "Skriv ett giltigt anst.nr (bara siffror, max 10).");
-      return;
-    }
-
-    const roleId = $("#roleSelect").value;
-    if(!roleId){
-      setActionMsg("err", "Välj en roll.");
-      return;
-    }
-
-    const scopeId = $("#scopeSelect").value || orgEx.meta.bestRootId;
-    if(!scopeId){
-      setActionMsg("err", "Välj ett scope.");
-      return;
-    }
-
-    const r = roles.find(x => String(x.id) === String(roleId));
-    if(!r){
-      setActionMsg("err", "Rollen finns inte i lagring (uppdatera roller).");
-      return;
-    }
-    if(!byId.has(String(scopeId))){
-      setActionMsg("err", "Scope finns inte i lagring (uppdatera org).");
-      return;
-    }
-
-    upsertAssignment(v.empNo, roleId, scopeId);
-    setActionMsg("ok", `Tilldelning sparad för anst.nr ${v.empNo}.`);
-    renderAll({ reason: "action" });
-  });
-
-  $("#btnClear").addEventListener("click", () => {
-    $("#empNo").value = "";
-    setActionMsg("", "");
-  });
-
-  // --- Init ---
-  setActionMsg("", "");
-  renderAll({ reason: "init" });
+  renderAll();
 
 })();
 </script>
