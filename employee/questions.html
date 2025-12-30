@@ -1,20 +1,24 @@
 <!-- ============================================================
-AO-055 | FIL-ID: employee/questions.html
+AO-019 7/8 (PATCH) | FIL-ID: employee/questions.html
 Projekt: HR-System
-Syfte: Employee – Frågor (svara) – UI-only v1 (nivå 3)
-Krav:
-- Visa frågor tilldelade inloggad employee (empNo) + ev "alla"/"grupp" (om admin använder det)
-- Employee kan svara + markera inskickat
-- Anonymt svar om frågan tillåter (styrs av admin per fråga)
-- Svar sparas separat (AO-013_ANSWERS_V1) och visas på admin/answers.html
+Syfte: Employee – Frågor (svara) – UI-only v1 (nivå 3) – scope-styrt
+Krav (AO-019 7/8):
+- Employee ser endast frågor där isInScope(employee.scopeId, question.scopeId, orgTree) === true
+- Saknat scopeId på fråga → visa inte
+- Saknad org/assignments → lås listning/svarande + visa felpanel (fail-closed)
 Policy:
 - Ingen backend
-- Ingen känslig data lagras
-- Robust guard: sessionStorage först, fallback localStorage
+- sessionStorage först, fallback localStorage (fail-closed)
+- Ingen känslig persondata (anst.nr)
+- Inga nya storage-keys
+- Hel-filsleverans
+- XSS-escape på all rendering
 Lagring:
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
-- AO-012_QUESTIONS_V1 (localStorage) – frågor
+- AO-012_QUESTIONS_V1 (localStorage) – frågor (primär)
 - AO-013_ANSWERS_V1 (localStorage) – svar
+- AO-020_ORG_V1 (localStorage) – org-träd (LÄS)
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – empNo→scopeId (LÄS)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -89,6 +93,20 @@ Lagring:
 
     textarea{ min-height: 120px; }
     .btnrow{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+
+    .guardbox{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: #fff;
+      color: var(--muted);
+    }
+    .guardbox.err{
+      border-color: rgba(239,68,68,.35);
+      background: rgba(254,226,226,.55);
+      color: #7f1d1d;
+    }
   </style>
 </head>
 
@@ -124,6 +142,8 @@ Lagring:
         <a class="btn secondary" href="../admin/answers.html">Öppna admin/answers (demo)</a>
       </div>
     </div>
+
+    <div id="guardPanel" class="guardbox" style="display:none;"></div>
 
     <div class="layout">
 
@@ -172,6 +192,10 @@ Lagring:
             <strong>Fråga:</strong> <span id="dText">—</span>
           </p>
 
+          <p id="dNoteWrap" class="muted" style="margin-top:8px; display:none;">
+            <strong>Info:</strong> <span id="dNote">—</span>
+          </p>
+
           <hr style="border:none; border-top:1px solid var(--line); margin:12px 0;" />
 
           <label>
@@ -199,15 +223,21 @@ Lagring:
 
 <script>
 /* ============================================================
-AO-055 | FIL-ID: employee/questions.html (inline JS)
-Syfte: Guard + visa frågor + spara svar separat
+AO-019 7/8 | FIL-ID: employee/questions.html (inline JS)
+Syfte: Guard + scope-filter + visa frågor + spara svar separat (fail-closed)
 ============================================================ */
 (function(){
   "use strict";
 
-  const SESSION_KEY   = "AO-001_LOGIN_V1";
-  const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
-  const ANSWERS_KEY   = "AO-013_ANSWERS_V1";
+  const SESSION_KEY        = "AO-001_LOGIN_V1";
+
+  // P0: key-mismatch i kedjan (kompat utan nya keys)
+  const QUESTIONS_KEY      = "AO-012_QUESTIONS_V1"; // primär (GitHub-sanning i denna fil)
+  const QUESTIONS_KEY_COMP = "AO-015_QUESTIONS_V1"; // kompat: om admin råkat skriva hit
+
+  const ANSWERS_KEY        = "AO-013_ANSWERS_V1";
+  const ORG_KEY            = "AO-020_ORG_V1";
+  const ASSIGNMENTS_KEY    = "AO-020_ROLE_ASSIGNMENTS_V2";
 
   const $ = (s) => document.querySelector(s);
 
@@ -221,27 +251,12 @@ Syfte: Guard + visa frågor + spara svar separat
     return null;
   }
 
-  function readAuth(){
-    try{
-      const raw = readRawSession();
-      if(!raw) return null;
-      const data = JSON.parse(raw);
-      if(!data?.auth?.isAuthed) return null;
-      if(data.auth.role !== "employee") return null;
-      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
-      return data.auth;
-    }catch{
-      return null;
-    }
-  }
-
   function safeParse(key, fallback){
     try{
       const v = JSON.parse(localStorage.getItem(key) || "null");
       return (v === null || v === undefined) ? fallback : v;
     }catch{ return fallback; }
   }
-  function save(key, value){ localStorage.setItem(key, JSON.stringify(value)); }
 
   function escapeHtml(s){
     return String(s ?? "")
@@ -258,6 +273,19 @@ Syfte: Guard + visa frågor + spara svar separat
     m.textContent = text || "";
   }
 
+  function setGuard(kind, text){
+    const box = $("#guardPanel");
+    if(!text){
+      box.style.display = "none";
+      box.className = "guardbox";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "block";
+    box.className = "guardbox" + (kind ? " " + kind : "");
+    box.textContent = text;
+  }
+
   function fmtDate(ts){
     try{
       const d = new Date(ts);
@@ -270,6 +298,127 @@ Syfte: Guard + visa frågor + spara svar separat
 
   function genId(prefix){
     return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function normalizeEmpNo(v){
+    const s = String(v || "").trim();
+    return s.replace(/[^\d]/g, "");
+  }
+
+  function normalizeRole(r){
+    return String(r || "").trim().toLowerCase();
+  }
+
+  function readAuth(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+
+      const role = normalizeRole(data.auth.role);
+      if(role !== "employee") return null;
+
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+
+      const empNo = normalizeEmpNo(
+        data.auth.empNo ?? data.auth.employeeNo ?? data.auth.emp ?? data.auth.userId ?? ""
+      );
+
+      return { ...data.auth, role, empNo };
+    }catch{
+      return null;
+    }
+  }
+
+  // fail-closed save (kvot/blockerad storage)
+  function saveFailClosed(key, value){
+    try{
+      localStorage.setItem(key, JSON.stringify(value));
+      return { ok:true };
+    }catch(err){
+      return { ok:false, err: err ? String(err) : "unknown" };
+    }
+  }
+
+  // Org helpers
+  function normalizeOrgTree(raw){
+    const arr =
+      Array.isArray(raw) ? raw :
+      (Array.isArray(raw?.nodes) ? raw.nodes :
+      (Array.isArray(raw?.items) ? raw.items : null));
+
+    if(!Array.isArray(arr)) return [];
+
+    return arr
+      .filter(n => n && (n.id !== undefined && n.id !== null))
+      .map(n => ({
+        id: String(n.id),
+        parentId: (n.parentId === null || n.parentId === undefined) ? null : String(n.parentId),
+        name: String(n.name ?? n.title ?? n.label ?? n.id)
+      }));
+  }
+
+  function buildOrgIndex(nodes){
+    const byId = new Map();
+    const children = new Map();
+    nodes.forEach(n => {
+      byId.set(n.id, n);
+      if(!children.has(n.id)) children.set(n.id, []);
+    });
+    nodes.forEach(n => {
+      if(n.parentId && byId.has(n.parentId)){
+        children.get(n.parentId).push(n.id);
+      }
+    });
+    return { byId, children };
+  }
+
+  function isDescendant(index, nodeId, ancestorId){
+    const a = String(ancestorId);
+    const n = String(nodeId);
+    if(n === a) return true;
+    let cur = index.byId.get(n);
+    let hops = 0;
+    while(cur && cur.parentId && hops < 5000){
+      if(cur.parentId === a) return true;
+      cur = index.byId.get(String(cur.parentId));
+      hops++;
+    }
+    return false;
+  }
+
+  function orgHasDuplicateIds(nodes){
+    const seen = new Set();
+    for(const n of nodes){
+      if(seen.has(n.id)) return true;
+      seen.add(n.id);
+    }
+    return false;
+  }
+
+  // Assignments helpers
+  function normalizeAssignments(raw){
+    const arr =
+      Array.isArray(raw) ? raw :
+      (Array.isArray(raw?.assignments) ? raw.assignments :
+      (Array.isArray(raw?.items) ? raw.items : null));
+
+    if(!Array.isArray(arr)) return [];
+
+    return arr
+      .filter(a => a && (a.empNo !== undefined && a.empNo !== null))
+      .map(a => ({
+        empNo: normalizeEmpNo(a.empNo),
+        roleId: String(a.roleId ?? a.role ?? ""),
+        scopeId: (a.scopeId === undefined || a.scopeId === null) ? "" : String(a.scopeId)
+      }))
+      .filter(a => a.empNo);
+  }
+
+  function getMyScopeId(empNo, assignments){
+    const row = assignments.find(x => x.empNo === empNo);
+    return String(row?.scopeId || "").trim();
   }
 
   // Guard
@@ -286,58 +435,100 @@ Syfte: Guard + visa frågor + spara svar separat
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
+  // Load org + assignments (fail-closed på scope)
+  const orgNodes = normalizeOrgTree(safeParse(ORG_KEY, null));
+  const orgIndex = buildOrgIndex(orgNodes);
+  const assignments = normalizeAssignments(safeParse(ASSIGNMENTS_KEY, null));
+  const myEmpNo = String(auth.empNo || "").trim();
+  const myScopeId = myEmpNo ? getMyScopeId(myEmpNo, assignments) : "";
+
+  function scopeReady(){
+    const problems = [];
+    if(!myEmpNo) problems.push("Ditt anst.nr saknas i sessionen.");
+    if(!orgNodes.length) problems.push("Org-träd saknas (AO-020_ORG_V1).");
+    if(orgNodes.length && orgHasDuplicateIds(orgNodes)) problems.push("Org-trädet är korrupt (duplicerade id).");
+    if(!assignments.length) problems.push("Role assignments saknas (AO-020_ROLE_ASSIGNMENTS_V2).");
+    if(!myScopeId) problems.push("Din scopeId saknas i assignments.");
+    if(myScopeId && orgNodes.length && !orgIndex.byId.has(String(myScopeId))) problems.push("Din scopeId finns inte i org-trädet.");
+
+    if(problems.length){
+      setGuard("err", "Frågor är låsta (fail-closed): " + problems.join(" "));
+      return false;
+    }
+    setGuard("", "");
+    return true;
+  }
+
   // Data
-  function loadQuestions(){
-    const arr = safeParse(QUESTIONS_KEY, []);
+  function loadQuestionsFromKey(key){
+    const arr = safeParse(key, []);
     return Array.isArray(arr) ? arr : [];
   }
+
+  function loadQuestionsUnified(){
+    // P0: kompatläge utan nya keys:
+    // - primär: AO-012_QUESTIONS_V1
+    // - fallback: om primär är tom men AO-015 har data, visa även AO-015
+    const primary = loadQuestionsFromKey(QUESTIONS_KEY);
+    if(primary.length) return primary;
+
+    const compat = loadQuestionsFromKey(QUESTIONS_KEY_COMP);
+    return compat.length ? compat : primary;
+  }
+
   function loadAnswers(){
     const arr = safeParse(ANSWERS_KEY, []);
     return Array.isArray(arr) ? arr : [];
   }
+
   function saveAnswers(arr){
-    save(ANSWERS_KEY, Array.isArray(arr) ? arr : []);
+    return saveFailClosed(ANSWERS_KEY, Array.isArray(arr) ? arr : []);
   }
 
+  // Target filter (för mig) + scope filter (AO-019 7/8)
   function isForMe(q){
-    const empNo = String(auth.empNo || "").trim();
-    // Policy: om empNo saknas => visa inget (fail-closed)
+    const empNo = myEmpNo;
     if(!empNo) return false;
 
-    // Stöd flera enkla format (autopatch/kompat):
-    // - q.targetMode: "one"|"all"|"group"
-    // - q.targetEmpNo: "1234"
-    // - q.targetEmpNos: ["1234","5678"]
-    // - q.empNo: "1234" (legacy)
-    // - q.targets: { mode, empNo, groupId } (legacy)
     const mode = String(q.targetMode || q.mode || q.targets?.mode || "").toLowerCase();
 
     if(mode === "all") return true;
 
-    const one =
-      String(q.targetEmpNo || q.empNo || q.targets?.empNo || "").trim();
-
+    const one = String(q.targetEmpNo || q.empNo || q.targets?.empNo || "").trim();
     if(one && one === empNo) return true;
 
     const many = q.targetEmpNos || q.empNos || q.targets?.empNos;
     if(Array.isArray(many) && many.map(x => String(x).trim()).includes(empNo)) return true;
 
-    // group kräver att admin-sidan redan filtrerat fram listan till empNos,
-    // annars kan vi inte avgöra utan GROUPS_KEY (håll det fail-closed i v1).
+    // group: utan groups-uppslag i employee-vy → fail-closed
     return false;
   }
 
-  function findMyQuestions(){
-    return loadQuestions().filter(isForMe);
+  function isInMyScope(q){
+    const qs = String(q.scopeId || "").trim();
+    if(!qs) return false;
+    if(!orgIndex.byId.has(qs)) return false;
+    return isDescendant(orgIndex, qs, String(myScopeId));
   }
 
-  function isAnswered(questionId){
-    const empNo = String(auth.empNo || "").trim();
-    const answers = loadAnswers();
-    return answers.some(a =>
-      String(a.questionId) === String(questionId) &&
-      String(a.empNo || "") === empNo
-    );
+  function findMyQuestions(){
+    if(!scopeReady()) return [];
+    return loadQuestionsUnified()
+      .filter(isForMe)
+      .filter(isInMyScope);
+  }
+
+  // P2: prestanda — bygg answeredSet per render
+  function buildAnsweredSet(){
+    const empNo = myEmpNo;
+    const set = new Set();
+    if(!empNo) return set;
+    loadAnswers().forEach(a => {
+      if(String(a.empNo || "") === empNo){
+        set.add(String(a.questionId));
+      }
+    });
+    return set;
   }
 
   // Selection
@@ -350,8 +541,19 @@ Syfte: Guard + visa frågor + spara svar separat
     $("#detail").style.display = "block";
     setMsg("", "");
 
+    const qText = q.prompt ?? q.text ?? q.question ?? q.q ?? "—";
+    const note = String(q.note || "").trim();
+
     $("#dTitle").textContent = q.title || "Fråga";
-    $("#dText").textContent = q.text || q.question || "—";
+    $("#dText").textContent = String(qText);
+
+    if(note){
+      $("#dNoteWrap").style.display = "block";
+      $("#dNote").textContent = note;
+    }else{
+      $("#dNoteWrap").style.display = "none";
+      $("#dNote").textContent = "—";
+    }
 
     const allowAnon = !!(q.allowAnonymous ?? q.anonymousAllowed ?? q.allowAnon);
     $("#dAnon").textContent = allowAnon ? "Anonymt: tillåtet" : "Anonymt: ej tillåtet";
@@ -381,15 +583,37 @@ Syfte: Guard + visa frågor + spara svar separat
   $("#btnSend").addEventListener("click", () => {
     setMsg("", "");
 
-    const q = getSelectedQuestion();
-    if(!q){
-      setMsg("err", "Vald fråga hittades inte.");
+    if(!scopeReady()){
+      setMsg("err", "Kan inte skicka svar: scope/org/assignments saknas eller är korrupt.");
       closeDetail();
       render();
       return;
     }
 
-    if(isAnswered(q.id)){
+    const q = getSelectedQuestion();
+    if(!q){
+      setMsg("err", "Vald fråga hittades inte (kan vara borttagen eller inte längre i din scope).");
+      closeDetail();
+      render();
+      return;
+    }
+
+    if(!isInMyScope(q)){
+      setMsg("err", "Åtkomst nekad: frågan ligger inte i din scope.");
+      closeDetail();
+      render();
+      return;
+    }
+
+    const empNo = myEmpNo;
+    if(!empNo){
+      setMsg("err", "Ditt anst.nr saknas i sessionen (kan inte skicka).");
+      return;
+    }
+
+    const answers = loadAnswers();
+    const already = answers.some(a => String(a.questionId) === String(q.id) && String(a.empNo || "") === empNo);
+    if(already){
       setMsg("err", "Du har redan svarat på den här frågan.");
       render();
       return;
@@ -405,25 +629,26 @@ Syfte: Guard + visa frågor + spara svar separat
     const wantsAnon = !!$("#dAnswerAnon").checked;
     const isAnon = allowAnon && wantsAnon;
 
-    const empNo = String(auth.empNo || "").trim();
-    if(!empNo){
-      setMsg("err", "Ditt anst.nr saknas i sessionen (kan inte skicka).");
-      return;
-    }
-
-    const answers = loadAnswers();
     answers.push({
       id: genId("ans"),
       questionId: q.id,
-      // Behåll empNo internt för att stoppa dubbelsvar,
-      // men admin-vy kan maska om anonymous=true.
+
+      // Behåll empNo internt för att stoppa dubbelsvar.
       empNo,
-      employeeName: String(auth.displayName || ""),
+
+      // P1-minimering: spara inte namn om anonymous=true
+      employeeName: isAnon ? "" : String(auth.displayName || ""),
+
       anonymous: isAnon,
       answerText: text,
       createdAt: Date.now()
     });
-    saveAnswers(answers);
+
+    const res = saveAnswers(answers);
+    if(!res.ok){
+      setMsg("err", "Kunde inte spara (localStorage är full/blockerad). Inget skickades.");
+      return;
+    }
 
     setMsg("ok", "Svar skickat.");
     render();
@@ -436,30 +661,39 @@ Syfte: Guard + visa frågor + spara svar separat
     list.innerHTML = "";
 
     const filter = $("#filter").value;
-    const q = String($("#search").value || "").trim().toLowerCase();
+    const query = String($("#search").value || "").trim().toLowerCase();
 
-    let items = findMyQuestions().slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    const ready = scopeReady();
+    $("#btnSend").disabled = !ready;
 
-    if(filter === "open") items = items.filter(x => !isAnswered(x.id));
-    if(filter === "answered") items = items.filter(x => isAnswered(x.id));
+    const answeredSet = ready ? buildAnsweredSet() : new Set();
 
-    if(q){
+    let items = ready
+      ? findMyQuestions().slice().sort((a,b) => (b.createdAt||0) - (a.createdAt||0))
+      : [];
+
+    if(filter === "open") items = items.filter(x => !answeredSet.has(String(x.id)));
+    if(filter === "answered") items = items.filter(x => answeredSet.has(String(x.id)));
+
+    if(query){
       items = items.filter(x => {
-        const blob = `${x.title||""} ${x.text||x.question||""}`.toLowerCase();
-        return blob.includes(q);
+        const txt = String(x.prompt ?? x.text ?? x.question ?? "");
+        const blob = `${x.title||""} ${txt}`.toLowerCase();
+        return blob.includes(query);
       });
     }
 
     if(items.length === 0){
-      list.innerHTML = `<div class="empty">Inga frågor att visa.</div>`;
+      list.innerHTML = `<div class="empty">${ready ? "Inga frågor att visa." : "Frågor är låsta (saknar org/assignments/scope)."}</div>`;
       const sel = getSelectedQuestion();
       if(!sel && selectedId) closeDetail();
       return;
     }
 
     items.slice(0, 80).forEach(x => {
-      const answered = isAnswered(x.id);
+      const answered = answeredSet.has(String(x.id));
       const allowAnon = !!(x.allowAnonymous ?? x.anonymousAllowed ?? x.allowAnon);
+      const txt = String(x.prompt ?? x.text ?? x.question ?? "—");
 
       const el = document.createElement("div");
       el.className = "item";
@@ -467,11 +701,12 @@ Syfte: Guard + visa frågor + spara svar separat
         <div style="min-width:260px; flex: 1 1 520px;">
           <p class="item-title">${escapeHtml(x.title || "Fråga")}</p>
           <div class="meta">
-            <span class="pill">${answered ? "Besvarad" : "Ej besvarad"}</span>
+            <span class="pill">${answered ? "Inskickad" : "Ej inskickad"}</span>
             <span class="pill">${allowAnon ? "Anonymt: ja" : "Anonymt: nej"}</span>
             <span class="pill">Skapad: ${escapeHtml(fmtDate(x.createdAt || x.updatedAt || Date.now()))}</span>
           </div>
-          <div class="meta"><span><strong>Text:</strong> ${escapeHtml(x.text || x.question || "—")}</span></div>
+          <div class="meta"><span><strong>Text:</strong> ${escapeHtml(txt)}</span></div>
+          ${x.note ? `<div class="meta"><span><strong>Info:</strong> ${escapeHtml(x.note)}</span></div>` : ``}
         </div>
         <div class="row" style="gap:8px;">
           <button type="button" data-open="${escapeHtml(x.id)}" ${answered ? "disabled" : ""}>
@@ -484,6 +719,10 @@ Syfte: Guard + visa frågor + spara svar separat
 
     list.querySelectorAll("button[data-open]").forEach(btn => {
       btn.addEventListener("click", () => {
+        if(!scopeReady()){
+          setMsg("err", "Frågor är låsta (saknar org/assignments/scope).");
+          return;
+        }
         const id = btn.getAttribute("data-open");
         const item = findMyQuestions().find(t => String(t.id) === String(id));
         if(item) openDetail(item);
