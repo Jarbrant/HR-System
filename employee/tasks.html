@@ -1,8 +1,8 @@
 <!-- ============================================================
-AO-054 | FIL-ID: employee/tasks.html
+AO-019 6/8-FIX-02 | FIL-ID: employee/tasks.html
 Projekt: HR-System
 Syfte: Employee – Uppgifter (tilldelade) – UI-only v1 (nivå 3)
-PATCH: v1.2 (role-normalisering + recurring doneToday i KPI/filter + hint vid saknat scope)
+PATCH: v1.3 (AO-019 6/8-FIX-02: XSS-härdning hintNoScope + KPI entydig + recurring detalj-indikator + byWeekday normalisering)
 Krav:
 - Visa endast uppgifter tilldelade till inloggad employee (empNo)
 - Status: open/progress/done
@@ -247,6 +247,9 @@ Lagring:
               <strong>Återkommande:</strong> <span id="dRecurringRule">—</span>
             </div>
             <div class="muted2" style="margin-top:6px;">
+              <strong>Klar idag:</strong> <span id="dDoneToday">—</span>
+            </div>
+            <div class="muted2" style="margin-top:6px;">
               För återkommande gäller “Klar idag” (sparas per datum).
             </div>
           </div>
@@ -268,12 +271,11 @@ Lagring:
 <script>
 /* ============================================================
 AO-054 | FIL-ID: employee/tasks.html (inline JS)
-PATCH v1.2:
-- Role-normalisering: accepterar "EMPLOYEE"/"Employee" osv (lowercase)
-- Recurring "Klar idag" räknas som KLAR i KPI + filter "Klara"
-- Fail-closed: tasks utan scopeId visas inte + hint visas om sådana finns
-- Fail-closed save (kvot/blocked)
-- todayDue gäller endast engång (endDate). Recurring använder untilDate, inte endDate.
+PATCH v1.3 (AO-019 6/8-FIX-02):
+- XSS-härdning: hintNoScope byggs utan innerHTML (DOM/textContent)
+- KPI: entydig räkning (Open/Progress räknas bara om !doneForUi)
+- Recurring detalj: tydlig indikator "Klar idag: Ja/Nej"
+- Normaliserar byWeekday (unique + sort) i recurringRuleLabel (legacy-data)
 ============================================================ */
 (function(){
   "use strict";
@@ -403,6 +405,18 @@ PATCH v1.2:
     return "Ej startad";
   }
 
+  function normalizeWeekdaysInput(byWeekday){
+    if(!Array.isArray(byWeekday)) return [];
+    const nums = [];
+    for (const v of byWeekday){
+      const n = Number(String(v).trim());
+      if(Number.isFinite(n)) nums.push(n);
+    }
+    const uniq = Array.from(new Set(nums.filter(n => n >= 1 && n <= 7)));
+    uniq.sort((a,b) => a - b);
+    return uniq;
+  }
+
   function recurringRuleLabel(rec){
     if(!rec) return "—";
     const freq = rec.freq || "daily";
@@ -410,9 +424,12 @@ PATCH v1.2:
     const freqSv = (freq === "weekly") ? "vecka" : (freq === "monthly" ? "månad" : "dag");
     const iv = interval === 1 ? "" : ` var ${interval}e`;
     let days = "";
-    if(freq === "weekly" && Array.isArray(rec.byWeekday) && rec.byWeekday.length){
-      const map = {1:"mån",2:"tis",3:"ons",4:"tor",5:"fre",6:"lör",7:"sön"};
-      days = " (" + rec.byWeekday.map(d => map[String(d)] || "").filter(Boolean).join(", ") + ")";
+    if(freq === "weekly"){
+      const normalized = normalizeWeekdaysInput(rec.byWeekday);
+      if(normalized.length){
+        const map = {1:"mån",2:"tis",3:"ons",4:"tor",5:"fre",6:"lör",7:"sön"};
+        days = " (" + normalized.map(d => map[String(d)] || "").filter(Boolean).join(", ") + ")";
+      }
     }
     const until = rec.untilDate ? ` till ${rec.untilDate}` : " tillsvidare";
     return `Varje${iv} ${freqSv}${days}${until}`;
@@ -440,7 +457,7 @@ PATCH v1.2:
     return Array.isArray(task.exceptionsDone) && task.exceptionsDone.includes(iso);
   }
 
-  // UI "done" policy v1.2:
+  // UI "done" policy:
   // - Engång: status === done
   // - Återkommande: status === done OR doneToday
   function isDoneForUi(task){
@@ -495,37 +512,41 @@ PATCH v1.2:
     return { visible, hiddenNoScope, totalMine: mine.length };
   }
 
+  // AO-019 6/8-FIX-02: ingen innerHTML här, bygg DOM/textnoder
   function updateHintNoScope(hiddenNoScope){
     const box = $("#hintNoScope");
     if(!box) return;
 
     if(hiddenNoScope > 0){
       box.style.display = "block";
-      box.innerHTML = `<strong>Info:</strong> ${hiddenNoScope} uppgift(er) är dolda eftersom de saknar <code>scopeId</code>.
-      Kontakta admin så att uppgifterna kan uppdateras.`;
+      while (box.firstChild) box.removeChild(box.firstChild);
+
+      const strong = document.createElement("strong");
+      strong.textContent = "Info:";
+      box.appendChild(strong);
+
+      box.appendChild(document.createTextNode(` ${hiddenNoScope} uppgift(er) är dolda eftersom de saknar `));
+
+      const code = document.createElement("code");
+      code.textContent = "scopeId";
+      box.appendChild(code);
+
+      box.appendChild(document.createTextNode(". Kontakta admin så att uppgifterna kan uppdateras."));
     }else{
       box.style.display = "none";
       box.textContent = "";
     }
   }
 
+  // AO-019 6/8-FIX-02: entydig KPI-räkning utan dubbelräkning/död kod
   function updateKpis(items){
-    const open = items.filter(x => !isDoneForUi(x) && (x?.status || "open") !== "progress").length
-      + items.filter(x => (x?.status||"open") === "open" && !isDoneForUi(x)).length; // robust, men enkel
-
-    const prog = items.filter(x => (x?.status||"open") === "progress" && !isDoneForUi(x)).length;
-
-    // P0-fix: KPI Done inkluderar recurring doneToday
     const done = items.filter(x => isDoneForUi(x)).length;
-
+    const prog = items.filter(x => (x?.status||"open") === "progress" && !isDoneForUi(x)).length;
+    const open = items.filter(x => (x?.status||"open") === "open" && !isDoneForUi(x)).length;
     const rec  = items.filter(x => (x?.kind||"oneoff") === "recurring").length;
 
-    // Open ska vara: alla som inte är doneForUi och inte progress? (men "open" status)
-    // För tydlighet räknar vi:
-    const open2 = items.filter(x => (x?.status||"open") === "open" && !isDoneForUi(x)).length;
-
-    $("#kpiOpen").textContent = String(open2);
-    $("#kpiProg").textContent = String(items.filter(x => (x?.status||"open") === "progress" && !isDoneForUi(x)).length);
+    $("#kpiOpen").textContent = String(open);
+    $("#kpiProg").textContent = String(prog);
     $("#kpiDone").textContent = String(done);
     $("#kpiRec").textContent  = String(rec);
   }
@@ -554,6 +575,8 @@ PATCH v1.2:
       $("#dAdminNote").textContent = "";
     }
 
+    // Recurring: status-select visar fortsatt task.status (open/progress/done),
+    // men vi visar också "Klar idag" separat för konsekvens med listan.
     $("#dStatus").value = (task.status || "open");
     $("#dComment").value = String(task.employeeComment || "");
 
@@ -562,8 +585,11 @@ PATCH v1.2:
     $("#btnMarkToday").style.display = isRec ? "inline-block" : "none";
     if(isRec){
       $("#dRecurringRule").textContent = recurringRuleLabel(task.recurring || {});
+      const doneToday = isRecurringDoneToday(task);
+      $("#dDoneToday").textContent = doneToday ? "Ja" : "Nej";
     }else{
       $("#dRecurringRule").textContent = "";
+      $("#dDoneToday").textContent = "—";
     }
   }
 
@@ -673,7 +699,6 @@ PATCH v1.2:
       items = items.filter(x => (x?.status||"open") === "progress" && !isDoneForUi(x));
     }
     if(filter === "done"){
-      // P0-fix: inkludera recurring doneToday som “Klara”
       items = items.filter(x => isDoneForUi(x));
     }
     if(filter === "recurring"){
@@ -712,7 +737,7 @@ PATCH v1.2:
       const warn = ((kind !== "recurring") && x?.endDate && isPastOrToday(x.endDate) && !isDoneForUi(x));
       const tagClass = warn ? "pill tagwarn" : "pill tagok";
 
-      // v1.2: recToday är bara en label, men doneToday räknas in i done/filter/KPI
+      // v1.2+: recToday är en label, doneToday räknas in i done/filter/KPI
       let recTodayLabel = "";
       if(kind === "recurring"){
         const iso = todayISO();
