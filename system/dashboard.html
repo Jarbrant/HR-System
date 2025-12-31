@@ -1,359 +1,162 @@
+<!-- ============================================================
+AO-012 (PATCH) | FIL-ID: system/dashboard.html
+Projekt: HR-System
+Syfte: SYSTEM_ADMIN Dashboard (system-nav) – UI-only v1 – fail-closed
+Policy (LÅST):
+- Ingen backend
+- Fail-closed guards (sessionStorage → localStorage fallback via HRApp)
+- Ingen känslig persondata (endast empNo om det finns i session; logga ej)
+- Ingen ny auth-logik: använd AO-002 (HRApp.requireAuth/getAuth/logout)
+- Inga nya storage-keys/datamodell
+- XSS-escape på allt som renderas från storage/session
+Senaste sanning: 2025-12-31 (PATCH för att lösa "Access Denied: Invalid Role" och koppla till AO-002)
+============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Systemdashboard</title>
-
-  <!-- Global CSS (om ni har en gemensam) -->
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>HR-System – System Dashboard</title>
+  <meta name="description" content="Systemförvaltning (SYSTEM_ADMIN). Fail-closed. UI-only." />
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
-
-  <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 0; padding: 18px; background:#f6f7fb; color:#0f172a; }
-    .wrap { max-width: 1100px; margin: 0 auto; display: grid; gap: 14px; }
-    .topbar { display:flex; align-items:center; justify-content:space-between; gap: 10px; }
-    .title { font-size: 18px; font-weight: 700; }
-    .sub { font-size: 13px; color: #475569; margin-top: 3px; }
-    .card { background: #fff; border: 1px solid rgba(15,23,42,.08); border-radius: 12px; padding: 14px; box-shadow: 0 6px 18px rgba(15,23,42,.06); }
-    .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-    @media (max-width: 900px){ .grid { grid-template-columns: 1fr; } }
-    .row { display:flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    .pill { display:inline-flex; align-items:center; gap: 8px; padding: 6px 10px; border-radius: 999px; font-size: 12px; border: 1px solid rgba(15,23,42,.12); background: rgba(2,6,23,.02); }
-    .pill.ok { border-color: rgba(34,197,94,.25); background: rgba(220,252,231,.65); color:#14532d; }
-    .pill.bad { border-color: rgba(239,68,68,.28); background: rgba(254,226,226,.65); color:#7f1d1d; }
-    .btn { appearance:none; border: 1px solid rgba(15,23,42,.16); background:#fff; border-radius: 10px; padding: 10px 12px; font-size: 13px; cursor:pointer; text-decoration:none; color:#0f172a; display:inline-flex; gap:8px; align-items:center; }
-    .btn:hover { background: rgba(2,6,23,.03); }
-    .btn.primary { background:#0f172a; color:#fff; border-color:#0f172a; }
-    .btn.primary:hover { background:#111827; }
-    .list { margin: 10px 0 0 0; padding: 0; list-style: none; display:grid; gap: 8px; }
-    .item { display:flex; align-items:center; justify-content:space-between; gap: 10px; border: 1px solid rgba(15,23,42,.10); padding: 10px 12px; border-radius: 10px; background: rgba(2,6,23,.01); }
-    .item strong { font-size: 13px; }
-    .item span { font-size: 12px; color: #475569; }
-    .fail { background:#ef4444; color:#fff; padding: 12px; border-radius: 12px; font-weight: 700; display:none; }
-    .muted { font-size: 12px; color:#64748b; }
-    code { background: rgba(2,6,23,.05); padding: 2px 6px; border-radius: 6px; }
-  </style>
-
-  <script>
-    // =========================
-    // GUARD/XSS
-    // =========================
-    function escapeHtml(v){
-      const div = document.createElement('div');
-      div.textContent = (v === null || v === undefined) ? '' : String(v);
-      return div.innerHTML;
-    }
-
-    // =========================
-    // STORAGE: sessionStorage först, fallback localStorage (fail-closed)
-    // =========================
-    function safeReadJson(key){
-      const rawSession = sessionStorage.getItem(key);
-      const rawLocal   = localStorage.getItem(key);
-      const raw = rawSession !== null ? rawSession : rawLocal;
-      if (!raw) return null;
-      try {
-        const parsed = JSON.parse(raw);
-        return (parsed && typeof parsed === 'object') ? parsed : null;
-      } catch {
-        return null;
-      }
-    }
-
-    function hasKey(key){
-      return (sessionStorage.getItem(key) !== null) || (localStorage.getItem(key) !== null);
-    }
-
-    // =========================
-    // FAIL-CLOSED UI
-    // =========================
-    function showFail(msg){
-      const el = document.getElementById('fail');
-      if (!el) return;
-      el.style.display = 'block';
-      el.innerHTML = escapeHtml(msg);
-    }
-
-    // =========================
-    // AUTH/RBAC
-    // =========================
-    function getSession(){
-      return safeReadJson('AO-001_LOGIN_V1'); // (LÅST key i ert system)
-    }
-
-    function normalizeRole(role){
-      return String(role || '').trim().toUpperCase();
-    }
-
-    // OBS: /system/* är i er modell SYSTEM_ADMIN-skikt.
-    // Om ni vill att ADMIN ska se denna dashboard, tillåt ADMIN här.
-    // Om ni vill att endast SYSTEM_ADMIN ska se den, ändra allowedRoles.
-    function guardAccess(){
-      const session = getSession();
-      if (!session || !session.empNo || !session.role){
-        showFail('Fail-closed: saknar giltig session (AO-001_LOGIN_V1). Logga in igen.');
-        return null;
-      }
-      const role = normalizeRole(session.role);
-
-      // 🔒 Justera om du vill: ['SYSTEM_ADMIN'] endast.
-      const allowedRoles = ['SYSTEM_ADMIN', 'ADMIN', 'MANAGER', 'EMPLOYEE'];
-
-      if (!allowedRoles.includes(role)){
-        showFail('Access Denied: Invalid Role');
-        return null;
-      }
-      return { session, role };
-    }
-
-    // =========================
-    // NAV: vilka länkar som visas per roll
-    // =========================
-    function buildLinks(role){
-      // Allt här är bara länkar – ingen ny datalagring.
-      // Relativa paths från /system/dashboard.html
-      const links = [];
-
-      // Gemensamt (alla inloggade)
-      links.push({ title:'Min startsida', desc:'Hem för min roll', href: guessHome(role) });
-
-      // EMPLOYEE
-      if (role === 'EMPLOYEE'){
-        links.push({ title:'Mina uppgifter', desc:'Kvittera / uppdatera status', href:'../employee/tasks.html' });
-        links.push({ title:'Frågor', desc:'Svara på frågor', href:'../employee/questions.html' });
-        links.push({ title:'Mina svar', desc:'Se egna svar', href:'../employee/answers.html' });
-        links.push({ title:'Profil', desc:'Min profil', href:'../employee/profile.html' });
-      }
-
-      // MANAGER (operativt, men scope-styrt)
-      if (role === 'MANAGER'){
-        links.push({ title:'Uppgifter', desc:'Skapa / tilldela inom subtree', href:'../admin/tasks.html' });
-        links.push({ title:'Frågor', desc:'Skapa frågor inom subtree', href:'../admin/questions.html' });
-        links.push({ title:'Svar', desc:'Se svar inom subtree', href:'../admin/answers.html' });
-        links.push({ title:'Rapporter', desc:'Översikt (om byggd)', href:'../admin/reports.html' });
-      }
-
-      // ADMIN (operativ admin)
-      if (role === 'ADMIN'){
-        links.push({ title:'Org-träd', desc:'Bygg / granska organisation', href:'../admin/org.html' });
-        links.push({ title:'Access', desc:'Tilldela empNo → roll + scope', href:'../admin/access.html' });
-        links.push({ title:'Operativa roller', desc:'Metadata för roller', href:'../admin/roles.html' });
-        links.push({ title:'Uppgifter', desc:'Skapa / tilldela', href:'../admin/tasks.html' });
-        links.push({ title:'Frågor', desc:'Skapa frågor', href:'../admin/questions.html' });
-        links.push({ title:'Svar', desc:'Se svar', href:'../admin/answers.html' });
-        links.push({ title:'Rapporter', desc:'Översikt (om byggd)', href:'../admin/reports.html' });
-      }
-
-      // SYSTEM_ADMIN (systemförvaltning)
-      if (role === 'SYSTEM_ADMIN'){
-        links.push({ title:'System Shell', desc:'Nav för systemförvaltning', href:'./shell.html' });
-        links.push({ title:'Systemanvändare', desc:'Systemvy / användaröversikt', href:'./users.html' });
-        links.push({ title:'Systemroller', desc:'Mall/roller (systemlager)', href:'./roles.html' });
-        links.push({ title:'Moduler', desc:'Slå moduler av/på (metadata)', href:'./modules.html' });
-        links.push({ title:'Integrationer', desc:'Metadata / status', href:'./integrations.html' });
-        links.push({ title:'Policies', desc:'Systempolicys', href:'./policies.html' });
-        links.push({ title:'Health', desc:'Validera org/assignments/keys', href:'./health.html' });
-        links.push({ title:'Audit', desc:'Audit-logg (UI-only)', href:'./audit.html' });
-        links.push({ title:'Inbjudningar', desc:'Skapa inbjudningslänkar', href:'./invitations.html' });
-        links.push({ title:'Revision', desc:'Historik/objektvy', href:'./revision.html' });
-        links.push({ title:'Export/Backup', desc:'Exportera JSON-backup', href:'./export.html' });
-        links.push({ title:'Final Lock', desc:'Slutlig låsning', href:'./final-lock.html' });
-        links.push({ title:'Feature flags', desc:'Om ni använder den sidan', href:'./feature-flags.html' });
-      }
-
-      return links;
-    }
-
-    function guessHome(role){
-      // Rimlig default. Ändra om er routing är annorlunda.
-      if (role === 'EMPLOYEE') return '../employee/home.html';
-      if (role === 'MANAGER') return '../admin/home.html';
-      if (role === 'ADMIN') return '../admin/home.html';
-      if (role === 'SYSTEM_ADMIN') return './shell.html';
-      return '../UI/UI-01-SKELETON.html?err=logout';
-    }
-
-    // =========================
-    // MODULES: visa status om key finns
-    // =========================
-    function renderModules(){
-      const el = document.getElementById('modules');
-      if (!el) return;
-
-      // Om ni redan har AO-014_MODULER_V1, visa den. Annars visa tydligt att den saknas.
-      const modules = safeReadJson('AO-014_MODULER_V1');
-
-      if (!modules){
-        el.innerHTML = `
-          <div class="pill bad">Modulkey saknas: <code>AO-014_MODULER_V1</code></div>
-          <div class="muted" style="margin-top:8px;">Dashboard kan fortfarande fungera som nav via länkarna, men modullistan kan inte visas utan key.</div>
-        `;
-        return;
-      }
-
-      if (!Array.isArray(modules)){
-        el.innerHTML = `<div class="pill bad">Fel format i <code>AO-014_MODULER_V1</code> (förväntar array)</div>`;
-        return;
-      }
-
-      const enabled = modules.filter(m => String(m && m.status || '').toLowerCase() === 'enabled');
-      const disabled = modules.filter(m => String(m && m.status || '').toLowerCase() !== 'enabled');
-
-      el.innerHTML = `
-        <div class="row">
-          <span class="pill ok">Aktiva: ${enabled.length}</span>
-          <span class="pill bad">Inaktiva: ${disabled.length}</span>
-        </div>
-        <ul class="list" style="margin-top:10px;">
-          ${enabled.slice(0, 20).map(m => `
-            <li class="item">
-              <div>
-                <strong>${escapeHtml(m.moduleName || m.name || 'Modul')}</strong><br/>
-                <span>Status: ${escapeHtml(m.status || 'enabled')}</span>
-              </div>
-              <span class="pill ok">ON</span>
-            </li>
-          `).join('')}
-          ${enabled.length === 0 ? `<li class="item"><div><strong>Inga aktiva moduler</strong><br/><span>Alla är avstängda eller saknas</span></div></li>` : ``}
-        </ul>
-      `;
-    }
-
-    // =========================
-    // DIAGNOSTIK: visa om era centrala keys finns
-    // =========================
-    function renderDiagnostics(role){
-      const el = document.getElementById('diag');
-      if (!el) return;
-
-      const keysToCheck = [
-        'AO-001_LOGIN_V1',
-        'AO-020_ORG_V1',
-        'AO-020_ROLE_ASSIGNMENTS_V2',
-        'AO-014_MODULER_V1'
-      ];
-
-      el.innerHTML = `
-        <div class="row">
-          <span class="pill ok">Inloggad roll: ${escapeHtml(role)}</span>
-        </div>
-        <ul class="list" style="margin-top:10px;">
-          ${keysToCheck.map(k => {
-            const ok = hasKey(k);
-            return `
-              <li class="item">
-                <div>
-                  <strong>${escapeHtml(k)}</strong><br/>
-                  <span>${ok ? 'Finns i sessionStorage eller localStorage' : 'Saknas → vissa sidor kan låsa (fail-closed)'}</span>
-                </div>
-                <span class="pill ${ok ? 'ok' : 'bad'}">${ok ? 'OK' : 'MISSING'}</span>
-              </li>
-            `;
-          }).join('')}
-        </ul>
-        <div class="muted" style="margin-top:10px;">
-          Om du ser <code>MISSING</code> på t.ex. org/assignments så är det förväntat att vissa AO-sidor låser sig. Det betyder att guard fungerar.
-        </div>
-      `;
-    }
-
-    // =========================
-    // RENDER LINKS
-    // =========================
-    function renderLinks(role){
-      const el = document.getElementById('links');
-      if (!el) return;
-
-      const links = buildLinks(role);
-
-      el.innerHTML = `
-        <ul class="list">
-          ${links.map(l => `
-            <li class="item">
-              <div>
-                <strong>${escapeHtml(l.title)}</strong><br/>
-                <span>${escapeHtml(l.desc)}</span>
-              </div>
-              <a class="btn primary" href="${escapeHtml(l.href)}">Öppna</a>
-            </li>
-          `).join('')}
-        </ul>
-        <div class="muted" style="margin-top:10px;">
-          Om en sida “låser” sig när du öppnar den, är det nästan alltid p.g.a. fail-closed (saknar org/assignments/scope).
-        </div>
-      `;
-    }
-
-    // =========================
-    // LOGOUT: gå via er UI-skeleton (err=logout)
-    // =========================
-    function doLogout(){
-      // Fail-closed: rensa session först. Låt local vara kvar om ni vill ha "remember", men normalt rensar man båda.
-      try { sessionStorage.removeItem('AO-001_LOGIN_V1'); } catch {}
-      // Om ni vill hård-rensa även local:
-      // try { localStorage.removeItem('AO-001_LOGIN_V1'); } catch {}
-
-      window.location.href = '../UI/UI-01-SKELETON.html?err=logout';
-    }
-
-    // =========================
-    // INIT
-    // =========================
-    window.addEventListener('DOMContentLoaded', () => {
-      const guarded = guardAccess();
-      if (!guarded) return;
-
-      const { session, role } = guarded;
-      document.getElementById('who').innerHTML =
-        `${escapeHtml(session.empNo)} • ${escapeHtml(role)}`;
-
-      renderLinks(role);
-      renderModules();
-      renderDiagnostics(role);
-
-      const btn = document.getElementById('logoutBtn');
-      if (btn) btn.addEventListener('click', doLogout);
-    });
-  </script>
 </head>
 <body>
-  <div class="wrap">
-    <div id="fail" class="fail"></div>
 
-    <div class="topbar">
+<main class="container" style="max-width: 980px;">
+  <section class="card">
+    <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">
       <div>
-        <div class="title">Systemdashboard</div>
-        <div class="sub">Nav som kopplar ihop alla AO-sidor (RBAC + fail-closed)</div>
+        <h1 class="tight">System Dashboard</h1>
+        <p class="muted small" style="margin-top:6px;">
+          Endast för <strong>SYSTEM_ADMIN</strong>. Om något är osäkert låser systemet sig.
+        </p>
       </div>
-      <div class="row">
-        <span class="pill" id="who">—</span>
-        <button class="btn" id="logoutBtn" type="button">Logga ut</button>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+        <button id="btnLogout" class="secondary" type="button">Logga ut</button>
       </div>
     </div>
 
-    <div class="grid">
+    <div id="failBox" class="message err" style="display:none; margin-top:12px;" role="alert" aria-live="polite"></div>
+
+    <div class="card" style="margin-top:14px;">
+      <h2 class="tight" style="font-size:1.05rem;">Inloggad</h2>
+      <div id="who" class="muted small" style="margin-top:8px;"></div>
+    </div>
+
+    <div class="dashboard-grid" style="display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:12px; margin-top:14px;">
       <div class="card">
-        <div class="title" style="font-size:15px;">Snabblänkar</div>
-        <div class="sub">Visas baserat på din roll</div>
-        <div id="links"></div>
+        <h3 class="tight" style="font-size:1.02rem;">System</h3>
+        <ul class="list" style="margin-top:10px;">
+          <li><a href="./shell.html">Shell / Nav</a></li>
+          <li><a href="./roles.html">Systemroller</a></li>
+          <li><a href="./modules.html">Moduler</a></li>
+          <li><a href="./integrations.html">Integrationer</a></li>
+          <li><a href="./policies.html">Policys</a></li>
+        </ul>
       </div>
 
       <div class="card">
-        <div class="title" style="font-size:15px;">Modulstatus</div>
-        <div class="sub">Läser <code>AO-014_MODULER_V1</code> om den finns</div>
-        <div id="modules" style="margin-top:10px;"></div>
+        <h3 class="tight" style="font-size:1.02rem;">Kontroll</h3>
+        <ul class="list" style="margin-top:10px;">
+          <li><a href="./health.html">Systemstatus / Health</a></li>
+          <li><a href="./audit.html">Audit</a></li>
+          <li><a href="./revision.html">Revision UI</a></li>
+          <li><a href="./invitations.html">Inbjudningar</a></li>
+          <li><a href="./export.html">Export / Backup</a></li>
+        </ul>
       </div>
     </div>
 
-    <div class="card">
-      <div class="title" style="font-size:15px;">Diagnostik</div>
-      <div class="sub">Snabb kontroll av nycklar som ofta blockerar (fail-closed)</div>
-      <div id="diag" style="margin-top:10px;"></div>
-    </div>
+    <p class="muted small" style="margin-top:12px;">
+      Tips: Om du får “fail-closed” här beror det nästan alltid på att session saknas eller att rollen inte är SYSTEM_ADMIN i sessionen.
+      Logga då in via <code>UI/UI-01-SKELETON.html</code> och välj <strong>SYSTEM_ADMIN</strong>.
+    </p>
+  </section>
+</main>
 
-    <div class="muted">
-      Tips: Om du vill att dashboarden ska vara “den enda ingången”, kan vi senare låta <code>index.html</code> och UI-router skicka hit efter login – men först ska navet vara 100% stabilt.
-    </div>
-  </div>
+<!-- AO-002 beroenden (LÅSTA): config måste laddas före app -->
+<script src="../UI/UI-04-CONFIG.js"></script>
+<script src="../UI/UI-03-APP.js"></script>
+
+<script>
+(function () {
+  "use strict";
+
+  const $ = (s) => document.querySelector(s);
+
+  function showFail(msg) {
+    const el = $("#failBox");
+    if (!el) return;
+    el.style.display = "block";
+    el.textContent = String(msg || "Fail-closed.");
+  }
+
+  function escapeHtml(value) {
+    // använd helst HRApp.escapeHtml om den finns
+    if (window.HRApp && typeof window.HRApp.escapeHtml === "function") {
+      return window.HRApp.escapeHtml(value);
+    }
+    const s = String(value ?? "");
+    return s
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function renderWho(session) {
+    const who = $("#who");
+    if (!who) return;
+
+    const auth = window.HRApp && typeof window.HRApp.getAuth === "function"
+      ? window.HRApp.getAuth(session)
+      : null;
+
+    const empNo = auth && session && session.auth && session.auth.empNo ? String(session.auth.empNo) : "";
+    const role = auth && auth.role ? String(auth.role) : "";
+
+    who.innerHTML =
+      "<div><strong>Anst.nr:</strong> " + escapeHtml(empNo || "—") + "</div>" +
+      "<div><strong>Roll:</strong> " + escapeHtml(role || "—") + "</div>";
+  }
+
+  // 1) Bas-guards
+  if (!window.HR_CONFIG) {
+    showFail("Fail-closed: config saknas (HR_CONFIG).");
+    return;
+  }
+  if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+    showFail("Fail-closed: kärnan saknas (HRApp).");
+    return;
+  }
+
+  // 2) SYSTEM_ADMIN-only guard via AO-002
+  //    Om session saknas eller roll inte får route => redirect till login automatiskt.
+  const session = window.HRApp.requireAuth({ allowRoles: ["SYSTEM_ADMIN"] });
+  if (!session) {
+    // requireAuth har redan redirectat; vi stoppar rendering.
+    return;
+  }
+
+  renderWho(session);
+
+  const btnLogout = $("#btnLogout");
+  if (btnLogout) {
+    btnLogout.addEventListener("click", function () {
+      if (window.HRApp && typeof window.HRApp.logout === "function") {
+        window.HRApp.logout();
+      } else {
+        // fail-safe
+        try { sessionStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
+        try { localStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
+        window.location.replace("../UI/UI-01-SKELETON.html?err=logout");
+      }
+    });
+  }
+
+})();
+</script>
+
 </body>
 </html>
