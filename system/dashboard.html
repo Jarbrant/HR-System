@@ -1,1 +1,222 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Dashboard</title>
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background-color: #f4f4f9;
+      margin: 0;
+      padding: 20px;
+    }
+    .dashboard-container {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 20px;
+    }
+    .dashboard-card {
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+      padding: 20px;
+    }
+    .dashboard-card h3 {
+      margin-top: 0;
+      font-size: 18px;
+    }
+    .dashboard-card ul {
+      list-style-type: none;
+      padding: 0;
+    }
+    .dashboard-card ul li {
+      margin: 10px 0;
+    }
+    .fail-closed {
+      background-color: #ff4c4c;
+      color: white;
+      padding: 15px;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .loading {
+      font-size: 14px;
+      color: gray;
+    }
+    .pill.ok {
+      border-color: rgba(34, 197, 94, .25);
+      background: rgba(220, 252, 231, .65);
+      color: #14532d;
+    }
+    .pill.bad {
+      border-color: rgba(239, 68, 68, .35);
+      background: rgba(254, 226, 226, .55);
+      color: #7f1d1d;
+    }
+    canvas {
+      max-width: 100%;
+    }
+  </style>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <script>
+    // Function to escape XSS
+    function escapeHtml(str) {
+      var div = document.createElement('div');
+      if (str) {
+        div.innerText = str;
+        div.textContent = str;
+      }
+      return div.innerHTML;
+    }
+
+    // Check authentication and role
+    function checkAuth() {
+      const session = JSON.parse(localStorage.getItem('AO-001_LOGIN_V1')) || null;
+      const role = session ? session.role : null;
+      if (!session || !['ADMIN', 'MANAGER', 'EMPLOYEE'].includes(role)) {
+        showFailMessage('Access Denied: Invalid Role');
+        return false;
+      }
+      return true;
+    }
+
+    // Function to show failure message
+    function showFailMessage(message) {
+      const failMessage = document.getElementById('fail-closed');
+      failMessage.textContent = message;
+      failMessage.style.display = 'block';
+    }
+
+    // Function to load dashboard data from sessionStorage
+    function loadDashboardData() {
+      const session = JSON.parse(localStorage.getItem('AO-001_LOGIN_V1'));
+      const role = session ? session.role : null;
+      const empNo = session ? session.empNo : null;
+
+      // Fetching tasks, modules, health status from localStorage
+      const tasks = JSON.parse(localStorage.getItem('AO-013_ANSWERS_V1')) || [];
+      const modules = JSON.parse(localStorage.getItem('AO-014_MODULER_V1')) || [];
+      const healthStatus = JSON.parse(localStorage.getItem('systemHealth')) || {};
+
+      // Render user info
+      document.getElementById('user-info').innerHTML = ` 
+        <p><strong>Användar-ID:</strong> ${empNo}</p>
+        <p><strong>Roll:</strong> ${role}</p>
+      `;
+
+      // Render tasks
+      const taskList = tasks.filter(task => task.assignedTo === empNo || role === 'ADMIN' || role === 'MANAGER');
+      const taskListHtml = taskList.length > 0 ? taskList.map(task => `
+        <li>${task.taskName} - ${task.status}</li>
+      `).join('') : '<li>Inga uppgifter tilldelade</li>';
+      document.getElementById('tasks').innerHTML = taskListHtml;
+
+      // Render modules
+      const moduleList = modules.filter(module => module.status === 'enabled');
+      const moduleListHtml = moduleList.length > 0 ? moduleList.map(module => `
+        <li>${module.moduleName} - ${module.status}</li>
+      `).join('') : '<li>Inga aktiva moduler</li>';
+      document.getElementById('modules').innerHTML = moduleListHtml;
+
+      // Render system health
+      document.getElementById('health-status').innerHTML = `
+        <p><strong>Organisation Status:</strong> ${escapeHtml(healthStatus.orgStatus || 'Ok')}</p>
+        <p><strong>Task Status:</strong> ${escapeHtml(healthStatus.taskStatus || 'In Progress')}</p>
+        <p><strong>Module Status:</strong> ${escapeHtml(healthStatus.moduleStatus || 'Active')}</p>
+      `;
+
+      // Render task progress graph
+      renderTaskProgressGraph(taskList);
+    }
+
+    // Render Task Progress Graph
+    function renderTaskProgressGraph(tasks) {
+      const completedTasks = tasks.filter(task => task.status === 'completed').length;
+      const totalTasks = tasks.length;
+
+      const ctx = document.getElementById('taskProgressChart').getContext('2d');
+      const taskProgressChart = new Chart(ctx, {
+        type: 'doughnut',
+        data: {
+          labels: ['Completed', 'Remaining'],
+          datasets: [{
+            label: 'Task Progress',
+            data: [completedTasks, totalTasks - completedTasks],
+            backgroundColor: ['#36a2eb', '#ffcd56'],
+            borderColor: ['#fff', '#fff'],
+            borderWidth: 1
+          }]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { position: 'top' },
+            tooltip: {
+              callbacks: {
+                label: function(tooltipItem) {
+                  return tooltipItem.label + ': ' + tooltipItem.raw + ' tasks';
+                }
+              }
+            }
+          }
+        }
+      });
+    }
+
+    // Initialize page
+    window.onload = function() {
+      if (!checkAuth()) return;  // Ensure valid role
+      loadDashboardData(); // Load data after auth check
+    }
+  </script>
+</head>
+<body>
+  <div class="fail-closed" id="fail-closed" style="display:none;">
+    <p>Access Denied: Invalid Role</p>
+  </div>
+
+  <div class="dashboard-container">
+    <!-- User Info Section -->
+    <div class="dashboard-card">
+      <h3>Användarinformation</h3>
+      <div id="user-info"></div>
+    </div>
+
+    <!-- Tasks Section -->
+    <div class="dashboard-card">
+      <h3>Mina Uppgifter</h3>
+      <ul id="tasks" class="loading">
+        <li>Laddar uppgifter...</li>
+      </ul>
+    </div>
+
+    <!-- Modules Section -->
+    <div class="dashboard-card">
+      <h3>Aktiva Moduler</h3>
+      <ul id="modules" class="loading">
+        <li>Laddar moduler...</li>
+      </ul>
+    </div>
+
+    <!-- System Health Section -->
+    <div class="dashboard-card">
+      <h3>Systemhälsa</h3>
+      <div id="health-status" class="loading">
+        <p>Laddar systemhälsa...</p>
+      </div>
+    </div>
+
+    <!-- Task Progress Graph -->
+    <div class="dashboard-card">
+      <h3>Uppgiftsprogression</h3>
+      <canvas id="taskProgressChart"></canvas>
+    </div>
+  </div>
+</body>
+</html>
 
