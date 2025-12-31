@@ -1,1 +1,417 @@
+<!-- ============================================================
+AO-018/22 | FIL-ID: system/audit.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: SYSTEM_ADMIN-only auditlogg (read-only) – fail-closed + XSS-escape
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – System • Audit-logg</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .layout{ display:grid; grid-template-columns: 1fr; gap:12px; align-items:start; }
+    .panel{ border: 1px solid var(--line); transition: transform .15s ease, box-shadow .15s ease, filter .15s ease; }
+    .panel:hover{ transform: translateY(-1px); box-shadow: var(--shadow-soft); filter: brightness(1.01); }
+    .panel.list{ background: rgba(191,219,254,.18); }
+    .item{ border:1px solid var(--line); border-radius: var(--r14); padding: 12px; background:#fff; transition: transform .15s ease, box-shadow .15s ease, filter .15s ease; display:flex; gap:10px; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; margin-top:10px; }
+    .item:hover{ transform: var(--lift); box-shadow: var(--shadow-soft); filter: brightness(1.02); }
+    .item-title{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .empty{ padding:18px; border:1px dashed var(--line); border-radius: var(--r14); color: var(--muted); background:#fff; text-align:center; margin-top:10px; }
+    .guardbox{ margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--r14); background: #fff; color: var(--muted); }
+    .guardbox.err{ border-color: rgba(239,68,68,.35); background: rgba(254,226,226,.55); color: #7f1d1d; }
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+    code{ font-size:.95em; }
+    .pill.bad{ border-color: rgba(239,68,68,.35); background: rgba(254,226,226,.55); color:#7f1d1d; }
+    .pill.ok{ border-color: rgba(34,197,94,.25); background: rgba(220,252,231,.65); color:#14532d; }
+    details{ margin-top:8px; border: 1px solid var(--line); border-radius: var(--r14); background:#fff; padding:10px 12px; }
+    details > summary{ cursor:pointer; font-weight: 700; }
+    pre{ margin:10px 0 0; padding:10px 12px; border-radius: var(--r14); border: 1px solid var(--line); background: rgba(15,23,42,.03); overflow:auto; white-space: pre-wrap; word-break: break-word; }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• System • Audit-logg</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./shell.html">System Shell</a>
+    <a href="./health.html">Systemstatus</a>
+    <a href="./roles.html">Rollmallar</a>
+    <a href="./modules.html">Moduler</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="./policies.html">Policys</a>
+    <a href="./audit.html" aria-current="page">Audit-logg</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Audit-logg</h1>
+  <p class="muted">Read-only logg för systemändringar. Endast SYSTEM_ADMIN.</p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Anst.nr <span id="whoEmpNo">—</span> • Roll <span>system_admin</span>
+      </div>
+      <div class="row wrap">
+        <span class="pill" id="countPill">0 loggar</span>
+      </div>
+    </div>
+
+    <div id="guardPanel" class="guardbox" style="display:none;"></div>
+
+    <div class="layout">
+      <section class="panel list" aria-label="Audit-logg">
+        <div class="panel-title">Loggposter</div>
+
+        <div class="toolbar" aria-label="Filter och åtgärder">
+          <div class="left">
+            <label style="margin:0; min-width:220px;">
+              Visa
+              <select id="filter">
+                <option value="active" selected>Endast aktiva</option>
+                <option value="all">Alla</option>
+              </select>
+            </label>
+
+            <label style="margin:0; min-width:220px;">
+              Aktion
+              <select id="actionFilter">
+                <option value="all" selected>Alla</option>
+                <option value="create">create</option>
+                <option value="update">update</option>
+                <option value="delete">delete</option>
+              </select>
+            </label>
+
+            <label style="margin:0; min-width:260px; flex: 1 1 260px;">
+              Sök (entity / details / empNo)
+              <input id="search" type="text" placeholder="t.ex. module, update, 1001" />
+            </label>
+
+            <label style="margin:0; min-width:220px;">
+              Sortera
+              <select id="sort">
+                <option value="new" selected>Nyast först</option>
+                <option value="old">Äldst först</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="right">
+            <button id="btnRefresh" type="button" class="secondary">Uppdatera</button>
+          </div>
+        </div>
+
+        <p id="msg" class="message" aria-live="polite" style="margin: 0 0 10px;"></p>
+
+        <div id="list"></div>
+
+        <div class="smallnote">
+          Key: <code>AO-018_AUDIT_LOGS_V1</code> (read-only). Inga writes sker från denna sida.
+        </div>
+      </section>
+    </div>
+  </section>
+</main>
+
+<script>
+(function(){
+  "use strict";
+
+  const SESSION_KEY     = "AO-001_LOGIN_V1";
+  const ORG_KEY         = "AO-020_ORG_V1";
+  const ASSIGNMENTS_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
+  const AUDIT_KEY       = "AO-018_AUDIT_LOGS_V1";
+
+  const $ = (s) => document.querySelector(s);
+
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function readRawSession(){
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if(s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if(s2) return s2;
+    return null;
+  }
+
+  function safeParseStorage(key, fallback){
+    try{
+      const raw = localStorage.getItem(key);
+      if(!raw) return fallback;
+      const v = JSON.parse(raw);
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{
+      return fallback;
+    }
+  }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function normalizeRole(r){ return String(r || "").trim().toLowerCase(); }
+  function normalizeEmpNo(v){
+    const s = String(v || "").trim();
+    return s.replace(/[^\d]/g, "");
+  }
+
+  function readAuth(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = JSON.parse(raw);
+      if(!data?.auth?.isAuthed) return null;
+
+      const role = normalizeRole(data.auth.role);
+      if(role !== "system_admin") return null;
+
+      if(data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+
+      const empNo = normalizeEmpNo(
+        data.auth.empNo ?? data.auth.employeeNo ?? data.auth.emp ?? data.auth.userId ?? ""
+      );
+
+      return { ...data.auth, role, empNo };
+    }catch{
+      return null;
+    }
+  }
+
+  function setGuard(kind, text){
+    const box = $("#guardPanel");
+    if(!text){
+      box.style.display = "none";
+      box.className = "guardbox";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "block";
+    box.className = "guardbox" + (kind ? " " + kind : "");
+    box.textContent = text;
+  }
+
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function fmtTime(ts){
+    const t = Number(ts);
+    if(!Number.isFinite(t)) return "—";
+    const d = new Date(t);
+    if(String(d) === "Invalid Date") return "—";
+    return d.toLocaleString("sv-SE", {
+      year:"numeric", month:"2-digit", day:"2-digit",
+      hour:"2-digit", minute:"2-digit"
+    });
+  }
+
+  // --- Guard ---
+  const auth = readAuth();
+  if(!auth){ redirectLogin(); return; }
+
+  $("#whoName").textContent = auth.displayName || "SYSTEM_ADMIN";
+  $("#whoEmpNo").textContent = auth.empNo || "—";
+
+  function doLogout(){
+    sessionStorage.removeItem(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  // AO kräver org + assignments som beroenden (fail-closed om saknas)
+  function depsReady(){
+    const problems = [];
+
+    const org = safeParseStorage(ORG_KEY, null);
+    const assignments = safeParseStorage(ASSIGNMENTS_KEY, null);
+
+    const orgArr =
+      Array.isArray(org) ? org :
+      (Array.isArray(org?.nodes) ? org.nodes :
+      (Array.isArray(org?.items) ? org.items : []));
+    if(!Array.isArray(orgArr) || orgArr.length === 0){
+      problems.push("Org-träd saknas (AO-020_ORG_V1).");
+    }
+
+    let hasAssignments = false;
+    if(Array.isArray(assignments) && assignments.length) hasAssignments = true;
+    if(assignments && typeof assignments === "object" && !Array.isArray(assignments)){
+      if(Array.isArray(assignments.assignments) && assignments.assignments.length) hasAssignments = true;
+      if(Array.isArray(assignments.items) && assignments.items.length) hasAssignments = true;
+      const keys = Object.keys(assignments || {});
+      if(keys.length && keys.some(k => normalizeEmpNo(k))) hasAssignments = true;
+    }
+    if(!hasAssignments){
+      problems.push("Role-assignments saknas (AO-020_ROLE_ASSIGNMENTS_V2).");
+    }
+
+    if(problems.length){
+      setGuard("err", "Audit-logg är låst (fail-closed): " + problems.join(" "));
+      return false;
+    }
+
+    setGuard("", "");
+    return true;
+  }
+
+  // --- Data ---
+  function loadAuditLogs(){
+    const arr = safeParseStorage(AUDIT_KEY, []); 
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function isValidAction(a){
+    const v = String(a || "").trim().toLowerCase();
+    return (v === "create" || v === "update" || v === "delete");
+  }
+
+  function normalizeLog(x){
+    if(!x || typeof x !== "object") return null;
+
+    const id = String(x.id || "").trim();
+    const action = String(x.action || "").trim().toLowerCase();
+    const entity = String(x.entity || "").trim();
+    const details = String(x.details || "").trim();
+
+    const changedBy = normalizeEmpNo(x.changedBy || "");
+    const timestamp = Number(x.timestamp);
+    const scopeId = String(x.scopeId || "").trim();
+    const active = (x.active !== false); // default true om saknas
+
+    if(!id) return null;
+    if(!isValidAction(action)) return null;
+    if(!entity) return null;
+    if(!Number.isFinite(timestamp) || timestamp <= 0) return null;
+    if(!changedBy) return null; // krav: SYSTEM_ADMIN empNo
+    return { id, action, entity, details, changedBy, timestamp, scopeId, active, _raw: x };
+  }
+
+  function dedupeLogs(logs){
+    const byId = new Map();
+    for(const l of logs){
+      if(!l) continue;
+      const prev = byId.get(l.id);
+      if(!prev){ byId.set(l.id, l); continue; }
+      byId.set(l.id, (l.timestamp >= prev.timestamp) ? l : prev);
+    }
+    return Array.from(byId.values());
+  }
+
+  function buildRows(){
+    if(!depsReady()) return [];
+
+    const raw = loadAuditLogs();
+    const normalized = raw.map(normalizeLog).filter(Boolean);
+    const deduped = dedupeLogs(normalized);
+
+    const activeMode = $("#filter").value;
+    let rows = (activeMode === "active") ? deduped.filter(r => r.active) : deduped.slice();
+
+    const af = $("#actionFilter").value;
+    if(af !== "all"){
+      rows = rows.filter(r => r.action === af);
+    }
+
+    const q = String($("#search").value || "").trim().toLowerCase();
+    if(q){
+      rows = rows.filter(r => {
+        const blob = `${r.action} ${r.entity} ${r.details} ${r.changedBy} ${r.scopeId}`.toLowerCase();
+        return blob.includes(q);
+      });
+    }
+
+    const sortMode = $("#sort").value;
+    rows.sort((a,b) => sortMode === "old" ? (a.timestamp - b.timestamp) : (b.timestamp - a.timestamp));
+
+    return rows;
+  }
+
+  function render(){
+    setMsg("", "");
+    const list = $("#list");
+    list.innerHTML = "";
+
+    if(!depsReady()){
+      $("#countPill").textContent = "—";
+      list.innerHTML = `<div class="empty">Audit-logg är låst (fail-closed).</div>`;
+      return;
+    }
+
+    const rows = buildRows();
+    $("#countPill").textContent = `${rows.length} logg${rows.length === 1 ? "" : "ar"}`;
+
+    if(rows.length === 0){
+      list.innerHTML = `<div class="empty">Inga loggar att visa (eller inget matchar filtret).</div>`;
+      return;
+    }
+
+    rows.slice(0, 200).forEach(r => {
+      const el = document.createElement("div");
+      el.className = "item";
+
+      const statusPill = r.active ? `<span class="pill ok">aktiv</span>` : `<span class="pill bad">inaktiv</span>`;
+      const details = r.details ? escapeHtml(r.details) : "—";
+      const scope = r.scopeId ? escapeHtml(r.scopeId) : "—";
+
+      el.innerHTML = `
+        <div style="min-width:260px; flex: 1 1 720px;">
+          <p class="item-title">${escapeHtml(r.entity)}</p>
+          <div class="meta">
+            <span class="pill">${escapeHtml(r.action)}</span>
+            ${statusPill}
+            <span><strong>Vem:</strong> Anst.nr ${escapeHtml(r.changedBy)}</span>
+            <span><strong>När:</strong> ${escapeHtml(fmtTime(r.timestamp))}</span>
+            <span><strong>Scope:</strong> ${scope}</span>
+          </div>
+
+          <div class="meta">
+            <span><strong>Detaljer:</strong> ${details}</span>
+          </div>
+
+          <details>
+            <summary>Visa råpost (debug)</summary>
+            <pre>${escapeHtml(JSON.stringify(r._raw, null, 2))}</pre>
+          </details>
+        </div>
+      `;
+      list.appendChild(el);
+    });
+
+    if(rows.length > 200){
+      setMsg("warn", "Visar max 200 loggar (prestandaskäl). Använd filter/sök för att begränsa.");
+    }
+  }
+
+  $("#filter").addEventListener("change", render);
+  $("#actionFilter").addEventListener("change", render);
+  $("#search").addEventListener("input", render);
+  $("#sort").addEventListener("change", render);
+  $("#btnRefresh").addEventListener("click", render);
+
+  render();
+})();
+</script>
+
+</body>
+</html>
 
