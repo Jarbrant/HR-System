@@ -1,1 +1,283 @@
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Systemstatus</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+
+    .panel:hover {
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+
+    .panel.list {
+      background: rgba(191, 219, 254, .18);
+    }
+
+    .item {
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background: #fff;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      display: flex;
+      gap: 10px;
+      justify-content: space-between;
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+
+    .item:hover {
+      transform: var(--lift);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.02);
+    }
+
+    .item-title {
+      font-weight: 950;
+      margin: 0;
+    }
+
+    .meta {
+      color: var(--muted);
+      font-size: .9rem;
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 6px;
+    }
+
+    .empty {
+      padding: 18px;
+      border: 1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background: #fff;
+      text-align: center;
+    }
+
+    .guardbox {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: #fff;
+      color: var(--muted);
+    }
+
+    .guardbox.err {
+      border-color: rgba(239, 68, 68, .35);
+      background: rgba(254, 226, 226, .55);
+      color: #7f1d1d;
+    }
+
+    .smallnote {
+      font-size: .9rem;
+      color: var(--muted);
+      margin-top: 8px;
+    }
+
+    code {
+      font-size: .95em;
+    }
+
+    .pill.warn {
+      border-color: rgba(244, 63, 94, .35);
+      background: rgba(244, 63, 94, .10);
+    }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Systemstatus</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Uppgifter</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="./policies.html">Policys</a>
+    <a href="./health.html" aria-current="page">Systemstatus</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Systemstatus</h1>
+  <p class="muted">Kontrollera systemhälsan och status för org, rolltilldelningar, och moduler.</p>
+
+  <section class="card">
+    <div id="guardPanel" class="guardbox" style="display:none;"></div>
+
+    <div class="layout">
+      <section class="panel list" aria-label="Systemhälsa">
+        <div class="panel-title">Systemkomponenter</div>
+
+        <div id="msg" class="message" aria-live="polite" style="margin: 0 0 10px;"></div>
+
+        <div id="list"></div>
+
+        <div class="smallnote">
+          Kontrollera status för org-trädet, rolltilldelningar, och moduler.
+        </div>
+      </section>
+    </div>
+  </section>
+
+</main>
+
+<script>
+(function() {
+  "use strict";
+
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const ORG_KEY = "AO-020_ORG_V1";
+  const ASSIGNMENTS_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
+  const MODULES_KEY = "AO-014_MODULER_V1";
+  
+  const $ = (s) => document.querySelector(s);
+
+  function redirectLogin() {
+    window.location.replace("../UI/UI-01-SKELETON.html");
+  }
+
+  function readRawSession() {
+    const s1 = sessionStorage.getItem(SESSION_KEY);
+    if (s1) return s1;
+    const s2 = localStorage.getItem(SESSION_KEY);
+    if (s2) return s2;
+    return null;
+  }
+
+  function normalizeRole(r) {
+    return String(r || "").trim().toLowerCase();
+  }
+
+  function readAuth() {
+    try {
+      const raw = readRawSession();
+      if (!raw) return null;
+      const data = JSON.parse(raw);
+      if (!data?.auth?.isAuthed) return null;
+
+      const role = normalizeRole(data.auth.role);
+      if (role !== "system_admin") return null;
+
+      if (data.auth.expiresAt && data.auth.expiresAt < Date.now()) return null;
+
+      const empNo = data.auth.empNo ?? "";
+      return { ...data.auth, role, empNo };
+    } catch {
+      return null;
+    }
+  }
+
+  function setGuard(kind, text) {
+    const box = $("#guardPanel");
+    if (!text) {
+      box.style.display = "none";
+      box.className = "guardbox";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "block";
+    box.className = "guardbox" + (kind ? " " + kind : "");
+    box.textContent = text;
+  }
+
+  const auth = readAuth();
+  if (!auth) {
+    redirectLogin();
+    return;
+  }
+
+  if (auth.role !== "system_admin") {
+    setGuard("err", "Åtkomst nekad: Endast SYSTEM_ADMIN kan nå denna sida.");
+    return;
+  }
+
+  function loadStatus() {
+    const org = JSON.parse(localStorage.getItem(ORG_KEY) || "[]");
+    const assignments = JSON.parse(localStorage.getItem(ASSIGNMENTS_KEY) || "[]");
+    const modules = JSON.parse(localStorage.getItem(MODULES_KEY) || "[]");
+
+    return {
+      org: {
+        status: org.length ? "healthy" : "error",
+        message: org.length ? "Org-trädet är korrekt" : "Org-trädet saknas",
+        suggestedAction: org.length ? "" : "Lägg till org-trädet"
+      },
+      assignments: {
+        status: assignments.length ? "healthy" : "error",
+        message: assignments.length ? "Rolltilldelningar finns" : "Rolltilldelningar saknas",
+        suggestedAction: assignments.length ? "" : "Lägg till rolltilldelningar"
+      },
+      modules: {
+        status: modules.length ? "healthy" : "error",
+        message: modules.length ? "Moduler är aktiverade" : "Moduler saknas",
+        suggestedAction: modules.length ? "" : "Aktivera moduler"
+      }
+    };
+  }
+
+  function renderHealthStatus() {
+    const status = loadStatus();
+    const list = $("#list");
+    list.innerHTML = "";
+
+    const components = [
+      { name: "Org-träd", ...status.org },
+      { name: "Rolltilldelningar", ...status.assignments },
+      { name: "Moduler", ...status.modules }
+    ];
+
+    components.forEach(comp => {
+      const item = document.createElement("div");
+      item.className = "item";
+      item.innerHTML = `
+
+        <div style="flex:1;">
+          <p class="item-title">${comp.name}</p>
+          <div class="meta">
+            <span>Status: ${comp.status}</span>
+          </div>
+          <div class="meta">
+            <span>${comp.message}</span>
+          </div>
+          ${comp.status === "error" ? `<div class="meta"><strong>Förslag:</strong> ${comp.suggestedAction}</div>` : ""}
+        </div>
+      `;
+      list.appendChild(item);
+    });
+  }
+
+  renderHealthStatus();
+})();
+</script>
+
+</body>
+</html>
 
