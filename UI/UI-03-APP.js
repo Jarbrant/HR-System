@@ -1,5 +1,5 @@
 /* ============================================================
-AO-002 v1.3 | FILE: UI/UI-03-APP.js
+AO-002 v1.4 | FILE: UI/UI-03-APP.js
 Projekt: HR-System
 Syfte: CORE “hjärta” — Auth-guard, RBAC, fail-closed routing, scope-grund, XSS-helpers
 Nivå: UI-only (GitHub Pages) | localStorage-first
@@ -13,6 +13,9 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
 Ändringslogg:
 - v1.2: getSafePathname + prefix startsWith + BASE_PATH-trim + canonical getAuth + redirectTo + _paths endast i DEBUG
 - v1.3 (PATCH): ROUTES_BY_ROLE entries som slutar med "/" tolkas som PREFIX (inte exakt). Fixar att "/admin/" matchar "/admin/home.html" etc.
+- v1.4 (PATCH): Deterministisk scopeId-resolve från befintliga assignments (AO-020_ROLE_ASSIGNMENTS_V2) när session saknar scopeId.
+  * Skriver inget nytt. Läser endast befintliga keys.
+  * getAuth exponerar empNo (om finns) + härleder scopeId utan att mutera session.
 ============================================================ */
 
 (function () {
@@ -24,6 +27,9 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
 
   // STORAGE: Återanvänd exakt befintlig session-nyckel.
   const SESSION_KEY = "AO-001_LOGIN_V1";
+
+  // STORAGE: Befintliga nycklar (läsning endast)
+  const ASSIGNMENTS_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
 
   // GUARD: JSON-parse får aldrig kasta. Returnera null vid fel.
   function safeJsonParse(str) {
@@ -47,6 +53,18 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
     if (s2) return safeJsonParse(s2);
 
     return null;
+  }
+
+  // STORAGE: läs localStorage (för systemdata som normalt ligger där).
+  function readLocalStorage(key) {
+    const k = String(key || "");
+    if (!k) return null;
+    try {
+      const raw = localStorage.getItem(k);
+      return safeJsonParse(raw || "");
+    } catch {
+      return null;
+    }
   }
 
   // GUARD: rensa session (tillåtet som “clearSession”).
@@ -147,6 +165,7 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
 
   // ============================================================
   // AUTH SHAPE (P1) — canonical getAuth()
+  // + AO-002 v1.4: resolve scopeId from assignments if missing
   // ============================================================
 
   function normalizeRole(roleRaw) {
@@ -159,15 +178,113 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
     return values.includes(r) ? r : "";
   }
 
+  function normalizeEmpNo(empRaw) {
+    // EMPNO: tolerans i läsning (men vi "gissar" inte innehåll).
+    // Om session använder number/string, normalisera till sträng.
+    const s = String(empRaw ?? "").trim();
+    return s;
+  }
+
+  function extractEmpNo(sessionLike) {
+    const s = sessionLike && typeof sessionLike === "object" ? sessionLike : null;
+    if (!s) return "";
+
+    const a = (s.auth && typeof s.auth === "object") ? s.auth : s;
+
+    // Stöd flera namn utan att kräva dem.
+    const cand =
+      a.empNo ?? s.empNo ??
+      a.employeeNo ?? s.employeeNo ??
+      a.emp ?? s.emp ??
+      null;
+
+    return normalizeEmpNo(cand);
+  }
+
+  function extractScopeId(sessionLike) {
+    const s = sessionLike && typeof sessionLike === "object" ? sessionLike : null;
+    if (!s) return "";
+
+    const a = (s.auth && typeof s.auth === "object") ? s.auth : s;
+    return String((a.scopeId ?? s.scopeId) ?? "").trim();
+  }
+
+  function resolveScopeIdFromAssignments(empNo) {
+    // AO-002 v1.4: läs befintlig assignments-key och hitta scopeId för empNo.
+    // Skriver INGET.
+    const me = normalizeEmpNo(empNo);
+    if (!me) return "";
+
+    const data = readLocalStorage(ASSIGNMENTS_KEY);
+    if (!data) return "";
+
+    // Format A: Array[{ empNo, scopeId, ... }]
+    if (Array.isArray(data)) {
+      for (let i = 0; i < data.length; i++) {
+        const row = data[i];
+        if (!row || typeof row !== "object") continue;
+
+        const rowEmp =
+          normalizeEmpNo(row.empNo ?? row.employeeNo ?? row.emp ?? row.id ?? "");
+        if (!rowEmp || rowEmp !== me) continue;
+
+        const scope = String(row.scopeId ?? row.scope ?? row.nodeId ?? row.orgId ?? "").trim();
+        if (scope) return scope;
+      }
+      return "";
+    }
+
+    // Format B: Object-map { "3001": { scopeId:"UNIT_A", ... } } eller { "3001":"UNIT_A" }
+    if (typeof data === "object") {
+      const direct = data[me];
+      if (direct && typeof direct === "object") {
+        const scope = String(direct.scopeId ?? direct.scope ?? direct.nodeId ?? direct.orgId ?? "").trim();
+        if (scope) return scope;
+      }
+      if (typeof direct === "string" || typeof direct === "number") {
+        const scope = String(direct).trim();
+        if (scope) return scope;
+      }
+
+      // Format C: { byEmpNo: { "3001": {scopeId} } }
+      const byEmpNo = data.byEmpNo;
+      if (byEmpNo && typeof byEmpNo === "object") {
+        const row = byEmpNo[me];
+        if (row && typeof row === "object") {
+          const scope = String(row.scopeId ?? row.scope ?? row.nodeId ?? row.orgId ?? "").trim();
+          if (scope) return scope;
+        }
+        if (typeof row === "string" || typeof row === "number") {
+          const scope = String(row).trim();
+          if (scope) return scope;
+        }
+      }
+    }
+
+    return "";
+  }
+
   function getAuth(session) {
     const s = session && typeof session === "object" ? session : null;
     if (!s) return null;
 
     const a = (s.auth && typeof s.auth === "object") ? s.auth : s;
+
+    const empNo = extractEmpNo(s);
+    const scopeFromSession = extractScopeId(s);
+
     const out = {
       isAuthed: a.isAuthed === true,
+
+      // RBAC: roll måste vara en av cfg.ROLES
       role: normalizeRole(a.role),
-      scopeId: String((a.scopeId ?? s.scopeId) ?? "").trim(),
+
+      // AO-002 v1.4: om scope saknas i session => resolve via assignments
+      scopeId: scopeFromSession || resolveScopeIdFromAssignments(empNo),
+
+      // empNo (tillåtet): behövs för filter i UI-sidor (utan att logga det)
+      empNo: empNo,
+
       expiresAt: a.expiresAt ? Number(a.expiresAt) : null,
     };
 
@@ -506,6 +623,9 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
     // Scope grund
     getScopeId,
     sameOrMissingScope,
+
+    // AO-002 v1.4: scope resolver (read-only)
+    resolveScopeIdFromAssignments,
 
     // XSS helpers
     escapeHtml,
