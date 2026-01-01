@@ -1,7 +1,8 @@
 <!-- ============================================================
-AO-048 (PATCH) | FIL-ID: employee/home.html
+AO-048 (PATCH v1.1) | FIL-ID: employee/home.html
 Projekt: HR-System
 Syfte: Employee – Dagskalender + Post-its med visuell “knöggla & kasta”
+VIKTIGT: Återställer kopplingar till kärnan (AO-002) + fail-closed + korrekt session-shape.
 Policy (LÅST): UI-only • Fail-closed • sessionStorage först • fallback localStorage • XSS-escape • Inga nya storage-keys
 Keys (LÅST):
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
@@ -353,13 +354,8 @@ Keys (LÅST):
     .trash .icon{ font-size:22px; opacity:.85; }
     .trash .txt{ font-size:12px; color:var(--muted); text-align:center; padding:0 10px; }
 
-    /* === Filmisk “knöggla & kasta” ===
-       1) crumple: tappar form
-       2) throw: flyger mot papperskorg
-    */
-    .note.is-crumpling{
-      animation: crumple 520ms ease forwards;
-    }
+    /* === Filmisk “knöggla & kasta” === */
+    .note.is-crumpling{ animation: crumple 520ms ease forwards; }
     @keyframes crumple{
       0%   { transform: rotate(var(--tilt, -1deg)) scale(1); filter: blur(0px); }
       35%  { transform: rotate(8deg) scale(.94) skewX(2deg); filter: blur(.2px); }
@@ -367,17 +363,13 @@ Keys (LÅST):
       100% { transform: rotate(18deg) scale(.62); filter: blur(.9px); }
     }
 
-    /* when we have target coords we switch to throwing */
-    .note.is-throwing{
-      animation: throw 420ms cubic-bezier(.2,.9,.15,1) forwards;
-    }
+    .note.is-throwing{ animation: throw 420ms cubic-bezier(.2,.9,.15,1) forwards; }
     @keyframes throw{
       0%   { opacity: 1; }
       55%  { opacity: .9; }
       100% { opacity: 0; }
     }
 
-    /* Reduced motion */
     @media (prefers-reduced-motion: reduce){
       .note.is-crumpling, .note.is-throwing{ animation: none !important; opacity: 0 !important; }
     }
@@ -460,14 +452,17 @@ Keys (LÅST):
     </section>
   </main>
 
+  <!-- AO-002 beroenden (LÅSTA): config måste laddas före app -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
+  <script src="../UI/UI-03-APP.js"></script>
+
   <script>
     "use strict";
 
     /* ===========================
        Keys (LÅST)
     ============================ */
-    const KEY_SESSION = "AO-001_LOGIN_V1";
-    const KEY_TASKS   = "AO-014_TASKS_V1";
+    const KEY_TASKS = "AO-014_TASKS_V1";
 
     /* ===========================
        DOM
@@ -493,10 +488,13 @@ Keys (LÅST):
     const trashBox   = document.getElementById("trashBox");
 
     /* ===========================
-       Helpers
+       Fail-closed guard + XSS
     ============================ */
-    function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
+    function showGuard(msg){ guardBox.style.display = "block"; guardBox.textContent = String(msg || ""); }
+    function hideGuard(){ guardBox.style.display = "none"; guardBox.textContent = ""; }
+
     function escapeHtml(input){
+      if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(input);
       const s = String(input ?? "");
       return s
         .replaceAll("&","&amp;")
@@ -506,18 +504,38 @@ Keys (LÅST):
         .replaceAll("'","&#039;");
     }
 
-    function showGuard(msg){ guardBox.style.display = "block"; guardBox.textContent = msg; }
-    function hideGuard(){ guardBox.style.display = "none"; guardBox.textContent = ""; }
+    function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
 
-    // Fail-closed: sessionStorage först, fallback localStorage
-    function readSessionFailClosed(){
-      const s1 = sessionStorage.getItem(KEY_SESSION);
-      const s2 = localStorage.getItem(KEY_SESSION);
-      const obj = safeJsonParse(s1 || s2 || "");
-      if(!obj || typeof obj !== "object") return null;
-      return obj;
+    /* ===========================
+       AO-002 AUTH (återkopplat)
+       - Inga egna auth-gissningar
+       - RBAC via requireAuth
+    ============================ */
+    function mustAuthOrStop(){
+      if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+        showGuard("Systemfel: HRApp saknas. (UI-03-APP.js)");
+        return null;
+      }
+      if (!window.HR_CONFIG || !window.HR_CONFIG.ROLES) {
+        showGuard("Systemfel: HR_CONFIG saknas. (UI-04-CONFIG.js)");
+        return null;
+      }
+
+      // EMPLOYEE-sida: tillåt EMPLOYEE (fail-closed).
+      const sess = window.HRApp.requireAuth({ allowRoles: [ window.HR_CONFIG.ROLES.EMPLOYEE ] });
+      if (!sess) return null;
+
+      const auth = window.HRApp.getAuth(sess);
+      if (!auth || auth.isAuthed !== true) {
+        showGuard("Fail-closed: saknar giltig session. Logga in igen.");
+        return null;
+      }
+      return { sess, auth };
     }
 
+    /* ===========================
+       Tasks IO (LÅST)
+    ============================ */
     function readTasksArray(){
       const raw = localStorage.getItem(KEY_TASKS);
       const data = safeJsonParse(raw || "");
@@ -527,8 +545,12 @@ Keys (LÅST):
 
     function writeTasksArray(arr){
       if(!Array.isArray(arr)) return false;
-      localStorage.setItem(KEY_TASKS, JSON.stringify(arr));
-      return true;
+      try {
+        localStorage.setItem(KEY_TASKS, JSON.stringify(arr));
+        return true;
+      } catch {
+        return false;
+      }
     }
 
     /* ===========================
@@ -551,6 +573,9 @@ Keys (LÅST):
 
     /* ===========================
        Task normalization (tolerant läsning)
+       + FAIL-CLOSED FILTRERING (viktigt):
+       - visa inte tasks utan scopeId
+       - visa inte tasks som inte är riktade till empNo (eller ALL)
     ============================ */
     function getTaskId(t, idx){
       const raw = (t && (t.id || t.taskId || t.uuid)) ?? `task_${idx}`;
@@ -596,6 +621,53 @@ Keys (LÅST):
       return iso === dayISO;
     }
 
+    function getAssignedTo(t){
+      return t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
+    }
+
+    function isAssignedToMe(t, empNo){
+      const a = getAssignedTo(t);
+      if (a == null) return false;
+
+      const me = String(empNo || "").trim();
+      if (!me) return false;
+
+      if (typeof a === "string" || typeof a === "number") {
+        const s = String(a).trim();
+        if (s === "ALL" || s === "*") return true;
+        return s === me;
+      }
+      if (Array.isArray(a)) {
+        return a.map(x => String(x).trim()).includes(me);
+      }
+      return false;
+    }
+
+    function hasValidScopeMatch(t, myScopeId){
+      // FAIL-CLOSED: saknar scopeId på task => VISA INTE.
+      const scope = String(t?.scopeId ?? "").trim();
+      const mine  = String(myScopeId ?? "").trim();
+      if (!scope || !mine) return false;
+
+      // Employee ska inte subtree:a – bara exakt scope.
+      if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function") {
+        return window.HRApp.sameOrMissingScope(scope, mine);
+      }
+      return scope === mine;
+    }
+
+    function visibleTasksForMe(allTasks, empNo, scopeId){
+      return (Array.isArray(allTasks) ? allTasks : []).filter(t => {
+        // 1) scope måste matcha (ingen scope => inget)
+        if (!hasValidScopeMatch(t, scopeId)) return false;
+
+        // 2) måste vara till mig (eller ALL)
+        if (!isAssignedToMe(t, empNo)) return false;
+
+        return true;
+      });
+    }
+
     /* ===========================
        Systemets 5 meningar (låst)
     ============================ */
@@ -624,30 +696,16 @@ Keys (LÅST):
       return colors[i % colors.length];
     }
 
-    function render(){
+    function render(auth){
       hideGuard();
 
-      const session = readSessionFailClosed();
-      if(!session){
-        showGuard("Du är inte inloggad. Gå tillbaka och logga in igen.");
-        whoPill.textContent = "—";
-        helloLine.textContent = "Hej — • Anst.nr — • Roll EMPLOYEE";
-        voiceLine.textContent = VOICE.NOTHING;
-        doneList.innerHTML = "";
-        todoList.innerHTML = "";
-        notesGrid.innerHTML = "";
-        dayBadge.textContent = "—";
-        dateBig.textContent = "—";
-        dateSmall.textContent = "—";
-        return;
-      }
+      const empNo = String(auth.empNo ?? "").trim();
+      const role  = String(auth.role ?? "EMPLOYEE").trim();
+      const scopeId = String(auth.scopeId ?? "").trim();
 
-      const name = escapeHtml(session.name ?? session.displayName ?? "—");
-      const empNo = escapeHtml(session.empNo ?? session.employeeNo ?? "—");
-      const role = escapeHtml(session.role ?? "EMPLOYEE");
-
-      whoPill.textContent = `${name} • ${empNo}`;
-      helloLine.textContent = `Hej ${name} • Anst.nr ${empNo} • Roll ${role}`;
+      // UI-01 kan sakna "name" i session; visa robust utan att gissa.
+      whoPill.textContent = `${empNo || "—"} • ${role}`;
+      helloLine.textContent = `Hej • Anst.nr ${empNo || "—"} • Roll ${role}`;
 
       const dayISO = toISODate(selectedDate);
       const isToday = dayISO === toISODate(new Date());
@@ -655,8 +713,21 @@ Keys (LÅST):
       dateBig.textContent = fmtBig(selectedDate);
       dateSmall.textContent = fmtSmall(selectedDate);
 
+      // FAIL-CLOSED: om scope saknas -> visa inget (ingen läckage)
+      if (!scopeId) {
+        voiceLine.textContent = VOICE.UNCLEAR;
+        dayBadge.textContent = `0 färdig • 0 återstår`;
+        doneList.innerHTML = "";
+        todoList.innerHTML = "";
+        notesGrid.innerHTML = "";
+        showGuard("Fail-closed: saknar scopeId i session. (Access/Assignments måste vara korrekt.)");
+        return;
+      }
+
       const all = readTasksArray();
-      const todays = all.filter(t => taskBelongsToDay(t, dayISO));
+      const mine = visibleTasksForMe(all, empNo, scopeId);
+
+      const todays = mine.filter(t => taskBelongsToDay(t, dayISO));
       const done = todays.filter(isDone);
       const todo = todays.filter(t => !isDone(t));
 
@@ -761,50 +832,50 @@ Keys (LÅST):
     /* ===========================
        Mark done + Animate to trash
     ============================ */
-    function markTaskDone(taskId){
+    function markTaskDone(taskId, auth){
+      const empNo = String(auth.empNo ?? "").trim();
+      const scopeId = String(auth.scopeId ?? "").trim();
+
       const all = readTasksArray();
       if(!Array.isArray(all) || all.length === 0) return false;
 
       let found = false;
       for(let i=0;i<all.length;i++){
         const id = getTaskId(all[i], i);
-        if(String(id) === String(taskId)){
-          all[i] = setDone(all[i]);
-          found = true;
-          break;
-        }
+        if(String(id) !== String(taskId)) continue;
+
+        // FAIL-CLOSED: får bara ändra task som verkligen är min + scope-match
+        if (!hasValidScopeMatch(all[i], scopeId)) return false;
+        if (!isAssignedToMe(all[i], empNo)) return false;
+
+        all[i] = setDone(all[i]);
+        found = true;
+        break;
       }
       if(!found) return false;
 
-      writeTasksArray(all);
-      return true;
+      return writeTasksArray(all);
     }
 
-    function animateToTrash(noteEl){
-      // 1) knöggla
+    function animateToTrash(noteEl, auth){
       noteEl.classList.add("is-crumpling");
 
-      // 2) efter knöggla: flyg till papperskorgen (med riktiga koordinater)
       window.setTimeout(() => {
         const noteRect = noteEl.getBoundingClientRect();
         const trashRect = trashBox.getBoundingClientRect();
 
-        // Målpunkten: mitten av papperskorgen
         const targetX = (trashRect.left + trashRect.width/2) - (noteRect.left + noteRect.width/2);
         const targetY = (trashRect.top + trashRect.height/2) - (noteRect.top + noteRect.height/2);
 
         noteEl.classList.remove("is-crumpling");
         noteEl.classList.add("is-throwing");
 
-        // Lås transform med inline så att kastet känns "filmigt"
-        // (vi lägger rörelse + krympning)
         noteEl.style.transition = "transform 420ms cubic-bezier(.2,.9,.15,1)";
         noteEl.style.transform = `translate(${targetX}px, ${targetY}px) rotate(22deg) scale(0.2)`;
 
-        // 3) efter kast: remove + rerender
         window.setTimeout(() => {
           noteEl.remove();
-          render();
+          render(auth);
         }, 440);
       }, 520);
     }
@@ -812,27 +883,29 @@ Keys (LÅST):
     /* ===========================
        Events
     ============================ */
+    let AUTH = null;
+
     prevDayBtn.addEventListener("click", () => {
       selectedDate = new Date(selectedDate.getTime() - 86400000);
       selectedDate.setHours(12,0,0,0);
-      render();
+      if (AUTH) render(AUTH);
     });
 
     nextDayBtn.addEventListener("click", () => {
       selectedDate = new Date(selectedDate.getTime() + 86400000);
       selectedDate.setHours(12,0,0,0);
-      render();
+      if (AUTH) render(AUTH);
     });
 
     todayBtn.addEventListener("click", () => {
       selectedDate = new Date();
       selectedDate.setHours(12,0,0,0);
-      render();
+      if (AUTH) render(AUTH);
     });
 
     notesGrid.addEventListener("click", (e) => {
       const btn = e.target?.closest?.("button[data-action='done']");
-      if(!btn) return;
+      if(!btn || !AUTH) return;
 
       const taskId = btn.getAttribute("data-task-id");
       if(!taskId) return;
@@ -840,24 +913,34 @@ Keys (LÅST):
       const noteEl = notesGrid.querySelector(`.note[data-task-id="${CSS.escape(String(taskId))}"]`);
       if(!noteEl) return;
 
-      const ok = markTaskDone(taskId);
+      const ok = markTaskDone(taskId, AUTH);
       if(!ok){
-        showGuard("Kunde inte markera uppgiften som klar (data saknas eller är korrupt).");
+        showGuard("Fail-closed: kunde inte markera uppgiften som klar (scope/ägare matchar inte eller data är korrupt).");
         return;
       }
 
-      animateToTrash(noteEl);
+      animateToTrash(noteEl, AUTH);
     });
 
     logoutLink.addEventListener("click", (e) => {
       e.preventDefault();
-      sessionStorage.removeItem(KEY_SESSION);
-      localStorage.removeItem(KEY_SESSION);
-      window.location.href = "../index.html";
+      if (window.HRApp && typeof window.HRApp.logout === "function") {
+        window.HRApp.logout();
+      } else {
+        // sista utväg – men normalt ska HRApp.logout finnas
+        try { sessionStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
+        try { localStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
+        window.location.href = "../UI/UI-01-SKELETON.html?err=logout";
+      }
     });
 
-    // init
-    render();
+    // init (återkopplat till kärnan)
+    (function init(){
+      const res = mustAuthOrStop();
+      if (!res) return;
+      AUTH = res.auth;
+      render(AUTH);
+    })();
   </script>
 </body>
 </html>
