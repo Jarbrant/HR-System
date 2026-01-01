@@ -1,733 +1,132 @@
-<!-- ============================================================
-AO-MGR-001 (NY) | FIL-ID: manager/overview.html
+/* ============================================================
+AO-002 v1.3 | FILE: UI/UI-04-CONFIG.js
 Projekt: HR-System
-Syfte: MANAGER – Översikt (läge, avvikelser, belastning, beslut) – utan detaljer
+Syfte: Central config för RBAC + route-tillgång + default routing (config-driven)
 Nivå: UI-only (GitHub Pages) | localStorage-first
 Policy (LÅST):
 - Ingen backend
-- Fail-closed: sessionStorage först, fallback localStorage via AO-002 (HRApp.requireAuth)
-- Inga nya storage-keys/datamodell
-- XSS-escape på allt som renderas från storage
-- Visa "läge" och "avvikelser" – inte minut-för-minut, inte task-titlar per individ
-Nycklar (LÄSER – befintliga i projektet):
-- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session (via HRApp)
-- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – access/assignments (empNo→scopeId+role)
-- AO-014_TASKS_V1 (localStorage) – uppgifter
-- AO-012_QUESTIONS_V1 (localStorage) – frågor
-- AO-013_ANSWERS_V1 (localStorage) – svar
-Obs:
-- Subtree-scope: denna v1 kör exakt scope-match (fail-closed, inget läckage).
-============================================================ -->
-<!doctype html>
-<html lang="sv">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Manager – Översikt</title>
-  <meta name="description" content="Översikt för manager: läge, avvikelser, belastning, beslut – utan detaljer." />
-  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
-
-  <style>
-    /* Lugn, enkel layout – ingen ny global designstandard här */
-    .wrap{ max-width:1100px; margin:16px auto 28px; padding:0 16px; }
-    .topbar{
-      position: sticky; top:0; z-index:10;
-      background: rgba(255,255,255,.92);
-      backdrop-filter: blur(10px);
-      border-bottom:1px solid rgba(15,23,42,.10);
-    }
-    .nav{
-      max-width:1100px; margin:0 auto; padding:10px 16px;
-      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
-    }
-    .nav a{
-      text-decoration:none;
-      color: inherit;
-      font-size:14px;
-      padding:8px 10px;
-      border-radius:12px;
-      border:1px solid transparent;
-    }
-    .nav a:hover{ border-color: rgba(15,23,42,.10); background: rgba(15,23,42,.03); }
-    .nav .spacer{ flex:1; }
-    .pill{
-      font-size:12px;
-      color: rgba(15,23,42,.72);
-      border:1px solid rgba(15,23,42,.12);
-      background:#fff;
-      padding:6px 10px;
-      border-radius:999px;
-      white-space:nowrap;
-    }
-
-    .guard{
-      display:none;
-      margin:14px 0;
-      padding:12px 14px;
-      border-radius:14px;
-      border:1px solid rgba(239,68,68,.25);
-      background: rgba(254,242,242,.9);
-      color: #7f1d1d;
-    }
-
-    .header{
-      border:1px solid rgba(15,23,42,.10);
-      border-radius:16px;
-      padding:14px;
-      background:#fff;
-    }
-    .header h1{ margin:0 0 6px; font-size:16px; font-weight:900; }
-    .header p{ margin:0; font-size:13px; color: rgba(15,23,42,.65); line-height:1.4; }
-
-    .grid{
-      margin-top:14px;
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap:14px;
-      align-items:start;
-    }
-    @media (max-width: 980px){ .grid{ grid-template-columns: 1fr; } }
-
-    .cardx{
-      border:1px solid rgba(15,23,42,.10);
-      border-radius:16px;
-      padding:14px;
-      background:#fff;
-    }
-    .cardx h2{ margin:0 0 8px; font-size:14px; font-weight:950; }
-    .muted{ color: rgba(15,23,42,.65); font-size:12px; margin-top:6px; }
-    .kpiRow{
-      display:grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap:10px;
-      margin-top:10px;
-    }
-    @media (max-width: 700px){ .kpiRow{ grid-template-columns: 1fr; } }
-    .kpi{
-      border:1px solid rgba(15,23,42,.10);
-      border-radius:14px;
-      padding:12px;
-      background: rgba(15,23,42,.02);
-    }
-    .kpi .v{ font-size:20px; font-weight:950; }
-    .kpi .l{ font-size:12px; color: rgba(15,23,42,.70); margin-top:4px; }
-
-    .badge{
-      display:inline-block;
-      padding:6px 10px;
-      border-radius:999px;
-      font-size:12px;
-      border:1px solid rgba(15,23,42,.10);
-      background: rgba(236,254,255,.70);
-      white-space:nowrap;
-    }
-    .badge.ok{ background: rgba(217,247,214,.85); border-color: rgba(16,185,129,.25); }
-    .badge.warn{ background: rgba(255,247,237,.95); border-color: rgba(234,88,12,.25); }
-    .badge.bad{ background: rgba(254,242,242,.92); border-color: rgba(239,68,68,.25); }
-
-    table{ width:100%; border-collapse:collapse; margin-top:10px; }
-    th, td{
-      text-align:left;
-      padding:10px 10px;
-      border-bottom:1px solid rgba(15,23,42,.08);
-      font-size:13px;
-      vertical-align:top;
-    }
-    th{ font-size:12px; color: rgba(15,23,42,.65); font-weight:800; }
-    .small{ font-size:12px; color: rgba(15,23,42,.65); }
-    .right{ text-align:right; }
-
-    .actions{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      margin-top:10px;
-    }
-    .btnx{
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      gap:8px;
-      padding:10px 12px;
-      border-radius:12px;
-      border:1px solid rgba(15,23,42,.12);
-      background:#fff;
-      cursor:pointer;
-      font-size:13px;
-      font-weight:800;
-      text-decoration:none;
-      color: inherit;
-    }
-    .btnx:hover{ background: rgba(15,23,42,.03); }
-  </style>
-</head>
-
-<body>
-  <div class="topbar">
-    <div class="nav" aria-label="Primär navigation">
-      <a href="./overview.html" aria-current="page">Översikt</a>
-      <div class="spacer"></div>
-      <span class="pill" id="whoPill">—</span>
-      <a href="#" id="logoutLink">Logga ut</a>
-    </div>
-  </div>
-
-  <main class="wrap">
-    <div id="guardBox" class="guard" role="alert"></div>
-
-    <section class="header">
-      <h1>Manager – Översikt</h1>
-      <p id="subLine">Läge (inte detaljer): avvikelser, belastning, behov av stöd.</p>
-      <p class="muted" id="scopeLine"></p>
-    </section>
-
-    <section class="grid" aria-label="Översiktssektioner">
-      <section class="cardx" aria-label="Läge">
-        <h2>Läge</h2>
-        <div class="kpiRow">
-          <div class="kpi">
-            <div class="v" id="kpiTeamSize">—</div>
-            <div class="l">Team i din scope</div>
-          </div>
-          <div class="kpi">
-            <div class="v" id="kpiInPhase">—</div>
-            <div class="l">I fas (tyst)</div>
-          </div>
-          <div class="kpi">
-            <div class="v" id="kpiNeedsSupport">—</div>
-            <div class="l">Behöver stöd</div>
-          </div>
-        </div>
-
-        <p class="muted">
-          “Normalt” ska vara tyst. Här visas bara avvikelser som kräver beslut eller stöd.
-        </p>
-
-        <div class="actions" aria-label="Snabba actions">
-          <a class="btnx" href="../report.html">Rapportera fel</a>
-          <button class="btnx" id="btnRefresh" type="button">Uppdatera</button>
-        </div>
-      </section>
-
-      <section class="cardx" aria-label="Avvikelser">
-        <h2>Avvikelser</h2>
-        <div class="kpiRow">
-          <div class="kpi">
-            <div class="v" id="kpiOverdue">—</div>
-            <div class="l">Försenade uppgifter</div>
-          </div>
-          <div class="kpi">
-            <div class="v" id="kpiUnanswered">—</div>
-            <div class="l">Obesvarade frågor</div>
-          </div>
-          <div class="kpi">
-            <div class="v" id="kpiMissingAck">—</div>
-            <div class="l">Saknad kvittens</div>
-          </div>
-        </div>
-
-        <div class="muted">
-          Kvittens är “senare modul” i flera trådar – i denna v1 visar vi 0 om data saknas (fail-closed).
-        </div>
-      </section>
-    </section>
-
-    <section class="grid" aria-label="Listor">
-      <section class="cardx" aria-label="Behöver stöd">
-        <h2>Behöver stöd</h2>
-        <div class="small">Visar empNo + avvikelse-typ. Inga task-titlar.</div>
-        <table>
-          <thead>
-            <tr>
-              <th>EmpNo</th>
-              <th>Signal</th>
-              <th class="right">Öppna</th>
-            </tr>
-          </thead>
-          <tbody id="needsTbody">
-            <tr><td colspan="3" class="small">—</td></tr>
-          </tbody>
-        </table>
-      </section>
-
-      <section class="cardx" aria-label="I fas">
-        <h2>I fas</h2>
-        <div class="small">“Tyst lista” – endast empNo (om du vill dölja helt kan vi senare slå av denna sektion).</div>
-        <table>
-          <thead>
-            <tr>
-              <th>EmpNo</th>
-              <th>Status</th>
-              <th class="right">Öppna</th>
-            </tr>
-          </thead>
-          <tbody id="okTbody">
-            <tr><td colspan="3" class="small">—</td></tr>
-          </tbody>
-        </table>
-      </section>
-    </section>
-
-    <section class="cardx" aria-label="Belastning på gruppnivå" style="margin-top:14px;">
-      <h2>Arbetsbelastning (gruppnivå)</h2>
-      <div class="small">Inte individuell produktivitet – bara signal om flaskhals.</div>
-      <div class="kpiRow" style="margin-top:10px;">
-        <div class="kpi">
-          <div class="v" id="kpiOpenTasks">—</div>
-          <div class="l">Öppna uppgifter (team)</div>
-        </div>
-        <div class="kpi">
-          <div class="v" id="kpiOpenQuestions">—</div>
-          <div class="l">Öppna frågor (team)</div>
-        </div>
-        <div class="kpi">
-          <div class="v" id="kpiBottleneck">—</div>
-          <div class="l">Flaskhals-signal</div>
-        </div>
-      </div>
-      <p class="muted" id="bottleneckHint"></p>
-    </section>
-
-  </main>
-
-  <!-- AO-002 beroenden (LÅSTA): config måste laddas före app -->
-  <script src="../UI/UI-04-CONFIG.js"></script>
-  <script src="../UI/UI-03-APP.js"></script>
-
-  <script>
-    "use strict";
-
-    /* ===========================
-       Keys (READ-ONLY, befintliga)
-    ============================ */
-    const KEY_ASSIGNMENTS = "AO-020_ROLE_ASSIGNMENTS_V2";
-    const KEY_TASKS = "AO-014_TASKS_V1";
-    const KEY_QUESTIONS = "AO-012_QUESTIONS_V1";
-    const KEY_ANSWERS = "AO-013_ANSWERS_V1";
-    // Kvittens/ack varierar i era AO: vi läser inget här (fail-closed => 0)
-    // const KEY_ACK = "AO-0xx_DOC_ACK_V1";
-
-    /* ===========================
-       DOM
-    ============================ */
-    const guardBox = document.getElementById("guardBox");
-    const whoPill = document.getElementById("whoPill");
-    const scopeLine = document.getElementById("scopeLine");
-    const logoutLink = document.getElementById("logoutLink");
-    const btnRefresh = document.getElementById("btnRefresh");
-
-    const kpiTeamSize = document.getElementById("kpiTeamSize");
-    const kpiInPhase = document.getElementById("kpiInPhase");
-    const kpiNeedsSupport = document.getElementById("kpiNeedsSupport");
-
-    const kpiOverdue = document.getElementById("kpiOverdue");
-    const kpiUnanswered = document.getElementById("kpiUnanswered");
-    const kpiMissingAck = document.getElementById("kpiMissingAck");
-
-    const needsTbody = document.getElementById("needsTbody");
-    const okTbody = document.getElementById("okTbody");
-
-    const kpiOpenTasks = document.getElementById("kpiOpenTasks");
-    const kpiOpenQuestions = document.getElementById("kpiOpenQuestions");
-    const kpiBottleneck = document.getElementById("kpiBottleneck");
-    const bottleneckHint = document.getElementById("bottleneckHint");
-
-    /* ===========================
-       Helpers: fail-closed + XSS
-    ============================ */
-    function showGuard(msg){
-      guardBox.style.display = "block";
-      guardBox.textContent = String(msg || "");
-    }
-    function hideGuard(){
-      guardBox.style.display = "none";
-      guardBox.textContent = "";
-    }
-    function esc(v){
-      if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(v);
-      const s = String(v ?? "");
-      return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
-    }
-    function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
-    function readLSArray(key){
-      const raw = localStorage.getItem(key);
-      const data = safeJsonParse(raw || "");
-      return Array.isArray(data) ? data : [];
-    }
-
-    /* ===========================
-       Auth (AO-002)
-    ============================ */
-    function mustAuthOrStop(){
-      if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-        showGuard("Systemfel: HRApp saknas. (UI-03-APP.js)");
-        return null;
-      }
-      if (!window.HR_CONFIG || !window.HR_CONFIG.ROLES) {
-        showGuard("Systemfel: HR_CONFIG saknas. (UI-04-CONFIG.js)");
-        return null;
-      }
-
-      // MANAGER-only sida
-      const sess = window.HRApp.requireAuth({ allowRoles: [ window.HR_CONFIG.ROLES.MANAGER ] });
-      if (!sess) return null;
-
-      const auth = window.HRApp.getAuth(sess);
-      if (!auth || auth.isAuthed !== true) {
-        showGuard("Fail-closed: saknar giltig session. Logga in igen.");
-        return null;
-      }
-
-      const empNo = String(auth.empNo ?? "").trim();
-      const scopeId = String(auth.scopeId ?? "").trim();
-
-      whoPill.textContent = empNo ? (`${empNo} • MANAGER`) : "MANAGER";
-      scopeLine.textContent = scopeId ? (`Scope: ${scopeId}`) : "Scope: —";
-
-      if (!scopeId) {
-        showGuard("Fail-closed: saknar scopeId i session. (Access/Assignments måste vara korrekt.)");
-        return null;
-      }
-
-      return auth;
-    }
-
-    /* ===========================
-       Data shaping (no details)
-    ============================ */
-
-    function normalizeRole(r){ return String(r || "").trim().toUpperCase(); }
-
-    function teamEmpNosInMyScope(scopeId){
-      // Vi tar EMPLOYEE i exakt scope (v1). Subtree kan komma senare.
-      const rows = readLSArray(KEY_ASSIGNMENTS);
-      const mine = String(scopeId || "").trim();
-      if (!mine) return [];
-
-      const out = [];
-      for (const row of rows){
-        const empNo = String(row?.empNo ?? "").trim();
-        const role = normalizeRole(row?.role ?? row?.roleId ?? "");
-        const sc = String(row?.scopeId ?? "").trim();
-        if (!empNo || !role || !sc) continue;
-        if (sc !== mine) continue;
-        if (role !== "EMPLOYEE") continue;
-        out.push(empNo);
-      }
-      // dedupe
-      return Array.from(new Set(out));
-    }
-
-    function isDoneTask(t){
-      const s = String(t?.status ?? t?.state ?? "").toLowerCase();
-      if (t?.done === true || t?.isDone === true) return true;
-      return (s === "done" || s === "klar" || s === "completed" || s === "complete");
-    }
-
-    function parseDateMs(v){
-      if (!v) return null;
-      if (typeof v === "number" && isFinite(v)) return v;
-      if (typeof v === "string"){
-        // support ISO date or ISO datetime
-        if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return new Date(v + "T12:00:00").getTime();
-        const d = new Date(v);
-        if (!isNaN(d.getTime())) return d.getTime();
-      }
-      return null;
-    }
-
-    function taskScopeOk(t, myScopeId){
-      const sc = String(t?.scopeId ?? "").trim();
-      const mine = String(myScopeId ?? "").trim();
-      if (!sc || !mine) return false;
-      // v1: exakt match (fail-closed, inget subtree-läckage)
-      if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function") {
-        return window.HRApp.sameOrMissingScope(sc, mine);
-      }
-      return sc === mine;
-    }
-
-    function getAssignedToEmpNo(t){
-      const a = t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
-      if (a == null) return null;
-      if (typeof a === "string" || typeof a === "number") return String(a).trim();
-      return null;
-    }
-
-    function isAssignedToTeamMember(t, teamSet){
-      const a = t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
-      if (a == null) return false;
-
-      if (typeof a === "string" || typeof a === "number"){
-        const s = String(a).trim();
-        if (s === "ALL" || s === "*") return true; // team-wide
-        return teamSet.has(s);
-      }
-
-      if (Array.isArray(a)){
-        return a.some(x => teamSet.has(String(x).trim()));
-      }
-
-      return false;
-    }
-
-    function isOverdueTask(t, nowMs){
-      if (isDoneTask(t)) return false;
-      const due = parseDateMs(t?.deadline ?? t?.dueDate ?? t?.endDate ?? t?.until ?? null);
-      if (!due) return false; // fail-closed: utan deadline => inte “försenad”
-      return due < nowMs;
-    }
-
-    function normalizeQuestionId(q, idx){
-      const raw = q?.id ?? q?.questionId ?? q?.uuid ?? ("q_" + idx);
-      return String(raw);
-    }
-
-    function questionScopeOk(q, myScopeId){
-      const sc = String(q?.scopeId ?? "").trim();
-      const mine = String(myScopeId ?? "").trim();
-      if (!sc || !mine) return false;
-      if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function") {
-        return window.HRApp.sameOrMissingScope(sc, mine);
-      }
-      return sc === mine;
-    }
-
-    function questionTargetEmpNo(q){
-      // vanligt mönster i era filer: toEmpNo / targetEmpNo / empNo
-      const v = q?.toEmpNo ?? q?.targetEmpNo ?? q?.empNo ?? q?.assignedTo ?? null;
-      if (v == null) return null;
-      if (typeof v === "string" || typeof v === "number") return String(v).trim();
-      return null;
-    }
-
-    function buildAnswersIndex(){
-      const answers = readLSArray(KEY_ANSWERS);
-      const idx = new Map(); // key: questionId|empNo -> true
-      for (const a of answers){
-        const qid = String(a?.questionId ?? a?.qId ?? a?.qid ?? "").trim();
-        const empNo = String(a?.empNo ?? a?.fromEmpNo ?? a?.employeeNo ?? "").trim();
-        if (!qid || !empNo) continue;
-        idx.set(qid + "|" + empNo, true);
-      }
-      return idx;
-    }
-
-    /* ===========================
-       Render
-    ============================ */
-    function setText(el, v){
-      if (!el) return;
-      el.textContent = String(v ?? "");
-    }
-
-    function clearTbody(tbody){
-      if (!tbody) return;
-      tbody.innerHTML = "";
-    }
-
-    function addRow(tbody, empNo, signalLabel, openCount, badgeClass){
-      const tr = document.createElement("tr");
-
-      const td1 = document.createElement("td");
-      td1.textContent = String(empNo || "—");
-
-      const td2 = document.createElement("td");
-      const span = document.createElement("span");
-      span.className = "badge " + (badgeClass || "");
-      span.textContent = String(signalLabel || "—");
-      td2.appendChild(span);
-
-      const td3 = document.createElement("td");
-      td3.className = "right";
-      td3.textContent = String(openCount ?? "—");
-
-      tr.appendChild(td1);
-      tr.appendChild(td2);
-      tr.appendChild(td3);
-      tbody.appendChild(tr);
-    }
-
-    function render(auth){
-      hideGuard();
-
-      const myScopeId = String(auth.scopeId ?? "").trim();
-      if (!myScopeId) {
-        showGuard("Fail-closed: saknar scopeId i session.");
-        return;
-      }
-
-      // Team
-      const team = teamEmpNosInMyScope(myScopeId);
-      const teamSet = new Set(team);
-
-      // Load data (read-only)
-      const now = Date.now();
-      const tasks = readLSArray(KEY_TASKS).filter(t => taskScopeOk(t, myScopeId) && isAssignedToTeamMember(t, teamSet));
-      const questions = readLSArray(KEY_QUESTIONS).filter(q => questionScopeOk(q, myScopeId));
-      const ansIndex = buildAnswersIndex();
-
-      // Per-emp metrics
-      const per = new Map(); // empNo -> { openTasks, overdueTasks, unansweredQuestions }
-      function ensure(emp){
-        const k = String(emp || "").trim();
-        if (!k) return null;
-        if (!per.has(k)) per.set(k, { openTasks:0, overdueTasks:0, unansweredQuestions:0 });
-        return per.get(k);
-      }
-
-      // Tasks per emp (ignore titles)
-      for (const t of tasks){
-        // if assigned ALL => count as team load, not per-person
-        const a = t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
-        const allLike = (typeof a === "string" || typeof a === "number") ? (String(a).trim() === "ALL" || String(a).trim() === "*") : false;
-        if (allLike) continue;
-
-        const emp = getAssignedToEmpNo(t);
-        if (!emp || !teamSet.has(emp)) continue;
-
-        const m = ensure(emp);
-        if (!m) continue;
-
-        if (!isDoneTask(t)) m.openTasks += 1;
-        if (isOverdueTask(t, now)) m.overdueTasks += 1;
-      }
-
-      // Questions per emp: obesvarad om det finns en fråga till emp i scope och inget answer matchar
-      questions.forEach((q, i) => {
-        const target = questionTargetEmpNo(q);
-        if (!target || !teamSet.has(target)) return;
-        const qid = normalizeQuestionId(q, i);
-        const m = ensure(target);
-        if (!m) return;
-
-        const hasAnswer = ansIndex.get(qid + "|" + target) === true;
-        if (!hasAnswer) m.unansweredQuestions += 1;
-      });
-
-      // Summaries
-      const teamSize = team.length;
-      let needsSupportCount = 0;
-      let inPhaseCount = 0;
-
-      let totalOverdue = 0;
-      let totalUnanswered = 0;
-      let totalOpenTasks = 0;
-
-      // needs support list
-      const needs = [];
-      const oks = [];
-
-      for (const emp of team){
-        const m = per.get(emp) || { openTasks:0, overdueTasks:0, unansweredQuestions:0 };
-        totalOverdue += m.overdueTasks;
-        totalUnanswered += m.unansweredQuestions;
-        totalOpenTasks += m.openTasks;
-
-        const hasDeviation = (m.overdueTasks > 0) || (m.unansweredQuestions > 0);
-        const open = m.openTasks + m.unansweredQuestions; // enkel “öppna”-siffra
-        if (hasDeviation){
-          needsSupportCount += 1;
-
-          // Signal prio: overdue > unanswered
-          let signal = "Behöver stöd";
-          let badge = "bad";
-          if (m.overdueTasks > 0) { signal = "Försenad uppgift"; badge = "bad"; }
-          else if (m.unansweredQuestions > 0) { signal = "Obesvarad fråga"; badge = "warn"; }
-
-          needs.push({ empNo: emp, signal, open, badge });
-        } else {
-          inPhaseCount += 1;
-          oks.push({ empNo: emp, open, badge: "ok" });
-        }
-      }
-
-      // Team-open questions = obesvarade (scope)
-      const openQuestionsTeam = totalUnanswered;
-
-      // Bottleneck signal (enkel, transparent)
-      let bottleneck = "Lugn";
-      let hint = "Inga tydliga avvikelser just nu.";
-      if (teamSize >= 1) {
-        const ratioNeeds = teamSize ? (needsSupportCount / teamSize) : 0;
-        if (totalOverdue >= 3 || ratioNeeds >= 0.35) {
-          bottleneck = "Hög";
-          hint = "Många avvikelser samtidigt. Prioritera stöd/omfördelning.";
-        } else if (totalOverdue >= 1 || ratioNeeds >= 0.15 || openQuestionsTeam >= 3) {
-          bottleneck = "Mellan";
-          hint = "Viss friktion. Kolla om något blockerar eller behöver beslut.";
-        }
-      }
-
-      // KPIs
-      setText(kpiTeamSize, teamSize);
-      setText(kpiInPhase, inPhaseCount);
-      setText(kpiNeedsSupport, needsSupportCount);
-
-      setText(kpiOverdue, totalOverdue);
-      setText(kpiUnanswered, totalUnanswered);
-      setText(kpiMissingAck, 0); // v1: saknar ack-data => 0 (fail-closed, inga antaganden)
-
-      setText(kpiOpenTasks, totalOpenTasks);
-      setText(kpiOpenQuestions, openQuestionsTeam);
-      setText(kpiBottleneck, bottleneck);
-      setText(bottleneckHint, hint);
-
-      // Tables
-      clearTbody(needsTbody);
-      clearTbody(okTbody);
-
-      if (needs.length === 0){
-        const tr = document.createElement("tr");
-        const td = document.createElement("td");
-        td.colSpan = 3;
-        td.className = "small";
-        td.textContent = "Inga avvikelser i teamet just nu.";
-        tr.appendChild(td);
-        needsTbody.appendChild(tr);
-      } else {
-        needs
-          .sort((a,b) => (b.open - a.open))
-          .forEach(row => addRow(needsTbody, row.empNo, row.signal, row.open, row.badge));
-      }
-
-      if (oks.length === 0){
-        const tr = document.createElement("tr");
-        const td = document.createElement("td");
-        td.colSpan = 3;
-        td.className = "small";
-        td.textContent = "Ingen i fas-lista (antingen tomt team eller avvikelser finns).";
-        tr.appendChild(td);
-        okTbody.appendChild(tr);
-      } else {
-        oks
-          .sort((a,b) => String(a.empNo).localeCompare(String(b.empNo)))
-          .forEach(row => addRow(okTbody, row.empNo, "I fas", row.open, row.badge));
-      }
-    }
-
-    /* ===========================
-       Events
-    ============================ */
-    logoutLink.addEventListener("click", (e) => {
-      e.preventDefault();
-      if (window.HRApp && typeof window.HRApp.logout === "function") window.HRApp.logout();
-      else window.location.href = "../UI/UI-01-SKELETON.html?err=logout";
-    });
-
-    btnRefresh.addEventListener("click", () => {
-      if (window.__AUTH__) render(window.__AUTH__);
-    });
-
-    /* ===========================
-       Init
-    ============================ */
-    (function init(){
-      const auth = mustAuthOrStop();
-      if (!auth) return;
-      window.__AUTH__ = auth;
-      render(auth);
-    })();
-  </script>
-</body>
-</html>
+- Inga storage-keys/datamodell utan AO (AO-002: skriver inget)
+- Fail-closed (okänd roll = nekad)
+- Public route ska vara explicit (endast allowlist)
+- Authed rollers får inte ha /UI/ som route-prefix
+Senaste sanning: 2026-01-01 (AO-002 v1.3 PATCH: MANAGER till egen /manager/)
+============================================================ */
+
+(function () {
+  "use strict";
+
+  // -------------------------
+  // Base-path (GitHub Pages)
+  // -------------------------
+  // Repo heter "HR-System" => GitHub Pages kör under /HR-System
+  const BASE_PATH = "/HR-System";
+
+  // -------------------------
+  // Roles (LÅST)
+  // -------------------------
+  const ROLES = Object.freeze({
+    SYSTEM_ADMIN: "SYSTEM_ADMIN",
+    ADMIN: "ADMIN",
+    MANAGER: "MANAGER",
+    EMPLOYEE: "EMPLOYEE",
+  });
+
+  // -------------------------
+  // Public routes (explicit allowlist)
+  // -------------------------
+  const PUBLIC_ROUTES = Object.freeze([
+    "/UI/UI-01-SKELETON.html",
+    "/index.html",
+  ]);
+
+  // -------------------------
+  // Default route per role
+  // -------------------------
+  const DEFAULT_ROUTE_BY_ROLE = Object.freeze({
+    [ROLES.SYSTEM_ADMIN]: "/system/dashboard.html",
+    [ROLES.ADMIN]: "/admin/home.html",
+
+    // PATCH: MANAGER ska inte blandas med admin.
+    [ROLES.MANAGER]: "/manager/overview.html",
+
+    [ROLES.EMPLOYEE]: "/employee/home.html",
+  });
+
+  // -------------------------
+  // Allowed routes per role (PREFIXES)
+  // -------------------------
+  const ROUTES_BY_ROLE = Object.freeze({
+    [ROLES.SYSTEM_ADMIN]: Object.freeze([
+      "/system/",
+    ]),
+    [ROLES.ADMIN]: Object.freeze([
+      "/admin/",
+    ]),
+
+    // PATCH: MANAGER får egen yta.
+    [ROLES.MANAGER]: Object.freeze([
+      "/manager/",
+    ]),
+
+    [ROLES.EMPLOYEE]: Object.freeze([
+      "/employee/",
+    ]),
+  });
+
+  // -------------------------
+  // Permissions (minimal nivå 1)
+  // -------------------------
+  const PERMISSIONS_BY_ROLE = Object.freeze({
+    [ROLES.SYSTEM_ADMIN]: Object.freeze([
+      "SYSTEM_VIEW_DASHBOARD",
+      "SYSTEM_MANAGE_USERS",
+      "SYSTEM_MANAGE_ROLES",
+      "SYSTEM_MANAGE_MODULES",
+      "SYSTEM_VIEW_AUDIT",
+      "SYSTEM_VIEW_HEALTH",
+    ]),
+    [ROLES.ADMIN]: Object.freeze([
+      "ADMIN_VIEW_HOME",
+      "ADMIN_VIEW_QUESTIONS",
+      "ADMIN_MANAGE_ACCESS",
+      "ADMIN_MANAGE_ORG",
+      "ADMIN_MANAGE_ROLES",
+      "ADMIN_MANAGE_TASKS",
+      "ADMIN_MANAGE_QUESTIONS",
+      "ADMIN_VIEW_ANSWERS",
+      "ADMIN_VIEW_REPORTS",
+    ]),
+
+    // Manager ska se läge/avvikelser/beslut (utan detalj-övervakning)
+    [ROLES.MANAGER]: Object.freeze([
+      "MGR_VIEW_OVERVIEW",
+      "MGR_VIEW_DEVIATIONS",
+      "MGR_VIEW_TEAM_LOAD",
+      "MGR_DECIDE_PRIORITIZE",
+    ]),
+
+    [ROLES.EMPLOYEE]: Object.freeze([
+      "EMP_VIEW_HOME",
+      "EMP_UPDATE_TASKS",
+      "EMP_VIEW_QUESTIONS",
+      "EMP_SUBMIT_ANSWERS",
+      "EMP_VIEW_PROFILE",
+    ]),
+  });
+
+  // -------------------------
+  // Debug
+  // -------------------------
+  const DEBUG = false;
+
+  window.HR_CONFIG = Object.freeze({
+    DEBUG,
+    BASE_PATH,
+
+    ROLES,
+    PUBLIC_ROUTES,
+    DEFAULT_ROUTE_BY_ROLE,
+    ROUTES_BY_ROLE,
+    PERMISSIONS_BY_ROLE,
+  });
+})();
