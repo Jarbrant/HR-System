@@ -1,5 +1,5 @@
 /* ============================================================
-AO-002 v1.4 (PATCH) | FILE: UI/UI-04-CONFIG.js
+AO-002 v1.3 (PATCH v1.4) | FILE: UI/UI-04-CONFIG.js
 Projekt: HR-System
 Syfte: Central config för RBAC + route-tillgång + default routing (config-driven)
 Nivå: UI-only (GitHub Pages) | localStorage-first
@@ -9,10 +9,8 @@ Policy (LÅST):
 - Fail-closed (okänd roll = nekad)
 - Public route ska vara explicit (endast allowlist)
 - Authed rollers får inte ha /UI/ som route-prefix
-Patch (v1.4):
-- MANAGER får egen yta: /manager/
-- MANAGER default-route: /manager/overview.html
-Senaste sanning: 2026-01-01
+PATCH v1.4 (RBAC):
+- MANAGER får /manager/ (ny vy) och default-route till /manager/overview.html
 ============================================================ */
 
 (function () {
@@ -21,7 +19,6 @@ Senaste sanning: 2026-01-01
   // -------------------------
   // Base-path (GitHub Pages)
   // -------------------------
-  // Repo heter "HR-System" => GitHub Pages kör under /HR-System
   const BASE_PATH = "/HR-System";
 
   // -------------------------
@@ -48,7 +45,10 @@ Senaste sanning: 2026-01-01
   const DEFAULT_ROUTE_BY_ROLE = Object.freeze({
     [ROLES.SYSTEM_ADMIN]: "/system/dashboard.html",
     [ROLES.ADMIN]: "/admin/home.html",
+
+    // PATCH: Manager ska landa på manager-vy (inte admin)
     [ROLES.MANAGER]: "/manager/overview.html",
+
     [ROLES.EMPLOYEE]: "/employee/home.html",
   });
 
@@ -63,7 +63,11 @@ Senaste sanning: 2026-01-01
       "/admin/",
     ]),
     [ROLES.MANAGER]: Object.freeze([
+      // PATCH: Manager får egen vy
       "/manager/",
+      // Behåll admin om du vill att Manager även ska kunna gå in i admin-sidor
+      // (om du INTE vill blanda, ta bort "/admin/" raden)
+      "/admin/",
     ]),
     [ROLES.EMPLOYEE]: Object.freeze([
       "/employee/",
@@ -73,7 +77,6 @@ Senaste sanning: 2026-01-01
   // -------------------------
   // Permissions (minimal nivå 1)
   // -------------------------
-  // Not: permissions är separata från routes. Routes stoppar “var man kan vara”.
   const PERMISSIONS_BY_ROLE = Object.freeze({
     [ROLES.SYSTEM_ADMIN]: Object.freeze([
       "SYSTEM_VIEW_DASHBOARD",
@@ -95,11 +98,15 @@ Senaste sanning: 2026-01-01
       "ADMIN_VIEW_REPORTS",
     ]),
     [ROLES.MANAGER]: Object.freeze([
-      // Manager-rollen: översikt + beslutsförmågor (utan admin-ytan)
+      // Manager-översikt (ny)
       "MANAGER_VIEW_OVERVIEW",
-      "MANAGER_VIEW_DEVIATIONS",
-      "MANAGER_VIEW_LOAD",
-      "MANAGER_MANAGE_PRIORITIES",
+
+      // Om ni återanvänder admin-funktioner för manager i v1:
+      "ADMIN_VIEW_HOME",
+      "ADMIN_MANAGE_TASKS",
+      "ADMIN_VIEW_QUESTIONS",
+      "ADMIN_VIEW_ANSWERS",
+      "ADMIN_VIEW_REPORTS",
     ]),
     [ROLES.EMPLOYEE]: Object.freeze([
       "EMP_VIEW_HOME",
