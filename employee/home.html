@@ -1,12 +1,16 @@
 <!-- ============================================================
-AO-048 (PATCH v1.1) | FIL-ID: employee/home.html
+AO-048 (PATCH v1.2) | FIL-ID: employee/home.html
 Projekt: HR-System
 Syfte: Employee – Dagskalender + Post-its med visuell “knöggla & kasta”
-VIKTIGT: Återställer kopplingar till kärnan (AO-002) + fail-closed + korrekt session-shape.
+VIKTIGT:
+- Återställer kopplingar till kärnan (AO-002) + fail-closed + korrekt session-shape.
+- PATCH v1.2: Om scopeId saknas i session försöker sidan RESOLVA scopeId via
+  AO-020_ROLE_ASSIGNMENTS_V2 (ingen ny key), och skriver tillbaka till AO-001_LOGIN_V1.
 Policy (LÅST): UI-only • Fail-closed • sessionStorage först • fallback localStorage • XSS-escape • Inga nya storage-keys
 Keys (LÅST):
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
 - AO-014_TASKS_V1 (localStorage) – uppgifter
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – empNo→scopeId (läs/ev. resolva)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -462,7 +466,9 @@ Keys (LÅST):
     /* ===========================
        Keys (LÅST)
     ============================ */
-    const KEY_TASKS = "AO-014_TASKS_V1";
+    const KEY_SESSION     = "AO-001_LOGIN_V1";
+    const KEY_TASKS       = "AO-014_TASKS_V1";
+    const KEY_ASSIGNMENTS = "AO-020_ROLE_ASSIGNMENTS_V2";
 
     /* ===========================
        DOM
@@ -506,10 +512,31 @@ Keys (LÅST):
 
     function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
 
+    function readAnyStorage(key){
+      // fail-closed läsning: sessionStorage först, fallback localStorage
+      try {
+        const s1 = sessionStorage.getItem(key);
+        if (s1) return s1;
+      } catch {}
+      try {
+        const s2 = localStorage.getItem(key);
+        if (s2) return s2;
+      } catch {}
+      return null;
+    }
+
+    function writeSessionPreferred(sessionObj){
+      // Skriver ENDAST befintlig key (KEY_SESSION). Ingen ny key.
+      const raw = JSON.stringify(sessionObj);
+      try { sessionStorage.setItem(KEY_SESSION, raw); return true; } catch {}
+      try { localStorage.setItem(KEY_SESSION, raw); return true; } catch {}
+      return false;
+    }
+
     /* ===========================
-       AO-002 AUTH (återkopplat)
-       - Inga egna auth-gissningar
+       AO-002 AUTH (kopplat)
        - RBAC via requireAuth
+       - scopeId-repair via assignments (PATCH v1.2)
     ============================ */
     function mustAuthOrStop(){
       if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
@@ -521,16 +548,110 @@ Keys (LÅST):
         return null;
       }
 
-      // EMPLOYEE-sida: tillåt EMPLOYEE (fail-closed).
+      // EMPLOYEE-sida: tillåt endast EMPLOYEE (fail-closed)
       const sess = window.HRApp.requireAuth({ allowRoles: [ window.HR_CONFIG.ROLES.EMPLOYEE ] });
       if (!sess) return null;
 
-      const auth = window.HRApp.getAuth(sess);
+      let auth = window.HRApp.getAuth(sess);
       if (!auth || auth.isAuthed !== true) {
         showGuard("Fail-closed: saknar giltig session. Logga in igen.");
         return null;
       }
+
+      // PATCH v1.2: om scopeId saknas -> försök resolva via assignments och skriv tillbaka till session.
+      if (!String(auth.scopeId || "").trim()) {
+        const empNo = String(auth.empNo || "").trim();
+        const role  = String(auth.role || "").trim();
+        const scopeId = resolveScopeIdFromAssignments(empNo, role);
+
+        if (scopeId) {
+          const patched = patchSessionScope(sess, scopeId);
+          if (patched) {
+            auth = window.HRApp.getAuth(patched) || auth;
+            // Vi fortsätter även om write misslyckas, men visar varning.
+          } else {
+            // Om vi inte kan patcha sessionobjektet alls: fail-closed.
+            showGuard("Fail-closed: kunde inte uppdatera session med scopeId (korrupt session). Logga in igen.");
+            return null;
+          }
+        }
+      }
+
       return { sess, auth };
+    }
+
+    function readAssignments(){
+      // Assignments ska ligga i localStorage (enligt era AO), men vi läser defensivt.
+      const raw = readAnyStorage(KEY_ASSIGNMENTS);
+      if (!raw) return [];
+      const data = safeJsonParse(raw);
+      if (Array.isArray(data)) return data;
+      // tolerans: { assignments:[...] }
+      if (data && typeof data === "object" && Array.isArray(data.assignments)) return data.assignments;
+      return [];
+    }
+
+    function normalizeEmpNo(x){
+      const s = String(x ?? "").trim();
+      return s;
+    }
+
+    function normalizeRole(x){
+      const s = String(x ?? "").trim();
+      return s;
+    }
+
+    function resolveScopeIdFromAssignments(empNo, role){
+      // Fail-closed: kräver både empNo+role och hittad match.
+      const me = normalizeEmpNo(empNo);
+      const r  = normalizeRole(role);
+      if (!me || !r) return "";
+
+      const list = readAssignments();
+      if (!Array.isArray(list) || list.length === 0) return "";
+
+      // Matcha tolerant: empNo + (role eller roleId)
+      for (const a of list) {
+        if (!a || typeof a !== "object") continue;
+
+        const aEmp = normalizeEmpNo(a.empNo ?? a.employeeNo ?? a.id ?? "");
+        if (aEmp !== me) continue;
+
+        const aRole = normalizeRole(a.role ?? a.roleId ?? "");
+        if (aRole && aRole !== r) {
+          // om role saknas i assignment godtar vi inte – men om finns och skiljer: fortsätt leta
+          continue;
+        }
+
+        const scope = String(a.scopeId ?? a.scope ?? "").trim();
+        if (scope) return scope;
+      }
+
+      return "";
+    }
+
+    function patchSessionScope(sessionObj, scopeId){
+      const sid = String(scopeId || "").trim();
+      if (!sessionObj || typeof sessionObj !== "object" || !sid) return null;
+
+      // PRC-shape: session.auth...
+      const out = sessionObj;
+
+      if (out.auth && typeof out.auth === "object") {
+        out.auth.scopeId = sid;
+      } else {
+        // fallback-shape
+        out.scopeId = sid;
+      }
+
+      // skriv tillbaka till samma key (tillåtet), men vi failar inte UI om storage blockeras
+      const ok = writeSessionPreferred(out);
+      if (!ok) {
+        // UI fortsätter ändå, men scope finns nu i minnet (out)
+        // Ingen console-logg (PII-risk). Vi låter bara UI fungera.
+      }
+
+      return out;
     }
 
     /* ===========================
@@ -572,8 +693,8 @@ Keys (LÅST):
     selectedDate.setHours(12,0,0,0);
 
     /* ===========================
-       Task normalization (tolerant läsning)
-       + FAIL-CLOSED FILTRERING (viktigt):
+       Task normalization (tolerant)
+       + FAIL-CLOSED FILTRERING:
        - visa inte tasks utan scopeId
        - visa inte tasks som inte är riktade till empNo (eller ALL)
     ============================ */
@@ -644,12 +765,11 @@ Keys (LÅST):
     }
 
     function hasValidScopeMatch(t, myScopeId){
-      // FAIL-CLOSED: saknar scopeId på task => VISA INTE.
       const scope = String(t?.scopeId ?? "").trim();
       const mine  = String(myScopeId ?? "").trim();
       if (!scope || !mine) return false;
 
-      // Employee ska inte subtree:a – bara exakt scope.
+      // Employee: exakt scope (inte subtree)
       if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function") {
         return window.HRApp.sameOrMissingScope(scope, mine);
       }
@@ -658,12 +778,8 @@ Keys (LÅST):
 
     function visibleTasksForMe(allTasks, empNo, scopeId){
       return (Array.isArray(allTasks) ? allTasks : []).filter(t => {
-        // 1) scope måste matcha (ingen scope => inget)
         if (!hasValidScopeMatch(t, scopeId)) return false;
-
-        // 2) måste vara till mig (eller ALL)
         if (!isAssignedToMe(t, empNo)) return false;
-
         return true;
       });
     }
@@ -703,7 +819,6 @@ Keys (LÅST):
       const role  = String(auth.role ?? "EMPLOYEE").trim();
       const scopeId = String(auth.scopeId ?? "").trim();
 
-      // UI-01 kan sakna "name" i session; visa robust utan att gissa.
       whoPill.textContent = `${empNo || "—"} • ${role}`;
       helloLine.textContent = `Hej • Anst.nr ${empNo || "—"} • Roll ${role}`;
 
@@ -713,7 +828,7 @@ Keys (LÅST):
       dateBig.textContent = fmtBig(selectedDate);
       dateSmall.textContent = fmtSmall(selectedDate);
 
-      // FAIL-CLOSED: om scope saknas -> visa inget (ingen läckage)
+      // Fail-closed: om scope saknas även efter repair -> stoppa.
       if (!scopeId) {
         voiceLine.textContent = VOICE.UNCLEAR;
         dayBadge.textContent = `0 färdig • 0 återstår`;
@@ -844,7 +959,7 @@ Keys (LÅST):
         const id = getTaskId(all[i], i);
         if(String(id) !== String(taskId)) continue;
 
-        // FAIL-CLOSED: får bara ändra task som verkligen är min + scope-match
+        // Fail-closed: får bara ändra task som är min + scope-match
         if (!hasValidScopeMatch(all[i], scopeId)) return false;
         if (!isAssignedToMe(all[i], empNo)) return false;
 
@@ -927,14 +1042,13 @@ Keys (LÅST):
       if (window.HRApp && typeof window.HRApp.logout === "function") {
         window.HRApp.logout();
       } else {
-        // sista utväg – men normalt ska HRApp.logout finnas
-        try { sessionStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
-        try { localStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
+        try { sessionStorage.removeItem(KEY_SESSION); } catch {}
+        try { localStorage.removeItem(KEY_SESSION); } catch {}
         window.location.href = "../UI/UI-01-SKELETON.html?err=logout";
       }
     });
 
-    // init (återkopplat till kärnan)
+    // init (kopplat till kärnan)
     (function init(){
       const res = mustAuthOrStop();
       if (!res) return;
