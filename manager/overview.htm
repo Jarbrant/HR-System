@@ -1,1 +1,1034 @@
+<!-- ============================================================
+AO-049 (NY FIL) | FIL-ID: manager/overview.html
+Projekt: HR-System
+Syfte: MANAGER – Overview (kärna) – läge & avvikelser (inte detaljer)
+Nivå: UI-only (GitHub Pages) | localStorage-first
+Policy (LÅST):
+- Ingen backend
+- Fail-closed guards (sessionStorage → localStorage via AO-002)
+- Ingen känslig persondata (endast empNo)
+- Inga nya storage-keys/datamodell (läser bara befintliga nycklar)
+- XSS-escape på all rendering från storage
+VIKTIGT (KRÄVER CONFIG-CHANGE):
+- UI/UI-04-CONFIG.js måste lägga till "/manager/" i ROUTES_BY_ROLE för MANAGER
+  annars blockeras sidan av AO-002 RBAC.
+Keys (LÅST, läs):
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-020_ORG_V1 (localStorage) – org-träd
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – empNo→scopeId
+- AO-014_TASKS_V1 (localStorage) – uppgifter
+- AO-012_QUESTIONS_V1 (localStorage) – frågor (om finns)
+- AO-013_ANSWERS_V1 (localStorage) – svar (om finns)
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Manager Overview</title>
+  <meta name="description" content="Manager-översikt: läge, avvikelser och beslut – utan detaljövervakning." />
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    :root{
+      --bg:#f6f7fb;
+      --card:#ffffff;
+      --ink:#0f172a;
+      --muted:#64748b;
+      --line:rgba(15,23,42,.12);
+      --warn:#b45309;
+      --bad:#b91c1c;
+      --ok:#065f46;
+    }
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--ink);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .topbar{
+      position: sticky;
+      top:0;
+      z-index:10;
+      background: rgba(246,247,251,.92);
+      backdrop-filter: blur(10px);
+      border-bottom:1px solid var(--line);
+    }
+    .nav{
+      max-width:1100px;
+      margin:0 auto;
+      padding:10px 16px;
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .nav a{
+      text-decoration:none;
+      color:var(--ink);
+      font-size:14px;
+      padding:8px 10px;
+      border-radius:12px;
+      border:1px solid transparent;
+    }
+    .nav a:hover{ border-color:var(--line); background:#fff; }
+    .nav .spacer{ flex:1; }
+    .pill{
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid var(--line);
+      background:#fff;
+      padding:6px 10px;
+      border-radius:999px;
+      white-space:nowrap;
+    }
+
+    .wrap{
+      max-width:1100px;
+      margin:16px auto 28px;
+      padding:0 16px;
+    }
+    .guard{
+      border:1px solid rgba(239,68,68,.25);
+      background:rgba(254,242,242,.92);
+      color:#7f1d1d;
+      padding:12px 14px;
+      border-radius:14px;
+      margin:14px 0;
+      display:none;
+    }
+    .header{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:14px;
+      margin-bottom:14px;
+    }
+    .header h1{ margin:0 0 6px; font-size:16px; font-weight:900; }
+    .header p{ margin:0; font-size:13px; color:var(--muted); line-height:1.4; }
+
+    .grid{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:14px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .grid{ grid-template-columns: 1fr; }
+    }
+
+    .card{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:18px;
+      overflow:hidden;
+    }
+    .cardHead{
+      padding:12px 14px;
+      border-bottom:1px solid var(--line);
+      display:flex;
+      align-items:baseline;
+      justify-content:space-between;
+      gap:10px;
+      background: linear-gradient(180deg, #fff, #fafafa);
+    }
+    .cardHead h2{ margin:0; font-size:14px; font-weight:950; }
+    .cardHead .meta{ font-size:12px; color:var(--muted); }
+    .cardBody{ padding:14px; }
+
+    .kpis{
+      display:grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap:10px;
+    }
+    @media (max-width: 980px){
+      .kpis{ grid-template-columns: 1fr; }
+    }
+    .kpi{
+      border:1px solid var(--line);
+      border-radius:16px;
+      padding:12px;
+      background: rgba(255,255,255,.95);
+    }
+    .kpi .t{ font-size:12px; color:var(--muted); }
+    .kpi .v{ margin-top:4px; font-size:18px; font-weight:950; }
+    .kpi .s{ margin-top:6px; font-size:12px; color:var(--muted); line-height:1.35; }
+
+    .list{
+      list-style:none;
+      margin:0;
+      padding:0;
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+    }
+    .item{
+      border:1px solid rgba(15,23,42,.10);
+      background: rgba(255,255,255,.95);
+      border-radius:14px;
+      padding:10px 10px;
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:10px;
+    }
+    .item .left{ min-width:0; }
+    .item .name{ font-size:13px; font-weight:900; }
+    .item .desc{ font-size:12px; color:var(--muted); margin-top:2px; line-height:1.35; }
+    .badge{
+      font-size:12px;
+      border-radius:999px;
+      padding:6px 10px;
+      border:1px solid rgba(15,23,42,.10);
+      background: rgba(236,254,255,.70);
+      white-space:nowrap;
+      flex:0 0 auto;
+    }
+    .badge.ok{ background: rgba(217,247,214,.90); border-color: rgba(16,185,129,.25); color:var(--ok); }
+    .badge.warn{ background: rgba(255,237,213,.95); border-color: rgba(245,158,11,.25); color:var(--warn); }
+    .badge.bad{ background: rgba(254,226,226,.95); border-color: rgba(239,68,68,.25); color:var(--bad); }
+
+    .actions{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+    .btn{
+      border:1px solid var(--line);
+      background:#fff;
+      border-radius:12px;
+      padding:8px 10px;
+      font-size:13px;
+      cursor:pointer;
+      user-select:none;
+      text-decoration:none;
+      color:var(--ink);
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+    }
+    .btn:hover{ background:#fafafa; }
+    .btn.secondary{ background: rgba(15,23,42,.03); }
+    .smallMuted{ font-size:12px; color:var(--muted); line-height:1.35; }
+
+    .quiet{
+      border:1px dashed rgba(15,23,42,.20);
+      background: rgba(15,23,42,.02);
+      border-radius:14px;
+      padding:10px 12px;
+      color:var(--muted);
+      font-size:12px;
+      line-height:1.35;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="topbar">
+    <div class="nav" aria-label="Primär navigation">
+      <a href="./overview.html" aria-current="page">Översikt</a>
+      <!-- Manager har ofta sina operativa sidor under /admin/ i nuvarande suggests -->
+      <a href="../admin/home.html">Admin Hem</a>
+      <a href="../admin/tasks.html">Uppgifter</a>
+      <a href="../admin/questions.html">Frågor</a>
+      <a href="../admin/answers.html">Svar</a>
+      <div class="spacer"></div>
+      <span class="pill" id="whoPill">—</span>
+      <a href="#" id="logoutLink">Logga ut</a>
+    </div>
+  </div>
+
+  <main class="wrap">
+    <div class="guard" id="guardBox" role="alert"></div>
+
+    <section class="header">
+      <h1>Manager – läge & avvikelser</h1>
+      <p id="subLine">Tyst när allt är normalt. Visar bara sådant som kräver beslut eller stöd.</p>
+      <div class="actions" style="margin-top:12px;">
+        <a class="btn" href="../admin/tasks.html">Gå till uppgifter</a>
+        <a class="btn" href="../admin/questions.html">Gå till frågor</a>
+        <a class="btn secondary" href="../report.html">Rapportera fel</a>
+      </div>
+      <p class="smallMuted" style="margin-top:10px;">
+        Den här vyn visar <strong>inte</strong> minut-för-minut, och <strong>inte</strong> normalitet. Endast avvikelser.
+      </p>
+    </section>
+
+    <section class="grid" aria-label="Manager-översikt">
+      <section class="card" aria-label="Läge">
+        <div class="cardHead">
+          <h2>Läge</h2>
+          <div class="meta" id="teamMeta">—</div>
+        </div>
+        <div class="cardBody">
+          <div class="kpis" aria-label="Sammanfattning">
+            <div class="kpi">
+              <div class="t">I fas</div>
+              <div class="v" id="kpiInPhase">—</div>
+              <div class="s">Har inga avvikelser (inga förseningar / inga gamla obesvarade).</div>
+            </div>
+            <div class="kpi">
+              <div class="t">Har något öppet</div>
+              <div class="v" id="kpiOpen">—</div>
+              <div class="s">Har öppna uppgifter eller obesvarade frågor.</div>
+            </div>
+            <div class="kpi">
+              <div class="t">Behöver stöd</div>
+              <div class="v" id="kpiNeedsHelp">—</div>
+              <div class="s">Har avvikelse som kräver beslut / omfördelning.</div>
+            </div>
+          </div>
+
+          <div style="margin-top:12px;" class="quiet" id="quietHint">
+            Om allt är normalt kan listorna vara tomma. Det är meningen.
+          </div>
+        </div>
+      </section>
+
+      <section class="card" aria-label="Avvikelser">
+        <div class="cardHead">
+          <h2>Avvikelser</h2>
+          <div class="meta">endast det som sticker ut</div>
+        </div>
+        <div class="cardBody">
+          <ul class="list" id="deviationList"></ul>
+        </div>
+      </section>
+
+      <section class="card" aria-label="Arbetsbelastning på gruppnivå">
+        <div class="cardHead">
+          <h2>Arbetsbelastning (grupp)</h2>
+          <div class="meta">inte individuell produktivitet</div>
+        </div>
+        <div class="cardBody">
+          <ul class="list" id="workloadList"></ul>
+        </div>
+      </section>
+
+      <section class="card" aria-label="Kommunikationsbehov">
+        <div class="cardHead">
+          <h2>Kommunikationsbehov</h2>
+          <div class="meta">vem behöver svar / stöd</div>
+        </div>
+        <div class="cardBody">
+          <ul class="list" id="commList"></ul>
+        </div>
+      </section>
+
+      <section class="card" aria-label="Beslut och åtgärder">
+        <div class="cardHead">
+          <h2>Beslut som kräver dig</h2>
+          <div class="meta">godkänn / prioritera / omfördela</div>
+        </div>
+        <div class="cardBody">
+          <ul class="list" id="decisionList"></ul>
+          <div class="actions" style="margin-top:12px;">
+            <a class="btn" href="../admin/tasks.html">Omfördela uppgifter</a>
+            <a class="btn" href="../admin/questions.html">Skicka / följ upp frågor</a>
+            <a class="btn secondary" href="../admin/access.html">Kontrollera access</a>
+          </div>
+          <p class="smallMuted" style="margin-top:10px;">
+            Obs: själva ”prioritet/omfördelning” görs i era befintliga admin-sidor (för att inte skapa ny datamodell här).
+          </p>
+        </div>
+      </section>
+
+      <section class="card" aria-label="Systemstatus">
+        <div class="cardHead">
+          <h2>Systemstatus</h2>
+          <div class="meta">fail-closed</div>
+        </div>
+        <div class="cardBody">
+          <ul class="list" id="healthList"></ul>
+          <p class="smallMuted" style="margin-top:10px;">
+            Om org/assignments saknas eller är korrupt visar systemet inget. Det är ett skydd mot läckage.
+          </p>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <!-- AO-002 beroenden (LÅSTA): config måste laddas före app -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <script>
+  (function () {
+    "use strict";
+
+    // -----------------------------
+    // Keys (LÅST, bara läs)
+    // -----------------------------
+    const KEY_ORG         = "AO-020_ORG_V1";
+    const KEY_ASSIGNMENTS = "AO-020_ROLE_ASSIGNMENTS_V2";
+    const KEY_TASKS       = "AO-014_TASKS_V1";
+    const KEY_QUESTIONS   = "AO-012_QUESTIONS_V1";
+    const KEY_ANSWERS     = "AO-013_ANSWERS_V1";
+
+    // -----------------------------
+    // DOM
+    // -----------------------------
+    const guardBox = document.getElementById("guardBox");
+    const whoPill  = document.getElementById("whoPill");
+    const logoutLink = document.getElementById("logoutLink");
+
+    const teamMeta = document.getElementById("teamMeta");
+    const kpiInPhase = document.getElementById("kpiInPhase");
+    const kpiOpen = document.getElementById("kpiOpen");
+    const kpiNeedsHelp = document.getElementById("kpiNeedsHelp");
+
+    const deviationList = document.getElementById("deviationList");
+    const workloadList  = document.getElementById("workloadList");
+    const commList      = document.getElementById("commList");
+    const decisionList  = document.getElementById("decisionList");
+    const healthList    = document.getElementById("healthList");
+
+    function showGuard(msg){
+      if (!guardBox) return;
+      guardBox.style.display = "block";
+      guardBox.textContent = String(msg || "");
+    }
+    function hideGuard(){
+      if (!guardBox) return;
+      guardBox.style.display = "none";
+      guardBox.textContent = "";
+    }
+
+    function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
+
+    function escapeHtml(input){
+      if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(input);
+      const s = String(input ?? "");
+      return s
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
+    }
+
+    function readLSArray(key){
+      const raw = localStorage.getItem(key);
+      const data = safeJsonParse(raw || "");
+      return Array.isArray(data) ? data : [];
+    }
+
+    function readLSObject(key){
+      const raw = localStorage.getItem(key);
+      const data = safeJsonParse(raw || "");
+      return (data && typeof data === "object") ? data : null;
+    }
+
+    // -----------------------------
+    // Auth (AO-002)
+    // -----------------------------
+    function mustAuthOrStop(){
+      hideGuard();
+
+      if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+        showGuard("Systemfel: HRApp saknas. (UI-03-APP.js)");
+        return null;
+      }
+      if (!window.HR_CONFIG || !window.HR_CONFIG.ROLES) {
+        showGuard("Systemfel: HR_CONFIG saknas. (UI-04-CONFIG.js)");
+        return null;
+      }
+
+      // Tillåt MANAGER (och ADMIN kan få se denna vy om du vill felsöka)
+      const sess = window.HRApp.requireAuth({
+        allowRoles: [ window.HR_CONFIG.ROLES.MANAGER, window.HR_CONFIG.ROLES.ADMIN ]
+      });
+      if (!sess) return null;
+
+      const auth = window.HRApp.getAuth(sess);
+      if (!auth || auth.isAuthed !== true || !auth.role) {
+        showGuard("Fail-closed: saknar giltig session. Logga in igen.");
+        return null;
+      }
+
+      // Scope krävs för att filtrera (fail-closed)
+      const scopeId = String(auth.scopeId || "").trim();
+      if (!scopeId) {
+        showGuard("Fail-closed: saknar scopeId i session. (Access/Assignments måste vara korrekt.)");
+        return null;
+      }
+
+      // PII: visa endast empNo (om det finns)
+      const empNo = String(auth.empNo ?? "").trim();
+      whoPill.textContent = `${empNo || "—"} • ${escapeHtml(auth.role)}`;
+
+      return { sess, auth };
+    }
+
+    // -----------------------------
+    // Org & subtree
+    // -----------------------------
+    function buildOrgIndex(org){
+      // Förväntad minsta form: { nodes:[{id,parentId,...}], rootId? }
+      const nodes = Array.isArray(org?.nodes) ? org.nodes : null;
+      if (!nodes || nodes.length === 0) return null;
+
+      const byId = new Map();
+      for (const n of nodes){
+        const id = String(n?.id ?? "").trim();
+        if (!id) continue;
+        byId.set(id, {
+          id,
+          parentId: (n?.parentId == null ? null : String(n.parentId)),
+          label: String(n?.label ?? n?.name ?? id),
+        });
+      }
+      if (byId.size === 0) return null;
+      return { byId };
+    }
+
+    function isInSubtree(childId, rootId, orgIndex){
+      // Fail-closed
+      const child = String(childId ?? "").trim();
+      const root = String(rootId ?? "").trim();
+      if (!child || !root || !orgIndex?.byId) return false;
+
+      // samma nod
+      if (child === root) return true;
+
+      // gå uppåt via parentId och se om vi träffar root
+      let cur = orgIndex.byId.get(child);
+      let hops = 0;
+      while (cur && hops < 2000){
+        const p = cur.parentId;
+        if (!p) return false;
+        if (p === root) return true;
+        cur = orgIndex.byId.get(p);
+        hops++;
+      }
+      return false;
+    }
+
+    function normalizeAssignment(a){
+      const empNo = String(a?.empNo ?? a?.employeeNo ?? "").trim();
+      const role  = String(a?.role ?? a?.roleId ?? "").trim();
+      const scopeId = String(a?.scopeId ?? "").trim();
+      if (!empNo || !role || !scopeId) return null;
+      return { empNo, role, scopeId };
+    }
+
+    // Team = alla EMPLOYEE i managerns subtree (inkl ev. manager/admin om ni vill)
+    function computeTeam(assignmentsRaw, orgIndex, managerScopeId){
+      const items = (Array.isArray(assignmentsRaw) ? assignmentsRaw : []).map(normalizeAssignment).filter(Boolean);
+      const team = [];
+      for (const a of items){
+        if (!isInSubtree(a.scopeId, managerScopeId, orgIndex)) continue;
+        // Här filtrerar vi primärt EMPLOYEE (för att hålla vyn “manager → team”)
+        if (a.role === "EMPLOYEE") team.push(a.empNo);
+      }
+      // Dedupe
+      return Array.from(new Set(team));
+    }
+
+    // -----------------------------
+    // Tasks & deviations (tolerant)
+    // -----------------------------
+    function getTaskId(t, idx){
+      const raw = (t && (t.id || t.taskId || t.uuid)) ?? `task_${idx}`;
+      return String(raw);
+    }
+    function getTaskTitle(t){ return String(t?.title ?? t?.name ?? t?.text ?? "Uppgift"); }
+
+    function isDone(t){
+      const s = String(t?.status ?? t?.state ?? "").toLowerCase();
+      if (t?.done === true) return true;
+      if (t?.isDone === true) return true;
+      return (s === "done" || s === "klar" || s === "completed" || s === "complete");
+    }
+
+    function toISODate(d){
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,"0");
+      const day = String(d.getDate()).padStart(2,"0");
+      return `${y}-${m}-${day}`;
+    }
+
+    function parseToDate(val){
+      if (!val) return null;
+      if (typeof val === "number"){
+        const d = new Date(val);
+        return isNaN(d.getTime()) ? null : d;
+      }
+      if (typeof val === "string"){
+        if (/^\d{4}-\d{2}-\d{2}$/.test(val)){
+          const d = new Date(val + "T12:00:00");
+          return isNaN(d.getTime()) ? null : d;
+        }
+        const d = new Date(val);
+        return isNaN(d.getTime()) ? null : d;
+      }
+      return null;
+    }
+
+    function getDueDate(t){
+      // Vanliga fält i era AO: dueDate/startDate/endsAt/etc.
+      const candidates = [t?.dueDate, t?.deadline, t?.endDate, t?.endsAt, t?.date, t?.day];
+      for (const c of candidates){
+        const d = parseToDate(c);
+        if (d) return d;
+      }
+      return null;
+    }
+
+    function getAssignedTo(t){
+      return t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
+    }
+
+    function isAssignedToEmp(t, empNo){
+      const a = getAssignedTo(t);
+      const me = String(empNo || "").trim();
+      if (!me) return false;
+
+      if (a == null) return false;
+
+      if (typeof a === "string" || typeof a === "number"){
+        const s = String(a).trim();
+        if (s === "ALL" || s === "*") return true;
+        return s === me;
+      }
+      if (Array.isArray(a)){
+        return a.map(x => String(x).trim()).includes(me);
+      }
+      return false;
+    }
+
+    function hasScopeMatchExact(t, empScopeId){
+      const tScope = String(t?.scopeId ?? "").trim();
+      const my = String(empScopeId ?? "").trim();
+      if (!tScope || !my) return false;
+      // Employee: exakt scope. Manager: vi gör team-subtree via assignments/org, inte via tasks-subtree.
+      return tScope === my;
+    }
+
+    // -----------------------------
+    // Questions/Answers (tolerant)
+    // -----------------------------
+    function normalizeQuestion(q, idx){
+      const id = String(q?.id ?? q?.qid ?? q?.questionId ?? `q_${idx}`).trim();
+      if (!id) return null;
+      const createdAt = Number(q?.createdAt ?? q?.ts ?? q?.timestamp ?? 0) || 0;
+      const scopeId = String(q?.scopeId ?? "").trim();
+      const title = String(q?.title ?? q?.question ?? q?.text ?? "Fråga");
+      return { id, createdAt, scopeId, title };
+    }
+
+    function normalizeAnswer(a, idx){
+      const qid = String(a?.questionId ?? a?.qid ?? a?.question_id ?? "").trim();
+      const empNo = String(a?.empNo ?? a?.employeeNo ?? a?.byEmpNo ?? "").trim();
+      const createdAt = Number(a?.createdAt ?? a?.ts ?? a?.timestamp ?? 0) || 0;
+      if (!qid || !empNo) return null;
+      return { qid, empNo, createdAt };
+    }
+
+    function daysSince(ts){
+      if (!ts) return null;
+      const d = Date.now() - Number(ts);
+      if (!isFinite(d) || d < 0) return null;
+      return Math.floor(d / 86400000);
+    }
+
+    // -----------------------------
+    // Render helpers
+    // -----------------------------
+    function clearList(el){ if (el) el.innerHTML = ""; }
+
+    function addItem(listEl, name, desc, badgeText, badgeClass){
+      if (!listEl) return;
+      const n = escapeHtml(name || "—");
+      const d = escapeHtml(desc || "");
+      const b = escapeHtml(badgeText || "—");
+      const cls = badgeClass ? `badge ${badgeClass}` : "badge";
+      listEl.insertAdjacentHTML("beforeend", `
+        <li class="item">
+          <div class="left">
+            <div class="name">${n}</div>
+            <div class="desc">${d || "—"}</div>
+          </div>
+          <span class="${cls}">${b}</span>
+        </li>
+      `);
+    }
+
+    function addEmpty(listEl, text){
+      addItem(listEl, "Tyst läge", text || "Inga avvikelser att visa.", "OK", "ok");
+    }
+
+    // -----------------------------
+    // Main
+    // -----------------------------
+    function init(){
+      const authRes = mustAuthOrStop();
+      if (!authRes) return;
+
+      const auth = authRes.auth;
+      const managerScopeId = String(auth.scopeId || "").trim();
+
+      // Org + assignments krävs (fail-closed)
+      const org = readLSObject(KEY_ORG);
+      const orgIndex = buildOrgIndex(org);
+
+      const assignmentsRaw = readLSArray(KEY_ASSIGNMENTS);
+      const anyAssignments = Array.isArray(assignmentsRaw) && assignmentsRaw.length > 0;
+
+      clearList(healthList);
+      addItem(
+        healthList,
+        "Org-träd",
+        orgIndex ? "OK" : "Saknas/korrupt (AO-020_ORG_V1)",
+        orgIndex ? "OK" : "BLOCK",
+        orgIndex ? "ok" : "bad"
+      );
+      addItem(
+        healthList,
+        "Assignments",
+        anyAssignments ? "OK" : "Saknas/korrupt (AO-020_ROLE_ASSIGNMENTS_V2)",
+        anyAssignments ? "OK" : "BLOCK",
+        anyAssignments ? "ok" : "bad"
+      );
+
+      if (!orgIndex || !anyAssignments){
+        showGuard("Fail-closed: org/assignments saknas eller är korrupt. Systemet visar inget för att undvika läckage.");
+        // KPIs till 0
+        teamMeta.textContent = "—";
+        kpiInPhase.textContent = "0";
+        kpiOpen.textContent = "0";
+        kpiNeedsHelp.textContent = "0";
+        // tomma listor
+        clearList(deviationList); addEmpty(deviationList, "Systemet saknar org/assignments.");
+        clearList(workloadList); addEmpty(workloadList, "Systemet saknar org/assignments.");
+        clearList(commList);     addEmpty(commList, "Systemet saknar org/assignments.");
+        clearList(decisionList); addEmpty(decisionList, "Systemet saknar org/assignments.");
+        return;
+      }
+
+      // Team
+      const teamEmpNos = computeTeam(assignmentsRaw, orgIndex, managerScopeId);
+      teamMeta.textContent = `${teamEmpNos.length} medarbetare i ditt scope`;
+
+      // Data (tolerant)
+      const tasksAll = readLSArray(KEY_TASKS);
+      const questionsAll = readLSArray(KEY_QUESTIONS).map(normalizeQuestion).filter(Boolean);
+      const answersAll = readLSArray(KEY_ANSWERS).map(normalizeAnswer).filter(Boolean);
+
+      // Index answers: qid -> set(empNo)
+      const answeredByQ = new Map();
+      for (const a of answersAll){
+        if (!answeredByQ.has(a.qid)) answeredByQ.set(a.qid, new Set());
+        answeredByQ.get(a.qid).add(a.empNo);
+      }
+
+      // By employee: counts
+      const now = new Date();
+      now.setHours(12,0,0,0);
+      const todayISO = toISODate(now);
+
+      const byEmp = new Map(); // empNo -> { openTasks, overdueTasks, unansweredQuestionsOld, unansweredQuestionsTotal }
+      for (const empNo of teamEmpNos){
+        byEmp.set(empNo, { openTasks:0, overdueTasks:0, unansweredQuestionsOld:0, unansweredQuestionsTotal:0 });
+      }
+
+      // Tasks: only those assigned to employee AND exact scope match with their assignment scope.
+      // (Manager ser teamets avvikelser, inte allt globalt.)
+      const empScopeByEmpNo = new Map();
+      for (const aRaw of assignmentsRaw){
+        const a = normalizeAssignment(aRaw);
+        if (!a) continue;
+        // endast EMPLOYEE som är i teamet
+        if (!teamEmpNos.includes(a.empNo)) continue;
+        empScopeByEmpNo.set(a.empNo, a.scopeId);
+      }
+
+      const overdueList = []; // {empNo, title, dueISO}
+      const openTaskEmpSet = new Set();
+
+      for (let i=0;i<tasksAll.length;i++){
+        const t = tasksAll[i];
+        // scopeId måste finnas (fail-closed: annars ignoreras)
+        const tScope = String(t?.scopeId ?? "").trim();
+        if (!tScope) continue;
+
+        for (const empNo of teamEmpNos){
+          const empScope = empScopeByEmpNo.get(empNo);
+          if (!empScope) continue;
+
+          // visa bara tasks som är riktade till empNo (eller ALL), och som matchar exakt scope
+          if (!isAssignedToEmp(t, empNo)) continue;
+          if (!hasScopeMatchExact(t, empScope)) continue;
+
+          const done = isDone(t);
+          const due = getDueDate(t);
+          const dueISO = due ? toISODate(new Date(due.getFullYear(), due.getMonth(), due.getDate())) : null;
+
+          if (!done){
+            byEmp.get(empNo).openTasks++;
+            openTaskEmpSet.add(empNo);
+
+            // Overdue = har dueDate och dueISO < todayISO
+            if (dueISO && dueISO < todayISO){
+              byEmp.get(empNo).overdueTasks++;
+              overdueList.push({
+                empNo,
+                title: getTaskTitle(t),
+                dueISO
+              });
+            }
+          }
+        }
+      }
+
+      // Questions: vi använder scopeId + teamets empNos.
+      // Fail-closed: fråga utan scopeId ignoreras.
+      const unansweredOld = []; // {empNo, qTitle, ageDays}
+      const unansweredAny = []; // {empNo, count}
+      for (const q of questionsAll){
+        if (!q.scopeId) continue;
+
+        // bara frågor i managerns subtree (question.scopeId i subtree av managerScopeId)
+        if (!isInSubtree(q.scopeId, managerScopeId, orgIndex)) continue;
+
+        // per employee i teamet: om de inte har svarat på q => obesvarad
+        const answeredSet = answeredByQ.get(q.id) || new Set();
+        for (const empNo of teamEmpNos){
+          if (answeredSet.has(empNo)) continue;
+          byEmp.get(empNo).unansweredQuestionsTotal++;
+          const age = daysSince(q.createdAt);
+          // "har inte svarat på länge" = > 7 dagar (tyst annars)
+          if (age != null && age >= 7){
+            byEmp.get(empNo).unansweredQuestionsOld++;
+            unansweredOld.push({ empNo, qTitle: q.title, ageDays: age });
+          }
+        }
+      }
+
+      // KPI groups
+      let inPhase = 0, hasOpen = 0, needsHelp = 0;
+      for (const empNo of teamEmpNos){
+        const s = byEmp.get(empNo);
+        const anyDev = (s.overdueTasks > 0) || (s.unansweredQuestionsOld > 0);
+        const anyOpen = (s.openTasks > 0) || (s.unansweredQuestionsTotal > 0);
+
+        if (!anyDev) inPhase++;
+        if (anyOpen) hasOpen++;
+        // needsHelp: overdue eller gamla obesvarade eller “tungt öppet” (>5 öppna)
+        if (anyDev || s.openTasks >= 6) needsHelp++;
+      }
+
+      kpiInPhase.textContent = String(inPhase);
+      kpiOpen.textContent = String(hasOpen);
+      kpiNeedsHelp.textContent = String(needsHelp);
+
+      // -----------------------------
+      // Avvikelser (tyst om normalt)
+      // -----------------------------
+      clearList(deviationList);
+
+      // 1) Försenade uppgifter (top 8)
+      if (overdueList.length > 0){
+        overdueList.sort((a,b) => (a.dueISO || "").localeCompare(b.dueISO || ""));
+        const top = overdueList.slice(0, 8);
+        for (const it of top){
+          addItem(
+            deviationList,
+            `Försenad uppgift – ${it.empNo}`,
+            `${it.title} (deadline ${it.dueISO})`,
+            "Försenad",
+            "bad"
+          );
+        }
+        if (overdueList.length > top.length){
+          addItem(deviationList, "Fler försenade", `+${overdueList.length - top.length} till`, "Info", "warn");
+        }
+      }
+
+      // 2) Obesvarade frågor “länge” (top 8)
+      if (unansweredOld.length > 0){
+        unansweredOld.sort((a,b) => (b.ageDays || 0) - (a.ageDays || 0));
+        const top = unansweredOld.slice(0, 8);
+        for (const it of top){
+          addItem(
+            deviationList,
+            `Obesvarad fråga – ${it.empNo}`,
+            `${it.qTitle} (${it.ageDays} dagar)`,
+            "Obesvarad",
+            "warn"
+          );
+        }
+        if (unansweredOld.length > top.length){
+          addItem(deviationList, "Fler obesvarade", `+${unansweredOld.length - top.length} till`, "Info", "warn");
+        }
+      }
+
+      if (overdueList.length === 0 && unansweredOld.length === 0){
+        addEmpty(deviationList, "Inga förseningar eller gamla obesvarade frågor i ditt scope.");
+      }
+
+      // -----------------------------
+      // Arbetsbelastning (gruppnivå)
+      // -----------------------------
+      clearList(workloadList);
+
+      // group load: avg open per person, max open
+      let sumOpen = 0, maxOpen = 0;
+      let maxEmp = null;
+      for (const empNo of teamEmpNos){
+        const s = byEmp.get(empNo);
+        sumOpen += s.openTasks;
+        if (s.openTasks > maxOpen){
+          maxOpen = s.openTasks;
+          maxEmp = empNo;
+        }
+      }
+      const avgOpen = teamEmpNos.length ? (sumOpen / teamEmpNos.length) : 0;
+
+      const loadBadge =
+        avgOpen >= 4 ? {t:"Tungt", c:"bad"} :
+        avgOpen >= 2 ? {t:"Måttligt", c:"warn"} :
+        {t:"Lugnt", c:"ok"};
+
+      addItem(
+        workloadList,
+        "Team-belastning (öppna uppgifter)",
+        `Snitt: ${avgOpen.toFixed(1)} • Totalt: ${sumOpen} • Max: ${maxOpen}${maxEmp ? " ("+maxEmp+")" : ""}`,
+        loadBadge.t,
+        loadBadge.c
+      );
+
+      // Flaskhalsar = personer med >=6 öppna eller >=1 försenad
+      const bottlenecks = [];
+      for (const empNo of teamEmpNos){
+        const s = byEmp.get(empNo);
+        if (s.openTasks >= 6 || s.overdueTasks >= 1){
+          bottlenecks.push({ empNo, open: s.openTasks, overdue: s.overdueTasks });
+        }
+      }
+      if (bottlenecks.length > 0){
+        bottlenecks.sort((a,b) => (b.overdue - a.overdue) || (b.open - a.open));
+        const top = bottlenecks.slice(0, 8);
+        for (const it of top){
+          addItem(
+            workloadList,
+            `Flaskhals (möjlig) – ${it.empNo}`,
+            `Öppna: ${it.open} • Försenade: ${it.overdue}`,
+            "Titta",
+            it.overdue > 0 ? "bad" : "warn"
+          );
+        }
+        if (bottlenecks.length > top.length){
+          addItem(workloadList, "Fler signaler", `+${bottlenecks.length - top.length} till`, "Info", "warn");
+        }
+      } else {
+        addItem(workloadList, "Flaskhalsar", "Inga tydliga signaler just nu.", "Tyst", "ok");
+      }
+
+      // -----------------------------
+      // Kommunikationsbehov
+      // -----------------------------
+      clearList(commList);
+
+      // “Vem har inte svarat på länge” = unansweredQuestionsOld > 0
+      const commNeed = [];
+      for (const empNo of teamEmpNos){
+        const s = byEmp.get(empNo);
+        if (s.unansweredQuestionsOld > 0){
+          commNeed.push({ empNo, n: s.unansweredQuestionsOld });
+        }
+      }
+      if (commNeed.length > 0){
+        commNeed.sort((a,b) => b.n - a.n);
+        const top = commNeed.slice(0, 8);
+        for (const it of top){
+          addItem(
+            commList,
+            `Behöver svar – ${it.empNo}`,
+            `${it.n} obesvarade (äldre än 7 dagar)`,
+            "Svara",
+            "warn"
+          );
+        }
+      } else {
+        addEmpty(commList, "Inga gamla obesvarade frågor i ditt scope.");
+      }
+
+      // “Finns något som blockerar arbetet?” – vi har ingen blockeringsmodell (och skapar ingen här).
+      addItem(
+        commList,
+        "Blockeringar",
+        "Ingen blockeringsmodell är definierad här (för att undvika ny datamodell). Använd rapportera-fel eller en enkel status i uppgifter om ni vill lägga till senare.",
+        "Info",
+        "ok"
+      );
+
+      // -----------------------------
+      // Beslut som kräver dig
+      // -----------------------------
+      clearList(decisionList);
+
+      // Beslut = om någon har försenad eller “tungt öppet”
+      const decisions = [];
+      for (const empNo of teamEmpNos){
+        const s = byEmp.get(empNo);
+        const needs = (s.overdueTasks > 0) || (s.openTasks >= 6) || (s.unansweredQuestionsOld > 0);
+        if (!needs) continue;
+
+        let reason = [];
+        if (s.overdueTasks > 0) reason.push(`${s.overdueTasks} försenad(e)`);
+        if (s.unansweredQuestionsOld > 0) reason.push(`${s.unansweredQuestionsOld} obesvarad(e) >7d`);
+        if (s.openTasks >= 6) reason.push(`${s.openTasks} öppna`);
+        decisions.push({ empNo, reason: reason.join(" • ") });
+      }
+
+      if (decisions.length > 0){
+        decisions.sort((a,b) => a.empNo.localeCompare(b.empNo));
+        const top = decisions.slice(0, 10);
+        for (const it of top){
+          addItem(
+            decisionList,
+            `Åtgärd – ${it.empNo}`,
+            it.reason || "Behöver bedömning",
+            "Beslut",
+            "bad"
+          );
+        }
+        if (decisions.length > top.length){
+          addItem(decisionList, "Fler beslut", `+${decisions.length - top.length} till`, "Info", "warn");
+        }
+      } else {
+        addEmpty(decisionList, "Inga beslut krävs just nu. (Det är bra.)");
+      }
+
+      // “Saknad kvittens” – vi har ingen låst kvittens-key i listan.
+      // Vi visar inte påhittade data. Om ni har en nyckel för kvittens senare, kopplar vi in det då.
+      addItem(
+        decisionList,
+        "Kvittens",
+        "Saknad kvittens kan inte beräknas utan definierad datamodell/nyckel. (Visas inte för att undvika felaktiga signaler.)",
+        "Info",
+        "ok"
+      );
+    }
+
+    // Logout via core om möjligt
+    logoutLink.addEventListener("click", function (e) {
+      e.preventDefault();
+      if (window.HRApp && typeof window.HRApp.logout === "function") {
+        window.HRApp.logout();
+      } else {
+        try { sessionStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
+        try { localStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
+        window.location.href = "../UI/UI-01-SKELETON.html?err=logout";
+      }
+    });
+
+    // Start
+    init();
+  })();
+  </script>
+</body>
+</html>
 
