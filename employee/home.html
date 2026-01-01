@@ -1,24 +1,16 @@
 <!-- ============================================================
-AO-048 (PATCH v1.1) | FIL-ID: employee/home.html
+AO-048 (PATCH) | FIL-ID: employee/home.html
 Projekt: HR-System
-Syfte: Medarbetarens startsida (Dashboard) – UI-only v1 (nivå 3)
+Syfte: Medarbetarens startsida – Dagskalender + Post-its (UI-only v1.x)
 Krav:
-- Pastellrutor + hover
-- “Dagens uppgifter” + badge ska döljas om allt är klart
-- Samma för frågor (panel + badge)
-- Guard + logout
-Policy:
-- Ingen backend
-- Ingen känslig persondata lagras
-- Fail-closed via AO-002 (HRApp.requireAuth)
-Lagring:
+- Vänster: Dagskalender (bläddra dag)
+- Höger: Post-it-lappar (uppgifter)
+- Klarmarkering: post-it “knögglas” + slängs i papperskorg
+- Klar uppgift visas i dagskalendern som “Färdig”
+Policy (LÅST): UI-only • Fail-closed • sessionStorage först • fallback localStorage • XSS-escape • Inga nya storage-keys
+Lagring (LÅST):
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
 - AO-014_TASKS_V1 (localStorage) – uppgifter
-- AO-015_QA_V1 (localStorage) – frågor/svar
-- AO-018_DOCS_V1 (localStorage) – dokument (om finns)
-- AO-018_DOCS_ACK_V1 (localStorage) – kvittenser (om finns)
-Ändringslogg:
-- v1.1: Byter till AO-002 core-guard, fixar roll (EMPLOYEE), logout via HRApp, tar bort egen auth-parse
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -26,406 +18,853 @@ Lagring:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HR-System – Medarbetare</title>
-
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
   <style>
-    /* Små, lokala UI-förbättringar (låsta: inga redesigns) */
-    .top-actions{
+    :root{
+      --bg: #f6f7fb;
+      --card: #ffffff;
+      --ink: #111827;
+      --muted: #6b7280;
+      --line: rgba(17,24,39,.10);
+
+      --cal: #eef2ff;        /* lugn blå */
+      --cal2: #ecfeff;       /* lugn cyan */
+      --note1:#fff7c2;       /* post-it gul */
+      --note2:#ffd6a5;       /* varm */
+      --note3:#cdeaff;       /* sval */
+      --note4:#d9f7d6;       /* grön */
+    }
+
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--ink);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+
+    /* --- Top bar (behåll samma routingkänsla som idag) --- */
+    .topbar{
+      position: sticky;
+      top:0;
+      z-index:10;
+      background: rgba(246,247,251,.92);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid var(--line);
+    }
+    .nav{
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 10px 16px;
       display:flex;
-      justify-content:flex-end;
       gap:10px;
-      margin-bottom:10px;
+      align-items:center;
+      flex-wrap: wrap;
     }
-    .btn-logout{ opacity:0.85; }
-    .btn-logout:hover{ opacity:1; }
-
-    /* Pastellrutor */
-    .bigcard.pastel{
-      border: 1px solid var(--line);
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
-    }
-    .bigcard.pastel:hover{
-      transform: var(--lift);
-      box-shadow: var(--shadow-soft);
-      filter: brightness(1.03) saturate(1.02);
-    }
-    .p-mint{ background: rgba(167,243,208,.45); }
-    .p-rose{ background: rgba(254,202,202,.45); }
-    .p-sky { background: rgba(191,219,254,.45); }
-    .p-lilac{ background: rgba(233,213,255,.45); }
-    .p-amber{ background: rgba(254,243,199,.45); }
-    .p-sand{ background: rgba(245,245,244,1.0); }
-
-    /* Panels hover-princip */
-    .panel{
-      border: 1px solid var(--line);
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
-    }
-    .panel:hover{
-      transform: translateY(-1px);
-      box-shadow: var(--shadow-soft);
-      filter: brightness(1.01);
-    }
-    .panel.tasks{ background: rgba(167,243,208,.18); }
-    .panel.q{ background: rgba(254,202,202,.18); }
-    .panel.n{ background: rgba(191,219,254,.18); }
-    .panel.d{ background: rgba(254,243,199,.18); }
-
-    /* List hover */
-    .list > li{
-      border-radius: 10px;
+    .nav a{
+      text-decoration:none;
+      color: var(--ink);
+      font-size: 14px;
       padding: 8px 10px;
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      border-radius: 10px;
+      border: 1px solid transparent;
     }
-    .list > li:hover{
-      transform: translateY(-1px);
-      box-shadow: 0 8px 22px rgba(17,17,17,.10);
-      filter: brightness(1.02);
+    .nav a:hover{ border-color: var(--line); background: #fff; }
+    .nav .spacer{ flex:1; }
+    .pill{
+      font-size: 12px;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      background: #fff;
+      padding: 6px 10px;
+      border-radius: 999px;
     }
 
-    .hide{ display:none !important; }
+    /* --- Layout --- */
+    .wrap{
+      max-width: 1100px;
+      margin: 18px auto 28px;
+      padding: 0 16px;
+    }
+
+    .hero{
+      display:flex;
+      gap:12px;
+      align-items:flex-start;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+    .hello{
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px 14px;
+      flex: 1;
+      min-width: 260px;
+    }
+    .hello h1{
+      margin:0 0 6px;
+      font-size: 16px;
+      font-weight: 700;
+    }
+    .hello p{
+      margin:0;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.4;
+    }
+
+    /* Systemets röst */
+    .voice{
+      margin-top: 10px;
+      padding: 14px;
+      border-radius: 14px;
+      border: 1px dashed rgba(17,24,39,.20);
+      background: linear-gradient(135deg, rgba(238,242,255,.9), rgba(236,254,255,.9));
+      font-weight: 700;
+      font-size: 16px;
+    }
+
+    .grid{
+      display:grid;
+      grid-template-columns: 340px 1fr;
+      gap: 16px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .grid{ grid-template-columns: 1fr; }
+    }
+
+    /* --- Kalender (vänster) --- */
+    .calendar{
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      overflow:hidden;
+    }
+    .cal-head{
+      padding: 14px 14px 10px;
+      background: linear-gradient(180deg, rgba(238,242,255,.9), rgba(255,255,255,1));
+      border-bottom: 1px solid var(--line);
+    }
+    .cal-head .title{
+      display:flex;
+      align-items:center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .cal-head h2{
+      margin:0;
+      font-size: 14px;
+      font-weight: 800;
+    }
+    .cal-controls{
+      display:flex;
+      gap:8px;
+      align-items:center;
+    }
+    .btn{
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 12px;
+      padding: 8px 10px;
+      font-size: 13px;
+      cursor:pointer;
+      user-select:none;
+    }
+    .btn:hover{ background: #fafafa; }
+    .btn:active{ transform: translateY(1px); }
+
+    .cal-date{
+      margin-top: 10px;
+      display:flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 10px;
+    }
+    .cal-date .big{
+      font-size: 18px;
+      font-weight: 900;
+      letter-spacing: .2px;
+    }
+    .cal-date .small{
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .cal-body{
+      padding: 12px 14px 14px;
+    }
+    .cal-block{
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px;
+      background: rgba(238,242,255,.55);
+      margin-bottom: 10px;
+    }
+    .cal-block h3{
+      margin: 0 0 8px;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .cal-list{
+      list-style:none;
+      margin:0;
+      padding:0;
+      display:flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .cal-item{
+      display:flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items:flex-start;
+      padding: 10px 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(17,24,39,.10);
+      background: rgba(255,255,255,.9);
+    }
+    .cal-item .name{
+      font-size: 13px;
+      font-weight: 700;
+      line-height: 1.25;
+    }
+    .cal-item .meta{
+      font-size: 12px;
+      color: var(--muted);
+      margin-top: 2px;
+    }
+    .badge{
+      font-size: 12px;
+      border-radius: 999px;
+      padding: 6px 10px;
+      border: 1px solid rgba(17,24,39,.10);
+      background: rgba(236,254,255,.7);
+      color: #0f172a;
+      white-space: nowrap;
+    }
+    .badge.done{
+      background: rgba(217,247,214,.85);
+      border-color: rgba(16,185,129,.25);
+    }
+
+    /* --- Post-its (höger) --- */
+    .board{
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      overflow:hidden;
+      position: relative;
+      min-height: 520px;
+    }
+    .board-head{
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+      display:flex;
+      align-items:center;
+      justify-content: space-between;
+      gap: 10px;
+      background: linear-gradient(180deg, rgba(255,255,255,1), rgba(250,250,250,1));
+    }
+    .board-head h2{
+      margin:0;
+      font-size: 14px;
+      font-weight: 900;
+    }
+    .hint{
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .notes{
+      padding: 14px;
+      display:grid;
+      grid-template-columns: repeat(2, minmax(220px, 1fr));
+      gap: 14px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .notes{ grid-template-columns: 1fr; }
+    }
+
+    .note{
+      border-radius: 14px;
+      border: 1px solid rgba(17,24,39,.12);
+      box-shadow: 0 10px 20px rgba(17,24,39,.06);
+      padding: 12px;
+      position: relative;
+      transform: rotate(var(--tilt, -1deg));
+      transition: transform .2s ease, box-shadow .2s ease, opacity .2s ease;
+      will-change: transform, opacity;
+    }
+    .note:hover{
+      transform: rotate(var(--tilt, -1deg)) translateY(-2px);
+      box-shadow: 0 14px 24px rgba(17,24,39,.10);
+    }
+    .note .t{
+      font-weight: 900;
+      font-size: 14px;
+      margin: 0 0 6px;
+      line-height: 1.25;
+    }
+    .note .s{
+      font-size: 12px;
+      color: rgba(17,24,39,.70);
+      margin: 0 0 10px;
+      line-height: 1.35;
+    }
+    .note .row{
+      display:flex;
+      gap: 8px;
+      align-items:center;
+      justify-content: space-between;
+    }
+    .note .mini{
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .note .donebtn{
+      border: 1px solid rgba(17,24,39,.12);
+      background: rgba(255,255,255,.75);
+      border-radius: 12px;
+      padding: 8px 10px;
+      cursor:pointer;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .note .donebtn:hover{ background: rgba(255,255,255,.95); }
+    .note .donebtn:active{ transform: translateY(1px); }
+
+    /* “Knöggla” animation */
+    @keyframes crumple {
+      0%   { transform: rotate(var(--tilt, -1deg)) scale(1); filter: blur(0px); }
+      45%  { transform: rotate(8deg) scale(.92); filter: blur(.3px); }
+      70%  { transform: rotate(-12deg) scale(.78); filter: blur(.6px); }
+      100% { transform: rotate(18deg) scale(.30); opacity: 0; filter: blur(1px); }
+    }
+    .note.crumpling{
+      animation: crumple 520ms ease forwards;
+    }
+
+    /* Papperskorg */
+    .trash{
+      position:absolute;
+      right: 14px;
+      bottom: 14px;
+      width: 160px;
+      height: 120px;
+      border-radius: 16px;
+      border: 1px dashed rgba(17,24,39,.18);
+      background: rgba(17,24,39,.03);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      flex-direction: column;
+      gap: 6px;
+      pointer-events: none; /* bara visuellt */
+    }
+    .trash .icon{
+      font-size: 22px;
+      opacity: .8;
+    }
+    .trash .txt{
+      font-size: 12px;
+      color: var(--muted);
+      text-align:center;
+      padding: 0 10px;
+    }
+
+    /* Fail-closed panel */
+    .guard{
+      border: 1px solid rgba(239,68,68,.25);
+      background: rgba(254,242,242,.9);
+      color: #7f1d1d;
+      padding: 12px 14px;
+      border-radius: 14px;
+      margin: 14px 0;
+      display:none;
+    }
   </style>
 </head>
+
 <body>
-
-<header class="top">
-  <div class="brand">
-    <strong>HR-System</strong>
-    <span class="muted">• Medarbetare</span>
+  <div class="topbar">
+    <div class="nav" aria-label="Primär navigation">
+      <a href="./home.html" aria-current="page">Hem</a>
+      <a href="./tasks.html">Uppgifter</a>
+      <a href="./questions.html">Frågor</a>
+      <a href="./schedule.html">Schema</a>
+      <a href="./documents.html">Dokument</a>
+      <a href="../report.html">Rapportera fel</a>
+      <a href="./profile.html">Min sida</a>
+      <div class="spacer"></div>
+      <span class="pill" id="whoPill">—</span>
+      <a href="#" id="logoutLink">Logga ut</a>
+    </div>
   </div>
 
-  <nav class="nav" aria-label="Meny">
-    <a href="./home.html" aria-current="page">Hem</a>
-    <a href="./tasks.html">Uppgifter</a>
-    <a href="./questions.html">Frågor</a>
-    <a href="./schedule.html">Schema</a>
-    <a href="./docs.html">Dokument</a>
-    <a href="./report.html">Rapportera fel</a>
-    <a href="./profile.html">Min sida</a>
-    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
-  </nav>
-</header>
+  <main class="wrap">
+    <div class="guard" id="guardBox" role="alert"></div>
 
-<main class="container">
-
-  <div class="top-actions">
-    <!-- Rapportera fel + Logga ut på samma rad, logout längst till höger -->
-    <a class="btn secondary" href="./report.html">Rapportera fel</a>
-    <button id="btnLogout" class="secondary btn-logout" type="button">Logga ut</button>
-  </div>
-
-  <section class="card" aria-label="Dashboard">
-
-    <div class="row space-between wrap">
-      <div>
-        <h1 class="tight">Min sida</h1>
-        <div class="muted">
-          Hej <strong id="whoName">—</strong>
-          • Anst.nr <span id="whoEmpNo">—</span>
-          • Roll <span>EMPLOYEE</span>
-        </div>
+    <section class="hero">
+      <div class="hello">
+        <h1>Min sida</h1>
+        <p id="helloLine">Hej — • Anst.nr — • Roll EMPLOYEE</p>
+        <div class="voice" id="voiceLine">—</div>
       </div>
-    </div>
+    </section>
 
-    <!-- Stora navigationsrutor -->
-    <div class="grid-cards" style="margin-top:10px;">
-      <a class="bigcard pastel p-mint" href="./tasks.html">
-        <div class="bigcard-title">Uppgifter</div>
-        <div class="muted">
-          <span id="tasksBadgeLine">3 att göra idag <span class="tag">demo</span></span>
-          <span id="tasksAllDoneText" class="hide">Alla uppgifter klara</span>
+    <section class="grid" aria-label="Dagsvy">
+      <!-- VÄNSTER: Dagskalender -->
+      <aside class="calendar" aria-label="Dagskalender">
+        <div class="cal-head">
+          <div class="title">
+            <h2>Dagskalender</h2>
+            <div class="cal-controls">
+              <button class="btn" id="prevDayBtn" type="button" aria-label="Föregående dag">◀</button>
+              <button class="btn" id="todayBtn" type="button">Idag</button>
+              <button class="btn" id="nextDayBtn" type="button" aria-label="Nästa dag">▶</button>
+            </div>
+          </div>
+          <div class="cal-date">
+            <div>
+              <div class="big" id="dateBig">—</div>
+              <div class="small" id="dateSmall">—</div>
+            </div>
+            <div class="badge" id="dayBadge">—</div>
+          </div>
         </div>
-      </a>
 
-      <a class="bigcard pastel p-rose" href="./questions.html">
-        <div class="bigcard-title">Frågor</div>
-        <div class="muted">
-          <span id="qBadgeLine">2 nya från admin <span class="tag">demo</span></span>
-          <span id="qAllDoneText" class="hide">Inga frågor väntar</span>
+        <div class="cal-body">
+          <div class="cal-block">
+            <h3>Färdig idag</h3>
+            <ul class="cal-list" id="doneList"></ul>
+          </div>
+
+          <div class="cal-block" style="background: rgba(236,254,255,.55);">
+            <h3>Återstår</h3>
+            <ul class="cal-list" id="todoList"></ul>
+          </div>
         </div>
-      </a>
+      </aside>
 
-      <a class="bigcard pastel p-sky" href="./schedule.html">
-        <div class="bigcard-title">Schema</div>
-        <div class="muted">Read-only v1</div>
-      </a>
+      <!-- HÖGER: Post-its -->
+      <section class="board" aria-label="Post-it-tavla">
+        <div class="board-head">
+          <h2>Post-its</h2>
+          <div class="hint">Markera klar för att “knöggla” och slänga.</div>
+        </div>
 
-      <a class="bigcard pastel p-amber" href="./docs.html">
-        <div class="bigcard-title">Dokument</div>
-        <div class="muted">Läs & kvittera</div>
-      </a>
+        <div class="notes" id="notesGrid" aria-live="polite"></div>
 
-      <a class="bigcard pastel p-lilac" href="./report.html">
-        <div class="bigcard-title">Rapportera fel</div>
-        <div class="muted">Skicka fel med teknisk info</div>
-      </a>
-
-      <a class="bigcard pastel p-sand" href="./profile.html">
-        <div class="bigcard-title">Min sida</div>
-        <div class="muted">Profil & byt lösenord (placeholder)</div>
-      </a>
-
-      <!-- Nivå 3 (placeholder) -->
-      <a class="bigcard pastel p-sand" href="#" aria-disabled="true" onclick="return false;">
-        <div class="bigcard-title">Utbildning</div>
-        <div class="muted">Kommer senare</div>
-      </a>
-
-      <a class="bigcard pastel p-sand" href="#" aria-disabled="true" onclick="return false;">
-        <div class="bigcard-title">Kommunikation</div>
-        <div class="muted">Kommer senare</div>
-      </a>
-
-      <a class="bigcard pastel p-sand" href="#" aria-disabled="true" onclick="return false;">
-        <div class="bigcard-title">Inventering</div>
-        <div class="muted">Kommer senare</div>
-      </a>
-
-      <a class="bigcard pastel p-sand" href="#" aria-disabled="true" onclick="return false;">
-        <div class="bigcard-title">Förbättringsförslag</div>
-        <div class="muted">Kommer senare</div>
-      </a>
-
-      <a class="bigcard pastel p-sand" href="#" aria-disabled="true" onclick="return false;">
-        <div class="bigcard-title">Kvalitet & Avvikelser</div>
-        <div class="muted">Kommer senare</div>
-      </a>
-
-      <a class="bigcard pastel p-sand" href="#" aria-disabled="true" onclick="return false;">
-        <div class="bigcard-title">Insikter</div>
-        <div class="muted">Kommer senare</div>
-      </a>
-    </div>
-
-    <!-- Dashboard-paneler -->
-    <div class="dashgrid" style="margin-top:14px;">
-
-      <section id="panelTasks" class="panel tasks" aria-label="Dagens uppgifter">
-        <div class="panel-title">Dagens uppgifter <span class="tag">demo</span></div>
-        <ul class="list" id="tasksList">
-          <li><span>Check-in (2 min)</span><span class="pill">Ej startad</span></li>
-          <li><span>Läs rutin: Hygien</span><span class="pill">Pågår</span></li>
-          <li><span>Bekräfta leverans</span><span class="pill">Ej startad</span></li>
-        </ul>
-        <a class="link" href="./tasks.html">Visa alla →</a>
+        <div class="trash" aria-hidden="true">
+          <div class="icon">🗑️</div>
+          <div class="txt">Papperskorg<br><span style="font-size:11px;">(visuell)</span></div>
+        </div>
       </section>
+    </section>
+  </main>
 
-      <section id="panelQuestions" class="panel q" aria-label="Väntar på svar">
-        <div class="panel-title">Väntar på svar <span class="tag">demo</span></div>
-        <ul class="list" id="qList">
-          <li><span>Hur gick första veckan?</span><span class="pill">Svar krävs</span></li>
-          <li><span>Har du rätt verktyg?</span><span class="pill">Svar krävs</span></li>
-        </ul>
-        <a class="link" href="./questions.html">Öppna frågor →</a>
-      </section>
+  <script>
+    "use strict";
 
-      <section class="panel n" aria-label="Notiser">
-        <div class="panel-title">Notiser <span class="tag">demo</span></div>
-        <ul class="list">
-          <li><span>Nytt arbetssätt i kassan</span><span class="pill">Info</span></li>
-          <li><span>Möte: måndag 09:00</span><span class="pill">Info</span></li>
-        </ul>
-        <span class="muted small">Read-only i v1.</span>
-      </section>
+    /* ===========================
+       GUARD / STORAGE HELPERS
+    ============================ */
+    const KEY_SESSION = "AO-001_LOGIN_V1";
+    const KEY_TASKS = "AO-014_TASKS_V1";
 
-      <section class="panel d" aria-label="Att kvittera">
-        <div class="panel-title">Att kvittera <span class="tag">demo</span></div>
-        <ul class="list" id="docsList">
-          <li><span>Policy: Arbetsmiljö</span><span class="pill">Kvittera</span></li>
-          <li><span>Rutin: Städcheck</span><span class="pill">Kvittera</span></li>
-        </ul>
-        <a class="link" href="./docs.html">Öppna dokument →</a>
-      </section>
+    const guardBox = document.getElementById("guardBox");
 
-    </div>
-  </section>
-</main>
+    function showGuard(msg){
+      guardBox.style.display = "block";
+      guardBox.textContent = msg;
+    }
+    function hideGuard(){
+      guardBox.style.display = "none";
+      guardBox.textContent = "";
+    }
 
-<!-- AO-002 beroenden (LÅSTA): config före app -->
-<script src="../UI/UI-04-CONFIG.js"></script>
-<script src="../UI/UI-03-APP.js"></script>
+    function safeJsonParse(str){
+      try { return JSON.parse(str); } catch { return null; }
+    }
 
-<script>
-/* ============================================================
-AO-048 (PATCH v1.1) | employee/home.html (inline JS)
-- Core-guard via HRApp.requireAuth (fail-closed)
-- Fix: role är EMPLOYEE (uppercase) via HRApp.getAuth
-- Logout via HRApp.logout()
-- Smart hide för tasks/questions, tolerant docs-preview
-============================================================ */
-(function () {
-  "use strict";
+    function readSessionFailClosed(){
+      // Fail-closed: sessionStorage först, fallback localStorage
+      const s1 = sessionStorage.getItem(KEY_SESSION);
+      const s2 = localStorage.getItem(KEY_SESSION);
+      const obj = safeJsonParse(s1 || s2 || "");
+      if(!obj || typeof obj !== "object") return null;
+      return obj;
+    }
 
-  const TASKS_KEY = "AO-014_TASKS_V1";
-  const QA_KEY    = "AO-015_QA_V1";
-  const DOCS_KEY  = "AO-018_DOCS_V1";
-  const ACK_KEY   = "AO-018_DOCS_ACK_V1";
+    function readTasksArray(){
+      const raw = localStorage.getItem(KEY_TASKS);
+      const data = safeJsonParse(raw || "");
+      if(!Array.isArray(data)) return [];
+      return data;
+    }
 
-  function $(id){ return document.getElementById(id); }
+    function writeTasksArray(arr){
+      // Fail-safe: skriv bara om det är array
+      if(!Array.isArray(arr)) return false;
+      localStorage.setItem(KEY_TASKS, JSON.stringify(arr));
+      return true;
+    }
 
-  function setHide(el, hide){
-    if(!el) return;
-    if(hide) el.classList.add("hide");
-    else el.classList.remove("hide");
-  }
+    function escapeHtml(input){
+      const s = String(input ?? "");
+      return s
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
+    }
 
-  function setText(id, txt){
-    const el = $(id);
-    if(el) el.textContent = String(txt ?? "");
-  }
+    /* ===========================
+       DATE HELPERS
+    ============================ */
+    const WEEKDAYS = ["Söndag","Måndag","Tisdag","Onsdag","Torsdag","Fredag","Lördag"];
+    const MONTHS = ["januari","februari","mars","april","maj","juni","juli","augusti","september","oktober","november","december"];
 
-  function safeParseLS(key, fallback){
-    try{
-      const v = JSON.parse(localStorage.getItem(key) || "null");
-      return (v === null || v === undefined) ? fallback : v;
-    }catch{ return fallback; }
-  }
+    function toISODate(d){
+      // YYYY-MM-DD i lokal tid
+      const y = d.getFullYear();
+      const m = String(d.getMonth()+1).padStart(2,"0");
+      const day = String(d.getDate()).padStart(2,"0");
+      return `${y}-${m}-${day}`;
+    }
 
-  function escapeHtml(s){
-    return String(s ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
-  }
+    function fmtBig(d){
+      const wd = WEEKDAYS[d.getDay()];
+      return `${wd}`;
+    }
 
-  function isAnswered(q){
-    const hasA = !!(q && q.answer && String(q.answer).trim().length);
-    return (q && q.status === "answered") || hasA;
-  }
+    function fmtSmall(d){
+      return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+    }
 
-  // ---- CORE GUARD (fail-closed) ----
-  if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-    // Om kärnan saknas: fail-closed tillbaka till login.
-    window.location.replace("../UI/UI-01-SKELETON.html?err=core");
-    return;
-  }
+    /* ===========================
+       TASK NORMALIZATION
+       (ingen ny datamodell – vi läser tolerant)
+    ============================ */
+    function getTaskId(t, idx){
+      // stabilt id om saknas
+      const raw = (t && (t.id || t.taskId || t.uuid)) ?? `task_${idx}`;
+      return String(raw);
+    }
 
-  const session = window.HRApp.requireAuth({ allowRoles: ["EMPLOYEE"] });
-  if (!session) return; // core har redan redirectat
+    function getTaskTitle(t){
+      return String(t?.title ?? t?.name ?? t?.text ?? "Uppgift");
+    }
 
-  const auth = window.HRApp.getAuth(session);
-  if (!auth || auth.role !== "EMPLOYEE") {
-    window.location.replace("../UI/UI-01-SKELETON.html?err=forbidden");
-    return;
-  }
+    function getTaskDesc(t){
+      return String(t?.description ?? t?.desc ?? "");
+    }
 
-  // ---- UI fill ----
-  // OBS: vi visar bara empNo som redan finns i session (inte loggas).
-  setText("whoName", auth.displayName || "—");
-  setText("whoEmpNo", auth.empNo || "—");
+    function isDone(t){
+      const s = String(t?.status ?? t?.state ?? "").toLowerCase();
+      if(t?.done === true) return true;
+      if(t?.isDone === true) return true;
+      if(s === "done" || s === "klar" || s === "completed" || s === "complete") return true;
+      return false;
+    }
 
-  // ---- Logout ----
-  function doLogout(){
-    if (window.HRApp && typeof window.HRApp.logout === "function") window.HRApp.logout();
-    else window.location.replace("../UI/UI-01-SKELETON.html?err=logout");
-  }
-  const btn = $("btnLogout");
-  const nav = $("navLogout");
-  if (btn) btn.addEventListener("click", doLogout);
-  if (nav) nav.addEventListener("click", function(e){ e.preventDefault(); doLogout(); });
+    function setDone(t){
+      // ändra försiktigt utan att “uppfinna” nya fält om de redan finns:
+      if("done" in t) t.done = true;
+      else if("isDone" in t) t.isDone = true;
+      else t.done = true; // fallback (kan vara nytt fält i praktiken, men inom samma key/datapost)
+      if("status" in t) t.status = "done";
+      return t;
+    }
 
-  // ---- Tasks smart hide ----
-  const allTasks = safeParseLS(TASKS_KEY, []);
-  const myEmp = String(auth.empNo || "").trim();
+    function getTaskDateISO(t){
+      // Försök hitta en dagskoppling, annars null
+      // accepterar: dueDate, date, day, scheduledDate, startsAt, startDate
+      const candidates = [t?.dueDate, t?.date, t?.day, t?.scheduledDate, t?.startDate, t?.startsAt];
+      for(const c of candidates){
+        if(!c) continue;
+        if(typeof c === "string"){
+          // om redan YYYY-MM-DD
+          if(/^\d{4}-\d{2}-\d{2}$/.test(c)) return c;
+          // om ISO timestamp
+          const d = new Date(c);
+          if(!isNaN(d.getTime())) return toISODate(d);
+        } else if(typeof c === "number"){
+          const d = new Date(c);
+          if(!isNaN(d.getTime())) return toISODate(d);
+        }
+      }
+      return null;
+    }
 
-  const myTasks = Array.isArray(allTasks)
-    ? allTasks.filter(t => String(t?.empNo || "").trim() === myEmp)
-    : [];
+    function taskBelongsToDay(t, dayISO){
+      const iso = getTaskDateISO(t);
+      if(!iso) return (dayISO === toISODate(new Date())); // saknar datum -> behandla som idag
+      return iso === dayISO;
+    }
 
-  const openTasks = myTasks.filter(t => (t?.status || "open") !== "done");
-  const allTasksDone = (myTasks.length > 0 && openTasks.length === 0);
+    /* ===========================
+       UI STATE
+    ============================ */
+    const helloLine = document.getElementById("helloLine");
+    const whoPill = document.getElementById("whoPill");
+    const voiceLine = document.getElementById("voiceLine");
 
-  if(allTasksDone){
-    setHide($("tasksBadgeLine"), true);
-    setHide($("tasksAllDoneText"), false);
-    setHide($("panelTasks"), true);
-  }else{
-    const count = (myTasks.length ? openTasks.length : 3);
-    const badge = $("tasksBadgeLine");
-    if (badge) badge.textContent = `${count} att göra idag`;
-    setHide($("tasksBadgeLine"), false);
-    setHide($("tasksAllDoneText"), true);
-    setHide($("panelTasks"), false);
+    const dateBig = document.getElementById("dateBig");
+    const dateSmall = document.getElementById("dateSmall");
+    const dayBadge = document.getElementById("dayBadge");
 
-    if(myTasks.length){
-      const ul = $("tasksList");
-      if (ul){
-        ul.innerHTML = "";
-        myTasks.slice(0,3).forEach(t => {
-          const status = (t?.status === "done") ? "Klar" : (t?.status === "progress") ? "Pågår" : "Ej startad";
-          const li = document.createElement("li");
-          li.innerHTML = `<span>${escapeHtml(t?.text || t?.title || "Uppgift")}</span><span class="pill">${status}</span>`;
-          ul.appendChild(li);
+    const doneList = document.getElementById("doneList");
+    const todoList = document.getElementById("todoList");
+    const notesGrid = document.getElementById("notesGrid");
+
+    const prevDayBtn = document.getElementById("prevDayBtn");
+    const nextDayBtn = document.getElementById("nextDayBtn");
+    const todayBtn = document.getElementById("todayBtn");
+
+    const logoutLink = document.getElementById("logoutLink");
+
+    let selectedDate = new Date();
+    selectedDate.setHours(12,0,0,0);
+
+    /* ===========================
+       SYSTEMETS 5 MENINGAR (låst)
+    ============================ */
+    const VOICE = {
+      NOTHING: "Det finns inget som kräver din uppmärksamhet just nu.",
+      ONE_LEFT: "Det finns en sak kvar idag, den tar bara en stund.",
+      IN_PHASE: "Du är i fas.",
+      CAN_WAIT: "Det här kan vänta till imorgon.",
+      UNCLEAR: "Något är oklart – säg till om du behöver stöd."
+    };
+
+    function chooseVoice(todoCount, doneCount, isToday){
+      // enkel, lugn tolkning utan nya meningar
+      if(todoCount === 0 && doneCount === 0) return VOICE.NOTHING;
+      if(todoCount === 0 && doneCount > 0) return VOICE.IN_PHASE;
+      if(todoCount === 1 && isToday) return VOICE.ONE_LEFT;
+      if(todoCount > 1 && !isToday) return VOICE.CAN_WAIT;
+      if(todoCount > 0 && isToday) return VOICE.UNCLEAR;
+      return VOICE.IN_PHASE;
+    }
+
+    /* ===========================
+       RENDER
+    ============================ */
+    function render(){
+      hideGuard();
+
+      const session = readSessionFailClosed();
+      if(!session){
+        showGuard("Du är inte inloggad. Gå tillbaka och logga in igen.");
+        // fail-closed: visa inte funktion
+        voiceLine.textContent = VOICE.NOTHING;
+        notesGrid.innerHTML = "";
+        doneList.innerHTML = "";
+        todoList.innerHTML = "";
+        whoPill.textContent = "—";
+        helloLine.textContent = "Hej — • Anst.nr — • Roll EMPLOYEE";
+        return;
+      }
+
+      const name = escapeHtml(session.name ?? session.displayName ?? "—");
+      const empNo = escapeHtml(session.empNo ?? session.employeeNo ?? "—");
+      const role = escapeHtml(session.role ?? "EMPLOYEE");
+
+      helloLine.textContent = `Hej ${name} • Anst.nr ${empNo} • Roll ${role}`;
+      whoPill.textContent = `${name} • ${empNo}`;
+
+      const dayISO = toISODate(selectedDate);
+      const isToday = dayISO === toISODate(new Date());
+
+      dateBig.textContent = fmtBig(selectedDate);
+      dateSmall.textContent = fmtSmall(selectedDate);
+
+      const all = readTasksArray();
+
+      // filtrera per vald dag
+      const todays = all.filter(t => taskBelongsToDay(t, dayISO));
+
+      const done = todays.filter(isDone);
+      const todo = todays.filter(t => !isDone(t));
+
+      const msg = chooseVoice(todo.length, done.length, isToday);
+      voiceLine.textContent = msg;
+
+      dayBadge.textContent = `${done.length} färdig • ${todo.length} återstår`;
+
+      renderCalendarLists(done, todo);
+      renderNotes(todo, dayISO);
+    }
+
+    function renderCalendarLists(doneArr, todoArr){
+      doneList.innerHTML = "";
+      todoList.innerHTML = "";
+
+      if(doneArr.length === 0){
+        doneList.innerHTML = `<li class="cal-item"><div><div class="name">Inget färdigt ännu</div><div class="meta">Det är okej.</div></div><span class="badge done">Färdig</span></li>`;
+      } else {
+        doneArr.forEach((t, idx) => {
+          const title = escapeHtml(getTaskTitle(t));
+          const meta = escapeHtml(getTaskDesc(t));
+          doneList.insertAdjacentHTML("beforeend", `
+            <li class="cal-item">
+              <div>
+                <div class="name">${title}</div>
+                <div class="meta">${meta || "Färdig."}</div>
+              </div>
+              <span class="badge done">Färdig</span>
+            </li>
+          `);
+        });
+      }
+
+      if(todoArr.length === 0){
+        todoList.innerHTML = `<li class="cal-item"><div><div class="name">Inget kvar</div><div class="meta">Det är lugnt.</div></div><span class="badge">—</span></li>`;
+      } else {
+        todoArr.forEach((t) => {
+          const title = escapeHtml(getTaskTitle(t));
+          const meta = escapeHtml(getTaskDesc(t));
+          todoList.insertAdjacentHTML("beforeend", `
+            <li class="cal-item">
+              <div>
+                <div class="name">${title}</div>
+                <div class="meta">${meta || "Återstår."}</div>
+              </div>
+              <span class="badge">Återstår</span>
+            </li>
+          `);
         });
       }
     }
-  }
 
-  // ---- Questions smart hide ----
-  const allQA = safeParseLS(QA_KEY, []);
-  const myQA = Array.isArray(allQA)
-    ? allQA.filter(q => String(q?.empNo || "").trim() === myEmp)
-    : [];
-
-  const openQ = myQA.filter(q => !isAnswered(q));
-  const allQDone = (myQA.length > 0 && openQ.length === 0);
-
-  if(allQDone){
-    setHide($("qBadgeLine"), true);
-    setHide($("qAllDoneText"), false);
-    setHide($("panelQuestions"), true);
-  }else{
-    const count = (myQA.length ? openQ.length : 2);
-    const badge = $("qBadgeLine");
-    if (badge) badge.textContent = `${count} nya från admin`;
-    setHide($("qBadgeLine"), false);
-    setHide($("qAllDoneText"), true);
-    setHide($("panelQuestions"), false);
-
-    if(myQA.length){
-      const ul = $("qList");
-      if (ul){
-        ul.innerHTML = "";
-        myQA.slice(0,2).forEach(q => {
-          const pill = isAnswered(q) ? "Besvarad" : "Svar krävs";
-          const li = document.createElement("li");
-          li.innerHTML = `<span>${escapeHtml(q?.question || q?.title || "Fråga")}</span><span class="pill">${pill}</span>`;
-          ul.appendChild(li);
-        });
-      }
+    function pickNoteBg(i){
+      const colors = ["var(--note1)","var(--note2)","var(--note3)","var(--note4)"];
+      return colors[i % colors.length];
     }
-  }
 
-  // ---- Docs preview (tolerant) ----
-  const docs = safeParseLS(DOCS_KEY, null);
-  const docsArr = Array.isArray(docs) && docs.length ? docs : null;
+    function renderNotes(todoArr, dayISO){
+      notesGrid.innerHTML = "";
 
-  const ackAll = safeParseLS(ACK_KEY, {});
-  const mineAck = (ackAll && typeof ackAll === "object" && ackAll[myEmp])
-    ? ackAll[myEmp]
-    : {};
+      if(todoArr.length === 0){
+        notesGrid.innerHTML = `
+          <div class="note" style="background: rgba(217,247,214,.8); --tilt: -1deg;">
+            <div class="t">Inga post-its idag</div>
+            <div class="s">Om något dyker upp senare syns det här.</div>
+            <div class="row">
+              <div class="mini">${escapeHtml(dayISO)}</div>
+              <span class="badge done">Lugnt</span>
+            </div>
+          </div>
+        `;
+        return;
+      }
 
-  if(docsArr){
-    const ul = $("docsList");
-    if (ul){
-      ul.innerHTML = "";
-      const needAck = docsArr.filter(d => d && d.id && !(mineAck && mineAck[d.id]));
-      const pick = (needAck.length ? needAck : docsArr).slice(0,2);
+      todoArr.forEach((t, idx) => {
+        const title = escapeHtml(getTaskTitle(t));
+        const desc = escapeHtml(getTaskDesc(t));
+        const id = escapeHtml(getTaskId(t, idx));
+        const bg = pickNoteBg(idx);
+        const tilt = (idx % 2 === 0) ? "-1.2deg" : "1.1deg";
 
-      pick.forEach(d => {
-        const isAck = !!(mineAck && d && d.id && mineAck[d.id]);
-        const li = document.createElement("li");
-        li.innerHTML = `<span>${escapeHtml(d?.title || "Dokument")}</span><span class="pill">${isAck ? "Kvitterad" : "Kvittera"}</span>`;
-        ul.appendChild(li);
+        notesGrid.insertAdjacentHTML("beforeend", `
+          <article class="note" data-task-id="${id}" style="background:${bg}; --tilt:${tilt};">
+            <div class="t">${title}</div>
+            <div class="s">${desc || "—"}</div>
+            <div class="row">
+              <div class="mini">Id: ${id}</div>
+              <button class="donebtn" type="button" data-action="done" data-task-id="${id}">
+                Klar
+              </button>
+            </div>
+          </article>
+        `);
       });
     }
-  }
 
-})();
-</script>
+    /* ===========================
+       ACTIONS
+    ============================ */
+    function markTaskDone(taskId){
+      const all = readTasksArray();
+      if(!Array.isArray(all) || all.length === 0) return;
 
+      // hitta i hela listan (inte bara dagens)
+      let found = false;
+      for(let i=0;i<all.length;i++){
+        const id = getTaskId(all[i], i);
+        if(String(id) === String(taskId)){
+          all[i] = setDone(all[i]);
+          found = true;
+          break;
+        }
+      }
+      if(!found) return;
+
+      writeTasksArray(all);
+    }
+
+    function crumpleNote(taskId){
+      const el = notesGrid.querySelector(`.note[data-task-id="${CSS.escape(String(taskId))}"]`);
+      if(!el) return;
+
+      el.classList.add("crumpling");
+
+      // efter animation: rendera om så att den flyttas till “Färdig”
+      window.setTimeout(() => {
+        render();
+      }, 540);
+    }
+
+    /* ===========================
+       EVENTS
+    ============================ */
+    prevDayBtn.addEventListener("click", () => {
+      selectedDate = new Date(selectedDate.getTime() - 86400000);
+      selectedDate.setHours(12,0,0,0);
+      render();
+    });
+
+    nextDayBtn.addEventListener("click", () => {
+      selectedDate = new Date(selectedDate.getTime() + 86400000);
+      selectedDate.setHours(12,0,0,0);
+      render();
+    });
+
+    todayBtn.addEventListener("click", () => {
+      selectedDate = new Date();
+      selectedDate.setHours(12,0,0,0);
+      render();
+    });
+
+    notesGrid.addEventListener("click", (e) => {
+      const btn = e.target?.closest?.("button[data-action='done']");
+      if(!btn) return;
+      const taskId = btn.getAttribute("data-task-id");
+      if(!taskId) return;
+
+      // 1) uppdatera storage (så den blir “Färdig”)
+      markTaskDone(taskId);
+
+      // 2) knöggla visuellt + “släng”
+      crumpleNote(taskId);
+    });
+
+    logoutLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      // fail-closed: rensa session (båda), gå till login om du har den
+      sessionStorage.removeItem(KEY_SESSION);
+      localStorage.removeItem(KEY_SESSION);
+      // Anpassa om du har en specifik loginfil:
+      window.location.href = "../index.html";
+    });
+
+    // init
+    render();
+  </script>
 </body>
 </html>
