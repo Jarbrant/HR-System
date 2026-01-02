@@ -1,1 +1,1096 @@
+<!-- ============================================================
+AO-004 (MASTER SYS) | FIL-ID: system/org.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: Org Builder = enda sanna källan för scope-trädet (subtree)
+Policy (LÅST):
+- SYSTEM_ADMIN-only: org-trädet är systemets styrstruktur (ren förvaltning)
+- ADMIN/MANAGER får INTE ändra org-strukturen
+Typ: UI-only, hel fil (MASTER)
+
+LÅSTA REGLER:
+- Ingen backend
+- Ingen känslig persondata
+- Inga nya storage-keys
+- Endast dessa keys används i denna fil:
+  - Läs/Skriv: AO-020_ORG_V1 (localStorage) — org-träd (nodes)
+  - Endast läs: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) — assignments (empNo -> { roleId, scopeId })
+- Hel-filsleverans
+- XSS-escape på allt från storage
+
+Kontrakt:
+- Exakt 1 root-nod (ROOT_ID). Alla andra noder ligger under root.
+- Obegränsat djup (parentId kan peka på valfri nod).
+- Scope = nod + alla dess barn (subtree).
+- Delete-guards (fail-closed):
+  - stoppa om noden har barn, eller
+  - noden är scope i assignments, eller
+  - noden ligger under en scope (ancestor-scope),
+  - vid korrupt/oklar data → blockera delete (fail-closed)
+- Loop-skydd: vid loop/korruption → varning + lås kritiska actions
+MASTER FIX:
+- Bootstrap: om org saknas första gången skapas root automatiskt (ingen “repair krävs” för att komma igång)
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – System • Org Builder</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .layout{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .layout{ grid-template-columns: 1fr; }
+    }
+
+    .panel{
+      border: 1px solid var(--line);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .panel:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+    .panel.create{ background: rgba(167,243,208,.18); }
+    .panel.list{ background: rgba(191,219,254,.18); }
+
+    .row2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    @media (max-width: 620px){
+      .row2{ grid-template-columns: 1fr; }
+    }
+
+    .item{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 12px;
+      background:#fff;
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+    .item:hover{
+      transform: var(--lift);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.02);
+    }
+    .item-title{ font-weight: 950; margin:0; }
+    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+      margin-top:10px;
+    }
+
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+    code{ font-size:.95em; }
+
+    .kpis{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin: 10px 0 2px;
+    }
+    .kpi{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.95rem;
+    }
+
+    .treeName{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+      min-width: 260px;
+      flex: 1 1 560px;
+    }
+
+    .warnpill{ background: rgba(254,226,226,.9); }
+    .okpill{ background: rgba(209,250,229,.9); }
+
+    .health{
+      margin-top:10px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      padding: 10px 12px;
+      background:#fff;
+    }
+    .health .title{ font-weight: 800; margin:0 0 4px; }
+    .health .row{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:space-between;
+    }
+
+    .locknote{
+      margin-top:10px;
+      padding:10px 12px;
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+    }
+    .locknote strong{ font-weight: 900; }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• System • Org Builder</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./dashboard.html">Dashboard</a>
+    <a href="./org.html" aria-current="page">Org</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Org Builder</h1>
+  <p class="muted">Bygg koncernens struktur (obegränsade nivåer). Root är alltid 1 och allt ligger under den. (SYSTEM_ADMIN-only)</p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
+      </div>
+      <div class="row wrap"></div>
+    </div>
+
+    <div class="layout">
+
+      <!-- SKAPA/REDIGERA -->
+      <section class="panel create" aria-label="Skapa org-nod">
+        <div class="panel-title">Skapa / Redigera nod</div>
+
+        <div class="kpis" aria-label="Sammanfattning">
+          <div class="kpi">Noder: <strong id="kpiNodes">0</strong></div>
+          <div class="kpi">Top-nivå: <strong id="kpiTop">0</strong></div>
+          <div class="kpi">Maxdjup: <strong id="kpiDepth">0</strong></div>
+        </div>
+
+        <div id="healthBox" class="health" style="display:none;">
+          <p class="title">Datahälsa</p>
+          <div class="row">
+            <div class="muted" id="healthText">—</div>
+            <div class="row" style="gap:8px;">
+              <button id="btnRepair" type="button" class="secondary">Reparera (fail-safe)</button>
+              <button id="btnHideHealth" type="button" class="secondary">Dölj</button>
+            </div>
+          </div>
+          <div class="smallnote">
+            Reparera = (1) säkerställ exakt 1 root, (2) bryt loopar, (3) återställ orphans till root.
+            Sparar om <code>AO-020_ORG_V1</code>.
+          </div>
+        </div>
+
+        <div id="lockBox" class="locknote" style="display:none;">
+          <strong>Åtgärder låsta (fail-closed).</strong>
+          <div class="muted" id="lockText" style="margin-top:4px;">—</div>
+        </div>
+
+        <div class="row2" style="margin-top:10px;">
+          <label>
+            Namn
+            <input id="orgName" type="text" placeholder="t.ex. Bolag A / Enhet Kök / Team X" />
+          </label>
+
+          <label>
+            (Valfritt) Typ
+            <input id="orgType" type="text" placeholder="t.ex. Koncern / Bolag / Enhet / Team" />
+          </label>
+        </div>
+
+        <div class="row2" style="margin-top:10px;">
+          <label>
+            Parent (överordnad)
+            <select id="orgParent"></select>
+          </label>
+
+          <label>
+            Id (auto)
+            <input id="orgId" type="text" disabled />
+          </label>
+        </div>
+
+        <div class="row-actions" style="margin-top:10px;">
+          <button id="btnSave" type="button">Spara nod</button>
+          <button id="btnNew" type="button" class="secondary">Ny nod</button>
+        </div>
+
+        <p id="msg" class="message" aria-live="polite"></p>
+
+        <div class="smallnote">
+          Kontrakt: Root = 1. Scope gäller för nod + subtree.
+          <br/>Lagring: <code>AO-020_ORG_V1</code> + (read-only) <code>AO-020_ROLE_ASSIGNMENTS_V2</code>.
+        </div>
+      </section>
+
+      <!-- LISTA/TRÄD -->
+      <section class="panel list" aria-label="Org-träd">
+        <div class="panel-title">Org-träd</div>
+
+        <div class="row2" style="margin-bottom:10px;">
+          <label>
+            Sök
+            <input id="search" type="text" placeholder="sök på namn/typ/id" />
+          </label>
+
+          <label>
+            Visa
+            <select id="filter">
+              <option value="all" selected>Alla</option>
+              <option value="top">Top-nivå (barn till root)</option>
+              <option value="leaf">Endast löv (utan barn)</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="list" role="tree" aria-label="Org-träd"></div>
+
+        <div class="smallnote">
+          Tips: “Ta bort” stoppas om noden har barn eller ligger inom aktiv scope. Vid korrupt data låses actions (fail-closed).
+        </div>
+      </section>
+
+    </div>
+  </section>
+</main>
+
+<script src="../UI/UI-04-CONFIG.js"></script>
+<script src="../UI/UI-03-APP.js"></script>
+
+<script>
+(function(){
+  "use strict";
+
+  const ORG_KEY       = "AO-020_ORG_V1";
+  const ASSIGN_V2_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
+
+  const ROOT_ID = "org_root_v1";
+  const MAX_CHAIN_GUARD = 200;
+
+  const $ = (s) => document.querySelector(s);
+
+  function safeReplace(url){
+    try{ window.location.replace(url); }catch{ window.location.href = url; }
+  }
+
+  // ---- Core guard (tidigt) ----
+  const HRApp = window.HRApp;
+  if(!HRApp || typeof HRApp.requireAuth !== "function"){
+    safeReplace("../UI/UI-01-SKELETON.html");
+    return;
+  }
+
+  // Require SYSTEM_ADMIN (fail-closed)
+  const session = HRApp.requireAuth({
+    allowRoles: ["SYSTEM_ADMIN"],
+    redirectTo: "/UI/UI-01-SKELETON.html"
+  });
+  if(!session) return;
+
+  const auth = HRApp.getAuth(session);
+  if(!auth || !auth.isAuthed || auth.role !== "SYSTEM_ADMIN"){
+    safeReplace("../UI/UI-01-SKELETON.html?err=forbidden");
+    return;
+  }
+
+  const who = $("#whoName");
+  const wr = $("#whoRole");
+  if(who) who.textContent = "SYSTEM_ADMIN";
+  if(wr) wr.textContent = "SYSTEM_ADMIN";
+
+  const navLogout = $("#navLogout");
+  if(navLogout){
+    navLogout.addEventListener("click", (e) => {
+      e.preventDefault();
+      try{ HRApp.logout(); }catch{ safeReplace("../UI/UI-01-SKELETON.html"); }
+    });
+  }
+
+  function safeParseLocal(key, fallback){
+    try{
+      const raw = localStorage.getItem(key);
+      if(!raw) return fallback;
+      const v = JSON.parse(raw);
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{
+      return fallback;
+    }
+  }
+  function saveLocal(key, value){
+    localStorage.setItem(key, JSON.stringify(value));
+  }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replace(/&/g,"&amp;")
+      .replace(/</g,"&lt;")
+      .replace(/>/g,"&gt;")
+      .replace(/"/g,"&quot;")
+      .replace(/'/g,"&#039;");
+  }
+
+  function setMsg(kind, text){
+    const m = $("#msg");
+    if(!m) return;
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function genId(prefix){
+    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  // --- Bootstrap: skapa root direkt om org saknas/är tom ---
+  function bootstrapRootIfMissing(){
+    const raw = safeParseLocal(ORG_KEY, null);
+    const arr = Array.isArray(raw) ? raw : [];
+    const hasRoot = arr.some(n => String(n?.id || "").trim() === ROOT_ID);
+    if(arr.length === 0 || !hasRoot){
+      const now = Date.now();
+      const rootNode = {
+        id: ROOT_ID,
+        name: "Koncern (Root)",
+        type: "Root",
+        parentId: null,
+        createdAt: now,
+        updatedAt: now
+      };
+      saveLocal(ORG_KEY, [rootNode]);
+    }
+  }
+
+  // --- Assignments (read-only) ---
+  function loadAssignmentsV2(){
+    const raw = safeParseLocal(ASSIGN_V2_KEY, {});
+    return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
+  }
+  function extractScopeIds(assignments){
+    const set = new Set();
+    for(const empNo of Object.keys(assignments || {})){
+      const v = assignments[empNo];
+      const sid = String(v?.scopeId || "").trim();
+      if(sid) set.add(sid);
+    }
+    return Array.from(set);
+  }
+
+  // --- Org model ---
+  function normalizeNode(n){
+    const id = String(n?.id || "").trim();
+    const name = String(n?.name || "").trim();
+    const type = String(n?.type || "").trim();
+    const createdAt = Number.isFinite(n?.createdAt) ? n.createdAt : Date.now();
+    const updatedAt = Number.isFinite(n?.updatedAt) ? n.updatedAt : Date.now();
+
+    if(!id || !name) return null;
+
+    if(id === ROOT_ID){
+      return { id: ROOT_ID, name: name || "Koncern (Root)", type: type || "Root", parentId: null, createdAt, updatedAt };
+    }
+
+    const parentIdRaw = (n?.parentId === null || n?.parentId === undefined) ? ROOT_ID : String(n.parentId).trim();
+    const parentId = parentIdRaw ? parentIdRaw : ROOT_ID;
+
+    return { id, name, type, parentId, createdAt, updatedAt };
+  }
+
+  function buildById(nodes){
+    const byId = new Map();
+    const dupes = [];
+    for(const n of nodes){
+      if(byId.has(n.id)) dupes.push(n.id);
+      else byId.set(n.id, n);
+    }
+    return { byId, dupes: Array.from(new Set(dupes)) };
+  }
+
+  function buildChildrenMap(nodes){
+    const map = new Map();
+    nodes.forEach(n => { map.set(n.id, []); });
+    nodes.forEach(n => {
+      const pid = (n.parentId === null || n.parentId === undefined) ? null : n.parentId;
+      if(pid && map.has(pid)) map.get(pid).push(n.id);
+    });
+    return map;
+  }
+
+  function flattenTree(nodes){
+    const { byId } = buildById(nodes);
+    const children = buildChildrenMap(nodes);
+
+    const out = [];
+    function walk(id, depth, path){
+      const n = byId.get(id);
+      if(!n) return;
+      out.push({ id: n.id, name: n.name, type: n.type, parentId: n.parentId, depth });
+
+      const kids = (children.get(id) || []).slice().sort((a,b) => {
+        const na = byId.get(a)?.name || "";
+        const nb = byId.get(b)?.name || "";
+        return na.localeCompare(nb, "sv");
+      });
+
+      for(const k of kids){
+        if(path.has(k)) continue;
+        path.add(k);
+        walk(k, depth + 1, path);
+        path.delete(k);
+      }
+    }
+    walk(ROOT_ID, 1, new Set([ROOT_ID]));
+    return out;
+  }
+
+  function computeDepth(nodes){
+    const children = buildChildrenMap(nodes);
+    let maxDepth = 0;
+    function dfs(id, depth, path){
+      maxDepth = Math.max(maxDepth, depth);
+      const kids = children.get(id) || [];
+      for(const k of kids){
+        if(path.has(k)) continue;
+        path.add(k);
+        dfs(k, depth + 1, path);
+        path.delete(k);
+      }
+    }
+    dfs(ROOT_ID, 1, new Set([ROOT_ID]));
+    return maxDepth;
+  }
+
+  function chainHasCycleOrCorrupt(parentOf, startId){
+    const seen = new Set();
+    let cur = startId;
+    let steps = 0;
+
+    while(cur && steps < MAX_CHAIN_GUARD){
+      if(cur === ROOT_ID) return false;
+      if(seen.has(cur)) return true;
+      seen.add(cur);
+
+      const p = parentOf.get(cur);
+      if(!p) return true;
+      cur = p;
+      steps++;
+    }
+    return true;
+  }
+
+  function validateStrict(rawNodes){
+    let arr = Array.isArray(rawNodes) ? rawNodes.slice() : [];
+    const issues = [];
+    let needsRepair = false;
+    let criticalLock = false;
+
+    const norm = [];
+    for(const it of arr){
+      const n = normalizeNode(it);
+      if(n) norm.push(n);
+    }
+    arr = norm;
+
+    const roots = arr.filter(n => n.id === ROOT_ID);
+    const rootCount = roots.length;
+
+    if(rootCount !== 1){
+      issues.push(rootCount === 0
+        ? "Root saknas (ska inte hända efter bootstrap)."
+        : "Flera root-noder hittades (exakt 1 root krävs)."
+      );
+      needsRepair = true;
+      criticalLock = true;
+    }
+
+    const { dupes } = buildById(arr);
+    if(dupes.length){
+      issues.push(`Dublett-ID: ${dupes.slice(0,6).join(", ")}${dupes.length>6?"…":""}.`);
+      needsRepair = true;
+      criticalLock = true;
+    }
+
+    let work = arr.slice();
+
+    // parent checks
+    const ids = new Set(work.map(x => x.id));
+    const orphanNodes = [];
+    work = work.map(n => {
+      if(n.id === ROOT_ID) return { ...n, parentId: null };
+      const pid = String(n.parentId || "").trim();
+      if(!pid || !ids.has(pid)){
+        orphanNodes.push(n.id);
+        needsRepair = true;
+        criticalLock = true;
+        return { ...n, parentId: ROOT_ID };
+      }
+      return n;
+    });
+    if(orphanNodes.length){
+      issues.push("Orphan(s)/ogiltig parentId hittades (Repair krävs).");
+    }
+
+    const parentOf = new Map(work.map(n => [n.id, n.parentId]));
+    const cycleNodes = work
+      .filter(n => n.id !== ROOT_ID && chainHasCycleOrCorrupt(parentOf, n.id))
+      .map(n => n.id);
+
+    if(cycleNodes.length){
+      issues.push("Loop/cykel eller korrupt parent-kedja upptäckt (Repair krävs).");
+      needsRepair = true;
+      criticalLock = true;
+    }
+
+    return { nodes: work, issues, needsRepair, criticalLock };
+  }
+
+  function repairOrg(){
+    const raw = safeParseLocal(ORG_KEY, []);
+    const v = validateStrict(raw);
+
+    // Fail-safe: lägg alltid root först och bryt loopar/orphans
+    let nodes = Array.isArray(v.nodes) ? v.nodes.slice() : [];
+    const now = Date.now();
+
+    // dedupe
+    const seen = new Set();
+    nodes = nodes.filter(n => {
+      if(seen.has(n.id)) return false;
+      seen.add(n.id);
+      return true;
+    });
+
+    // säkerställ root (ska finnas, men fail-safe)
+    nodes = nodes.filter(n => n.id !== ROOT_ID);
+    nodes.unshift({ id: ROOT_ID, name:"Koncern (Root)", type:"Root", parentId:null, createdAt: now, updatedAt: now });
+
+    // fix parents
+    const ids = new Set(nodes.map(x => x.id));
+    nodes = nodes.map(n => {
+      if(n.id === ROOT_ID) return n;
+      const pid = String(n.parentId || "").trim();
+      if(!pid || !ids.has(pid)) return { ...n, parentId: ROOT_ID, updatedAt: Date.now() };
+      return n;
+    });
+
+    // break cycles
+    const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
+    for(let i=0;i<nodes.length;i++){
+      const n = nodes[i];
+      if(n.id === ROOT_ID) continue;
+      if(chainHasCycleOrCorrupt(parentOf, n.id)){
+        nodes[i] = { ...n, parentId: ROOT_ID, updatedAt: Date.now() };
+        parentOf.set(n.id, ROOT_ID);
+      }
+    }
+
+    saveLocal(ORG_KEY, nodes);
+  }
+
+  function computeDeleteGuards(nodes, scopeIds){
+    const nodeIds = new Set(nodes.map(n => n.id));
+    const scopesArr = (scopeIds || []).map(String).filter(Boolean);
+
+    const invalidScopes = scopesArr.filter(sid => sid && !nodeIds.has(sid));
+    if(invalidScopes.length){
+      return {
+        deleteLocked: true,
+        invalidScopes: invalidScopes.slice(0, 20),
+        blocked: new Set(nodes.map(n => n.id)),
+        reason: "INVALID_SCOPES"
+      };
+    }
+
+    const scopes = new Set(scopesArr);
+    const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
+    const memo = new Map();
+
+    function isBlocked(nodeId){
+      const id = String(nodeId);
+      if(memo.has(id)) return memo.get(id);
+
+      if(scopes.has(id)){
+        memo.set(id, true);
+        return true;
+      }
+
+      let cur = id;
+      let steps = 0;
+      const seen = new Set([cur]);
+
+      while(cur && steps < MAX_CHAIN_GUARD){
+        const p = parentOf.get(cur);
+        if(!p){ memo.set(id, true); return true; }
+        if(scopes.has(p)){ memo.set(id, true); return true; }
+        if(p === ROOT_ID){ memo.set(id, false); return false; }
+        if(seen.has(p)){ memo.set(id, true); return true; }
+        seen.add(p);
+        cur = p;
+        steps++;
+      }
+
+      memo.set(id, true);
+      return true;
+    }
+
+    const blocked = new Set();
+    nodes.forEach(n => { if(isBlocked(n.id)) blocked.add(n.id); });
+
+    return { deleteLocked:false, invalidScopes:[], blocked, reason:"" };
+  }
+
+  // --- UI state ---
+  let editingId = null;
+
+  function validateName(name){
+    const s = String(name || "").trim();
+    if(!s) return { ok:false, val:s };
+    if(s.length > 80) return { ok:false, val:s };
+    return { ok:true, val:s };
+  }
+
+  function resetForm(){
+    editingId = null;
+    $("#orgName").value = "";
+    $("#orgType").value = "";
+    $("#orgId").value = "";
+    $("#orgParent").disabled = false;
+    $("#orgParent").value = ROOT_ID;
+    setMsg("", "");
+  }
+
+  function setEditing(node){
+    editingId = node.id;
+    $("#orgId").value = node.id;
+    $("#orgName").value = node.name || "";
+    $("#orgType").value = node.type || "";
+
+    if(node.id === ROOT_ID){
+      $("#orgParent").disabled = true;
+      $("#orgParent").value = ROOT_ID;
+    }else{
+      $("#orgParent").disabled = false;
+      $("#orgParent").value = node.parentId || ROOT_ID;
+    }
+    setMsg("", "");
+  }
+
+  function getDescendants(nodes, startId){
+    const children = buildChildrenMap(nodes);
+    const seen = new Set();
+    const stack = [startId];
+    while(stack.length){
+      const cur = stack.pop();
+      const kids = children.get(cur) || [];
+      for(const k of kids){
+        if(seen.has(k)) continue;
+        seen.add(k);
+        stack.push(k);
+      }
+    }
+    return seen;
+  }
+
+  function renderHealthAndLocks(v, guards){
+    const healthBox = $("#healthBox");
+    const lockBox = $("#lockBox");
+
+    const issues = (v?.issues || []).slice();
+    let showHealth = !!v?.needsRepair;
+
+    if(guards?.deleteLocked && guards?.invalidScopes?.length){
+      showHealth = true;
+      issues.push(`Assignments pekar på scopeId som saknas i org: ${guards.invalidScopes.join(", ")}. Delete är låst (fail-closed) tills noder skapas eller scopes rättas.`);
+    }
+
+    if(!showHealth){
+      healthBox.style.display = "none";
+    }else{
+      healthBox.style.display = "block";
+      $("#healthText").textContent = issues.length ? issues.join(" ") : "Org-data kan behöva reparation.";
+    }
+
+    if(v?.criticalLock){
+      lockBox.style.display = "block";
+      $("#lockText").textContent = "Kritiskt fel i org-data. Skapande/sparande är låst tills du kör Reparera.";
+      $("#btnSave").disabled = true;
+      $("#btnNew").disabled = true;
+    }else{
+      if(guards?.deleteLocked){
+        lockBox.style.display = "block";
+        $("#lockText").textContent = "Radering är låst (fail-closed) p.g.a. ogiltiga scopes i assignments. Skapa saknad nod eller rätta assignments.";
+      }else{
+        lockBox.style.display = "none";
+        $("#lockText").textContent = "—";
+      }
+      $("#btnSave").disabled = false;
+      $("#btnNew").disabled = false;
+    }
+  }
+
+  $("#btnHideHealth").addEventListener("click", () => {
+    $("#healthBox").style.display = "none";
+  });
+
+  $("#btnRepair").addEventListener("click", () => {
+    if(!confirm("Reparera org-data? (1 root + bryt loopar + återställ orphans till root)")) return;
+    repairOrg();
+    setMsg("ok", "Reparerat och sparat org-data.");
+    renderList();
+  });
+
+  function renderParentSelect(nodes){
+    const sel = $("#orgParent");
+    sel.innerHTML = "";
+
+    const optRoot = document.createElement("option");
+    optRoot.value = ROOT_ID;
+    optRoot.textContent = "Root (högst upp)";
+    sel.appendChild(optRoot);
+
+    const flat = flattenTree(nodes);
+    const descendants = (editingId && editingId !== ROOT_ID) ? getDescendants(nodes, editingId) : new Set();
+
+    flat.forEach(row => {
+      if(row.id === ROOT_ID) return;
+      const opt = document.createElement("option");
+      opt.value = row.id;
+
+      const indent = "—".repeat(Math.min(row.depth - 1, 10));
+      opt.textContent = `${indent} ${row.name}${row.type ? " • " + row.type : ""}`;
+
+      if(editingId && (row.id === editingId || descendants.has(row.id))){
+        opt.disabled = true;
+      }
+      sel.appendChild(opt);
+    });
+
+    if(editingId === ROOT_ID){
+      sel.disabled = true;
+      sel.value = ROOT_ID;
+    }
+  }
+
+  function updateKpis(nodes){
+    const maxDepth = computeDepth(nodes);
+    const children = buildChildrenMap(nodes);
+    const top = (children.get(ROOT_ID) || []).length;
+
+    $("#kpiNodes").textContent = String(nodes.length);
+    $("#kpiTop").textContent = String(top);
+    $("#kpiDepth").textContent = String(maxDepth);
+  }
+
+  function renderList(){
+    const list = $("#list");
+    list.innerHTML = "";
+
+    bootstrapRootIfMissing();
+
+    const raw = safeParseLocal(ORG_KEY, []);
+    const v = validateStrict(raw);
+
+    const assignments = loadAssignmentsV2();
+    const scopeIds = extractScopeIds(assignments);
+    const guards = computeDeleteGuards(v.nodes, scopeIds);
+
+    renderHealthAndLocks(v, guards);
+
+    const nodes = v.nodes;
+
+    if(editingId && !nodes.some(n => n.id === editingId)){
+      resetForm();
+    }
+
+    renderParentSelect(nodes);
+    updateKpis(nodes);
+
+    const flat = flattenTree(nodes);
+
+    const q = String($("#search").value || "").trim().toLowerCase();
+    const filter = $("#filter").value;
+
+    const children = buildChildrenMap(nodes);
+    const childCount = (id) => (children.get(id) || []).length;
+
+    let rows = flat;
+
+    if(filter === "top"){
+      rows = rows.filter(r => r.parentId === ROOT_ID && r.id !== ROOT_ID);
+    }
+    if(filter === "leaf"){
+      rows = rows.filter(r => r.id !== ROOT_ID && childCount(r.id) === 0);
+    }
+    if(q){
+      rows = rows.filter(r => {
+        const blob = `${r.id} ${r.name} ${r.type || ""} ${(r.parentId || "")}`.toLowerCase();
+        return blob.includes(q);
+      });
+    }
+
+    if(rows.length === 0){
+      list.innerHTML = `<div class="empty">Inga noder matchar filter/sök.</div>`;
+      return;
+    }
+
+    const criticalLocked = $("#btnSave").disabled === true;
+
+    rows.forEach(r => {
+      const isRoot = (r.id === ROOT_ID);
+      const isEditing = (editingId && r.id === editingId);
+      const kids = childCount(r.id);
+
+      const deleteBlocked =
+        criticalLocked ||
+        guards.deleteLocked ||
+        isRoot ||
+        (kids > 0) ||
+        guards.blocked.has(r.id);
+
+      const indentPx = Math.min((r.depth - 1) * 14, 140);
+
+      const el = document.createElement("div");
+      el.className = "item";
+      el.setAttribute("role", "treeitem");
+      el.setAttribute("aria-level", String(r.depth));
+      el.innerHTML = `
+        <div class="treeName">
+          <span aria-hidden="true" style="display:inline-block;width:${indentPx}px;"></span>
+          <div>
+            <p class="item-title">${escapeHtml(r.name || "—")}</p>
+            <div class="meta">
+              <span class="pill">ID: ${escapeHtml(r.id)}</span>
+              ${r.type ? `<span class="pill">${escapeHtml(r.type)}</span>` : ``}
+              <span class="pill">Barn: ${kids}</span>
+              ${criticalLocked ? `<span class="pill warnpill">Actions låsta</span>` : `<span class="pill okpill">OK</span>`}
+              ${guards.deleteLocked ? `<span class="pill warnpill">Delete låst</span>` : ``}
+              ${(!isRoot && guards.blocked.has(r.id)) ? `<span class="pill warnpill">Scope-skydd</span>` : ``}
+              ${isRoot ? `<span class="pill">Root</span>` : ``}
+              ${isEditing ? `<span class="pill">Redigeras</span>` : ``}
+            </div>
+          </div>
+        </div>
+
+        <div class="row" style="gap:8px;">
+          <button type="button" class="secondary" data-edit="${escapeHtml(r.id)}" ${criticalLocked ? "disabled" : ""}>Redigera</button>
+          <button type="button" class="secondary" data-del="${escapeHtml(r.id)}" ${deleteBlocked ? "disabled" : ""}>
+            Ta bort
+          </button>
+        </div>
+      `;
+      list.appendChild(el);
+    });
+
+    list.querySelectorAll("button[data-edit]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        if($("#btnSave").disabled) return;
+        const id = btn.getAttribute("data-edit");
+        const node = nodes.find(x => x.id === id);
+        if(!node) return;
+        setEditing(node);
+        renderParentSelect(nodes);
+      });
+    });
+
+    list.querySelectorAll("button[data-del]").forEach(btn => {
+      btn.addEventListener("click", () => {
+        const id = btn.getAttribute("data-del");
+        if(!id) return;
+
+        if($("#btnSave").disabled){
+          setMsg("err", "Radering stoppas (fail-closed): kritiskt datafel. Kör Reparera först.");
+          return;
+        }
+        if(guards.deleteLocked){
+          setMsg("err", "Radering stoppas (fail-closed): ogiltiga scopes i assignments. Skapa saknad nod eller rätta assignments.");
+          return;
+        }
+
+        const node = nodes.find(x => x.id === id);
+        if(!node) return;
+
+        if(id === ROOT_ID){
+          setMsg("err", "Root kan inte tas bort.");
+          return;
+        }
+
+        const kids = (buildChildrenMap(nodes).get(id) || []).length;
+        if(kids > 0){
+          setMsg("err", "Noden har barn. Flytta/ta bort barn först.");
+          return;
+        }
+
+        if(guards.blocked.has(id)){
+          setMsg("err", "Radering stoppas: noden ligger inom en aktiv scope (subtree-skydd). Ändra assignments först.");
+          return;
+        }
+
+        if(!confirm(`Ta bort nod "${node.name}"?`)) return;
+
+        const next = nodes.filter(x => x.id !== id);
+        saveLocal(ORG_KEY, next);
+
+        if(editingId === id) resetForm();
+
+        setMsg("ok", "Nod borttagen.");
+        renderList();
+      });
+    });
+
+    if(!editingId){
+      $("#orgParent").disabled = false;
+      $("#orgParent").value = ROOT_ID;
+    }
+  }
+
+  function wouldCreateLoop(nodes, nodeId, newParentId){
+    if(nodeId === ROOT_ID) return true;
+    const pid = newParentId || ROOT_ID;
+    if(pid === nodeId) return true;
+    const desc = getDescendants(nodes, nodeId);
+    return desc.has(pid);
+  }
+
+  $("#btnSave").addEventListener("click", () => {
+    if($("#btnSave").disabled){
+      setMsg("err", "Sparande stoppas (fail-closed): kritiskt datafel. Kör Reparera först.");
+      return;
+    }
+
+    setMsg("", "");
+
+    bootstrapRootIfMissing();
+
+    const raw = safeParseLocal(ORG_KEY, []);
+    const v = validateStrict(raw);
+    if(v.criticalLock){
+      setMsg("err", "Sparande stoppas (fail-closed): org-data är korrupt. Kör Reparera först.");
+      return;
+    }
+
+    const nodes = v.nodes;
+
+    const vName = validateName($("#orgName").value);
+    if(!vName.ok){
+      setMsg("err", "Namn krävs (max 80 tecken).");
+      return;
+    }
+
+    const type = String($("#orgType").value || "").trim();
+    const now = Date.now();
+    const parentId = (editingId === ROOT_ID) ? null : String($("#orgParent").value || ROOT_ID);
+
+    if(!editingId){
+      const id = genId("org");
+      const newNode = normalizeNode({
+        id,
+        name: vName.val,
+        type,
+        parentId: parentId || ROOT_ID,
+        createdAt: now,
+        updatedAt: now
+      });
+
+      if(!newNode){ setMsg("err", "Kunde inte skapa nod (ogiltig data)."); return; }
+      if(wouldCreateLoop(nodes, newNode.id, newNode.parentId)){ setMsg("err", "Ogiltig parent (skulle skapa loop)."); return; }
+
+      saveLocal(ORG_KEY, nodes.concat([newNode]));
+      setMsg("ok", "Nod skapad.");
+      resetForm();
+      renderList();
+      return;
+    }
+
+    const idx = nodes.findIndex(x => x.id === editingId);
+    if(idx < 0){
+      setMsg("err", "Vald nod hittades inte.");
+      resetForm();
+      renderList();
+      return;
+    }
+
+    if(editingId === ROOT_ID){
+      const cur = nodes[idx];
+      nodes[idx] = { ...cur, name: vName.val, type: (type || cur.type), parentId: null, updatedAt: now };
+      saveLocal(ORG_KEY, nodes);
+      setMsg("ok", "Root uppdaterad.");
+      renderList();
+      setEditing(nodes[idx]);
+      return;
+    }
+
+    const cur = nodes[idx];
+    const nextNode = normalizeNode({
+      ...cur,
+      name: vName.val,
+      type,
+      parentId: parentId || ROOT_ID,
+      updatedAt: now
+    });
+
+    if(!nextNode){ setMsg("err", "Kunde inte spara (ogiltig data)."); return; }
+    if(wouldCreateLoop(nodes, nextNode.id, nextNode.parentId)){ setMsg("err", "Ogiltig parent (skulle skapa loop)."); return; }
+
+    nodes[idx] = nextNode;
+    saveLocal(ORG_KEY, nodes);
+
+    setMsg("ok", "Nod sparad.");
+    renderList();
+    setEditing(nextNode);
+  });
+
+  $("#btnNew").addEventListener("click", () => {
+    if($("#btnNew").disabled){
+      setMsg("err", "Ny nod stoppas (fail-closed): kritiskt datafel. Kör Reparera först.");
+      return;
+    }
+    resetForm();
+    renderList();
+  });
+
+  $("#search").addEventListener("input", renderList);
+  $("#filter").addEventListener("change", renderList);
+
+  // init
+  bootstrapRootIfMissing();
+  resetForm();
+  renderList();
+
+})();
+</script>
+
+</body>
+</html>
 
