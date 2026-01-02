@@ -22,6 +22,9 @@ FIX-01 (PRC/FIX-ARBETORDER – AO-019 6/8-FIX-01):
   - ADMIN/SYSTEM: får skapa även om viewerScopeId saknas, men:
     - inget default-scope (scope måste väljas manuellt innan spara)
     - org + assignments måste vara friska
+
+EXTRA (UX-HELP-01):
+- Om org har exakt 1 root-nod: visa “Välj root” knapp för ADMIN/SYSTEM (manuell click = fortfarande “ingen default”)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -250,6 +253,16 @@ FIX-01 (PRC/FIX-ARBETORDER – AO-019 6/8-FIX-01):
       color: var(--muted);
     }
     .lockbox strong{ color:#111; }
+    .lockbox ul{ margin:8px 0 0; padding-left: 18px; }
+    .lockbox li{ margin: 3px 0; }
+
+    .scope-helpbar{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+      margin-top: 8px;
+    }
   </style>
 </head>
 
@@ -328,6 +341,11 @@ FIX-01 (PRC/FIX-ARBETORDER – AO-019 6/8-FIX-01):
             <label>
               Scope (org-nod) <span class="muted">• krävs</span>
               <select id="scopeSelect"></select>
+
+              <div class="scope-helpbar">
+                <button id="btnPickRoot" type="button" class="secondary" style="display:none;">Välj root</button>
+                <span id="scopeHint" class="smallnote" style="margin:0;"></span>
+              </div>
             </label>
           </div>
 
@@ -562,12 +580,8 @@ FIX-01 (PRC/FIX-ARBETORDER – AO-019 6/8-FIX-01):
 
 <script>
 /* ============================================================
-AO-046 + AO-019 6/8 | admin/tasks.html (inline JS) – AUTOPATCH v1.3
-UX-QUICK-01: UI omstrukturering (snabbskapande som standard, avancerat i details)
-FIX-01:
-- Org-integritetscheck utan falska positives (root/orphan/loop)
-- Harden assignmentsV2 (Object.create(null) + blockera special-keys)
-- ViewerScope policy: Manager kräver viewerScopeId; Admin/System kan skapa utan viewerScopeId men ingen default-scope
+AO-046 + AO-019 6/8 | admin/tasks.html (inline JS) – AUTOPATCH v1.3.1
+- EXTRA (UX-HELP-01): “Välj root” knapp om exakt 1 root (ADMIN/SYSTEM), men fortfarande manuell click (ingen default)
 ============================================================ */
 (function(){
   "use strict";
@@ -632,7 +646,10 @@ FIX-01:
       return;
     }
     box.style.display = "block";
-    box.innerHTML = `<strong>Låst (fail-closed):</strong> ${escapeHtml(lines.join(" "))}`;
+    box.innerHTML = `
+      <strong>Låst (fail-closed):</strong>
+      <ul>${lines.map(x => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>
+    `;
   }
 
   function genId(prefix){
@@ -763,7 +780,7 @@ FIX-01:
     const out = Object.create(null);
     let blocked = false;
 
-    for(const k of Object.keys(raw)){
+    for(const k of Object.keys(raw)){ // egna keys only
       const key = String(k);
       if(SPECIAL_KEYS.has(key)){
         blocked = true;
@@ -911,8 +928,8 @@ FIX-01:
       while(steps < MAX_CHAIN_GUARD){
         const p = idx.parentOf.get(cur);
 
-        if(p === null) break;
-        if(!p || !idx.byId.has(p)) break;
+        if(p === null) break;                 // root reached => OK
+        if(!p || !idx.byId.has(p)) break;     // orphan chain => handled as orphan, NOT loop
 
         if(seen.has(p)){
           hasLoop = true;
@@ -1080,9 +1097,25 @@ FIX-01:
   // ------------------------------------------------------------
   // Scope select (FIX-01: Admin/System ingen default-scope)
   // ------------------------------------------------------------
+  function setScopeHint(text){
+    const el = $("#scopeHint");
+    if(!el) return;
+    el.textContent = text || "";
+  }
+
+  function getSingleRootId(){
+    if(!orgIntegrity.ok) return "";
+    const roots = (orgIntegrity.rootIds || []).filter(Boolean);
+    if(roots.length === 1) return String(roots[0] || "");
+    return "";
+  }
+
   function renderScopeSelect(){
     const sel = $("#scopeSelect");
     sel.innerHTML = "";
+
+    const btnPickRoot = $("#btnPickRoot");
+    if(btnPickRoot) btnPickRoot.style.display = "none";
 
     if(!orgIntegrity.ok){
       const opt = document.createElement("option");
@@ -1090,6 +1123,7 @@ FIX-01:
       opt.textContent = "— Org saknas/korrupt —";
       sel.appendChild(opt);
       sel.disabled = true;
+      setScopeHint("Org måste vara frisk innan du kan välja scope.");
       return;
     }
 
@@ -1119,10 +1153,26 @@ FIX-01:
 
     if(access.roleClass === "MANAGER"){
       if(viewerScopeId && (!allowed || allowed.has(viewerScopeId))){
-        sel.value = viewerScopeId;
+        sel.value = viewerScopeId; // manager får default till sin scope
       }
-    }else{
-      sel.value = "";
+      setScopeHint(viewerScopeId ? "Manager: scope är låst till din subtree." : "Manager: saknar viewerScopeId (låst).");
+      return;
+    }
+
+    // ADMIN / SYSTEM: ingen default-scope
+    sel.value = "";
+    setScopeHint("Admin/System: välj scope manuellt innan du skapar.");
+
+    // EXTRA (UX-HELP-01): om exakt 1 root, erbjud “Välj root” (manuellt klick)
+    const rootId = getSingleRootId();
+    if(rootId && btnPickRoot){
+      btnPickRoot.style.display = "inline-block";
+      btnPickRoot.onclick = () => {
+        sel.value = rootId;
+        const nm = orgIndex.byId.get(rootId)?.name || rootId;
+        setScopeHint(`Scope valt: ${nm}`);
+        setMsg("", "");
+      };
     }
   }
 
@@ -1433,7 +1483,6 @@ FIX-01:
     const sch = tpl.schedule || { kind:"oneoff" };
     $("#taskKind").value = (sch.kind === "recurring") ? "recurring" : "oneoff";
     $("#startDate").value = String(sch.startDate || "");
-    // Deadline ligger i snabb-läget via endDate:
     $("#endDate").value = String(sch.endDate || "");
 
     $("#freq").value = String(sch.freq || "daily");
@@ -1444,7 +1493,6 @@ FIX-01:
     $$("input[name='untilMode']").forEach(r => r.checked = (r.value === untilMode));
     $("#untilDate").value = String(sch.untilDate || "");
 
-    // Öppna avancerat om mallen innehåller recurring, så man ser vad som hänt
     const det = $("#advancedDetails");
     if(det && sch.kind === "recurring") det.open = true;
 
@@ -1635,7 +1683,6 @@ FIX-01:
 
     const mode = $("#targetMode").value;
 
-    // Snabb-läge: prio/adminNote finns i avancerat men har defaults, så vi läser alltid samma fields
     const title = normalizeLine($("#title").value || "", 160);
     const prio = $("#prio") ? $("#prio").value : "normal";
     const adminNote = $("#adminNote") ? normalizeLine($("#adminNote").value || "", 200) : "";
@@ -1658,7 +1705,7 @@ FIX-01:
 
     const kind = $("#taskKind") ? $("#taskKind").value : "oneoff";
     const startDate = $("#startDate") ? String($("#startDate").value || "").trim() : "";
-    const endDate = String($("#endDate").value || "").trim(); // deadline synlig i snabb-läge
+    const endDate = String($("#endDate").value || "").trim();
 
     if(startDate && !isISODate(startDate)){
       setMsg("err", "Startdatum är ogiltigt.");
