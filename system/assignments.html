@@ -30,7 +30,6 @@ Regler (LÅST):
 - SYSTEM_ADMIN: scopeId får vara tomt (rekommenderat)
 - Delete är tillåtet (tar bort assignment-rad), men alltid bekräftelse
 - Import/Export: finns ej i denna AO (undviker risk)
-
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -147,6 +146,15 @@ Regler (LÅST):
       background: rgba(254,226,226,.6);
       border: 1px solid rgba(220,38,38,.25);
     }
+
+    .blocker{
+      border: 1px solid rgba(220,38,38,.25);
+      background: rgba(254,226,226,.45);
+      border-radius: var(--r14);
+      padding: 10px 12px;
+      margin: 10px 0;
+    }
+    .blocker strong{ font-weight: 900; }
   </style>
 </head>
 
@@ -159,7 +167,7 @@ Regler (LÅST):
   </div>
 
   <nav class="nav" aria-label="Meny">
-    <a href="./dashboard.html">Dashboard</a>
+    <a href="./dashboard.html">Systemstart</a>
     <a href="./org.html">Org</a>
     <a href="./assignments.html" aria-current="page">Assignments</a>
     <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
@@ -168,7 +176,9 @@ Regler (LÅST):
 
 <main class="container">
   <h1 class="tight">Assignments</h1>
-  <p class="muted">Koppla <strong>anst.nr (empNo)</strong> till <strong>roll</strong> och <strong>scope</strong> (org-nod). SYSTEM_ADMIN-only.</p>
+  <p class="muted">
+    Koppla <strong>anst.nr (empNo)</strong> till <strong>roll</strong> och <strong>scope</strong> (org-nod). SYSTEM_ADMIN-only.
+  </p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
@@ -177,6 +187,15 @@ Regler (LÅST):
       </div>
       <div class="row wrap" style="gap:8px;">
         <a class="btn secondary" href="./org.html">Öppna Org Builder</a>
+      </div>
+    </div>
+
+    <div id="blockerBox" class="blocker" style="display:none;">
+      <div><strong>Systemet är inte konfigurerat.</strong> Du måste skapa Org först.</div>
+      <div class="muted" id="blockerText" style="margin-top:4px;">—</div>
+      <div class="row wrap" style="gap:8px; margin-top:10px;">
+        <a class="btn" href="./org.html">Gå till Org Builder</a>
+        <a class="btn secondary" href="./dashboard.html">Gå till Systemstart</a>
       </div>
     </div>
 
@@ -276,7 +295,7 @@ Regler (LÅST):
         <div id="list" aria-label="Lista"></div>
 
         <div class="smallnote">
-          Tips: Om du inte kan spara: kontrollera att Org finns och att scopeId finns i Org-trädet.
+          Om du inte kan spara: skapa Org först, välj sedan scope från listan (ej root).
         </div>
       </section>
 
@@ -304,7 +323,7 @@ Regler (LÅST):
   // ---- Core guard (tidigt) ----
   const HRApp = window.HRApp;
   if(!HRApp || typeof HRApp.requireAuth !== "function"){
-    safeReplace("../UI/UI-01-SKELETON.html");
+    safeReplace("../UI/UI-01-SKELETON.html?err=core");
     return;
   }
 
@@ -329,10 +348,13 @@ Regler (LÅST):
   }
   if(wr) wr.textContent = "SYSTEM_ADMIN";
 
-  $("#navLogout").addEventListener("click", (e) => {
-    e.preventDefault();
-    try{ HRApp.logout(); }catch{ safeReplace("../UI/UI-01-SKELETON.html"); }
-  });
+  const navLogout = $("#navLogout");
+  if(navLogout){
+    navLogout.addEventListener("click", (e) => {
+      e.preventDefault();
+      try{ HRApp.logout(); }catch{ safeReplace("../UI/UI-01-SKELETON.html?err=logout"); }
+    });
+  }
 
   function escapeHtml(s){
     return String(s ?? "")
@@ -446,17 +468,6 @@ Regler (LÅST):
     if(raw && typeof raw === "object" && !Array.isArray(raw)){
       return raw;
     }
-    if(Array.isArray(raw)){
-      const out = {};
-      for(const row of raw){
-        const empNo = normalizeEmpNo(row?.empNo ?? row?.employeeNo ?? row?.emp ?? "");
-        const roleId = normalizeRole(row?.roleId ?? row?.role ?? "");
-        const scopeId = String(row?.scopeId ?? row?.scope ?? "").trim();
-        if(!empNo || !roleId) continue;
-        out[empNo] = { roleId, scopeId, updatedAt: Number(row?.updatedAt) || Date.now() };
-      }
-      return out;
-    }
     return {};
   }
 
@@ -507,13 +518,30 @@ Regler (LÅST):
     $("#healthBox").style.display = "none";
   }
 
-  $("#btnHideHealth").addEventListener("click", hideHealthBox);
+  const btnHideHealth = $("#btnHideHealth");
+  if(btnHideHealth){
+    btnHideHealth.addEventListener("click", hideHealthBox);
+  }
+
+  function showBlocker(text){
+    const b = $("#blockerBox");
+    $("#blockerText").textContent = text || "—";
+    b.style.display = "block";
+  }
+  function hideBlocker(){
+    $("#blockerBox").style.display = "none";
+  }
 
   // -------------------------
   // UI state
   // -------------------------
-  let editingEmpNo = "";     // empNo under edit
-  let orgOkState = false;    // PATCH: hindra att scope-select "åter-aktiveras" när org saknas
+  let editingEmpNo = "";
+  let orgOkState = false;
+
+  function setSaveEnabled(enabled){
+    $("#btnSave").disabled = !enabled;
+    $("#btnNew").disabled = false; // Ny får alltid fungera (reset)
+  }
 
   function resetForm(){
     editingEmpNo = "";
@@ -541,7 +569,6 @@ Regler (LÅST):
     const role = normalizeRole($("#roleId").value);
     const sel = $("#scopeId");
 
-    // PATCH: org saknas => scope alltid låst (fail-closed UI)
     if(!orgOkState){
       sel.disabled = true;
       return;
@@ -693,33 +720,36 @@ Regler (LÅST):
   // -------------------------
   // Clear invalid scopes
   // -------------------------
-  $("#btnClearInvalid").addEventListener("click", () => {
-    const org = loadOrg();
-    if(!org.ok){
-      setMsg("err", "Kan inte rensa: Org saknas/är korrupt. Skapa org i System • Org Builder först.");
-      return;
-    }
-    const orgById = buildOrgIndex(org.nodes).byId;
-
-    const map = loadAssignments();
-    let changed = 0;
-
-    for(const empNo of Object.keys(map)){
-      const row = map[empNo];
-      const roleId = normalizeRole(row?.roleId);
-      const scopeId = String(row?.scopeId || "").trim();
-      if(!roleId) continue;
-
-      if(scopeId && !orgHasScope(orgById, scopeId)){
-        map[empNo] = { roleId, scopeId:"", updatedAt: Date.now() };
-        changed++;
+  const btnClearInvalid = $("#btnClearInvalid");
+  if(btnClearInvalid){
+    btnClearInvalid.addEventListener("click", () => {
+      const org = loadOrg();
+      if(!org.ok){
+        setMsg("err", "Fail-closed: Org saknas. Skapa org i Org Builder först.");
+        return;
       }
-    }
+      const orgById = buildOrgIndex(org.nodes).byId;
 
-    saveAssignments(map);
-    setMsg("ok", changed ? `Rensat ${changed} ogiltiga scopeId.` : "Inga ogiltiga scopeId att rensa.");
-    renderAll();
-  });
+      const map = loadAssignments();
+      let changed = 0;
+
+      for(const empNo of Object.keys(map)){
+        const row = map[empNo];
+        const roleId = normalizeRole(row?.roleId);
+        const scopeId = String(row?.scopeId || "").trim();
+        if(!roleId) continue;
+
+        if(scopeId && !orgHasScope(orgById, scopeId)){
+          map[empNo] = { roleId, scopeId:"", updatedAt: Date.now() };
+          changed++;
+        }
+      }
+
+      saveAssignments(map);
+      setMsg("ok", changed ? `Rensat ${changed} ogiltiga scopeId.` : "Inga ogiltiga scopeId att rensa.");
+      renderAll();
+    });
+  }
 
   // -------------------------
   // Save handler
@@ -729,13 +759,13 @@ Regler (LÅST):
 
     const org = loadOrg();
     if(!org.ok){
-      setMsg("err", "Fail-closed: Org saknas/är korrupt. Gå till System • Org Builder och skapa minst root + en nod.");
-      showHealthBox("Org saknas eller root saknas. Skapa org först i System • Org Builder.", false);
+      setMsg("err", "Fail-closed: Org saknas. Gå till Org Builder och skapa minst root + en nod.");
+      showBlocker("Org saknas (eller root saknas). Skapa organisation först, sedan kan du skapa assignments.");
+      setSaveEnabled(false);
       return;
     }
 
-    const orgIdx = buildOrgIndex(org.nodes);
-    const orgById = orgIdx.byId;
+    const orgById = buildOrgIndex(org.nodes).byId;
 
     const empNo = normalizeEmpNo($("#empNo").value);
     if(!empNo){
@@ -794,17 +824,20 @@ Regler (LÅST):
     orgOkState = !!org.ok;
 
     if(org.ok){
+      hideBlocker();
+      setSaveEnabled(true);
       renderScopeSelect(org.nodes);
-      const sel = $("#scopeId");
-      sel.disabled = false; // syncScopeEnabled avgör slutläge
+      $("#scopeId").disabled = false; // syncScopeEnabled avgör slutläge
     }else{
+      showBlocker("Org saknas/är korrupt. Skapa org i Org Builder innan du kan spara assignments.");
+      setSaveEnabled(false);
       const sel = $("#scopeId");
       sel.innerHTML = "";
       const opt = document.createElement("option");
       opt.value = "";
       opt.textContent = "— Org saknas (gå till System • Org Builder) —";
       sel.appendChild(opt);
-      sel.disabled = true; // PATCH: lås (syncScopeEnabled respekterar orgOkState)
+      sel.disabled = true;
     }
 
     const map = loadAssignments();
@@ -814,7 +847,7 @@ Regler (LÅST):
     renderKpis(map, health);
 
     if(!org.ok){
-      showHealthBox("Org saknas/är korrupt. Skapa org i System • Org Builder innan du kan spara assignments.", false);
+      showHealthBox("Org saknas. Skapa org först – därefter kan assignments skapas.", false);
     }else if(health.invalid > 0){
       showHealthBox(`Varning: ${health.invalid} assignment(s) har ogiltigt scopeId (scope finns inte i org).`, true);
     }else{
