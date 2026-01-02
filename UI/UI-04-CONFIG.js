@@ -1,16 +1,19 @@
 /* ============================================================
-AO-002 v1.3 (PATCH v1.4) | FILE: UI/UI-04-CONFIG.js
+AO-002 v1.5 (PATCH) | FILE: UI/UI-04-CONFIG.js
 Projekt: HR-System
 Syfte: Central config för RBAC + route-tillgång + default routing (config-driven)
 Nivå: UI-only (GitHub Pages) | localStorage-first
+
 Policy (LÅST):
 - Ingen backend
 - Inga storage-keys/datamodell utan AO (AO-002: skriver inget)
 - Fail-closed (okänd roll = nekad)
 - Public route ska vara explicit (endast allowlist)
-- Authed rollers får inte ha /UI/ som route-prefix
-PATCH v1.4 (RBAC):
-- MANAGER får /manager/ (ny vy) och default-route till /manager/overview.html
+- Authed roller får inte ha /UI/ som route-prefix
+
+PATCH v1.5 (STABILITET):
+- MANAGER är isolerad till /manager/ (tar bort /admin/ för att undvika rollblandning)
+- DEFAULT_ROUTE_BY_ROLE[MANAGER] = /manager/overview.html (standard .html)
 ============================================================ */
 
 (function () {
@@ -19,6 +22,7 @@ PATCH v1.4 (RBAC):
   // -------------------------
   // Base-path (GitHub Pages)
   // -------------------------
+  // Repo: Jarbrant/HR-System => public path: /HR-System
   const BASE_PATH = "/HR-System";
 
   // -------------------------
@@ -34,19 +38,20 @@ PATCH v1.4 (RBAC):
   // -------------------------
   // Public routes (explicit allowlist)
   // -------------------------
+  // Endast dessa får nås utan session.
   const PUBLIC_ROUTES = Object.freeze([
     "/UI/UI-01-SKELETON.html",
     "/index.html",
   ]);
 
   // -------------------------
-  // Default route per role
+  // Default route per role (MÅSTE finnas i repo)
   // -------------------------
   const DEFAULT_ROUTE_BY_ROLE = Object.freeze({
     [ROLES.SYSTEM_ADMIN]: "/system/dashboard.html",
     [ROLES.ADMIN]: "/admin/home.html",
 
-    // PATCH: Manager ska landa på manager-vy (inte admin)
+    // Manager landar i egen vy
     [ROLES.MANAGER]: "/manager/overview.html",
 
     [ROLES.EMPLOYEE]: "/employee/home.html",
@@ -55,6 +60,7 @@ PATCH v1.4 (RBAC):
   // -------------------------
   // Allowed routes per role (PREFIXES)
   // -------------------------
+  // Fail-closed: roll får bara röra sig i sin egen zon.
   const ROUTES_BY_ROLE = Object.freeze({
     [ROLES.SYSTEM_ADMIN]: Object.freeze([
       "/system/",
@@ -63,11 +69,8 @@ PATCH v1.4 (RBAC):
       "/admin/",
     ]),
     [ROLES.MANAGER]: Object.freeze([
-      // PATCH: Manager får egen vy
+      // PATCH v1.5: isolera Manager till manager-ytan (ingen /admin/ här)
       "/manager/",
-      // Behåll admin om du vill att Manager även ska kunna gå in i admin-sidor
-      // (om du INTE vill blanda, ta bort "/admin/" raden)
-      "/admin/",
     ]),
     [ROLES.EMPLOYEE]: Object.freeze([
       "/employee/",
@@ -77,6 +80,8 @@ PATCH v1.4 (RBAC):
   // -------------------------
   // Permissions (minimal nivå 1)
   // -------------------------
+  // Obs: permissions används av UI-sidorna via HRApp.hasPermission().
+  // Configen påverkar inte storage.
   const PERMISSIONS_BY_ROLE = Object.freeze({
     [ROLES.SYSTEM_ADMIN]: Object.freeze([
       "SYSTEM_VIEW_DASHBOARD",
@@ -98,15 +103,8 @@ PATCH v1.4 (RBAC):
       "ADMIN_VIEW_REPORTS",
     ]),
     [ROLES.MANAGER]: Object.freeze([
-      // Manager-översikt (ny)
+      // Manager-översikt (egen yta)
       "MANAGER_VIEW_OVERVIEW",
-
-      // Om ni återanvänder admin-funktioner för manager i v1:
-      "ADMIN_VIEW_HOME",
-      "ADMIN_MANAGE_TASKS",
-      "ADMIN_VIEW_QUESTIONS",
-      "ADMIN_VIEW_ANSWERS",
-      "ADMIN_VIEW_REPORTS",
     ]),
     [ROLES.EMPLOYEE]: Object.freeze([
       "EMP_VIEW_HOME",
@@ -125,7 +123,6 @@ PATCH v1.4 (RBAC):
   window.HR_CONFIG = Object.freeze({
     DEBUG,
     BASE_PATH,
-
     ROLES,
     PUBLIC_ROUTES,
     DEFAULT_ROUTE_BY_ROLE,
