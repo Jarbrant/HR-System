@@ -15,7 +15,7 @@ Policy (LÅST):
 
 Keys (LÅST, endast dessa):
 - Läs (session): AO-001_LOGIN_V1 (via HRApp.mustGetSession/requireAuth)
-- Läs/Skriv: AO-02020_ROLE_ASSIGNMENTS_V2 (localStorage) — assignments map
+- Läs/Skriv: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) — assignments map
 - Läs: AO-020_ORG_V1 (localStorage) — org-träd
 
 Datamodell (LÅST, normalform vid save):
@@ -320,8 +320,14 @@ Regler (LÅST):
     return;
   }
 
-  $("#whoName").textContent = "SYSTEM_ADMIN";
-  $("#whoRole").textContent = "SYSTEM_ADMIN";
+  // Visa minimal identitet (empNo är OK enligt policy)
+  const who = $("#whoName");
+  const wr  = $("#whoRole");
+  if(who){
+    const emp = String(auth.empNo || "").trim();
+    who.textContent = emp ? ("#" + emp) : "SYSTEM_ADMIN";
+  }
+  if(wr) wr.textContent = "SYSTEM_ADMIN";
 
   $("#navLogout").addEventListener("click", (e) => {
     e.preventDefault();
@@ -339,6 +345,7 @@ Regler (LÅST):
 
   function setMsg(kind, text){
     const m = $("#msg");
+    if(!m) return;
     m.className = "message" + (kind ? (" " + kind) : "");
     m.textContent = text || "";
   }
@@ -380,7 +387,6 @@ Regler (LÅST):
     for(const n of nodes){
       if(!byId.has(n.id)) byId.set(n.id, n);
     }
-    // children map
     const children = new Map();
     nodes.forEach(n => children.set(n.id, []));
     nodes.forEach(n => {
@@ -416,10 +422,8 @@ Regler (LÅST):
   function loadOrg(){
     const raw = safeParseLocal(ORG_KEY, []);
     const nodes = normalizeOrgNodes(raw);
-
     const hasRoot = nodes.some(n => n.id === ROOT_ID);
     if(!hasRoot) return { ok:false, nodes:[], reason:"NO_ROOT" };
-
     return { ok:true, nodes, reason:"" };
   }
 
@@ -433,18 +437,15 @@ Regler (LÅST):
 
   function normalizeEmpNo(empNo){
     const s = String(empNo ?? "").trim();
-    // Fail-closed-ish: tillåt bara 1-12 siffror (lagom strikt men inte destruktivt)
     if(!/^\d{1,12}$/.test(s)) return "";
     return s;
   }
 
   function loadAssignments(){
     const raw = safeParseLocal(ASSIGN_KEY, {});
-    // Normalform: object-map
     if(raw && typeof raw === "object" && !Array.isArray(raw)){
       return raw;
     }
-    // Legacy: array -> map (read-only conversion; vi sparar tillbaka först vid save)
     if(Array.isArray(raw)){
       const out = {};
       for(const row of raw){
@@ -469,7 +470,7 @@ Regler (LÅST):
   function orgHasScope(orgById, scopeId){
     const sid = String(scopeId || "").trim();
     if(!sid) return false;
-    if(sid === ROOT_ID) return false; // root får ej användas som scope i v1
+    if(sid === ROOT_ID) return false;
     return orgById.has(sid);
   }
 
@@ -481,11 +482,9 @@ Regler (LÅST):
       const row = assignMap[empNo];
       const roleId = normalizeRole(row?.roleId);
       const scopeId = String(row?.scopeId || "").trim();
-
       if(!roleId) continue;
 
       if(roleId === "SYSTEM_ADMIN"){
-        // SYSTEM_ADMIN får vara tom
         if(scopeId && !orgHasScope(orgById, scopeId)) invalid++;
         continue;
       }
@@ -513,7 +512,8 @@ Regler (LÅST):
   // -------------------------
   // UI state
   // -------------------------
-  let editingEmpNo = ""; // empNo under edit
+  let editingEmpNo = "";     // empNo under edit
+  let orgOkState = false;    // PATCH: hindra att scope-select "åter-aktiveras" när org saknas
 
   function resetForm(){
     editingEmpNo = "";
@@ -540,9 +540,16 @@ Regler (LÅST):
   function syncScopeEnabled(){
     const role = normalizeRole($("#roleId").value);
     const sel = $("#scopeId");
+
+    // PATCH: org saknas => scope alltid låst (fail-closed UI)
+    if(!orgOkState){
+      sel.disabled = true;
+      return;
+    }
+
     if(role === "SYSTEM_ADMIN"){
       sel.disabled = true;
-      sel.value = ""; // rekommenderat tomt
+      sel.value = "";
     }else{
       sel.disabled = false;
     }
@@ -564,7 +571,7 @@ Regler (LÅST):
 
     const flat = flattenOrg(orgNodes);
     for(const r of flat){
-      if(r.id === ROOT_ID) continue; // root ej valbar
+      if(r.id === ROOT_ID) continue;
       const opt = document.createElement("option");
       opt.value = r.id;
       const indent = "—".repeat(Math.min(r.depth - 1, 10));
@@ -603,7 +610,6 @@ Regler (LÅST):
       const missingScope = (roleId !== "SYSTEM_ADMIN" && !scopeId);
       const invalidScope = (roleId !== "SYSTEM_ADMIN" && scopeId && !scopeValid) || (roleId === "SYSTEM_ADMIN" && scopeId && !scopeValid);
 
-      // filter
       if(filter === "invalid" && !invalidScope) continue;
       if(filter === "missing" && !missingScope) continue;
       if(filter === "employee" && roleId !== "EMPLOYEE") continue;
@@ -611,7 +617,6 @@ Regler (LÅST):
       if(filter === "admin" && roleId !== "ADMIN") continue;
       if(filter === "system_admin" && roleId !== "SYSTEM_ADMIN") continue;
 
-      // search
       if(q){
         const blob = `${empNo} ${roleId} ${scopeId}`.toLowerCase();
         if(!blob.includes(q)) continue;
@@ -747,7 +752,6 @@ Regler (LÅST):
     let scopeId = String($("#scopeId").value || "").trim();
 
     if(roleId === "SYSTEM_ADMIN"){
-      // rekommenderat tomt
       scopeId = "";
     }else{
       if(!scopeId){
@@ -765,14 +769,8 @@ Regler (LÅST):
     }
 
     const map = loadAssignments();
-
     const now = Date.now();
-    map[empNo] = {
-      roleId,
-      scopeId,
-      updatedAt: now
-    };
-
+    map[empNo] = { roleId, scopeId, updatedAt: now };
     saveAssignments(map);
 
     setMsg("ok", editingEmpNo ? "Uppdaterat." : "Skapat.");
@@ -793,30 +791,28 @@ Regler (LÅST):
   // -------------------------
   function renderAll(){
     const org = loadOrg();
+    orgOkState = !!org.ok;
 
-    // Scope select
     if(org.ok){
       renderScopeSelect(org.nodes);
+      const sel = $("#scopeId");
+      sel.disabled = false; // syncScopeEnabled avgör slutläge
     }else{
-      // fail-closed: scope list tom
       const sel = $("#scopeId");
       sel.innerHTML = "";
       const opt = document.createElement("option");
       opt.value = "";
       opt.textContent = "— Org saknas (gå till System • Org Builder) —";
       sel.appendChild(opt);
-      sel.disabled = true;
+      sel.disabled = true; // PATCH: lås (syncScopeEnabled respekterar orgOkState)
     }
 
-    // Assignments
     const map = loadAssignments();
-
     const orgById = org.ok ? buildOrgIndex(org.nodes).byId : new Map();
     const health = computeHealth(map, orgById);
 
     renderKpis(map, health);
 
-    // Health box logic
     if(!org.ok){
       showHealthBox("Org saknas/är korrupt. Skapa org i System • Org Builder innan du kan spara assignments.", false);
     }else if(health.invalid > 0){
@@ -825,14 +821,7 @@ Regler (LÅST):
       hideHealthBox();
     }
 
-    // Keep form selection stable
-    if(editingEmpNo){
-      // ensure scope select contains current value (if org ok). if not, keep empty.
-      syncScopeEnabled();
-    }else{
-      syncScopeEnabled();
-    }
-
+    syncScopeEnabled();
     renderList(map, orgById);
   }
 
@@ -845,4 +834,3 @@ Regler (LÅST):
 
 </body>
 </html>
-
