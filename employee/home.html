@@ -1,16 +1,30 @@
 <!-- ============================================================
-AO-048 (PATCH v1.2) | FIL-ID: employee/home.html
+AO-053 (PATCH v1.1) | FIL-ID: employee/home.html
 Projekt: HR-System
-Syfte: Employee – Dagskalender + Post-its med visuell “knöggla & kasta”
-VIKTIGT:
-- Återställer kopplingar till kärnan (AO-002) + fail-closed + korrekt session-shape.
-- PATCH v1.2: Om scopeId saknas i session försöker sidan RESOLVA scopeId via
-  AO-020_ROLE_ASSIGNMENTS_V2 (ingen ny key), och skriver tillbaka till AO-001_LOGIN_V1.
-Policy (LÅST): UI-only • Fail-closed • sessionStorage först • fallback localStorage • XSS-escape • Inga nya storage-keys
+Syfte: Employee – Tolka aktiva HR-paket till görbara post-its (utan att visa “paket” i UI)
+
+BAS: AO-048 (PATCH v1.2) – Dagskalender + Post-its + knöggla & kasta
+
+AO-053 (LÅST):
+- UI-only • Fail-closed
+- Inga nya storage-keys
+- Ingen exekvering / ingen schemamotor / ingen historik
+- Employee ser endast “kort/post-its” (rubrik=blocktitel, subtext=källa + intervalltext)
+- Klar-logik (fail-closed):
+  * info: alltid klar (men visas)
+  * task: klar när uppgift är klar i AO-014_TASKS_V1
+  * question: klar när svar finns i AO-013_ANSWERS_V1 (match via questionId eller titel)
+  * both: båda måste vara klara
+- Question-kort leder till employee/questions.html (read-only navigering)
+- Behåll knöggla/kasta
+
 Keys (LÅST):
-- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
-- AO-014_TASKS_V1 (localStorage) – uppgifter
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session (auth)
 - AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – empNo→scopeId (läs/ev. resolva)
+- AO-014_TASKS_V1 (localStorage) – uppgifter (läser/skriver)
+- AO-050_PACKAGES_V1 (localStorage) – paketdefinitioner (läs endast)
+- AO-012_QUESTIONS_V1 (localStorage) – frågor (läs endast)
+- AO-013_ANSWERS_V1 (localStorage) – svar (läs endast)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -267,6 +281,7 @@ Keys (LÅST):
       justify-content:space-between;
       gap:10px;
       background: linear-gradient(180deg, #fff, #fafafa);
+      flex-wrap:wrap;
     }
     .boardHead h2{
       margin:0;
@@ -276,6 +291,23 @@ Keys (LÅST):
     .hint{
       font-size:12px;
       color:var(--muted);
+    }
+    .boardPills{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+      margin-left:auto;
+    }
+    .pill2{
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid var(--line);
+      background:#fff;
+      padding:6px 10px;
+      border-radius:999px;
+      white-space:nowrap;
     }
 
     .notes{
@@ -321,6 +353,7 @@ Keys (LÅST):
       gap:8px;
       align-items:center;
       justify-content:space-between;
+      flex-wrap:wrap;
     }
     .mini{
       font-size:12px;
@@ -337,6 +370,33 @@ Keys (LÅST):
     }
     .doneBtn:hover{ background: rgba(255,255,255,.95); }
     .doneBtn:active{ transform: translateY(1px); }
+
+    .linkBtn{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      border:1px solid rgba(15,23,42,.12);
+      background: rgba(255,255,255,.75);
+      border-radius:12px;
+      padding:8px 10px;
+      cursor:pointer;
+      font-size:13px;
+      font-weight:900;
+      color:inherit;
+      text-decoration:none;
+      white-space:nowrap;
+    }
+    .linkBtn:hover{ background: rgba(255,255,255,.95); }
+
+    .okPill{
+      font-size:12px;
+      border-radius:999px;
+      padding:6px 10px;
+      border:1px solid rgba(16,185,129,.25);
+      background: rgba(217,247,214,.85);
+      color:#064e3b;
+      white-space:nowrap;
+    }
 
     /* Trash */
     .trash{
@@ -444,6 +504,9 @@ Keys (LÅST):
         <div class="boardHead">
           <h2>Post-its</h2>
           <div class="hint">Klar → knögglas → kastas → försvinner.</div>
+          <div class="boardPills" aria-label="Status">
+            <span class="pill2" id="boardPill">—</span>
+          </div>
         </div>
 
         <div class="notes" id="notesGrid" aria-live="polite"></div>
@@ -466,9 +529,13 @@ Keys (LÅST):
     /* ===========================
        Keys (LÅST)
     ============================ */
-    const KEY_SESSION     = "AO-001_LOGIN_V1";
-    const KEY_TASKS       = "AO-014_TASKS_V1";
-    const KEY_ASSIGNMENTS = "AO-020_ROLE_ASSIGNMENTS_V2";
+    const KEY_SESSION      = "AO-001_LOGIN_V1";
+    const KEY_TASKS        = "AO-014_TASKS_V1";
+    const KEY_ASSIGNMENTS  = "AO-020_ROLE_ASSIGNMENTS_V2";
+    // AO-053 (READ ONLY)
+    const KEY_PACKAGES     = "AO-050_PACKAGES_V1";
+    const KEY_QUESTIONS    = "AO-012_QUESTIONS_V1";
+    const KEY_ANSWERS      = "AO-013_ANSWERS_V1";
 
     /* ===========================
        DOM
@@ -485,6 +552,7 @@ Keys (LÅST):
     const doneList  = document.getElementById("doneList");
     const todoList  = document.getElementById("todoList");
     const notesGrid = document.getElementById("notesGrid");
+    const boardPill = document.getElementById("boardPill");
 
     const prevDayBtn = document.getElementById("prevDayBtn");
     const nextDayBtn = document.getElementById("nextDayBtn");
@@ -570,7 +638,6 @@ Keys (LÅST):
             auth = window.HRApp.getAuth(patched) || auth;
             // Vi fortsätter även om write misslyckas, men visar varning.
           } else {
-            // Om vi inte kan patcha sessionobjektet alls: fail-closed.
             showGuard("Fail-closed: kunde inte uppdatera session med scopeId (korrupt session). Logga in igen.");
             return null;
           }
@@ -581,28 +648,18 @@ Keys (LÅST):
     }
 
     function readAssignments(){
-      // Assignments ska ligga i localStorage (enligt era AO), men vi läser defensivt.
       const raw = readAnyStorage(KEY_ASSIGNMENTS);
       if (!raw) return [];
       const data = safeJsonParse(raw);
       if (Array.isArray(data)) return data;
-      // tolerans: { assignments:[...] }
       if (data && typeof data === "object" && Array.isArray(data.assignments)) return data.assignments;
       return [];
     }
 
-    function normalizeEmpNo(x){
-      const s = String(x ?? "").trim();
-      return s;
-    }
-
-    function normalizeRole(x){
-      const s = String(x ?? "").trim();
-      return s;
-    }
+    function normalizeEmpNo(x){ return String(x ?? "").trim(); }
+    function normalizeRole(x){ return String(x ?? "").trim(); }
 
     function resolveScopeIdFromAssignments(empNo, role){
-      // Fail-closed: kräver både empNo+role och hittad match.
       const me = normalizeEmpNo(empNo);
       const r  = normalizeRole(role);
       if (!me || !r) return "";
@@ -610,7 +667,6 @@ Keys (LÅST):
       const list = readAssignments();
       if (!Array.isArray(list) || list.length === 0) return "";
 
-      // Matcha tolerant: empNo + (role eller roleId)
       for (const a of list) {
         if (!a || typeof a !== "object") continue;
 
@@ -618,10 +674,7 @@ Keys (LÅST):
         if (aEmp !== me) continue;
 
         const aRole = normalizeRole(a.role ?? a.roleId ?? "");
-        if (aRole && aRole !== r) {
-          // om role saknas i assignment godtar vi inte – men om finns och skiljer: fortsätt leta
-          continue;
-        }
+        if (aRole && aRole !== r) continue;
 
         const scope = String(a.scopeId ?? a.scope ?? "").trim();
         if (scope) return scope;
@@ -634,23 +687,15 @@ Keys (LÅST):
       const sid = String(scopeId || "").trim();
       if (!sessionObj || typeof sessionObj !== "object" || !sid) return null;
 
-      // PRC-shape: session.auth...
       const out = sessionObj;
 
       if (out.auth && typeof out.auth === "object") {
         out.auth.scopeId = sid;
       } else {
-        // fallback-shape
         out.scopeId = sid;
       }
 
-      // skriv tillbaka till samma key (tillåtet), men vi failar inte UI om storage blockeras
-      const ok = writeSessionPreferred(out);
-      if (!ok) {
-        // UI fortsätter ändå, men scope finns nu i minnet (out)
-        // Ingen console-logg (PII-risk). Vi låter bara UI fungera.
-      }
-
+      writeSessionPreferred(out);
       return out;
     }
 
@@ -672,6 +717,27 @@ Keys (LÅST):
       } catch {
         return false;
       }
+    }
+
+    /* ===========================
+       AO-053 READ helpers (NO WRITES)
+    ============================ */
+    function readLocalArray(key){
+      try{
+        const raw = localStorage.getItem(key);
+        const data = safeJsonParse(raw || "");
+        return Array.isArray(data) ? data : [];
+      }catch{
+        return [];
+      }
+    }
+
+    function normStr(s){
+      return String(s ?? "").trim();
+    }
+
+    function normKey(s){
+      return normStr(s).toLowerCase().replace(/\s+/g," ").trim();
     }
 
     /* ===========================
@@ -785,6 +851,191 @@ Keys (LÅST):
     }
 
     /* ===========================
+       AO-053: Schedule text (display-only, no engine)
+       - Supports legacy schedule.interval and MASTER schedule.intervalUnit
+    ============================ */
+    function isISODate(s){ return /^\d{4}-\d{2}-\d{2}$/.test(String(s||"")); }
+    function isHHMM(s){ return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s||"")); }
+
+    function swUnit(unit, every){
+      const u = String(unit || "").trim();
+      const n = Number(every || 1);
+      if (u === "day") return (n === 1 ? "dag" : "dagar");
+      if (u === "week") return (n === 1 ? "vecka" : "veckor");
+      if (u === "month") return (n === 1 ? "månad" : "månader");
+      return "period";
+    }
+
+    function weekdayLabel(id){
+      const m = { mon:"Mån", tue:"Tis", wed:"Ons", thu:"Tor", fri:"Fre", sat:"Lör", sun:"Sön" };
+      return m[String(id||"").trim()] || "";
+    }
+
+    function scheduleTextForCard(schedule){
+      const s = (schedule && typeof schedule === "object") ? schedule : {};
+      const mode = String(s.mode || "once");
+
+      const start = isISODate(s.startDate) ? s.startDate : "";
+      if(mode !== "recurring"){
+        return start ? `Start ${start}` : "Engång";
+      }
+
+      // Legacy support:
+      const unitRaw = (s.intervalUnit || s.interval);
+      const unit = (unitRaw === "day" || unitRaw === "week" || unitRaw === "month") ? unitRaw : "week";
+      const every = Number.isFinite(Number(s.intervalEvery)) ? Math.max(1, Math.min(52, Math.trunc(Number(s.intervalEvery)))) : 1;
+
+      const parts = [];
+
+      parts.push(`Varje ${every} ${swUnit(unit, every)}`);
+
+      // Weekdays (only metadata)
+      if(unit === "week" && Array.isArray(s.byWeekdays) && s.byWeekdays.length){
+        const w = s.byWeekdays.map(weekdayLabel).filter(Boolean);
+        if(w.length) parts.push(w.join(", "));
+      }
+
+      // Month day (only metadata)
+      if(unit === "month" && String(s.byMonthDay || "").trim()){
+        const md = String(s.byMonthDay).trim();
+        parts.push(`Dag ${md}`);
+      }
+
+      // time (only metadata)
+      if(isHHMM(s.time)) parts.push(`Kl ${s.time}`);
+
+      if(start) parts.push(`Start ${start}`);
+
+      const until = (String(s.endMode||"") === "until" && isISODate(s.endDate)) ? `Till ${s.endDate}` : "Tillsvidare";
+      parts.push(until);
+
+      return parts.filter(Boolean).join(" • ");
+    }
+
+    /* ===========================
+       AO-053: Questions/Answers matching (tolerant)
+       - If answer has empNo, require it matches current empNo (fail-closed for cross-user)
+       - Backcompat: missing empNo => accept
+    ============================ */
+    function readQuestions(){ return readLocalArray(KEY_QUESTIONS); }
+    function readAnswers(){ return readLocalArray(KEY_ANSWERS); }
+
+    function getQuestionId(q){
+      return String(q?.id ?? q?.questionId ?? q?.qid ?? "");
+    }
+    function getQuestionTitle(q){
+      return String(q?.title ?? q?.name ?? q?.text ?? "");
+    }
+
+    function answerEmpNo(ans){
+      return String(ans?.empNo ?? ans?.employeeNo ?? ans?.employeeId ?? ans?.userId ?? "").trim();
+    }
+
+    function answerMatchesQuestion(ans, qId, qTitle, myEmpNo){
+      if(!ans || typeof ans !== "object") return false;
+
+      // If empNo present on answer => must match me
+      const aEmp = answerEmpNo(ans);
+      if(aEmp && String(myEmpNo||"").trim() && aEmp !== String(myEmpNo).trim()) return false;
+
+      const aQid = String(ans.questionId ?? ans.qid ?? ans.question_id ?? "");
+      if(qId && aQid && aQid === qId) return true;
+
+      const aTitle = String(ans.questionTitle ?? ans.title ?? ans.questionText ?? "");
+      if(qTitle && aTitle && normKey(aTitle) === normKey(qTitle)) return true;
+
+      return false;
+    }
+
+    function hasAnswerForTitle(qTitle, myEmpNo){
+      const title = normStr(qTitle);
+      if(!title) return false;
+
+      const answers = readAnswers();
+      if(!Array.isArray(answers) || answers.length === 0) return false;
+
+      // Prefer: find questionId by questions list
+      const questions = readQuestions();
+      let qId = "";
+      if(Array.isArray(questions) && questions.length){
+        const found = questions.find(q => normKey(getQuestionTitle(q)) === normKey(title));
+        if(found) qId = getQuestionId(found);
+      }
+
+      return answers.some(a => answerMatchesQuestion(a, qId, title, myEmpNo));
+    }
+
+    /* ===========================
+       AO-053: Packages -> cards (read-only)
+    ============================ */
+    function readPackagesActive(){
+      const arr = readLocalArray(KEY_PACKAGES);
+      const list = Array.isArray(arr) ? arr : [];
+      return list.filter(p => !!p && typeof p === "object" && p.isActive === true);
+    }
+
+    function normalizeBlockKind(kind){
+      const k = String(kind || "").toLowerCase().trim();
+      if(k === "task" || k === "uppgift") return "task";
+      if(k === "question" || k === "fråga") return "question";
+      if(k === "info" || k === "information") return "info";
+      if(k === "both") return "both";
+      return "unknown";
+    }
+
+    function blocksFromPackage(pkg){
+      const blocks = Array.isArray(pkg?.blocks) ? pkg.blocks : [];
+      return blocks.map(b => {
+        const id = normStr(b?.id) || ("blk_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16));
+        const kind = normalizeBlockKind(b?.kind);
+        const title = normStr(b?.title) || "—";
+        const description = normStr(b?.description ?? b?.text ?? "");
+        const required = (b && typeof b === "object" && "required" in b) ? !!b.required : false;
+        return { id, kind, title, description, required, raw:b };
+      });
+    }
+
+    function findMatchingTaskForBlock(tasksVisible, blockTitle){
+      const bt = normKey(blockTitle);
+      if(!bt) return null;
+
+      for(let i=0;i<tasksVisible.length;i++){
+        const t = tasksVisible[i];
+        const tt = normKey(getTaskTitle(t));
+        if(tt && tt === bt) return { task: t, idx: i };
+      }
+      return null;
+    }
+
+    function isPackageBlockDone(block, tasksVisible, myEmpNo){
+      const kind = block.kind;
+
+      if(kind === "info") return true;
+
+      if(kind === "task"){
+        const match = findMatchingTaskForBlock(tasksVisible, block.title);
+        if(!match) return false;
+        return isDone(match.task);
+      }
+
+      if(kind === "question"){
+        return hasAnswerForTitle(block.title, myEmpNo);
+      }
+
+      if(kind === "both"){
+        const tOk = (() => {
+          const match = findMatchingTaskForBlock(tasksVisible, block.title);
+          if(!match) return false;
+          return isDone(match.task);
+        })();
+        const qOk = hasAnswerForTitle(block.title, myEmpNo);
+        return tOk && qOk;
+      }
+
+      return false;
+    }
+
+    /* ===========================
        Systemets 5 meningar (låst)
     ============================ */
     const VOICE = {
@@ -828,10 +1079,10 @@ Keys (LÅST):
       dateBig.textContent = fmtBig(selectedDate);
       dateSmall.textContent = fmtSmall(selectedDate);
 
-      // Fail-closed: om scope saknas även efter repair -> stoppa.
       if (!scopeId) {
         voiceLine.textContent = VOICE.UNCLEAR;
         dayBadge.textContent = `0 färdig • 0 återstår`;
+        boardPill.textContent = "—";
         doneList.innerHTML = "";
         todoList.innerHTML = "";
         notesGrid.innerHTML = "";
@@ -839,10 +1090,10 @@ Keys (LÅST):
         return;
       }
 
+      // Calendar tasks (existing logic)
       const all = readTasksArray();
-      const mine = visibleTasksForMe(all, empNo, scopeId);
-
-      const todays = mine.filter(t => taskBelongsToDay(t, dayISO));
+      const mineAll = visibleTasksForMe(all, empNo, scopeId);
+      const todays = mineAll.filter(t => taskBelongsToDay(t, dayISO));
       const done = todays.filter(isDone);
       const todo = todays.filter(t => !isDone(t));
 
@@ -850,7 +1101,16 @@ Keys (LÅST):
       dayBadge.textContent = `${done.length} färdig • ${todo.length} återstår`;
 
       renderCalendarLists(done, todo);
-      renderNotes(todo);
+
+      // AO-053: build extra cards from active definitions (read-only)
+      const pkgCards = buildPackageCards(mineAll, empNo);
+
+      const pkgTodoCount = pkgCards.filter(c => !c.isDone).length;
+      const pkgDoneCount = pkgCards.filter(c => c.isDone).length;
+
+      boardPill.textContent = `${pkgDoneCount} klar • ${pkgTodoCount} återstår`;
+
+      renderNotesCombined(todo, pkgCards, auth, mineAll);
     }
 
     function renderCalendarLists(doneArr, todoArr){
@@ -908,36 +1168,149 @@ Keys (LÅST):
       }
     }
 
-    function renderNotes(todoArr){
+    /* ===========================
+       AO-053: Cards build (read-only)
+    ============================ */
+    function buildPackageCards(tasksVisibleAll, myEmpNo){
+      const activePkgs = readPackagesActive();
+      if(!Array.isArray(activePkgs) || activePkgs.length === 0) return [];
+
+      const cards = [];
+      for(const pkg of activePkgs){
+        const sourceName = normStr(pkg?.name) || "—";
+        const schTxt = scheduleTextForCard(pkg?.schedule);
+        const sub = `${sourceName}${schTxt ? " • " + schTxt : ""}`.trim();
+
+        const blocks = blocksFromPackage(pkg);
+        for(const b of blocks){
+          const isDoneNow = isPackageBlockDone(b, tasksVisibleAll, myEmpNo);
+          const kind = b.kind;
+
+          const ui = { action:"none", primaryLabel:"", secondaryLabel:"" };
+
+          if(kind === "info"){
+            ui.action = "none";
+          }else if(kind === "task"){
+            ui.action = "taskDone";
+            ui.primaryLabel = "Klar";
+          }else if(kind === "question"){
+            ui.action = "goQuestions";
+            ui.primaryLabel = "Svara";
+          }else if(kind === "both"){
+            ui.action = "both";
+            ui.primaryLabel = "Klar";
+            ui.secondaryLabel = "Svara";
+          }else{
+            ui.action = "none";
+          }
+
+          cards.push({
+            source: "pkg",
+            id: `pkg_${normStr(pkg?.id) || "x"}_${b.id}`,
+            pkgId: normStr(pkg?.id),
+            title: b.title,
+            desc: b.description,
+            sub: sub,
+            kind: kind,
+            required: !!b.required,
+            isDone: !!isDoneNow,
+            ui
+          });
+        }
+      }
+
+      return cards;
+    }
+
+    /* ===========================
+       Notes rendering (combined)
+    ============================ */
+    function renderNotesCombined(todoTasksForDay, pkgCards, auth){
       notesGrid.innerHTML = "";
 
-      if(todoArr.length === 0){
+      const items = [];
+
+      if(Array.isArray(pkgCards) && pkgCards.length){
+        const a = pkgCards.slice().sort((x,y)=>Number(!!x.isDone)-Number(!!y.isDone));
+        items.push(...a);
+      }
+
+      if(Array.isArray(todoTasksForDay) && todoTasksForDay.length){
+        todoTasksForDay.forEach((t, idx) => {
+          items.push({
+            source: "task",
+            id: `task_${getTaskId(t, idx)}`,
+            taskId: getTaskId(t, idx),
+            title: getTaskTitle(t),
+            desc: getTaskDesc(t),
+            sub: "",
+            kind: "task",
+            isDone: false
+          });
+        });
+      }
+
+      if(items.length === 0){
         notesGrid.innerHTML = `
           <article class="note" style="background: rgba(217,247,214,.85); --tilt:-1deg;">
-            <div class="t">Inga post-its idag</div>
+            <div class="t">Inga post-its just nu</div>
             <div class="s">Om något dyker upp senare syns det här.</div>
             <div class="row">
               <div class="mini">—</div>
-              <span class="badge done">Lugnt</span>
+              <span class="okPill">Lugnt</span>
             </div>
           </article>`;
         return;
       }
 
-      todoArr.forEach((t, idx) => {
-        const title = escapeHtml(getTaskTitle(t));
-        const desc  = escapeHtml(getTaskDesc(t));
-        const id    = escapeHtml(getTaskId(t, idx));
+      items.forEach((it, idx) => {
+        const title = escapeHtml(it.title || "—");
+        const desc  = escapeHtml(it.desc || "—");
+        const sub   = escapeHtml(it.sub || "");
+        const id    = escapeHtml(it.id);
         const bg    = pickNoteBg(idx);
         const tilt  = (idx % 2 === 0) ? "-1.2deg" : "1.1deg";
 
+        const donePill = it.isDone ? `<span class="okPill" aria-label="Klar">Klar</span>` : "";
+
+        let actionsHtml = "";
+        if(it.source === "task"){
+          actionsHtml = `
+            <button class="doneBtn" type="button" data-action="done-task" data-task-id="${escapeHtml(it.taskId)}">Klar</button>
+          `;
+        }else if(it.source === "pkg"){
+          if(it.ui.action === "none"){
+            actionsHtml = donePill || `<span class="pill2">Info</span>`;
+          }else if(it.ui.action === "goQuestions"){
+            actionsHtml = `
+              <a class="linkBtn" href="./questions.html" data-action="go-questions">Svara</a>
+              ${donePill}
+            `;
+          }else if(it.ui.action === "taskDone"){
+            actionsHtml = it.isDone
+              ? donePill
+              : `<button class="doneBtn" type="button" data-action="done-pkg-task" data-card-id="${id}">Klar</button>`;
+          }else if(it.ui.action === "both"){
+            actionsHtml = `
+              ${it.isDone ? donePill : `<button class="doneBtn" type="button" data-action="done-pkg-task" data-card-id="${id}">Klar</button>`}
+              <a class="linkBtn" href="./questions.html" data-action="go-questions">Svara</a>
+            `;
+          }else{
+            actionsHtml = donePill || "";
+          }
+        }
+
+        const subline = sub ? `<div class="mini">${sub}</div>` : `<div class="mini">—</div>`;
+
         notesGrid.insertAdjacentHTML("beforeend", `
-          <article class="note" data-task-id="${id}" style="background:${bg}; --tilt:${tilt};">
+          <article class="note" data-note-id="${id}" data-source="${escapeHtml(it.source)}" style="background:${bg}; --tilt:${tilt};">
             <div class="t">${title}</div>
             <div class="s">${desc || "—"}</div>
             <div class="row">
-              <div class="mini">Id: ${id}</div>
-              <button class="doneBtn" type="button" data-action="done" data-task-id="${id}">Klar</button>
+              ${subline}
+              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+                ${actionsHtml}
+              </div>
             </div>
           </article>
         `);
@@ -959,7 +1332,6 @@ Keys (LÅST):
         const id = getTaskId(all[i], i);
         if(String(id) !== String(taskId)) continue;
 
-        // Fail-closed: får bara ändra task som är min + scope-match
         if (!hasValidScopeMatch(all[i], scopeId)) return false;
         if (!isAssignedToMe(all[i], empNo)) return false;
 
@@ -970,6 +1342,32 @@ Keys (LÅST):
       if(!found) return false;
 
       return writeTasksArray(all);
+    }
+
+    function markMatchingTaskDoneByTitle(blockTitle, auth){
+      const empNo = String(auth.empNo ?? "").trim();
+      const scopeId = String(auth.scopeId ?? "").trim();
+
+      const all = readTasksArray();
+      const mineAll = visibleTasksForMe(all, empNo, scopeId);
+      const match = findMatchingTaskForBlock(mineAll, blockTitle);
+      if(!match) return { ok:false, reason:"no_match" };
+
+      const realId = (() => {
+        const bt = normKey(blockTitle);
+        for(let i=0;i<all.length;i++){
+          const t = all[i];
+          if(!hasValidScopeMatch(t, scopeId)) continue;
+          if(!isAssignedToMe(t, empNo)) continue;
+          if(normKey(getTaskTitle(t)) !== bt) continue;
+          return getTaskId(t, i);
+        }
+        return "";
+      })();
+      if(!realId) return { ok:false, reason:"no_real_id" };
+
+      const ok = markTaskDone(realId, auth);
+      return ok ? { ok:true } : { ok:false, reason:"save_fail" };
     }
 
     function animateToTrash(noteEl, auth){
@@ -1019,22 +1417,51 @@ Keys (LÅST):
     });
 
     notesGrid.addEventListener("click", (e) => {
-      const btn = e.target?.closest?.("button[data-action='done']");
+      const btn = e.target?.closest?.("button[data-action]");
       if(!btn || !AUTH) return;
 
-      const taskId = btn.getAttribute("data-task-id");
-      if(!taskId) return;
+      const action = btn.getAttribute("data-action");
 
-      const noteEl = notesGrid.querySelector(`.note[data-task-id="${CSS.escape(String(taskId))}"]`);
-      if(!noteEl) return;
+      if(action === "done-task"){
+        const taskId = btn.getAttribute("data-task-id");
+        if(!taskId) return;
 
-      const ok = markTaskDone(taskId, AUTH);
-      if(!ok){
-        showGuard("Fail-closed: kunde inte markera uppgiften som klar (scope/ägare matchar inte eller data är korrupt).");
+        const noteEl = notesGrid.querySelector(`.note[data-source="task"] button[data-task-id="${CSS.escape(String(taskId))}"]`)?.closest?.(".note");
+        if(!noteEl) return;
+
+        const ok = markTaskDone(taskId, AUTH);
+        if(!ok){
+          showGuard("Fail-closed: kunde inte markera uppgiften som klar (scope/ägare matchar inte eller data är korrupt).");
+          return;
+        }
+        animateToTrash(noteEl, AUTH);
         return;
       }
 
-      animateToTrash(noteEl, AUTH);
+      if(action === "done-pkg-task"){
+        const noteEl = btn.closest(".note");
+        if(!noteEl) return;
+
+        const titleEl = noteEl.querySelector(".t");
+        const blockTitle = titleEl ? titleEl.textContent : "";
+        if(!String(blockTitle || "").trim()){
+          showGuard("Fail-closed: saknar titel för kortet (korrupt data).");
+          return;
+        }
+
+        const res = markMatchingTaskDoneByTitle(blockTitle, AUTH);
+        if(!res.ok){
+          if(res.reason === "no_match"){
+            showGuard("Fail-closed: hittade ingen kopplad uppgift att markera som klar. (Ingen schemamotor här.)");
+          }else{
+            showGuard("Fail-closed: kunde inte spara (localStorage kan vara fullt/blockerat).");
+          }
+          return;
+        }
+
+        animateToTrash(noteEl, AUTH);
+        return;
+      }
     });
 
     logoutLink.addEventListener("click", (e) => {
@@ -1056,5 +1483,18 @@ Keys (LÅST):
       render(AUTH);
     })();
   </script>
+
+  <!-- ============================================================
+  Ändringslogg (AO-053) ≤ 8 rader
+  - PATCH v1.1: scheduleText stöder MASTER schedule.intervalUnit + intervalEvery + byWeekdays/byMonthDay/time/endMode/endDate (display-only)
+  - Answer-match: om empNo finns i svaret måste det matcha aktuell empNo (backkompatibelt om empNo saknas)
+  - Behållit fail-closed, knöggla/kasta, och inga nya keys
+  Testnoteringar:
+  - Aktivera 1 definition i AO-050 med recurring + intervalUnit/week + byWeekdays → subtext visar veckodagar
+  - intervalUnit/month + byMonthDay + time → subtext visar Dag X och Kl HH:MM
+  - Svar i AO-013 med questionTitle/titelmatch + empNo → kort blir Klar
+  Risk/edge cases:
+  - Ingen stabil ID-koppling för tasks utan “motor”; titelmatch krävs för “Klar” på tolkade uppgifter (fail-closed om ingen match)
+  ============================================================ -->
 </body>
 </html>
