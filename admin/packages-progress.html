@@ -1,1 +1,977 @@
+<!-- ============================================================
+AO-054 (PATCH v1.2) | FIL-ID: admin/packages-progress.html
+Projekt: HR-System
+Syfte: ADMIN/SYSTEM_ADMIN – Paketstatus & progression (översikt) – READ ONLY
+
+Policy (LÅST):
+- UI-only • fail-closed
+- Inga nya storage-keys
+- Read-only (ingen ändring av status)
+- XSS-escape på allt från storage
+- Läser endast:
+  AO-050_PACKAGES_V1, AO-014_TASKS_V1, AO-012_QUESTIONS_V1, AO-013_ANSWERS_V1,
+  AO-020_ROLE_ASSIGNMENTS_V2, AO-020_ORG_V1, AO-001_LOGIN_V1
+
+RBAC (LÅST):
+- ADMIN + SYSTEM_ADMIN
+- Scope-styrt:
+  ADMIN -> sin subtree (kräver org)
+  SYSTEM_ADMIN -> allt (subtree om org finns, annars exakt scope-match)
+
+Autopatch v1.2 (utan UX-redesign):
+1) ALL/* i tasks räknas som “tilldelad till alla” inom scope i progress (scope fail-closed kvarstår).
+2) SYSTEM_ADMIN utan org: mild info-pill/guard (blockar inte) + exakt scope-match (ej subtree).
+3) EmpsInPkg===0: tydlig badge “0 medarbetare i scope” (status blir ändå ej startad om ej info).
+4) blocksFromPackage: stabilt block-id om b.id saknas (title+kind hash), ingen Math.random.
+
+Not:
+- Ingen kalender/exekvering/historik/export
+- Saknad data -> visa inget hellre än fel (fail-closed)
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Paketprogress</title>
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    :root{
+      --bg:#f6f7fb;
+      --card:#ffffff;
+      --ink:#0f172a;
+      --muted:#64748b;
+      --line:rgba(15,23,42,.12);
+      --good:rgba(217,247,214,.95);
+      --warn:rgba(255,247,194,.95);
+      --bad:rgba(254,226,226,.95);
+    }
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--ink);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .topbar{
+      position: sticky;
+      top:0;
+      z-index:10;
+      background: rgba(246,247,251,.92);
+      backdrop-filter: blur(10px);
+      border-bottom:1px solid var(--line);
+    }
+    .nav{
+      max-width:1100px;
+      margin:0 auto;
+      padding:10px 16px;
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .nav a{
+      text-decoration:none;
+      color:var(--ink);
+      font-size:14px;
+      padding:8px 10px;
+      border-radius:12px;
+      border:1px solid transparent;
+    }
+    .nav a:hover{ border-color:var(--line); background:#fff; }
+    .nav .spacer{ flex:1; }
+    .pill{
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid var(--line);
+      background:#fff;
+      padding:6px 10px;
+      border-radius:999px;
+      white-space:nowrap;
+    }
+
+    .wrap{
+      max-width:1100px;
+      margin:16px auto 28px;
+      padding:0 16px;
+    }
+
+    .guard{
+      border:1px solid rgba(239,68,68,.25);
+      background:rgba(254,242,242,.9);
+      color:#7f1d1d;
+      padding:12px 14px;
+      border-radius:14px;
+      margin:14px 0;
+      display:none;
+    }
+
+    .header{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:14px;
+      margin-bottom:14px;
+    }
+    .header h1{
+      margin:0 0 6px;
+      font-size:16px;
+      font-weight:950;
+    }
+    .header p{
+      margin:0;
+      font-size:13px;
+      color:var(--muted);
+      line-height:1.4;
+    }
+
+    .tools{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+      margin-top:10px;
+    }
+    .input{
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:10px 12px;
+      background:#fff;
+      font-size:13px;
+      min-width: 220px;
+    }
+
+    .list{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap:12px;
+      margin-top:12px;
+    }
+
+    .card{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:18px;
+      overflow:hidden;
+    }
+    .cardHead{
+      padding:14px;
+      display:flex;
+      gap:12px;
+      align-items:flex-start;
+      justify-content:space-between;
+      cursor:pointer;
+      user-select:none;
+      background: linear-gradient(180deg, #fff, #fafafa);
+    }
+    .left{
+      min-width:0;
+      flex:1;
+    }
+    .titleRow{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .pkgTitle{
+      margin:0;
+      font-size:14px;
+      font-weight:950;
+    }
+    .meta{
+      margin-top:6px;
+      font-size:12px;
+      color:var(--muted);
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .badge{
+      font-size:12px;
+      border-radius:999px;
+      padding:6px 10px;
+      border:1px solid rgba(15,23,42,.10);
+      background: rgba(236,254,255,.70);
+      white-space:nowrap;
+    }
+    .badge.good{ background: var(--good); border-color: rgba(16,185,129,.25); }
+    .badge.warn{ background: var(--warn); border-color: rgba(245,158,11,.25); }
+    .badge.bad{  background: var(--bad);  border-color: rgba(239,68,68,.25); }
+    .chev{
+      font-size:14px;
+      color:var(--muted);
+      padding-top:2px;
+      white-space:nowrap;
+    }
+    .barWrap{
+      margin-top:10px;
+      height:10px;
+      border-radius:999px;
+      background: rgba(15,23,42,.08);
+      overflow:hidden;
+      border:1px solid rgba(15,23,42,.08);
+    }
+    .bar{
+      height:100%;
+      width:0%;
+      background: rgba(59,130,246,.65);
+      transition: width .25s ease;
+    }
+
+    .summaryRow{
+      margin-top:10px;
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+      font-size:12px;
+      color:var(--muted);
+    }
+
+    .details{
+      border-top:1px solid var(--line);
+      padding:12px 14px 14px;
+      display:none;
+    }
+    .details.open{ display:block; }
+
+    .tbl{
+      width:100%;
+      border-collapse:separate;
+      border-spacing:0;
+      overflow:hidden;
+      border:1px solid var(--line);
+      border-radius:14px;
+      background:#fff;
+    }
+    .tbl th, .tbl td{
+      text-align:left;
+      padding:10px 12px;
+      font-size:13px;
+      border-bottom:1px solid var(--line);
+      vertical-align:top;
+    }
+    .tbl th{
+      font-size:12px;
+      color:var(--muted);
+      font-weight:900;
+      background: rgba(248,250,252,.9);
+    }
+    .tbl tr:last-child td{ border-bottom:none; }
+
+    .small{
+      font-size:12px;
+      color:var(--muted);
+    }
+  </style>
+</head>
+
+<body>
+  <div class="topbar">
+    <div class="nav" aria-label="Primär navigation">
+      <a href="./dashboard.html">Dashboard</a>
+      <a href="./packages.html">Paket</a>
+      <a href="./packages-progress.html" aria-current="page">Paketprogress</a>
+      <div class="spacer"></div>
+      <span class="pill" id="whoPill">—</span>
+      <a href="#" id="logoutLink">Logga ut</a>
+    </div>
+  </div>
+
+  <main class="wrap">
+    <div class="guard" id="guardBox" role="alert"></div>
+
+    <section class="header">
+      <h1>Paketprogress</h1>
+      <p>Överblick: vad går bra, vad fastnar. Read-only.</p>
+
+      <div class="tools" aria-label="Filter">
+        <input class="input" id="q" type="search" placeholder="Sök paket eller scope…" autocomplete="off" />
+        <span class="pill" id="countPill">—</span>
+      </div>
+    </section>
+
+    <section class="list" id="list" aria-label="Paketlista"></section>
+  </main>
+
+  <!-- AO-002 beroenden (LÅSTA): config måste laddas före app -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <script>
+    "use strict";
+
+    /* ===========================
+       Keys (LÅST)
+    ============================ */
+    const KEY_SESSION      = "AO-001_LOGIN_V1";
+    const KEY_PACKAGES     = "AO-050_PACKAGES_V1";
+    const KEY_TASKS        = "AO-014_TASKS_V1";
+    const KEY_QUESTIONS    = "AO-012_QUESTIONS_V1";
+    const KEY_ANSWERS      = "AO-013_ANSWERS_V1";
+    const KEY_ASSIGNMENTS  = "AO-020_ROLE_ASSIGNMENTS_V2";
+    const KEY_ORG          = "AO-020_ORG_V1";
+
+    /* ===========================
+       DOM
+    ============================ */
+    const guardBox  = document.getElementById("guardBox");
+    const whoPill   = document.getElementById("whoPill");
+    const logoutLink= document.getElementById("logoutLink");
+    const listEl    = document.getElementById("list");
+    const qEl       = document.getElementById("q");
+    const countPill = document.getElementById("countPill");
+
+    function showGuard(msg){ guardBox.style.display = "block"; guardBox.textContent = String(msg || ""); }
+    function hideGuard(){ guardBox.style.display = "none"; guardBox.textContent = ""; }
+
+    function escapeHtml(input){
+      if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(input);
+      const s = String(input ?? "");
+      return s
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
+    }
+
+    function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
+
+    function readAnyStorage(key){
+      try { const s1 = sessionStorage.getItem(key); if (s1) return s1; } catch {}
+      try { const s2 = localStorage.getItem(key);  if (s2) return s2; } catch {}
+      return null;
+    }
+
+    function readLocalArray(key){
+      try{
+        const raw = localStorage.getItem(key);
+        const data = safeJsonParse(raw || "");
+        return Array.isArray(data) ? data : [];
+      }catch{
+        return [];
+      }
+    }
+
+    function normStr(s){ return String(s ?? "").trim(); }
+    function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
+
+    /* ===========================
+       Deterministisk "hash" för id (ingen lagring)
+    ============================ */
+    function stableIdFromString(str){
+      const s = String(str ?? "");
+      let h = 2166136261;
+      for(let i=0;i<s.length;i++){
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return "p_" + (h >>> 0).toString(36);
+    }
+
+    /* ===========================
+       Mild info (utan block)
+    ============================ */
+    function showInfo(msg){
+      // Reuse guardBox styling, men mild text (ingen redesign).
+      // Om någon redan satt en guard (röd), skriv inte över.
+      if (guardBox.style.display === "block") return;
+      showGuard(msg);
+    }
+
+    /* ===========================
+       AO-002 AUTH (kopplat)
+    ============================ */
+    function mustAuthOrStop(){
+      if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+        showGuard("Systemfel: HRApp saknas. (UI-03-APP.js)");
+        return null;
+      }
+      if (!window.HR_CONFIG || !window.HR_CONFIG.ROLES) {
+        showGuard("Systemfel: HR_CONFIG saknas. (UI-04-CONFIG.js)");
+        return null;
+      }
+
+      const allow = [ window.HR_CONFIG.ROLES.ADMIN, window.HR_CONFIG.ROLES.SYSTEM_ADMIN ];
+      const sess = window.HRApp.requireAuth({ allowRoles: allow });
+      if (!sess) return null;
+
+      const auth = window.HRApp.getAuth(sess);
+      if (!auth || auth.isAuthed !== true) {
+        showGuard("Fail-closed: saknar giltig session. Logga in igen.");
+        return null;
+      }
+      return { sess, auth };
+    }
+
+    /* ===========================
+       ORG helpers (subtree)
+    ============================ */
+    function readOrg(){
+      const arr = readLocalArray(KEY_ORG);
+      return Array.isArray(arr) ? arr : [];
+    }
+
+    function buildOrgIndex(nodes){
+      const byId = new Map();
+      for(const n of (Array.isArray(nodes)?nodes:[])){
+        if(!n || typeof n !== "object") continue;
+        const id = normStr(n.id ?? n.scopeId ?? "");
+        if(!id) continue;
+        byId.set(id, {
+          id,
+          parentId: normStr(n.parentId ?? n.parent ?? ""),
+          label: normStr(n.label ?? n.name ?? n.title ?? id) || id
+        });
+      }
+      return byId;
+    }
+
+    function isInSubtree(childId, ancestorId, byId){
+      const c = normStr(childId);
+      const a = normStr(ancestorId);
+      if(!c || !a) return false;
+      if(c === a) return true;
+
+      let cur = byId.get(c);
+      let steps = 0;
+      while(cur && steps < 1000){
+        const pid = normStr(cur.parentId);
+        if(!pid) break;
+        if(pid === a) return true;
+        cur = byId.get(pid);
+        steps++;
+      }
+      return false;
+    }
+
+    function scopeLabel(scopeId, byId){
+      const id = normStr(scopeId);
+      if(!id) return "—";
+      const n = byId.get(id);
+      return n ? (n.label || id) : id;
+    }
+
+    /* ===========================
+       ASSIGNMENTS -> employees list
+    ============================ */
+    function readAssignments(){
+      const raw = readAnyStorage(KEY_ASSIGNMENTS);
+      if(!raw) return [];
+      const data = safeJsonParse(raw);
+      if(Array.isArray(data)) return data;
+      if(data && typeof data === "object" && Array.isArray(data.assignments)) return data.assignments;
+      return [];
+    }
+
+    function pickEmpNo(a){
+      return normStr(a?.empNo ?? a?.employeeNo ?? a?.id ?? "");
+    }
+    function pickRole(a){
+      return normStr(a?.role ?? a?.roleId ?? "");
+    }
+    function pickScope(a){
+      return normStr(a?.scopeId ?? a?.scope ?? "");
+    }
+
+    function uniqueByEmpNo(list){
+      const out = [];
+      const seen = new Set();
+      for(const e of list){
+        if(!e || typeof e !== "object") continue;
+        if(!e.empNo) continue;
+        if(seen.has(e.empNo)) continue;
+        seen.add(e.empNo);
+        out.push(e);
+      }
+      return out;
+    }
+
+    function employeesVisibleToViewer(auth, orgById, orgNodes){
+      const viewerRole = normStr(auth.role);
+      const viewerScope = normStr(auth.scopeId);
+
+      const assigns = readAssignments();
+      if(!Array.isArray(assigns) || assigns.length === 0) return [];
+
+      const emps = assigns
+        .map(a => ({ empNo: pickEmpNo(a), role: pickRole(a), scopeId: pickScope(a) }))
+        .filter(x => x.empNo && x.scopeId && x.role === "EMPLOYEE");
+
+      const uniq = uniqueByEmpNo(emps);
+
+      if(viewerRole === "SYSTEM_ADMIN"){
+        return uniq;
+      }
+
+      if(!viewerScope) return [];
+      if(!Array.isArray(orgNodes) || orgNodes.length === 0) return [];
+
+      if(window.HRApp && typeof window.HRApp.isInScope === "function"){
+        return uniq.filter(e => {
+          try { return window.HRApp.isInScope(e.scopeId, viewerScope, orgNodes) === true; } catch { return false; }
+        });
+      }
+
+      return uniq.filter(e => isInSubtree(e.scopeId, viewerScope, orgById));
+    }
+
+    /* ===========================
+       Tolerant matching
+    ============================ */
+    function getTaskTitle(t){ return String(t?.title ?? t?.name ?? t?.text ?? ""); }
+    function isTaskDone(t){
+      const s = String(t?.status ?? t?.state ?? "").toLowerCase();
+      if(t?.done === true) return true;
+      if(t?.isDone === true) return true;
+      if(s === "done" || s === "klar" || s === "completed" || s === "complete") return true;
+      return false;
+    }
+
+    function getQuestionId(q){
+      return String(q?.id ?? q?.questionId ?? q?.qid ?? "");
+    }
+    function getQuestionTitle(q){
+      return String(q?.title ?? q?.name ?? q?.text ?? "");
+    }
+
+    function answerMatchesQuestion(ans, qId, qTitle){
+      if(!ans || typeof ans !== "object") return false;
+      const aQid = String(ans.questionId ?? ans.qid ?? ans.question_id ?? "");
+      if(qId && aQid && aQid === qId) return true;
+
+      const aTitle = String(ans.questionTitle ?? ans.title ?? ans.questionText ?? "");
+      if(qTitle && aTitle && normKey(aTitle) === normKey(qTitle)) return true;
+
+      return false;
+    }
+
+    function answersForEmpNo(empNo, answers){
+      const me = normStr(empNo);
+      return (Array.isArray(answers)?answers:[]).filter(a => normStr(a?.empNo ?? a?.employeeNo ?? a?.byEmpNo ?? a?.respondentEmpNo ?? "") === me);
+    }
+
+    /* ===========================
+       Package blocks normalization
+       - AUTOPATCH v1.2: stabilt block-id om b.id saknas
+    ============================ */
+    function normalizeBlockKind(kind){
+      const k = String(kind || "").toLowerCase().trim();
+      if(k === "task" || k === "uppgift") return "task";
+      if(k === "question" || k === "fråga") return "question";
+      if(k === "info" || k === "information") return "info";
+      if(k === "both") return "both";
+      return "unknown";
+    }
+
+    function blocksFromPackage(pkg){
+      const blocks = Array.isArray(pkg?.blocks) ? pkg.blocks : [];
+      return blocks.map(b => {
+        const kind = normalizeBlockKind(b?.kind);
+        const title = normStr(b?.title) || "—";
+        const id =
+          normStr(b?.id) ||
+          stableIdFromString(`${kind}||${normKey(title)}`); // stabilt, ingen Math.random
+        return { id, kind, title, raw:b };
+      });
+    }
+
+    /* ===========================
+       Progress calculation
+       - AUTOPATCH v1.2: ALL/* räknas som "tilldelad till alla i scope"
+    ============================ */
+    function taskDoneForEmp(blockTitle, empNo, scopeId, tasks){
+      const me = normStr(empNo);
+      const sc = normStr(scopeId);
+      const bt = normKey(blockTitle);
+      if(!me || !sc || !bt) return false;
+
+      const list = Array.isArray(tasks) ? tasks : [];
+      for(const t of list){
+        if(!t || typeof t !== "object") continue;
+
+        const tScope = normStr(t?.scopeId ?? "");
+        if(!tScope || tScope !== sc) continue; // scope fail-closed
+
+        const assigned = t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
+
+        // accept string/number
+        const assignedStr = (typeof assigned === "string" || typeof assigned === "number") ? String(assigned).trim() : "";
+
+        // AUTOPATCH v1.2:
+        // - Om assignedStr är ALL/*: tolka som tilldelad till varje emp i scope (progress får bli klar)
+        // - Om assignedStr saknas: fail-closed (räknas ej)
+        const isAll = (assignedStr === "ALL" || assignedStr === "*");
+        if(!assignedStr) continue;
+        if(!isAll && assignedStr !== me) continue;
+
+        const tt = normKey(getTaskTitle(t));
+        if(tt && tt === bt){
+          return isTaskDone(t);
+        }
+      }
+      return false;
+    }
+
+    function questionDoneForEmp(blockTitle, empNo, questions, answers){
+      const me = normStr(empNo);
+      const title = normStr(blockTitle);
+      if(!me || !title) return false;
+
+      let qId = "";
+      const qs = Array.isArray(questions) ? questions : [];
+      const foundQ = qs.find(q => normKey(getQuestionTitle(q)) === normKey(title));
+      if(foundQ) qId = getQuestionId(foundQ);
+
+      const myAns = answersForEmpNo(me, answers);
+      return myAns.some(a => answerMatchesQuestion(a, qId, title));
+    }
+
+    function blockDoneForEmp(block, emp, data){
+      const kind = block.kind;
+      if(kind === "info") return true;
+
+      if(kind === "task"){
+        return taskDoneForEmp(block.title, emp.empNo, emp.scopeId, data.tasks);
+      }
+      if(kind === "question"){
+        return questionDoneForEmp(block.title, emp.empNo, data.questions, data.answers);
+      }
+      if(kind === "both"){
+        const tOk = taskDoneForEmp(block.title, emp.empNo, emp.scopeId, data.tasks);
+        const qOk = questionDoneForEmp(block.title, emp.empNo, data.questions, data.answers);
+        return tOk && qOk;
+      }
+      return false;
+    }
+
+    /* ===========================
+       Packages read (active only)
+    ============================ */
+    function readActivePackages(){
+      const arr = readLocalArray(KEY_PACKAGES);
+      const list = Array.isArray(arr) ? arr : [];
+      return list.filter(p => !!p && typeof p === "object" && p.isActive === true);
+    }
+
+    function packageScopeId(pkg){
+      return normStr(pkg?.scopeId ?? pkg?.targetScopeId ?? pkg?.scope ?? "");
+    }
+
+    function packageName(pkg){ return normStr(pkg?.name) || "—"; }
+
+    /* ===========================
+       UI render
+    ============================ */
+    function statusBadge(percent, started){
+      if(percent >= 100) return { cls:"good", txt:"🟢 Klar" };
+      if(!started)        return { cls:"bad",  txt:"🔴 Ej startad" };
+      return { cls:"warn", txt:"🟡 Pågår" };
+    }
+
+    function pct(done, total){
+      if(total <= 0) return 0;
+      return Math.round((done / total) * 100);
+    }
+
+    function renderList(items, filterQ){
+      listEl.innerHTML = "";
+
+      const q = normKey(filterQ || "");
+      const filtered = !q ? items : items.filter(it => {
+        const hay = normKey(`${it.name} ${it.scopeLabel}`);
+        return hay.includes(q);
+      });
+
+      countPill.textContent = `${filtered.length} paket`;
+
+      if(filtered.length === 0){
+        listEl.innerHTML = `
+          <div class="card">
+            <div class="cardHead" style="cursor:default;">
+              <div class="left">
+                <div class="titleRow">
+                  <h3 class="pkgTitle">Inget att visa</h3>
+                </div>
+                <div class="meta">
+                  <span class="badge">Antingen saknas data, eller inga aktiva paket i din vy.</span>
+                </div>
+              </div>
+            </div>
+          </div>`;
+        return;
+      }
+
+      for(const it of filtered){
+        const badge = statusBadge(it.percent, it.started);
+        const safeId = escapeHtml(it.uiId);
+
+        const empBadge = (it.employeesTotal === 0)
+          ? `<span class="badge bad">0 medarbetare i scope</span>`
+          : `<span class="badge">${it.employeesTotal} medarbetare</span>`;
+
+        const card = document.createElement("article");
+        card.className = "card";
+        card.innerHTML = `
+          <div class="cardHead" data-action="toggle" data-id="${safeId}">
+            <div class="left">
+              <div class="titleRow">
+                <h3 class="pkgTitle">${escapeHtml(it.name)}</h3>
+                <span class="badge ${badge.cls}">${escapeHtml(badge.txt)}</span>
+              </div>
+              <div class="meta">
+                <span class="badge">Scope: ${escapeHtml(it.scopeLabel)}</span>
+                <span class="badge">Block: ${it.totalBlocks}</span>
+                <span class="badge">Klara: ${it.doneBlocks}</span>
+                <span class="badge">Återstår: ${Math.max(0, it.totalBlocks - it.doneBlocks)}</span>
+                ${empBadge}
+              </div>
+
+              <div class="barWrap" aria-label="Progress">
+                <div class="bar" style="width:${it.percent}%;"></div>
+              </div>
+
+              <div class="summaryRow">
+                <span>${it.percent}%</span>
+                <span>•</span>
+                <span class="small">Klar per block = alla medarbetare inom scope klara</span>
+              </div>
+            </div>
+            <div class="chev" aria-hidden="true">Klick för detalj ▾</div>
+          </div>
+
+          <div class="details" id="d_${safeId}">
+            <table class="tbl" role="table" aria-label="Blockdetaljer">
+              <thead>
+                <tr>
+                  <th>Block</th>
+                  <th>Typ</th>
+                  <th>Status</th>
+                  <th>Klara / Totalt</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${it.blocks.map(b => {
+                  const st = b.isDoneAll ? "🟢 Klar" : (b.doneCount > 0 ? "🟡 Pågår" : "🔴 Ej startad");
+                  const badgeCls = b.isDoneAll ? "good" : (b.doneCount > 0 ? "warn" : "bad");
+                  return `
+                    <tr>
+                      <td><strong>${escapeHtml(b.title)}</strong></td>
+                      <td><span class="badge">${escapeHtml(b.kind)}</span></td>
+                      <td><span class="badge ${badgeCls}">${escapeHtml(st)}</span></td>
+                      <td>${b.doneCount} / ${b.total}</td>
+                    </tr>
+                  `;
+                }).join("")}
+              </tbody>
+            </table>
+            <div class="small" style="margin-top:10px;">
+              Read-only. Ingen navigation till employee. Ingen status lagras.
+            </div>
+          </div>
+        `;
+        listEl.appendChild(card);
+      }
+    }
+
+    /* ===========================
+       Build AO-054 dataset
+    ============================ */
+    function computeProgress(auth){
+      const viewerRole  = normStr(auth.role);
+      const viewerScope = normStr(auth.scopeId);
+
+      const orgNodes = readOrg();
+      const orgById  = buildOrgIndex(orgNodes);
+
+      // ADMIN: kräver org för subtree (fail-closed)
+      if(viewerRole !== "SYSTEM_ADMIN"){
+        if(!viewerScope || orgNodes.length === 0){
+          return { ok:false, reason:"missing_org_or_scope" };
+        }
+      } else {
+        // AUTOPATCH v1.2: SYSTEM_ADMIN utan org -> mild info, men blocka inte
+        if(orgNodes.length === 0){
+          showInfo("Info: ORG saknas. SYSTEM_ADMIN visar endast exakt scope-match (ej subtree).");
+        }
+      }
+
+      const employeesAll = employeesVisibleToViewer(auth, orgById, orgNodes);
+
+      const tasks = readLocalArray(KEY_TASKS);
+      const questions = readLocalArray(KEY_QUESTIONS);
+      const answers = readLocalArray(KEY_ANSWERS);
+
+      const pkgs = readActivePackages();
+      if(!Array.isArray(pkgs) || pkgs.length === 0){
+        return { ok:true, items:[] };
+      }
+
+      const items = [];
+
+      for(const pkg of pkgs){
+        const pkgScope = packageScopeId(pkg);
+        if(!pkgScope){
+          continue;
+        }
+
+        const empsInPkg = (() => {
+          if(employeesAll.length === 0) return [];
+
+          if(viewerRole === "SYSTEM_ADMIN"){
+            if(orgNodes.length > 0){
+              if(window.HRApp && typeof window.HRApp.isInScope === "function"){
+                return employeesAll.filter(e => {
+                  try { return window.HRApp.isInScope(e.scopeId, pkgScope, orgNodes) === true; } catch { return false; }
+                });
+              }
+              return employeesAll.filter(e => isInSubtree(e.scopeId, pkgScope, orgById));
+            }
+            // org saknas: exakt scope-match (redan flaggat som info)
+            return employeesAll.filter(e => normStr(e.scopeId) === pkgScope);
+          }
+
+          if(window.HRApp && typeof window.HRApp.isInScope === "function"){
+            return employeesAll.filter(e => {
+              try { return window.HRApp.isInScope(e.scopeId, pkgScope, orgNodes) === true; } catch { return false; }
+            });
+          }
+          return employeesAll.filter(e => isInSubtree(e.scopeId, pkgScope, orgById));
+        })();
+
+        const blocks = blocksFromPackage(pkg);
+        const totalBlocks = blocks.length;
+
+        // fail-closed: paket utan blocks -> visa inte
+        if(totalBlocks === 0){
+          continue;
+        }
+
+        const blockStats = blocks.map(b => {
+          const total = empsInPkg.length;
+          let doneCount = 0;
+
+          for(const emp of empsInPkg){
+            const ok = blockDoneForEmp(b, emp, { tasks, questions, answers });
+            if(ok) doneCount++;
+          }
+
+          const isDoneAll = (b.kind === "info") ? true : ((total > 0) ? (doneCount === total) : false);
+          return { id:b.id, title:b.title, kind:b.kind, doneCount, total, isDoneAll };
+        });
+
+        const doneBlocks = blockStats.reduce((acc, b) => acc + (b.isDoneAll ? 1 : 0), 0);
+        const percent = pct(doneBlocks, totalBlocks);
+
+        const hasNonInfo = blockStats.some(b => b.kind !== "info");
+        const started = hasNonInfo ? blockStats.some(b => b.kind !== "info" && b.doneCount > 0) : true;
+
+        const name = packageName(pkg);
+        const scopeLbl = scopeLabel(pkgScope, orgById);
+        const uiId = normStr(pkg.id) || stableIdFromString(`${name}||${pkgScope}`);
+
+        items.push({
+          uiId,
+          name,
+          scopeId: pkgScope,
+          scopeLabel: scopeLbl,
+          totalBlocks,
+          doneBlocks,
+          employeesTotal: empsInPkg.length,
+          percent: Math.max(0, Math.min(100, percent)),
+          started,
+          blocks: blockStats
+        });
+      }
+
+      items.sort((a,b) => a.percent - b.percent);
+
+      return { ok:true, items };
+    }
+
+    /* ===========================
+       Toggle details
+    ============================ */
+    listEl.addEventListener("click", (e) => {
+      const head = e.target?.closest?.(".cardHead[data-action='toggle']");
+      if(!head) return;
+      const id = head.getAttribute("data-id");
+      if(!id) return;
+      const d = document.getElementById("d_" + id);
+      if(!d) return;
+      d.classList.toggle("open");
+    });
+
+    qEl.addEventListener("input", () => {
+      if(!STATE.items) return;
+      renderList(STATE.items, qEl.value);
+    });
+
+    logoutLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (window.HRApp && typeof window.HRApp.logout === "function") {
+        window.HRApp.logout();
+      } else {
+        try { sessionStorage.removeItem(KEY_SESSION); } catch {}
+        try { localStorage.removeItem(KEY_SESSION); } catch {}
+        window.location.href = "../UI/UI-01-SKELETON.html?err=logout";
+      }
+    });
+
+    /* ===========================
+       Init
+    ============================ */
+    const STATE = { auth:null, items:null };
+
+    (function init(){
+      const res = mustAuthOrStop();
+      if(!res) return;
+
+      STATE.auth = res.auth;
+
+      const empNo = normStr(STATE.auth.empNo) || "—";
+      const role  = normStr(STATE.auth.role)  || "—";
+      whoPill.textContent = `${empNo} • ${role}`;
+
+      const out = computeProgress(STATE.auth);
+      if(!out.ok){
+        listEl.innerHTML = "";
+        countPill.textContent = "—";
+        const reason = out.reason || "unknown";
+        if(reason === "missing_org_or_scope"){
+          showGuard("Fail-closed: saknar org/scope för att räkna subtree. (Behöver AO-020_ORG_V1 + scopeId i session.)");
+        }else{
+          showGuard("Fail-closed: kunde inte läsa nödvändiga data för paketprogress.");
+        }
+        return;
+      }
+
+      // Om vi bara visade en mild info: låt den stå kvar. Annars: stäng guard.
+      // (Utan redesign.)
+      if(!(guardBox.style.display === "block" && guardBox.textContent.startsWith("Info:"))){
+        hideGuard();
+      }
+
+      STATE.items = out.items || [];
+      renderList(STATE.items, qEl.value);
+    })();
+  </script>
+
+  <!-- ============================================================
+  Ändringslogg (AO-054 PATCH v1.2) ≤ 8 rader
+  - Task ALL/* räknas som tilldelad till alla inom scope i progress (scope fail-closed kvarstår)
+  - SYSTEM_ADMIN utan org: mild info + exakt scope-match (ej subtree), blockar inte
+  - Tydlig badge vid 0 medarbetare i scope
+  - Stabilt block-id om b.id saknas (title+kind hash), ingen Math.random
+  - Ingen ny storage-key, read-only, ingen navigation
+  Testnoteringar
+  - Skapa task med assignedTo="ALL" och scopeId=pkgScope: progress ska kunna nå 100%
+  - SYSTEM_ADMIN utan AO-020_ORG_V1: listan fungerar, men info visas
+  Risk/edge cases
+  - Titelmatch för task är heuristik (ingen exekvering/ID-koppling lagras)
+  ============================================================ -->
+</body>
+</html>
 
