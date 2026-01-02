@@ -1,1 +1,1062 @@
+<!-- ============================================================
+AO-051 | FIL-ID: admin/packages-list.html
+Projekt: HR-System
+Syfte: Admin/Manager – Paket (Översikt/Nav) – UI-only v1.1 (REFINER)
+
+VIKTIGT (AO-051, LÅST):
+- Ny fil (ingen patch i befintliga filer)
+- UI-only • Fail-closed • sessionStorage först • fallback localStorage
+- XSS-escape på all rendering från storage
+- Ingen employee-påverkan
+- INGA nya storage-keys
+
+Keys (LÅST – ÅTERANVÄND):
+- Läser/Skriver: AO-050_PACKAGES_V1
+- Läser session (endast auth): AO-001_LOGIN_V1
+
+Krav:
+- Lista paket (namn, typ, intervall, block, status, skapad)
+- Toggle aktiv/inaktiv (fail-closed: revert UI om save fail)
+- Filter (typ, status) + sök (namn)
+- Åtgärder: Öppna (AO-050), Duplicera (inaktiv), Ta bort (confirm)
+- Endast AO-050_PACKAGES_V1 ändras
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin/Manager • Paket (Översikt)</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  <!-- HRApp (auth/routing). Fail-safe: sidan har egen fallback om HRApp saknas -->
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <style>
+    .toplinks{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:flex-end;
+    }
+    .muted2{ color: var(--muted); font-size:.92rem; line-height:1.35; }
+    .panel{
+      border: 1px solid var(--line);
+      background: rgba(167,243,208,.14);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .panel:hover{
+      transform: translateY(-1px);
+      box-shadow: var(--shadow-soft);
+      filter: brightness(1.01);
+    }
+
+    .row2{
+      display:grid;
+      grid-template-columns: 1.2fr .6fr .6fr;
+      gap: 10px;
+      align-items:end;
+    }
+    @media (max-width: 860px){
+      .row2{ grid-template-columns: 1fr; }
+    }
+
+    .filters{
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.78);
+      margin-top: 10px;
+    }
+    .filters .hint{
+      margin-top: 8px;
+      font-size:.9rem;
+      color: var(--muted);
+    }
+
+    .statbar{
+      margin-top: 10px;
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+      justify-content:space-between;
+    }
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.88rem;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .tableWrap{
+      margin-top: 10px;
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      overflow:hidden;
+    }
+    table{ width:100%; border-collapse: collapse; }
+    thead th{
+      text-align:left;
+      font-size:.9rem;
+      color: var(--muted);
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(250,250,250,.92);
+      white-space: nowrap;
+    }
+    tbody td{
+      padding: 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    tbody tr:last-child td{ border-bottom:none; }
+
+    .name{ font-weight: 950; line-height: 1.2; }
+    .sub{ margin-top: 4px; color: var(--muted); font-size: .9rem; line-height: 1.25; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: .9rem; color: var(--muted); }
+
+    .actions{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .miniBtn{
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 12px;
+      padding: 8px 10px;
+      cursor:pointer;
+      user-select:none;
+      font-weight: 900;
+      font-size: 13px;
+      line-height: 1;
+      text-decoration: none;
+      color: inherit;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+    }
+    .miniBtn:hover{ background:#fafafa; }
+    .miniBtn.danger{ border-color: rgba(239,68,68,.35); }
+    .miniBtn.danger:hover{ background: rgba(254,242,242,.8); }
+
+    /* Toggle */
+    .toggle{ display:inline-flex; align-items:center; gap:8px; user-select:none; }
+    .switch{
+      width: 44px;
+      height: 26px;
+      border-radius: 999px;
+      border:1px solid rgba(15,23,42,.18);
+      background: rgba(15,23,42,.06);
+      position:relative;
+      cursor:pointer;
+      flex: 0 0 auto;
+      transition: background .15s ease;
+      outline: none;
+    }
+    .switch::after{
+      content:"";
+      width: 20px;
+      height: 20px;
+      border-radius: 999px;
+      background:#fff;
+      border: 1px solid rgba(15,23,42,.12);
+      position:absolute;
+      top: 2px;
+      left: 2px;
+      transition: transform .15s ease;
+      box-shadow: 0 6px 12px rgba(15,23,42,.10);
+    }
+    .switch.on{
+      background: rgba(16,185,129,.22);
+      border-color: rgba(16,185,129,.30);
+    }
+    .switch.on::after{ transform: translateX(18px); }
+    .switch:focus-visible{ box-shadow: 0 0 0 3px rgba(59,130,246,.25); }
+
+    /* Card list for small screens */
+    .cards{
+      display:none;
+      margin-top: 10px;
+      gap:10px;
+      flex-direction: column;
+    }
+    .cardItem{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      padding: 10px;
+    }
+    .cardTop{
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+    .cardMeta{
+      margin-top: 8px;
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+
+    @media (max-width: 860px){
+      .tableWrap{ display:none; }
+      .cards{ display:flex; }
+    }
+
+    .message{ margin-top: 10px; }
+    .lockbox{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px dashed var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      color: var(--muted);
+      display:none;
+    }
+    .lockbox strong{ color:#111; }
+  </style>
+</head>
+
+<body>
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin/Manager • Paket (Översikt)</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./packages-list.html" aria-current="page">Paket (översikt)</a>
+    <a href="./packages.html">Skapa/Redigera paket</a>
+    <a href="./tasks.html">Uppgifter</a>
+    <a href="./tasks-list.html">Uppgifter (översikt)</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Paket (översikt)</h1>
+  <p class="muted2">
+    Här ser du alla HR-paket. Skapande och redigering sker i <a href="./packages.html">admin/packages.html</a>.
+    Toggle påverkar endast paketets status (ingen employee-påverkan ännu).
+  </p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
+      </div>
+      <div class="toplinks">
+        <a class="btn" href="./packages.html">Skapa nytt paket</a>
+      </div>
+    </div>
+
+    <div id="lockBox" class="lockbox" role="alert"></div>
+
+    <section class="panel" aria-label="Paketlista">
+      <div class="panel-title">Alla paket</div>
+
+      <div class="filters" aria-label="Filter">
+        <div class="row2">
+          <label>
+            Sök (namn)
+            <input id="q" type="text" placeholder="Sök paket..." autocomplete="off" />
+          </label>
+          <label>
+            Typ
+            <select id="filterType"></select>
+          </label>
+          <label>
+            Status
+            <select id="filterStatus">
+              <option value="all">Alla</option>
+              <option value="active">Aktiva</option>
+              <option value="inactive">Inaktiva</option>
+            </select>
+          </label>
+        </div>
+        <div class="hint">
+          Tips: Öppna paket för redigering via <span class="mono">Öppna</span>. Duplicera skapar en kopia som alltid är <strong>inaktiv</strong>.
+        </div>
+
+        <div class="statbar">
+          <div class="pill" id="countPill">—</div>
+          <div class="pill" id="lastPill">—</div>
+        </div>
+      </div>
+
+      <div class="tableWrap" aria-label="Tabell">
+        <table>
+          <thead>
+            <tr>
+              <th style="min-width:260px;">Paket</th>
+              <th>Typ</th>
+              <th>Intervall</th>
+              <th>Block</th>
+              <th>Status</th>
+              <th>Skapad</th>
+              <th style="min-width:240px;">Åtgärder</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+      </div>
+
+      <div class="cards" id="cards" aria-label="Kortlista"></div>
+
+      <p id="msg" class="message" aria-live="polite"></p>
+    </section>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+AO-051 | admin/packages-list.html – REFINER v1.1
+- Align schedule-shape with AO-050 (mode once/recurring, interval day/week/month, endMode open/until, endDate)
+- Restrict access to ADMIN/MANAGER per AO-051
+- Fail-closed toggle (revert on save fail) preserved
+============================================================ */
+(function(){
+  "use strict";
+
+  const SESSION_KEY  = "AO-001_LOGIN_V1";
+  const PACKAGES_KEY = "AO-050_PACKAGES_V1";
+
+  const $ = (s) => document.querySelector(s);
+
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function escapeHtml(s){
+    if(window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(s);
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function readRawSession(){
+    try{
+      const s1 = sessionStorage.getItem(SESSION_KEY);
+      if(s1) return s1;
+    }catch{}
+    try{
+      const s2 = localStorage.getItem(SESSION_KEY);
+      if(s2) return s2;
+    }catch{}
+    return null;
+  }
+
+  function safeParseJson(raw, fallback){
+    try{
+      const v = JSON.parse(raw);
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+
+  function readAuthFallback(){
+    try{
+      const raw = readRawSession();
+      if(!raw) return null;
+      const data = safeParseJson(raw, null);
+      if(!data?.auth?.isAuthed) return null;
+      if(data.auth.expiresAt && Number(data.auth.expiresAt) < Date.now()) return null;
+      if(!data.auth.role) return null;
+      return data.auth;
+    }catch{ return null; }
+  }
+
+  function roleClassFromAuthRole(role){
+    const r = String(role || "").toLowerCase();
+    if(r === "admin") return "ADMIN";
+    if(r === "manager") return "MANAGER";
+    return "UNKNOWN";
+  }
+
+  function getAccessCtx(){
+    if(window.HRApp && typeof window.HRApp.getCurrentAccess === "function"){
+      const acc = window.HRApp.getCurrentAccess();
+      if(acc && acc.ok && acc.auth){
+        return {
+          source: "HRApp",
+          roleClass: roleClassFromAuthRole(acc.auth.role),
+          auth: acc.auth
+        };
+      }
+    }
+    const auth = readAuthFallback();
+    if(!auth) return null;
+    return { source:"fallback", roleClass: roleClassFromAuthRole(auth.role), auth };
+  }
+
+  function doLogout(){
+    // NOTE: Not creating new keys; removes only session key.
+    if(window.HRApp && typeof window.HRApp.logout === "function"){
+      window.HRApp.logout(); return;
+    }
+    try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
+    try{ localStorage.removeItem(SESSION_KEY); }catch{}
+    redirectLogin();
+  }
+
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  const access = getAccessCtx();
+  if(!access || access.roleClass === "UNKNOWN"){
+    redirectLogin(); return;
+  }
+  if(access.roleClass !== "ADMIN" && access.roleClass !== "MANAGER"){
+    redirectLogin(); return;
+  }
+
+  $("#whoName").textContent = access.auth.displayName || "—";
+  $("#whoRole").textContent = (access.auth.role || "").toLowerCase() || "—";
+
+  function showLockBox(text){
+    const box = $("#lockBox");
+    if(!text){
+      box.style.display = "none";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "block";
+    box.innerHTML = `<strong>Låst (fail-closed):</strong> ${escapeHtml(text)}`;
+  }
+
+  // Storage helpers (fail-closed)
+  function safeParseLocal(key, fallback){
+    try{
+      const raw = localStorage.getItem(key);
+      if(raw == null) return fallback;
+      const v = JSON.parse(raw);
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+
+  function saveFailClosed(key, value){
+    try{
+      localStorage.setItem(key, JSON.stringify(value));
+      return { ok:true };
+    }catch(e){
+      return { ok:false, err:e };
+    }
+  }
+
+  function genId(prefix){
+    try{
+      if(window.crypto && typeof window.crypto.randomUUID === "function"){
+        return (prefix || "id") + "_" + window.crypto.randomUUID();
+      }
+    }catch{}
+    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function clampText(s, max){
+    const str = String(s ?? "");
+    return str.length <= max ? str : str.slice(0, max);
+  }
+
+  function isISODate(s){
+    return /^\d{4}-\d{2}-\d{2}$/.test(String(s||""));
+  }
+
+  function fmtDate(ts){
+    const t = Number(ts);
+    if(!Number.isFinite(t) || t <= 0) return "—";
+    const d = new Date(t);
+    if(isNaN(d.getTime())) return "—";
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const day = String(d.getDate()).padStart(2,"0");
+    return `${y}-${m}-${day}`;
+  }
+
+  // Package domain (AO-050 locked types)
+  const TYPES = [
+    "Onboarding",
+    "Mål & uppföljning",
+    "Utvecklingssamtal",
+    "Utbildning",
+    "Kompetenskartläggning",
+    "Regel/Policy"
+  ];
+
+  function normalizeSchedule(rawSch){
+    // AO-050 schedule shape:
+    // { mode:'once'|'recurring', startDate:'YYYY-MM-DD', interval:'day'|'week'|'month', endMode:'open'|'until', endDate:'YYYY-MM-DD' }
+    const sch = (rawSch && typeof rawSch === "object") ? rawSch : {};
+
+    // Legacy mapping support (fail-closed display only; we still keep original stored fields untouched unless we save)
+    // - If sch.mode is "oneoff" or "recurring" -> map oneoff->once
+    // - If sch.freq exists -> map daily/weekly/monthly -> day/week/month
+    // - If sch.untilMode exists -> map forever->open, until->until and untilDate->endDate
+    let mode = String(sch.mode || "").trim();
+    if(mode === "oneoff") mode = "once";
+    if(mode !== "once" && mode !== "recurring") mode = "once";
+
+    const startDate = isISODate(sch.startDate) ? sch.startDate : "";
+
+    let interval = String(sch.interval || "").trim(); // AO-050 uses interval as unit
+    if(interval !== "day" && interval !== "week" && interval !== "month"){
+      // legacy freq mapping
+      const freq = String(sch.freq || "").trim();
+      if(freq === "daily") interval = "day";
+      else if(freq === "weekly") interval = "week";
+      else if(freq === "monthly") interval = "month";
+      else interval = "week";
+    }
+
+    let endMode = String(sch.endMode || "").trim();
+    if(endMode !== "open" && endMode !== "until"){
+      const untilMode = String(sch.untilMode || "").trim();
+      endMode = (untilMode === "until") ? "until" : "open";
+    }
+
+    let endDate = isISODate(sch.endDate) ? sch.endDate : "";
+    if(!endDate){
+      const untilDate = isISODate(sch.untilDate) ? sch.untilDate : "";
+      endDate = untilDate;
+    }
+    if(endMode !== "until") endDate = "";
+
+    return { mode, startDate, interval, endMode, endDate };
+  }
+
+  function normalizePkg(raw){
+    const p = raw && typeof raw === "object" ? raw : {};
+    const id = String(p.id || "").trim() || genId("pkg");
+    const type = String(p.type || "").trim();
+    const name = String(p.name || "").trim();
+    const description = String(p.description || "").trim();
+
+    const schedule = normalizeSchedule(p.schedule);
+
+    const blocks = Array.isArray(p.blocks) ? p.blocks : [];
+    const isActive = !!p.isActive;
+
+    const createdAt = Number.isFinite(Number(p.createdAt)) ? Number(p.createdAt) : Date.now();
+    const updatedAt = Number.isFinite(Number(p.updatedAt)) ? Number(p.updatedAt) : createdAt;
+
+    return {
+      id,
+      type,
+      name,
+      description,
+      schedule,
+      blocks,
+      isActive,
+      createdAt,
+      updatedAt
+    };
+  }
+
+  function loadPackages(){
+    const arr = safeParseLocal(PACKAGES_KEY, []);
+    const list = Array.isArray(arr) ? arr : [];
+    // normalize defensivt (utan att spara automatiskt)
+    return list.map(normalizePkg);
+  }
+
+  function savePackages(pkgs){
+    // Only writes AO-050_PACKAGES_V1 (allowed)
+    return saveFailClosed(PACKAGES_KEY, Array.isArray(pkgs) ? pkgs : []);
+  }
+
+  function scheduleText(sch){
+    const s = sch && typeof sch === "object" ? sch : {};
+    const mode = s.mode === "recurring" ? "recurring" : "once";
+
+    const start = isISODate(s.startDate) ? s.startDate : "";
+    if(mode === "once"){
+      if(start) return `Engång • Start ${start}`;
+      return "Engång";
+    }
+
+    const unit =
+      s.interval === "day" ? "dag" :
+      s.interval === "week" ? "vecka" :
+      s.interval === "month" ? "månad" : "period";
+
+    const every = `Varje ${unit}`;
+    const until = (s.endMode === "until" && isISODate(s.endDate)) ? `• Till ${s.endDate}` : "• Tillsvidare";
+    const startTxt = start ? `• Start ${start}` : "";
+    return `${every} ${startTxt} ${until}`.replace(/\s+/g," ").trim();
+  }
+
+  // UI state
+  let ALL = loadPackages();
+  let VIEW = [];
+
+  const tbody = $("#tbody");
+  const cards = $("#cards");
+  const q = $("#q");
+  const filterType = $("#filterType");
+  const filterStatus = $("#filterStatus");
+  const countPill = $("#countPill");
+  const lastPill = $("#lastPill");
+
+  function renderTypeFilter(){
+    filterType.innerHTML = "";
+    const opt0 = document.createElement("option");
+    opt0.value = "all";
+    opt0.textContent = "Alla typer";
+    filterType.appendChild(opt0);
+
+    TYPES.forEach(t => {
+      const opt = document.createElement("option");
+      opt.value = t;
+      opt.textContent = t;
+      filterType.appendChild(opt);
+    });
+
+    // Extra typer (legacy/korrupt) sist
+    const extra = new Set();
+    ALL.forEach(p => {
+      const t = String(p.type||"").trim();
+      if(t && !TYPES.includes(t)) extra.add(t);
+    });
+    Array.from(extra).sort((a,b)=>a.localeCompare(b,"sv")).forEach(t => {
+      const opt = document.createElement("option");
+      opt.value = t;
+      opt.textContent = `Okänd: ${t}`;
+      filterType.appendChild(opt);
+    });
+  }
+
+  function applyFilters(){
+    const text = String(q.value || "").trim().toLowerCase();
+    const t = String(filterType.value || "all");
+    const st = String(filterStatus.value || "all");
+
+    VIEW = ALL.filter(p => {
+      if(t !== "all" && String(p.type||"") !== t) return false;
+      if(st === "active" && !p.isActive) return false;
+      if(st === "inactive" && p.isActive) return false;
+      if(text){
+        const nm = String(p.name||"").toLowerCase();
+        if(!nm.includes(text)) return false;
+      }
+      return true;
+    });
+
+    // Sort: active first, then newest updated
+    VIEW.sort((a,b)=>{
+      if(!!b.isActive !== !!a.isActive) return (b.isActive?1:0) - (a.isActive?1:0);
+      return Number(b.updatedAt||0) - Number(a.updatedAt||0);
+    });
+
+    render();
+  }
+
+  function renderStats(){
+    const total = ALL.length;
+    const active = ALL.filter(p=>p.isActive).length;
+    const inactive = total - active;
+    const showing = VIEW.length;
+
+    countPill.textContent = `Visar ${showing} / ${total} • ${active} aktiv • ${inactive} inaktiv`;
+
+    const last = ALL.slice().sort((a,b)=>Number(b.updatedAt||0)-Number(a.updatedAt||0))[0];
+    lastPill.textContent = last
+      ? `Senast uppdaterad: ${fmtDate(last.updatedAt)} • ${clampText(last.name||"—", 40)}`
+      : "Senast uppdaterad: —";
+  }
+
+  function clearChildren(el){
+    while(el.firstChild) el.removeChild(el.firstChild);
+  }
+
+  function makeToggle(pkg){
+    const wrap = document.createElement("div");
+    wrap.className = "toggle";
+
+    const sw = document.createElement("div");
+    sw.className = "switch" + (pkg.isActive ? " on" : "");
+    sw.setAttribute("role", "switch");
+    sw.setAttribute("tabindex", "0");
+    sw.setAttribute("aria-checked", pkg.isActive ? "true" : "false");
+    sw.setAttribute("data-action", "toggle");
+    sw.setAttribute("data-id", pkg.id);
+    sw.setAttribute("aria-label", pkg.isActive ? "Inaktivera paket" : "Aktivera paket");
+
+    const label = document.createElement("span");
+    label.className = "tiny";
+    label.textContent = pkg.isActive ? "På" : "Av";
+
+    wrap.appendChild(sw);
+    wrap.appendChild(label);
+    return wrap;
+  }
+
+  function openUrlFor(id){
+    // AO-051 kräver "Öppna (AO-050)". Param kan ignoreras av AO-050 om den inte används.
+    const u = new URL("./packages.html", window.location.href);
+    u.searchParams.set("id", String(id));
+    return u.toString();
+  }
+
+  function renderTable(){
+    clearChildren(tbody);
+
+    if(VIEW.length === 0){
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 7;
+      td.className = "muted2";
+      td.style.padding = "14px 10px";
+      td.textContent = "Inga paket matchar filtret.";
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+      return;
+    }
+
+    VIEW.forEach(pkg => {
+      const tr = document.createElement("tr");
+
+      const tdName = document.createElement("td");
+      const name = document.createElement("div");
+      name.className = "name";
+      name.textContent = pkg.name || "Namnlöst paket";
+      const sub = document.createElement("div");
+      sub.className = "sub";
+      sub.textContent = pkg.description || "—";
+      const id = document.createElement("div");
+      id.className = "mono";
+      id.textContent = `id: ${pkg.id}`;
+      tdName.appendChild(name);
+      tdName.appendChild(sub);
+      tdName.appendChild(id);
+
+      const tdType = document.createElement("td");
+      tdType.textContent = pkg.type || "—";
+
+      const tdSch = document.createElement("td");
+      tdSch.textContent = scheduleText(pkg.schedule);
+
+      const tdBlocks = document.createElement("td");
+      tdBlocks.textContent = String(Array.isArray(pkg.blocks) ? pkg.blocks.length : 0);
+
+      const tdStatus = document.createElement("td");
+      tdStatus.appendChild(makeToggle(pkg));
+
+      const tdCreated = document.createElement("td");
+      tdCreated.textContent = fmtDate(pkg.createdAt);
+
+      const tdActions = document.createElement("td");
+      const actions = document.createElement("div");
+      actions.className = "actions";
+
+      const btnOpen = document.createElement("a");
+      btnOpen.className = "miniBtn";
+      btnOpen.textContent = "Öppna";
+      btnOpen.href = openUrlFor(pkg.id);
+
+      const btnDup = document.createElement("button");
+      btnDup.className = "miniBtn";
+      btnDup.type = "button";
+      btnDup.textContent = "Duplicera";
+      btnDup.setAttribute("data-action", "duplicate");
+      btnDup.setAttribute("data-id", pkg.id);
+
+      const btnDel = document.createElement("button");
+      btnDel.className = "miniBtn danger";
+      btnDel.type = "button";
+      btnDel.textContent = "Ta bort";
+      btnDel.setAttribute("data-action", "delete");
+      btnDel.setAttribute("data-id", pkg.id);
+
+      actions.appendChild(btnOpen);
+      actions.appendChild(btnDup);
+      actions.appendChild(btnDel);
+      tdActions.appendChild(actions);
+
+      tr.appendChild(tdName);
+      tr.appendChild(tdType);
+      tr.appendChild(tdSch);
+      tr.appendChild(tdBlocks);
+      tr.appendChild(tdStatus);
+      tr.appendChild(tdCreated);
+      tr.appendChild(tdActions);
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderCards(){
+    clearChildren(cards);
+
+    if(VIEW.length === 0){
+      const box = document.createElement("div");
+      box.className = "cardItem";
+      box.textContent = "Inga paket matchar filtret.";
+      cards.appendChild(box);
+      return;
+    }
+
+    VIEW.forEach(pkg => {
+      const item = document.createElement("div");
+      item.className = "cardItem";
+
+      const top = document.createElement("div");
+      top.className = "cardTop";
+
+      const left = document.createElement("div");
+      const nm = document.createElement("div");
+      nm.className = "name";
+      nm.textContent = pkg.name || "Namnlöst paket";
+      const ds = document.createElement("div");
+      ds.className = "sub";
+      ds.textContent = pkg.description || "—";
+      left.appendChild(nm);
+      left.appendChild(ds);
+
+      const right = document.createElement("div");
+      const statusPill = document.createElement("span");
+      statusPill.className = "pill";
+      statusPill.textContent = pkg.isActive ? "Aktiv" : "Inaktiv";
+      right.appendChild(statusPill);
+
+      top.appendChild(left);
+      top.appendChild(right);
+
+      const meta = document.createElement("div");
+      meta.className = "cardMeta";
+      const p1 = document.createElement("span");
+      p1.className = "pill";
+      p1.textContent = pkg.type || "—";
+      const p2 = document.createElement("span");
+      p2.className = "pill";
+      p2.textContent = scheduleText(pkg.schedule);
+      const p3 = document.createElement("span");
+      p3.className = "pill";
+      p3.textContent = `${Array.isArray(pkg.blocks)?pkg.blocks.length:0} block`;
+      const p4 = document.createElement("span");
+      p4.className = "pill";
+      p4.textContent = `Skapad ${fmtDate(pkg.createdAt)}`;
+      meta.appendChild(p1); meta.appendChild(p2); meta.appendChild(p3); meta.appendChild(p4);
+
+      const statusRow = document.createElement("div");
+      statusRow.style.marginTop = "10px";
+      statusRow.appendChild(makeToggle(pkg));
+
+      const actions = document.createElement("div");
+      actions.className = "actions";
+      actions.style.marginTop = "10px";
+
+      const btnOpen = document.createElement("a");
+      btnOpen.className = "miniBtn";
+      btnOpen.textContent = "Öppna";
+      btnOpen.href = openUrlFor(pkg.id);
+
+      const btnDup = document.createElement("button");
+      btnDup.className = "miniBtn";
+      btnDup.type = "button";
+      btnDup.textContent = "Duplicera";
+      btnDup.setAttribute("data-action", "duplicate");
+      btnDup.setAttribute("data-id", pkg.id);
+
+      const btnDel = document.createElement("button");
+      btnDel.className = "miniBtn danger";
+      btnDel.type = "button";
+      btnDel.textContent = "Ta bort";
+      btnDel.setAttribute("data-action", "delete");
+      btnDel.setAttribute("data-id", pkg.id);
+
+      actions.appendChild(btnOpen);
+      actions.appendChild(btnDup);
+      actions.appendChild(btnDel);
+
+      const id = document.createElement("div");
+      id.className = "mono";
+      id.style.marginTop = "10px";
+      id.textContent = `id: ${pkg.id}`;
+
+      item.appendChild(top);
+      item.appendChild(meta);
+      item.appendChild(statusRow);
+      item.appendChild(actions);
+      item.appendChild(id);
+
+      cards.appendChild(item);
+    });
+  }
+
+  function render(){
+    renderStats();
+    renderTable();
+    renderCards();
+  }
+
+  function findIndexById(id){
+    const sid = String(id||"");
+    return ALL.findIndex(p => String(p.id) === sid);
+  }
+
+  // Fail-closed toggle: revert if save fails
+  function toggleActive(id){
+    setMsg("", "");
+    const idx = findIndexById(id);
+    if(idx < 0) return;
+
+    const prev = !!ALL[idx].isActive;
+    const next = !prev;
+
+    // apply locally
+    ALL[idx].isActive = next;
+    ALL[idx].updatedAt = Date.now();
+
+    const res = savePackages(ALL);
+    if(!res.ok){
+      // revert (fail-closed)
+      ALL[idx].isActive = prev;
+      ALL[idx].updatedAt = Date.now();
+      setMsg("err", "Kunde inte spara status (localStorage fullt/blockerat). UI återställd (fail-closed).");
+    }else{
+      setMsg("ok", next ? "Paket aktiverat." : "Paket inaktiverat.");
+    }
+
+    applyFilters();
+  }
+
+  function duplicatePackage(id){
+    setMsg("", "");
+    const idx = findIndexById(id);
+    if(idx < 0) return;
+
+    const src = ALL[idx];
+    const now = Date.now();
+
+    let copy;
+    try{ copy = JSON.parse(JSON.stringify(src)); }catch{
+      setMsg("err", "Kunde inte duplicera (korrupt data). Inget ändrades (fail-closed).");
+      return;
+    }
+
+    copy.id = genId("pkg");
+    copy.isActive = false;
+    copy.createdAt = now;
+    copy.updatedAt = now;
+    copy.name = clampText((src.name || "Paket") + " (kopia)", 80);
+
+    ALL.push(copy);
+
+    const res = savePackages(ALL);
+    if(!res.ok){
+      ALL.pop();
+      setMsg("err", "Kunde inte duplicera (localStorage fullt/blockerat). Inget ändrades.");
+      return;
+    }
+
+    setMsg("ok", "Duplicerat. Kopian är inaktiv.");
+    applyFilters();
+  }
+
+  function deletePackage(id){
+    setMsg("", "");
+    const idx = findIndexById(id);
+    if(idx < 0) return;
+
+    const pkg = ALL[idx];
+    const name = pkg.name || "Namnlöst paket";
+    if(!confirm(`Ta bort paket "${name}"? Detta går inte att ångra.`)) return;
+
+    const removed = ALL.splice(idx, 1)[0];
+    const res = savePackages(ALL);
+    if(!res.ok){
+      ALL.splice(idx, 0, removed);
+      setMsg("err", "Kunde inte ta bort (localStorage fullt/blockerat). Inget ändrades.");
+      return;
+    }
+
+    setMsg("ok", "Paket borttaget.");
+    applyFilters();
+  }
+
+  // Event delegation
+  function handleClick(e){
+    const el = e.target && (e.target.closest ? e.target.closest("[data-action]") : null);
+    if(!el) return;
+
+    const action = el.getAttribute("data-action");
+    const id = el.getAttribute("data-id");
+
+    if(action === "toggle"){
+      e.preventDefault();
+      toggleActive(id);
+      return;
+    }
+    if(action === "duplicate"){
+      e.preventDefault();
+      duplicatePackage(id);
+      return;
+    }
+    if(action === "delete"){
+      e.preventDefault();
+      deletePackage(id);
+      return;
+    }
+  }
+
+  function handleKeydown(e){
+    const sw = e.target && e.target.classList && e.target.classList.contains("switch") ? e.target : null;
+    if(!sw) return;
+    const action = sw.getAttribute("data-action");
+    if(action !== "toggle") return;
+    if(e.key === "Enter" || e.key === " "){
+      e.preventDefault();
+      toggleActive(sw.getAttribute("data-id"));
+    }
+  }
+
+  tbody.addEventListener("click", handleClick);
+  cards.addEventListener("click", handleClick);
+  document.addEventListener("keydown", handleKeydown);
+
+  q.addEventListener("input", () => applyFilters());
+  filterType.addEventListener("change", () => applyFilters());
+  filterStatus.addEventListener("change", () => applyFilters());
+
+  // Init
+  (function init(){
+    ALL = loadPackages();
+    renderTypeFilter();
+
+    if(!Array.isArray(ALL)){
+      showLockBox("AO-050_PACKAGES_V1 är korrupt JSON. Rensa nyckeln för att återställa.");
+      setMsg("err", "Kunde inte läsa paket (fail-closed).");
+      return;
+    }
+
+    if(ALL.length === 0){
+      setMsg("", "Inga paket ännu. Klicka “Skapa nytt paket” för att börja.");
+    }
+
+    applyFilters();
+    showLockBox(""); // hidden
+  })();
+
+})();
+</script>
+</body>
+</html>
 
