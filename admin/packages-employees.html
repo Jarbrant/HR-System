@@ -1,1 +1,1014 @@
+<!-- ============================================================
+AO-055 (PATCH v1.1) | FIL-ID: admin/packages-employees.html
+Projekt: HR-System
+Syfte: ADMIN/SYSTEM_ADMIN – Paket → status per medarbetare (drill-down) – READ ONLY
+
+Policy (LÅST):
+- UI-only • fail-closed
+- Inga nya storage-keys
+- Read-only (ingen ändring av status)
+- XSS-escape på allt från storage
+- Samma logik som AO-053 / AO-054 (ingen ny tolkning)
+- Läser endast:
+  AO-050_PACKAGES_V1, AO-014_TASKS_V1, AO-012_QUESTIONS_V1, AO-013_ANSWERS_V1,
+  AO-020_ROLE_ASSIGNMENTS_V2, AO-020_ORG_V1, AO-001_LOGIN_V1
+
+RBAC (LÅST):
+- ADMIN + SYSTEM_ADMIN
+- Scope:
+  ADMIN -> egen subtree (kräver org)
+  SYSTEM_ADMIN -> allt (utan org: fallback exakt scope-match)
+
+Autopatch v1.1 (utan UX-redesign, matchar AO-054 v1.2):
+1) ALL/* i tasks räknas som “tilldelad till alla” inom scope i progress (scope fail-closed kvarstår).
+2) SYSTEM_ADMIN utan org: mild info i topMsg (blockar inte) + exakt scope-match (ej subtree).
+3) EmpsInPkg===0: tydlig badge “0 medarbetare i scope”.
+4) blocksFromPackage: stabilt block-id om b.id saknas (title+kind hash), ingen Math.random.
+
+Not:
+- Ingen navigation till employee
+- Ingen historik/export/notifiering
+- Saknad data -> visa inget hellre än fel (fail-closed)
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Paketstatus per medarbetare</title>
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    :root{
+      --bg:#f6f7fb;
+      --card:#ffffff;
+      --ink:#0f172a;
+      --muted:#64748b;
+      --line:rgba(15,23,42,.12);
+      --good:rgba(217,247,214,.95);
+      --warn:rgba(255,247,194,.95);
+      --bad:rgba(254,226,226,.95);
+    }
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--ink);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+    .topbar{
+      position: sticky;
+      top:0;
+      z-index:10;
+      background: rgba(246,247,251,.92);
+      backdrop-filter: blur(10px);
+      border-bottom:1px solid var(--line);
+    }
+    .nav{
+      max-width:1100px;
+      margin:0 auto;
+      padding:10px 16px;
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .nav a{
+      text-decoration:none;
+      color:var(--ink);
+      font-size:14px;
+      padding:8px 10px;
+      border-radius:12px;
+      border:1px solid transparent;
+    }
+    .nav a:hover{ border-color:var(--line); background:#fff; }
+    .nav .spacer{ flex:1; }
+    .pill{
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid var(--line);
+      background:#fff;
+      padding:6px 10px;
+      border-radius:999px;
+      white-space:nowrap;
+    }
+
+    .wrap{
+      max-width:1100px;
+      margin:16px auto 28px;
+      padding:0 16px;
+    }
+
+    .guard{
+      border:1px solid rgba(239,68,68,.25);
+      background:rgba(254,242,242,.9);
+      color:#7f1d1d;
+      padding:12px 14px;
+      border-radius:14px;
+      margin:14px 0;
+      display:none;
+    }
+
+    .header{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:18px;
+      padding:14px;
+      margin-bottom:14px;
+    }
+    .header h1{
+      margin:0 0 6px;
+      font-size:16px;
+      font-weight:950;
+    }
+    .header p{
+      margin:0;
+      font-size:13px;
+      color:var(--muted);
+      line-height:1.4;
+    }
+
+    .tools{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+      align-items:end;
+      margin-top:10px;
+    }
+    @media (max-width: 820px){
+      .tools{ grid-template-columns: 1fr; }
+    }
+    label{
+      font-size:13px;
+      color:var(--muted);
+      display:flex;
+      flex-direction:column;
+      gap:6px;
+    }
+    select, input{
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:10px 12px;
+      background:#fff;
+      font-size:13px;
+      color:var(--ink);
+    }
+
+    .card{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:18px;
+      overflow:hidden;
+    }
+    .cardHead{
+      padding:14px;
+      background: linear-gradient(180deg, #fff, #fafafa);
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+    .cardHead .t{
+      font-weight:950;
+      font-size:14px;
+      margin:0;
+    }
+    .cardHead .m{
+      margin-top:6px;
+      font-size:12px;
+      color:var(--muted);
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .badge{
+      font-size:12px;
+      border-radius:999px;
+      padding:6px 10px;
+      border:1px solid rgba(15,23,42,.10);
+      background: rgba(236,254,255,.70);
+      white-space:nowrap;
+    }
+    .badge.good{ background: var(--good); border-color: rgba(16,185,129,.25); }
+    .badge.warn{ background: var(--warn); border-color: rgba(245,158,11,.25); }
+    .badge.bad{  background: var(--bad);  border-color: rgba(239,68,68,.25); }
+
+    .tableWrap{
+      border-top:1px solid var(--line);
+      padding:12px 14px 14px;
+    }
+    .tbl{
+      width:100%;
+      border-collapse:separate;
+      border-spacing:0;
+      border:1px solid var(--line);
+      border-radius:14px;
+      overflow:hidden;
+      background:#fff;
+    }
+    .tbl th, .tbl td{
+      text-align:left;
+      padding:10px 12px;
+      font-size:13px;
+      border-bottom:1px solid var(--line);
+      vertical-align:top;
+    }
+    .tbl th{
+      font-size:12px;
+      color:var(--muted);
+      font-weight:900;
+      background: rgba(248,250,252,.9);
+      white-space:nowrap;
+    }
+    .tbl tr:last-child td{ border-bottom:none; }
+
+    .mono{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .barWrap{
+      height:10px;
+      border-radius:999px;
+      background: rgba(15,23,42,.08);
+      overflow:hidden;
+      border:1px solid rgba(15,23,42,.08);
+      min-width: 120px;
+    }
+    .bar{
+      height:100%;
+      width:0%;
+      background: rgba(59,130,246,.65);
+      transition: width .25s ease;
+    }
+    .small{
+      font-size:12px;
+      color:var(--muted);
+    }
+    .msg{
+      margin-top:10px;
+      font-size:13px;
+      color:var(--muted);
+    }
+  </style>
+</head>
+
+<body>
+  <div class="topbar">
+    <div class="nav" aria-label="Primär navigation">
+      <a href="./dashboard.html">Dashboard</a>
+      <a href="./packages.html">Paket</a>
+      <a href="./packages-progress.html">Paketprogress</a>
+      <a href="./packages-employees.html" aria-current="page">Paket → Medarbetare</a>
+      <div class="spacer"></div>
+      <span class="pill" id="whoPill">—</span>
+      <a href="#" id="logoutLink">Logga ut</a>
+    </div>
+  </div>
+
+  <main class="wrap">
+    <div class="guard" id="guardBox" role="alert"></div>
+
+    <section class="header">
+      <h1>Paketstatus per medarbetare</h1>
+      <p>Read-only drill-down: “vem ligger efter i vilket paket?”</p>
+
+      <div class="tools" aria-label="Val">
+        <label>
+          Välj aktivt paket
+          <select id="pkgSelect"></select>
+        </label>
+        <label>
+          Sök medarbetare (empNo)
+          <input id="empSearch" type="search" placeholder="t.ex. 10012" autocomplete="off" />
+        </label>
+      </div>
+
+      <div class="msg" id="topMsg"></div>
+    </section>
+
+    <section class="card" id="card" style="display:none;">
+      <div class="cardHead">
+        <div>
+          <div class="t" id="pkgTitle">—</div>
+          <div class="m" id="pkgMeta"></div>
+        </div>
+        <div class="badge" id="pkgStatus">—</div>
+      </div>
+      <div class="tableWrap">
+        <table class="tbl" aria-label="Status per medarbetare">
+          <thead>
+            <tr>
+              <th>Medarbetare</th>
+              <th>Scope</th>
+              <th>Klara block</th>
+              <th>Totalt</th>
+              <th>Status</th>
+              <th>Progress</th>
+            </tr>
+          </thead>
+          <tbody id="tbody"></tbody>
+        </table>
+        <div class="small" style="margin-top:10px;">
+          Sortering: sämst → bäst. Samma logik som AO-054/AO-053. Ingen status lagras.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- AO-002 beroenden (LÅSTA): config måste laddas före app -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <script>
+    "use strict";
+
+    /* ===========================
+       Keys (LÅST)
+    ============================ */
+    const KEY_SESSION      = "AO-001_LOGIN_V1";
+    const KEY_PACKAGES     = "AO-050_PACKAGES_V1";
+    const KEY_TASKS        = "AO-014_TASKS_V1";
+    const KEY_QUESTIONS    = "AO-012_QUESTIONS_V1";
+    const KEY_ANSWERS      = "AO-013_ANSWERS_V1";
+    const KEY_ASSIGNMENTS  = "AO-020_ROLE_ASSIGNMENTS_V2";
+    const KEY_ORG          = "AO-020_ORG_V1";
+
+    /* ===========================
+       DOM
+    ============================ */
+    const guardBox    = document.getElementById("guardBox");
+    const whoPill     = document.getElementById("whoPill");
+    const logoutLink  = document.getElementById("logoutLink");
+    const pkgSelect   = document.getElementById("pkgSelect");
+    const empSearch   = document.getElementById("empSearch");
+    const topMsg      = document.getElementById("topMsg");
+
+    const card        = document.getElementById("card");
+    const pkgTitle    = document.getElementById("pkgTitle");
+    const pkgMeta     = document.getElementById("pkgMeta");
+    const pkgStatus   = document.getElementById("pkgStatus");
+    const tbody       = document.getElementById("tbody");
+
+    function showGuard(msg){ guardBox.style.display = "block"; guardBox.textContent = String(msg || ""); }
+    function hideGuard(){ guardBox.style.display = "none"; guardBox.textContent = ""; }
+
+    function escapeHtml(input){
+      if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(input);
+      const s = String(input ?? "");
+      return s
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
+    }
+
+    function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
+
+    function readAnyStorage(key){
+      try { const s1 = sessionStorage.getItem(key); if (s1) return s1; } catch {}
+      try { const s2 = localStorage.getItem(key);  if (s2) return s2; } catch {}
+      return null;
+    }
+
+    function readLocalArray(key){
+      try{
+        const raw = localStorage.getItem(key);
+        const data = safeJsonParse(raw || "");
+        return Array.isArray(data) ? data : [];
+      }catch{
+        return [];
+      }
+    }
+
+    function normStr(s){ return String(s ?? "").trim(); }
+    function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
+
+    function setTopMsg(text){ topMsg.textContent = String(text || ""); }
+
+    /* ===========================
+       Deterministisk id-hash (ingen lagring)
+    ============================ */
+    function stableIdFromString(str){
+      const s = String(str ?? "");
+      let h = 2166136261;
+      for(let i=0;i<s.length;i++){
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return "b_" + (h >>> 0).toString(36);
+    }
+
+    /* ===========================
+       AO-002 AUTH (kopplat)
+    ============================ */
+    function mustAuthOrStop(){
+      if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+        showGuard("Systemfel: HRApp saknas. (UI-03-APP.js)");
+        return null;
+      }
+      if (!window.HR_CONFIG || !window.HR_CONFIG.ROLES) {
+        showGuard("Systemfel: HR_CONFIG saknas. (UI-04-CONFIG.js)");
+        return null;
+      }
+      const allow = [ window.HR_CONFIG.ROLES.ADMIN, window.HR_CONFIG.ROLES.SYSTEM_ADMIN ];
+      const sess = window.HRApp.requireAuth({ allowRoles: allow });
+      if (!sess) return null;
+
+      const auth = window.HRApp.getAuth(sess);
+      if (!auth || auth.isAuthed !== true) {
+        showGuard("Fail-closed: saknar giltig session. Logga in igen.");
+        return null;
+      }
+      return { sess, auth };
+    }
+
+    /* ===========================
+       ORG helpers (subtree)
+    ============================ */
+    function readOrg(){
+      const arr = readLocalArray(KEY_ORG);
+      return Array.isArray(arr) ? arr : [];
+    }
+
+    function buildOrgIndex(nodes){
+      const byId = new Map();
+      for(const n of (Array.isArray(nodes)?nodes:[])){
+        if(!n || typeof n !== "object") continue;
+        const id = normStr(n.id ?? n.scopeId ?? "");
+        if(!id) continue;
+        byId.set(id, {
+          id,
+          parentId: normStr(n.parentId ?? n.parent ?? ""),
+          label: normStr(n.label ?? n.name ?? n.title ?? id) || id
+        });
+      }
+      return byId;
+    }
+
+    function isInSubtree(childId, ancestorId, byId){
+      const c = normStr(childId);
+      const a = normStr(ancestorId);
+      if(!c || !a) return false;
+      if(c === a) return true;
+
+      let cur = byId.get(c);
+      let steps = 0;
+      while(cur && steps < 1000){
+        const pid = normStr(cur.parentId);
+        if(!pid) break;
+        if(pid === a) return true;
+        cur = byId.get(pid);
+        steps++;
+      }
+      return false;
+    }
+
+    function scopeLabel(scopeId, byId){
+      const id = normStr(scopeId);
+      if(!id) return "—";
+      const n = byId.get(id);
+      return n ? (n.label || id) : id;
+    }
+
+    /* ===========================
+       ASSIGNMENTS -> employees list
+    ============================ */
+    function readAssignments(){
+      const raw = readAnyStorage(KEY_ASSIGNMENTS);
+      if(!raw) return [];
+      const data = safeJsonParse(raw);
+      if(Array.isArray(data)) return data;
+      if(data && typeof data === "object" && Array.isArray(data.assignments)) return data.assignments;
+      return [];
+    }
+
+    function pickEmpNo(a){ return normStr(a?.empNo ?? a?.employeeNo ?? a?.id ?? ""); }
+    function pickRole(a){ return normStr(a?.role ?? a?.roleId ?? ""); }
+    function pickScope(a){ return normStr(a?.scopeId ?? a?.scope ?? ""); }
+
+    function uniqueByEmpNo(list){
+      const out = [];
+      const seen = new Set();
+      for(const e of list){
+        if(!e || typeof e !== "object") continue;
+        if(!e.empNo) continue;
+        if(seen.has(e.empNo)) continue;
+        seen.add(e.empNo);
+        out.push(e);
+      }
+      return out;
+    }
+
+    function employeesVisibleToViewer(auth, orgById, orgNodes){
+      const viewerRole  = normStr(auth.role);
+      const viewerScope = normStr(auth.scopeId);
+
+      const assigns = readAssignments();
+      if(!Array.isArray(assigns) || assigns.length === 0) return [];
+
+      const emps = assigns
+        .map(a => ({ empNo: pickEmpNo(a), role: pickRole(a), scopeId: pickScope(a) }))
+        .filter(x => x.empNo && x.scopeId && x.role === "EMPLOYEE");
+
+      const uniq = uniqueByEmpNo(emps);
+
+      if(viewerRole === "SYSTEM_ADMIN") return uniq;
+
+      // ADMIN: need org to subtree (fail-closed)
+      if(!viewerScope) return [];
+      if(!Array.isArray(orgNodes) || orgNodes.length === 0) return [];
+
+      if(window.HRApp && typeof window.HRApp.isInScope === "function"){
+        return uniq.filter(e => {
+          try { return window.HRApp.isInScope(e.scopeId, viewerScope, orgNodes) === true; } catch { return false; }
+        });
+      }
+      return uniq.filter(e => isInSubtree(e.scopeId, viewerScope, orgById));
+    }
+
+    /* ===========================
+       Tolerant matching (AO-053/AO-054)
+    ============================ */
+    function getTaskTitle(t){ return String(t?.title ?? t?.name ?? t?.text ?? ""); }
+    function isTaskDone(t){
+      const s = String(t?.status ?? t?.state ?? "").toLowerCase();
+      if(t?.done === true) return true;
+      if(t?.isDone === true) return true;
+      if(s === "done" || s === "klar" || s === "completed" || s === "complete") return true;
+      return false;
+    }
+
+    function getQuestionId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? ""); }
+    function getQuestionTitle(q){ return String(q?.title ?? q?.name ?? q?.text ?? ""); }
+
+    function answerMatchesQuestion(ans, qId, qTitle){
+      if(!ans || typeof ans !== "object") return false;
+      const aQid = String(ans.questionId ?? ans.qid ?? ans.question_id ?? "");
+      if(qId && aQid && aQid === qId) return true;
+
+      const aTitle = String(ans.questionTitle ?? ans.title ?? ans.questionText ?? "");
+      if(qTitle && aTitle && normKey(aTitle) === normKey(qTitle)) return true;
+
+      return false;
+    }
+
+    function answersForEmpNo(empNo, answers){
+      const me = normStr(empNo);
+      return (Array.isArray(answers)?answers:[]).filter(a => normStr(a?.empNo ?? a?.employeeNo ?? a?.byEmpNo ?? a?.respondentEmpNo ?? "") === me);
+    }
+
+    function normalizeBlockKind(kind){
+      const k = String(kind || "").toLowerCase().trim();
+      if(k === "task" || k === "uppgift") return "task";
+      if(k === "question" || k === "fråga") return "question";
+      if(k === "info" || k === "information") return "info";
+      if(k === "both") return "both";
+      return "unknown";
+    }
+
+    function blocksFromPackage(pkg){
+      const blocks = Array.isArray(pkg?.blocks) ? pkg.blocks : [];
+      return blocks.map(b => {
+        const kind = normalizeBlockKind(b?.kind);
+        const title = normStr(b?.title) || "—";
+        const id = normStr(b?.id) || stableIdFromString(`${kind}||${normKey(title)}`);
+        return { id, kind, title };
+      });
+    }
+
+    function taskDoneForEmp(blockTitle, empNo, scopeId, tasks){
+      // AUTOPATCH v1.1: ALL/* räknas som tilldelad till alla inom scope (scope fail-closed kvarstår)
+      const me = normStr(empNo);
+      const sc = normStr(scopeId);
+      const bt = normKey(blockTitle);
+      if(!me || !sc || !bt) return false;
+
+      const list = Array.isArray(tasks) ? tasks : [];
+      for(const t of list){
+        if(!t || typeof t !== "object") continue;
+
+        const tScope = normStr(t?.scopeId ?? "");
+        if(!tScope || tScope !== sc) continue;
+
+        const assigned = t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
+        const assignedStr = (typeof assigned === "string" || typeof assigned === "number") ? String(assigned).trim() : "";
+        if(!assignedStr) continue;
+
+        const isAll = (assignedStr === "ALL" || assignedStr === "*");
+        if(!isAll && assignedStr !== me) continue;
+
+        const tt = normKey(getTaskTitle(t));
+        if(tt && tt === bt){
+          return isTaskDone(t);
+        }
+      }
+      return false;
+    }
+
+    function questionDoneForEmp(blockTitle, empNo, questions, answers){
+      const me = normStr(empNo);
+      const title = normStr(blockTitle);
+      if(!me || !title) return false;
+
+      let qId = "";
+      const qs = Array.isArray(questions) ? questions : [];
+      const foundQ = qs.find(q => normKey(getQuestionTitle(q)) === normKey(title));
+      if(foundQ) qId = getQuestionId(foundQ);
+
+      const myAns = answersForEmpNo(me, answers);
+      return myAns.some(a => answerMatchesQuestion(a, qId, title));
+    }
+
+    function blockDoneForEmp(block, emp, data){
+      const kind = block.kind;
+      if(kind === "info") return true;
+
+      if(kind === "task"){
+        return taskDoneForEmp(block.title, emp.empNo, emp.scopeId, data.tasks);
+      }
+      if(kind === "question"){
+        return questionDoneForEmp(block.title, emp.empNo, data.questions, data.answers);
+      }
+      if(kind === "both"){
+        const tOk = taskDoneForEmp(block.title, emp.empNo, emp.scopeId, data.tasks);
+        const qOk = questionDoneForEmp(block.title, emp.empNo, data.questions, data.answers);
+        return tOk && qOk;
+      }
+      return false; // unknown => fail-closed
+    }
+
+    /* ===========================
+       Packages read (active only)
+       - "Tomt paket -> visas ej"
+    ============================ */
+    function readActiveNonEmptyPackages(){
+      const arr = readLocalArray(KEY_PACKAGES);
+      const list = Array.isArray(arr) ? arr : [];
+      return list.filter(p => {
+        if(!p || typeof p !== "object") return false;
+        if(p.isActive !== true) return false;
+        const blocks = Array.isArray(p.blocks) ? p.blocks : [];
+        if(blocks.length === 0) return false;
+        return true;
+      });
+    }
+
+    function packageScopeId(pkg){
+      return normStr(pkg?.scopeId ?? pkg?.targetScopeId ?? pkg?.scope ?? "");
+    }
+    function packageName(pkg){ return normStr(pkg?.name) || "—"; }
+
+    function pct(done, total){
+      if(total <= 0) return 0;
+      return Math.round((done / total) * 100);
+    }
+
+    function statusFrom(percent, started){
+      if(percent >= 100) return { cls:"good", txt:"🟢 Klar" };
+      if(!started)        return { cls:"bad",  txt:"🔴 Ej startad" };
+      return { cls:"warn", txt:"🟡 Pågår" };
+    }
+
+    /* ===========================
+       Compute per employee table for one package
+       - Sorting: worst -> best
+    ============================ */
+    function computeForPackage(pkg, auth, orgNodes, orgById, employeesAll, data){
+      const viewerRole = normStr(auth.role);
+
+      const pkgScope = packageScopeId(pkg);
+      if(!pkgScope){
+        return { ok:false, reason:"missing_pkg_scope" };
+      }
+
+      const blocks = blocksFromPackage(pkg);
+      if(blocks.length === 0){
+        return { ok:false, reason:"empty_pkg" };
+      }
+
+      const empsInPkg = (() => {
+        if(employeesAll.length === 0) return [];
+
+        if(viewerRole === "SYSTEM_ADMIN"){
+          if(Array.isArray(orgNodes) && orgNodes.length > 0){
+            if(window.HRApp && typeof window.HRApp.isInScope === "function"){
+              return employeesAll.filter(e => {
+                try { return window.HRApp.isInScope(e.scopeId, pkgScope, orgNodes) === true; } catch { return false; }
+              });
+            }
+            return employeesAll.filter(e => isInSubtree(e.scopeId, pkgScope, orgById));
+          }
+          // org saknas: exakt scope-match
+          return employeesAll.filter(e => normStr(e.scopeId) === pkgScope);
+        }
+
+        if(window.HRApp && typeof window.HRApp.isInScope === "function"){
+          return employeesAll.filter(e => {
+            try { return window.HRApp.isInScope(e.scopeId, pkgScope, orgNodes) === true; } catch { return false; }
+          });
+        }
+        return employeesAll.filter(e => isInSubtree(e.scopeId, pkgScope, orgById));
+      })();
+
+      const rows = empsInPkg.map(emp => {
+        let done = 0;
+        let started = false;
+
+        for(const b of blocks){
+          const ok = blockDoneForEmp(b, emp, data);
+          if(ok) done++;
+          if(!started && b.kind !== "info" && ok) started = true;
+        }
+
+        const percent = pct(done, blocks.length);
+        const st = statusFrom(percent, started || percent === 100);
+
+        return {
+          empNo: emp.empNo,
+          scopeId: emp.scopeId,
+          scopeLabel: scopeLabel(emp.scopeId, orgById),
+          done,
+          total: blocks.length,
+          percent,
+          statusTxt: st.txt,
+          statusCls: st.cls,
+          started: started || percent === 100
+        };
+      });
+
+      rows.sort((a,b) => {
+        if(a.percent !== b.percent) return a.percent - b.percent;
+        return String(a.empNo).localeCompare(String(b.empNo), "sv");
+      });
+
+      return { ok:true, pkgScope, blocks, empsInPkgCount: empsInPkg.length, rows };
+    }
+
+    /* ===========================
+       UI render
+    ============================ */
+    function clear(el){ while(el.firstChild) el.removeChild(el.firstChild); }
+
+    function fillPackageSelect(pkgs){
+      clear(pkgSelect);
+
+      const opt0 = document.createElement("option");
+      opt0.value = "";
+      opt0.textContent = "Välj paket…";
+      pkgSelect.appendChild(opt0);
+
+      for(const p of pkgs){
+        const id = normStr(p.id);
+        const name = packageName(p);
+        const opt = document.createElement("option");
+        opt.value = id;
+        opt.textContent = name;
+        pkgSelect.appendChild(opt);
+      }
+    }
+
+    function renderTable(rows, filterQ){
+      clear(tbody);
+
+      const q = normKey(filterQ || "");
+      const view = !q ? rows : rows.filter(r => normKey(r.empNo).includes(q));
+
+      if(view.length === 0){
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 6;
+        td.textContent = "Inga medarbetare matchar (eller inga i scope).";
+        td.style.color = "var(--muted)";
+        td.style.padding = "14px 12px";
+        tr.appendChild(td);
+        tbody.appendChild(tr);
+        return;
+      }
+
+      for(const r of view){
+        const tr = document.createElement("tr");
+
+        const tdEmp = document.createElement("td");
+        tdEmp.innerHTML = `<strong>${escapeHtml(r.empNo)}</strong> <div class="mono">scopeId: ${escapeHtml(r.scopeId)}</div>`;
+
+        const tdScope = document.createElement("td");
+        tdScope.textContent = r.scopeLabel || "—";
+
+        const tdDone = document.createElement("td");
+        tdDone.textContent = String(r.done);
+
+        const tdTotal = document.createElement("td");
+        tdTotal.textContent = String(r.total);
+
+        const tdStatus = document.createElement("td");
+        tdStatus.innerHTML = `<span class="badge ${escapeHtml(r.statusCls)}">${escapeHtml(r.statusTxt)}</span>`;
+
+        const tdPct = document.createElement("td");
+        tdPct.innerHTML = `
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <div class="barWrap" aria-label="Progress">
+              <div class="bar" style="width:${Math.max(0, Math.min(100, r.percent))}%;"></div>
+            </div>
+            <span class="badge">${r.percent}%</span>
+          </div>
+        `;
+
+        tr.appendChild(tdEmp);
+        tr.appendChild(tdScope);
+        tr.appendChild(tdDone);
+        tr.appendChild(tdTotal);
+        tr.appendChild(tdStatus);
+        tr.appendChild(tdPct);
+
+        tbody.appendChild(tr);
+      }
+    }
+
+    function renderPackageHeader(pkg, meta){
+      pkgTitle.textContent = packageName(pkg);
+
+      pkgMeta.innerHTML = "";
+      const m1 = document.createElement("span");
+      m1.className = "badge";
+      m1.textContent = `Scope: ${meta.pkgScopeLabel}`;
+
+      const m2 = document.createElement("span");
+      m2.className = "badge";
+      m2.textContent = `Block: ${meta.totalBlocks}`;
+
+      const m3 = document.createElement("span");
+      m3.className = (meta.empCount === 0) ? "badge bad" : "badge";
+      m3.textContent = (meta.empCount === 0) ? "0 medarbetare i scope" : `Medarbetare: ${meta.empCount}`;
+
+      pkgMeta.appendChild(m1);
+      pkgMeta.appendChild(m2);
+      pkgMeta.appendChild(m3);
+
+      pkgStatus.className = "badge";
+      pkgStatus.textContent = "Read-only";
+    }
+
+    /* ===========================
+       Init
+    ============================ */
+    const STATE = {
+      auth:null,
+      viewerRole:"",
+      orgNodes:[],
+      orgById:new Map(),
+      packages:[],
+      employeesAll:[],
+      data:{ tasks:[], questions:[], answers:[] },
+      selectedPkg:null,
+      selectedRows:[]
+    };
+
+    function initDataOrFail(){
+      const res = mustAuthOrStop();
+      if(!res) return false;
+
+      STATE.auth = res.auth;
+      STATE.viewerRole = normStr(STATE.auth.role);
+
+      const empNo = normStr(STATE.auth.empNo) || "—";
+      const role  = normStr(STATE.auth.role)  || "—";
+      whoPill.textContent = `${empNo} • ${role}`;
+
+      // org
+      STATE.orgNodes = readOrg();
+      STATE.orgById  = buildOrgIndex(STATE.orgNodes);
+
+      // ADMIN requires org + scopeId
+      if(STATE.viewerRole !== "SYSTEM_ADMIN"){
+        const viewerScope = normStr(STATE.auth.scopeId);
+        if(!viewerScope || !Array.isArray(STATE.orgNodes) || STATE.orgNodes.length === 0){
+          showGuard("Fail-closed: ADMIN kräver org + scopeId för subtree. (Behöver AO-020_ORG_V1 + scopeId i session.)");
+          return false;
+        }
+      } else {
+        // SYSTEM_ADMIN utan org: mild info (blockar inte)
+        if(!Array.isArray(STATE.orgNodes) || STATE.orgNodes.length === 0){
+          setTopMsg("Info: ORG saknas. SYSTEM_ADMIN visar endast exakt scope-match (ej subtree).");
+        }
+      }
+
+      // read-only data
+      STATE.data.tasks     = readLocalArray(KEY_TASKS);
+      STATE.data.questions = readLocalArray(KEY_QUESTIONS);
+      STATE.data.answers   = readLocalArray(KEY_ANSWERS);
+
+      // employees visible to viewer
+      STATE.employeesAll = employeesVisibleToViewer(STATE.auth, STATE.orgById, STATE.orgNodes);
+
+      // packages active + non-empty
+      STATE.packages = readActiveNonEmptyPackages();
+      STATE.packages = STATE.packages.filter(p => !!packageScopeId(p)); // saknad data -> visa inget
+
+      fillPackageSelect(STATE.packages);
+
+      if(STATE.packages.length === 0){
+        if(!topMsg.textContent) setTopMsg("Inga aktiva paket (med scope + block) att visa.");
+        card.style.display = "none";
+      }else{
+        if(!topMsg.textContent) setTopMsg("Välj ett paket för att se status per medarbetare (sämst → bäst).");
+      }
+
+      hideGuard();
+      return true;
+    }
+
+    function onSelectPackage(){
+      const id = normStr(pkgSelect.value);
+      STATE.selectedPkg = null;
+      STATE.selectedRows = [];
+      card.style.display = "none";
+      clear(tbody);
+
+      if(!id){
+        if(!topMsg.textContent || !topMsg.textContent.startsWith("Info:")) setTopMsg("Välj ett paket.");
+        return;
+      }
+
+      const pkg = STATE.packages.find(p => normStr(p.id) === id);
+      if(!pkg){
+        if(!topMsg.textContent || !topMsg.textContent.startsWith("Info:")) setTopMsg("Paket saknas (fail-closed).");
+        return;
+      }
+
+      const out = computeForPackage(pkg, STATE.auth, STATE.orgNodes, STATE.orgById, STATE.employeesAll, STATE.data);
+      if(!out.ok){
+        if(!topMsg.textContent || !topMsg.textContent.startsWith("Info:")) setTopMsg("Kunde inte visa paketet (saknad/korrupt data).");
+        card.style.display = "none";
+        return;
+      }
+
+      const pkgScope = out.pkgScope;
+      const pkgScopeLabel = (STATE.orgNodes.length > 0) ? scopeLabel(pkgScope, STATE.orgById) : pkgScope;
+
+      renderPackageHeader(pkg, {
+        pkgScopeLabel,
+        totalBlocks: out.blocks.length,
+        empCount: out.empsInPkgCount
+      });
+
+      STATE.selectedPkg = pkg;
+      STATE.selectedRows = out.rows;
+
+      card.style.display = "block";
+      renderTable(STATE.selectedRows, empSearch.value);
+
+      if(out.empsInPkgCount === 0){
+        if(!topMsg.textContent || !topMsg.textContent.startsWith("Info:")){
+          setTopMsg("Inga medarbetare hittades i paketets scope (eller assignments/org saknas).");
+        }
+      }else{
+        if(!topMsg.textContent || !topMsg.textContent.startsWith("Info:")){
+          setTopMsg("Tabell visar per medarbetare: klara block, status och progress.");
+        }
+      }
+    }
+
+    pkgSelect.addEventListener("change", onSelectPackage);
+    empSearch.addEventListener("input", () => {
+      if(!STATE.selectedRows) return;
+      renderTable(STATE.selectedRows, empSearch.value);
+    });
+
+    logoutLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (window.HRApp && typeof window.HRApp.logout === "function") {
+        window.HRApp.logout();
+      } else {
+        try { sessionStorage.removeItem(KEY_SESSION); } catch {}
+        try { localStorage.removeItem(KEY_SESSION); } catch {}
+        window.location.href = "../UI/UI-01-SKELETON.html?err=logout";
+      }
+    });
+
+    (function init(){
+      const ok = initDataOrFail();
+      if(!ok) return;
+      if(STATE.packages.length === 1){
+        pkgSelect.value = normStr(STATE.packages[0].id);
+        onSelectPackage();
+      }
+    })();
+  </script>
+
+  <!-- ============================================================
+  Ändringslogg (AO-055 PATCH v1.1) ≤ 8 rader
+  - Task ALL/* räknas som tilldelad till alla inom scope i progress (scope fail-closed kvarstår)
+  - SYSTEM_ADMIN utan org: mild info i topMsg + exakt scope-match (ej subtree)
+  - Tydlig badge vid 0 medarbetare i scope
+  - Stabilt block-id om b.id saknas (title+kind hash), ingen Math.random
+  Testnoteringar
+  - Task med assignedTo="ALL" + scopeId=pkgScope ska kunna göra block klart per emp i scope
+  - SYSTEM_ADMIN utan AO-020_ORG_V1: vy fungerar, info visas, subtree ej beräknas
+  Risk/edge cases
+  - Titelmatch för task är heuristik (ingen exekvering/ingen ID-koppling lagras)
+  ============================================================ -->
+</body>
+</html>
 
