@@ -1,1 +1,1141 @@
+<!-- ============================================================
+AO-046 + AO-019 6/8 (SPLIT-STEP2) | FIL-ID: admin/tasks-list.html
+Projekt: HR-System
+Syfte: Admin/Manager – Uppgifter (ÖVERSIKT/LISTA) – UI-only v1.4 (nivå 3)
+
+SPLIT-STEP2:
+- Denna sida = ÖVERSIKT (lista, filter, detalj, radera)
+- Skapande ligger i admin/tasks.html (Steg 1)
+
+Policy (LÅST):
+- Ingen backend
+- sessionStorage först, fallback localStorage (fail-closed)
+- Ingen känslig persondata (endast anst.nr)
+- Inga nya storage-keys/datamodell utan explicit AO
+- XSS-escape på all rendering från storage
+- Hel-filsleverans
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin/Manager • Uppgifter (Översikt)</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <style>
+    .toplinks{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:flex-end;
+    }
+
+    .lockbox{
+      margin: 10px 0 0;
+      padding: 10px 12px;
+      border: 1px dashed var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      color: var(--muted);
+    }
+    .lockbox strong{ color:#111; }
+    .lockbox ul{ margin:8px 0 0; padding-left: 18px; }
+    .lockbox li{ margin: 3px 0; }
+
+    .filters{
+      display:grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+      margin-top: 10px;
+    }
+    @media (max-width: 860px){
+      .filters{ grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 620px){
+      .filters{ grid-template-columns: 1fr; }
+    }
+
+    .mini{
+      font-size:.9rem;
+      color: var(--muted);
+      margin-top: 6px;
+      line-height: 1.35;
+    }
+
+    .summary{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top: 10px;
+    }
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 6px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      color:#111;
+      font-weight: 850;
+      font-size:.92rem;
+    }
+    .pill span{
+      color: var(--muted);
+      font-weight: 750;
+    }
+
+    .tablewrap{
+      margin-top: 12px;
+      overflow:auto;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+    }
+    table{
+      width:100%;
+      border-collapse: collapse;
+      min-width: 980px;
+    }
+    th, td{
+      padding: 10px 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      font-size: .95rem;
+    }
+    th{
+      position: sticky;
+      top: 0;
+      background: #fff;
+      z-index: 2;
+      text-align:left;
+      font-weight: 950;
+    }
+    tr:hover td{
+      background: rgba(167,243,208,.12);
+    }
+    .muted2{ color: var(--muted); font-size: .9rem; }
+    .nowrap{ white-space:nowrap; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .btnrow{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:flex-end;
+    }
+    .btn.small{
+      padding: 8px 10px;
+      font-size: .9rem;
+      border-radius: 12px;
+    }
+
+    .tag{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.86rem;
+      color: var(--muted);
+      font-weight: 750;
+      margin-right: 6px;
+      margin-top: 4px;
+    }
+
+    /* Modal */
+    .modal-backdrop{
+      position:fixed;
+      inset:0;
+      background: rgba(0,0,0,.45);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      padding: 14px;
+      z-index: 9999;
+    }
+    .modal{
+      width:min(920px, 100%);
+      max-height: 85vh;
+      overflow:auto;
+      background:#fff;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow-soft);
+      padding: 14px;
+    }
+    .modal header{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:space-between;
+      margin-bottom: 10px;
+    }
+    .modal h2{
+      margin: 0;
+      font-size: 1.1rem;
+    }
+    .kv{
+      display:grid;
+      grid-template-columns: 180px 1fr;
+      gap: 10px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.9);
+      margin-top: 10px;
+    }
+    @media (max-width: 620px){
+      .kv{ grid-template-columns: 1fr; }
+    }
+    .k{ color: var(--muted); font-weight: 850; }
+    .v{ color: #111; }
+    pre{
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin: 0;
+      font-size: .95rem;
+    }
+
+    .danger{
+      border-color: rgba(239,68,68,.35) !important;
+      background: rgba(239,68,68,.06) !important;
+    }
+  </style>
+</head>
+
+<body>
+
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin/Manager • Uppgifter (Översikt)</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Skapa uppgift</a>
+    <a href="./tasks-list.html" aria-current="page">Översikt</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Uppgifter – Översikt</h1>
+  <p class="muted">
+    Här ser du uppgifter inom ditt scope. Skapande görs på <a href="./tasks.html">Skapa uppgift</a>.
+  </p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
+      </div>
+      <div class="toplinks">
+        <a class="btn secondary" href="./tasks.html">+ Skapa uppgift</a>
+        <a class="btn secondary" href="../employee/tasks.html">Öppna employee/tasks (demo)</a>
+        <a class="btn secondary" href="../system/org.html" id="linkOrg" style="display:none;">System: Org</a>
+        <a class="btn secondary" href="../system/assignments.html" id="linkAssignments" style="display:none;">System: Uppdrag</a>
+      </div>
+    </div>
+
+    <div id="lockBox" class="lockbox" style="display:none;"></div>
+
+    <div class="filters" aria-label="Filter">
+      <label>
+        Sök (titel/text/notis)
+        <input id="q" type="text" placeholder="t.ex. hygien, introduktion..." />
+      </label>
+
+      <label>
+        Status
+        <select id="status">
+          <option value="any">Alla</option>
+          <option value="open">Öppen</option>
+          <option value="done">Klar</option>
+          <option value="blocked">Blockerad</option>
+        </select>
+      </label>
+
+      <label>
+        Mottagare (anst.nr)
+        <select id="empFilter"></select>
+      </label>
+
+      <label>
+        Scope
+        <select id="scopeFilter"></select>
+        <div class="mini" id="scopeHint"></div>
+      </label>
+
+      <label>
+        Typ
+        <select id="kind">
+          <option value="any">Alla</option>
+          <option value="oneoff">Engång</option>
+          <option value="recurring">Återkommande</option>
+        </select>
+      </label>
+
+      <label>
+        Visa
+        <select id="sort">
+          <option value="newest">Nyast först</option>
+          <option value="oldest">Äldst först</option>
+          <option value="emp">Anst.nr</option>
+          <option value="scope">Scope</option>
+          <option value="status">Status</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="summary" aria-label="Sammanfattning">
+      <div class="pill">Visar: <span id="sumShown">0</span></div>
+      <div class="pill">Öppna: <span id="sumOpen">0</span></div>
+      <div class="pill">Klara: <span id="sumDone">0</span></div>
+      <div class="pill">Återkommande: <span id="sumRec">0</span></div>
+
+      <div class="btnrow" style="margin-left:auto;">
+        <button id="btnReset" class="secondary small btn" type="button">Rensa filter</button>
+        <button id="btnRefresh" class="secondary small btn" type="button">Uppdatera</button>
+      </div>
+    </div>
+
+    <p id="msg" class="message" aria-live="polite"></p>
+
+    <div class="tablewrap" role="region" aria-label="Uppgifter tabell">
+      <table aria-describedby="msg">
+        <thead>
+          <tr>
+            <th class="nowrap">Skapad</th>
+            <th class="nowrap">Anst.nr</th>
+            <th>Titel / Text</th>
+            <th class="nowrap">Status</th>
+            <th class="nowrap">Scope</th>
+            <th class="nowrap">Typ</th>
+            <th class="nowrap">Deadline</th>
+            <th class="nowrap">Åtgärd</th>
+          </tr>
+        </thead>
+        <tbody id="tbody">
+          <tr><td colspan="8" class="muted2">Laddar…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="mini">
+      Radering påverkar endast lagrade uppgifter i <span class="mono">AO-014_TASKS_V1</span>.
+      Medarbetaren uppdaterar status på sin egen sida.
+    </p>
+  </section>
+</main>
+
+<!-- Modal -->
+<div id="modalBack" class="modal-backdrop" role="dialog" aria-modal="true" aria-label="Uppgift detaljer">
+  <div class="modal">
+    <header>
+      <h2 id="modalTitle">Uppgift</h2>
+      <div class="btnrow">
+        <button id="btnModalDelete" class="small btn danger" type="button">Radera</button>
+        <button id="btnModalClose" class="secondary small btn" type="button">Stäng</button>
+      </div>
+    </header>
+
+    <div id="modalTags"></div>
+
+    <div class="kv">
+      <div class="k">Anst.nr</div><div class="v" id="mEmp">—</div>
+      <div class="k">Status</div><div class="v" id="mStatus">—</div>
+      <div class="k">Scope</div><div class="v" id="mScope">—</div>
+      <div class="k">Titel</div><div class="v" id="mTitle">—</div>
+      <div class="k">Text</div><div class="v"><pre id="mText">—</pre></div>
+      <div class="k">Admin-notis</div><div class="v"><pre id="mNote">—</pre></div>
+      <div class="k">Skapad</div><div class="v" id="mCreated">—</div>
+      <div class="k">Uppdaterad</div><div class="v" id="mUpdated">—</div>
+      <div class="k">Start</div><div class="v" id="mStart">—</div>
+      <div class="k">Deadline</div><div class="v" id="mEnd">—</div>
+      <div class="k">Återkommande</div><div class="v"><pre id="mRecurring">—</pre></div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+AO-046 + AO-019 6/8 | admin/tasks-list.html – AUTOPATCH v1.4.0
+- Översikt/lista (filter, detalj, radera)
+============================================================ */
+(function(){
+  "use strict";
+
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const TASKS_KEY   = "AO-014_TASKS_V1";
+  const ORG_KEY     = "AO-020_ORG_V1";
+
+  const MAX_CHAIN_GUARD = 200;
+
+  const $ = (s) => document.querySelector(s);
+  const $$ = (s) => Array.from(document.querySelectorAll(s));
+
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function safeParseLocal(key, fallback){
+    try{
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+
+  function saveFailClosed(key, value){
+    try{
+      localStorage.setItem(key, JSON.stringify(value));
+      return { ok:true };
+    }catch(e){
+      return { ok:false, err:e };
+    }
+  }
+
+  function escapeHtml(s){
+    return String(s ?? "")
+      .replaceAll("&","&amp;")
+      .replaceAll("<","&lt;")
+      .replaceAll(">","&gt;")
+      .replaceAll('"',"&quot;")
+      .replaceAll("'","&#039;");
+  }
+
+  function setMsg(kind, text){
+    const m = $("#msg");
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+
+  function showLockBox(lines){
+    const box = $("#lockBox");
+    if(!lines || !lines.length){
+      box.style.display = "none";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "block";
+    box.innerHTML = `
+      <strong>Låst (fail-closed):</strong>
+      <ul>${lines.map(x => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>
+    `;
+  }
+
+  function formatTs(ts){
+    const n = Number(ts);
+    if(!Number.isFinite(n) || n <= 0) return "—";
+    try{
+      const d = new Date(n);
+      const yyyy = d.getFullYear();
+      const mm = String(d.getMonth()+1).padStart(2,"0");
+      const dd = String(d.getDate()).padStart(2,"0");
+      const hh = String(d.getHours()).padStart(2,"0");
+      const mi = String(d.getMinutes()).padStart(2,"0");
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+    }catch{ return "—"; }
+  }
+
+  function normalizeOrgNodes(raw){
+    const arr = Array.isArray(raw) ? raw : [];
+    const out = [];
+    for(const n of arr){
+      const id = String(n?.id || "").trim();
+      const name = String(n?.name || "").trim();
+      const type = String(n?.type || "").trim();
+      const parentId = (n?.parentId === null || n?.parentId === undefined) ? null : String(n.parentId).trim();
+      if(!id || !name) continue;
+      out.push({ id, name, type, parentId });
+    }
+    return out;
+  }
+
+  function buildOrgIndex(nodes){
+    const byId = new Map();
+    for(const n of nodes){ if(!byId.has(n.id)) byId.set(n.id, n); }
+
+    const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
+    const children = new Map();
+    nodes.forEach(n => children.set(n.id, []));
+    nodes.forEach(n => {
+      if(n.parentId && children.has(n.parentId)) children.get(n.parentId).push(n.id);
+    });
+    return { byId, parentOf, children };
+  }
+
+  function validateOrgIntegrity(nodes){
+    const issues = [];
+    if(!Array.isArray(nodes) || nodes.length === 0){
+      return { ok:false, issues:["Org saknas/korrupt (tom eller fel format)."], rootIds: [] };
+    }
+
+    const idx = buildOrgIndex(nodes);
+    const ids = new Set(nodes.map(n => n.id));
+    const rootIds = nodes.filter(n => n.parentId === null).map(n => n.id);
+
+    if(rootIds.length === 0) issues.push("Org saknar root (ingen nod med parentId=null).");
+    if(rootIds.length > 1) issues.push("Org har flera root-noder (förväntar exakt 1).");
+
+    // orphan (parent saknas)
+    for(const n of nodes){
+      if(n.parentId === null) continue;
+      if(!n.parentId || !ids.has(n.parentId)){
+        issues.push("Org har orphan-noder (parentId pekar på saknad nod).");
+        break;
+      }
+    }
+
+    // loop
+    let hasLoop = false;
+    for(const n of nodes){
+      let cur = n.id;
+      let steps = 0;
+      const seen = new Set([cur]);
+
+      while(steps < MAX_CHAIN_GUARD){
+        const p = idx.parentOf.get(cur);
+        if(p === null) break;                 // root reached => OK
+        if(!p || !idx.byId.has(p)) break;     // orphan chain => not loop
+        if(seen.has(p)){ hasLoop = true; break; }
+        seen.add(p);
+        cur = p;
+        steps++;
+      }
+      if(hasLoop) break;
+      if(steps >= MAX_CHAIN_GUARD){ hasLoop = true; break; }
+    }
+    if(hasLoop) issues.push("Org har loop i parent-kedjan (återbesök upptäckt).");
+
+    return { ok: issues.length === 0, issues, rootIds };
+  }
+
+  function computeSubtreeSet(rootId, orgIndex){
+    const r = String(rootId || "").trim();
+    if(!r) return new Set();
+    if(!orgIndex.byId.has(r)) return new Set();
+    const set = new Set([r]);
+    const stack = [r];
+    while(stack.length){
+      const cur = stack.pop();
+      const kids = orgIndex.children.get(cur) || [];
+      for(const k of kids){
+        if(set.has(k)) continue;
+        set.add(k);
+        stack.push(k);
+      }
+    }
+    return set;
+  }
+
+  function isInScope(viewerScopeId, itemScopeId, orgIndex){
+    const v = String(viewerScopeId || "").trim();
+    const s = String(itemScopeId || "").trim();
+    if(!v || !s) return false;
+
+    const { byId, parentOf } = orgIndex;
+    if(!byId.has(v)) return false;
+    if(!byId.has(s)) return false;
+    if(v === s) return true;
+
+    let cur = s;
+    let steps = 0;
+    const seen = new Set([cur]);
+    while(cur && steps < MAX_CHAIN_GUARD){
+      const p = parentOf.get(cur);
+      if(p === null) return false;
+      if(!p || !byId.has(p)) return false;
+      if(p === v) return true;
+      if(seen.has(p)) return false;
+      seen.add(p);
+      cur = p;
+      steps++;
+    }
+    return false;
+  }
+
+  function flattenOrgForSelect(nodes, orgIndex){
+    const roots = nodes.filter(n => n.parentId === null).map(n => n.id);
+    const visited = new Set();
+    const out = [];
+
+    function walk(id, depth){
+      if(visited.has(id)) return;
+      visited.add(id);
+      const n = orgIndex.byId.get(id);
+      if(!n) return;
+      out.push({ id:n.id, name:n.name, type:n.type, depth });
+
+      const kids = (orgIndex.children.get(id) || []).slice().sort((a,b)=>{
+        const na = orgIndex.byId.get(a)?.name || "";
+        const nb = orgIndex.byId.get(b)?.name || "";
+        return na.localeCompare(nb, "sv");
+      });
+      kids.forEach(k => walk(k, depth+1));
+    }
+
+    if(roots.length){
+      roots.slice().sort((a,b)=>{
+        const na = orgIndex.byId.get(a)?.name || "";
+        const nb = orgIndex.byId.get(b)?.name || "";
+        return na.localeCompare(nb, "sv");
+      }).forEach(r => walk(r, 1));
+    }else{
+      nodes.slice().sort((a,b)=>a.name.localeCompare(b.name,"sv"))
+        .forEach(n => out.push({ id:n.id, name:n.name, type:n.type, depth:1 }));
+    }
+    return out;
+  }
+
+  // ------------------------------------------------------------
+  // Access (HRApp first; fallback session only)
+  // ------------------------------------------------------------
+  function readRawSession(){
+    try{
+      const s1 = sessionStorage.getItem(SESSION_KEY);
+      if(s1) return s1;
+      const s2 = localStorage.getItem(SESSION_KEY);
+      if(s2) return s2;
+      return null;
+    }catch{ return null; }
+  }
+
+  function safeParseJson(raw, fallback){
+    try{
+      const v = JSON.parse(raw);
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+
+  function readAuthFallback(){
+    const raw = readRawSession();
+    if(!raw) return null;
+    const data = safeParseJson(raw, null);
+    if(!data?.auth?.isAuthed) return null;
+    if(data.auth.expiresAt && Number(data.auth.expiresAt) < Date.now()) return null;
+    if(!data.auth.role) return null;
+    return data.auth;
+  }
+
+  function roleClassFromAuthRole(role){
+    const r = String(role || "").toLowerCase();
+    if(r === "systemadmin") return "SYSTEM_ADMIN";
+    if(r === "admin") return "ADMIN";
+    if(r === "manager") return "MANAGER";
+    return "UNKNOWN";
+  }
+
+  function pickEmpNoFromAuth(auth){
+    const candidates = [auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier];
+    for(const c of candidates){
+      const s = String(c || "").trim();
+      if(!s) continue;
+      const digits = s.replace(/[^\d]/g, "");
+      if(digits) return digits.slice(0, 10);
+    }
+    return "";
+  }
+
+  function getAccessCtx(){
+    if(window.HRApp && typeof window.HRApp.getCurrentAccess === "function"){
+      const acc = window.HRApp.getCurrentAccess();
+      if(acc && acc.ok && acc.auth){
+        const cls = roleClassFromAuthRole(acc.auth.role);
+        return {
+          source: "HRApp",
+          roleClass: cls,
+          auth: acc.auth,
+          empNo: String(acc.empNo || "").trim(),
+          viewerScopeId: String(acc.scopeId || "").trim()
+        };
+      }
+    }
+
+    const auth = readAuthFallback();
+    if(!auth) return null;
+
+    return {
+      source: "fallback",
+      roleClass: roleClassFromAuthRole(auth.role),
+      auth,
+      empNo: pickEmpNoFromAuth(auth),
+      viewerScopeId: "" // viewerScopeId kan vara okänd här; MANAGER låses utan HRApp-scope
+    };
+  }
+
+  const access = getAccessCtx();
+  if(!access || access.roleClass === "UNKNOWN"){
+    redirectLogin(); return;
+  }
+  if(access.roleClass !== "SYSTEM_ADMIN" && access.roleClass !== "ADMIN" && access.roleClass !== "MANAGER"){
+    redirectLogin(); return;
+  }
+
+  $("#whoName").textContent = access.auth.displayName || "—";
+  $("#whoRole").textContent = (access.auth.role || "").toLowerCase() || "—";
+
+  // Visa system-länkar endast för ADMIN/SYSTEM_ADMIN
+  if(access.roleClass === "SYSTEM_ADMIN" || access.roleClass === "ADMIN"){
+    $("#linkOrg").style.display = "inline-flex";
+    $("#linkAssignments").style.display = "inline-flex";
+  }
+
+  function doLogout(){
+    if(window.HRApp && typeof window.HRApp.logout === "function"){
+      window.HRApp.logout();
+      return;
+    }
+    try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
+    try{ localStorage.removeItem(SESSION_KEY); }catch{}
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  // ------------------------------------------------------------
+  // Org load (fail-closed for listing)
+  // ------------------------------------------------------------
+  const orgRaw = safeParseLocal(ORG_KEY, []);
+  const orgNodes = normalizeOrgNodes(orgRaw);
+  const orgIndex = buildOrgIndex(orgNodes);
+  const orgIntegrity = validateOrgIntegrity(orgNodes);
+
+  const lockReasons = [];
+  if(!orgIntegrity.ok) lockReasons.push(...orgIntegrity.issues);
+
+  // MANAGER kräver viewerScopeId från HRApp
+  if(access.roleClass === "MANAGER"){
+    const vs = String(access.viewerScopeId || "").trim();
+    if(!vs){
+      lockReasons.push("MANAGER: viewerScopeId saknas (HRApp-scope). Öppna via korrekt inloggning/routing.");
+    }else if(!orgIndex.byId.has(vs)){
+      lockReasons.push("MANAGER: viewerScopeId finns inte i org.");
+    }
+  }
+
+  const canList = (lockReasons.length === 0);
+  showLockBox(lockReasons);
+
+  // ------------------------------------------------------------
+  // Tasks load
+  // ------------------------------------------------------------
+  function loadTasks(){
+    const arr = safeParseLocal(TASKS_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function getOrgName(scopeId){
+    const id = String(scopeId || "").trim();
+    if(!id) return "—";
+    return orgIndex.byId.get(id)?.name || id;
+  }
+
+  function computeVisibleTasks(all){
+    if(!canList) return [];
+    const role = access.roleClass;
+    if(role !== "MANAGER") return all.slice();
+
+    const vs = String(access.viewerScopeId || "").trim();
+    return all.filter(t => isInScope(vs, String(t?.scopeId||"").trim(), orgIndex));
+  }
+
+  // ------------------------------------------------------------
+  // Filters
+  // ------------------------------------------------------------
+  function renderEmpFilter(tasks){
+    const sel = $("#empFilter");
+    sel.innerHTML = "";
+
+    const opt0 = document.createElement("option");
+    opt0.value = "any";
+    opt0.textContent = "Alla";
+    sel.appendChild(opt0);
+
+    const set = new Set();
+    tasks.forEach(t => {
+      const emp = String(t?.empNo || "").trim();
+      if(emp) set.add(emp);
+    });
+
+    Array.from(set).sort((a,b)=>a.localeCompare(b,"sv")).forEach(emp => {
+      const opt = document.createElement("option");
+      opt.value = emp;
+      opt.textContent = emp;
+      sel.appendChild(opt);
+    });
+  }
+
+  function renderScopeFilter(){
+    const sel = $("#scopeFilter");
+    sel.innerHTML = "";
+
+    const opt0 = document.createElement("option");
+    opt0.value = "any";
+    opt0.textContent = "Alla";
+    sel.appendChild(opt0);
+
+    if(!orgIntegrity.ok){
+      sel.disabled = true;
+      $("#scopeHint").textContent = "Org måste vara frisk för scope-filter.";
+      return;
+    }
+    sel.disabled = false;
+
+    let allowed = null;
+    if(access.roleClass === "MANAGER"){
+      allowed = computeSubtreeSet(String(access.viewerScopeId||"").trim(), orgIndex);
+    }
+
+    const flat = flattenOrgForSelect(orgNodes, orgIndex);
+    flat.forEach(row => {
+      if(allowed && !allowed.has(row.id)) return;
+      const opt = document.createElement("option");
+      opt.value = row.id;
+      const indent = "—".repeat(Math.min((row.depth - 1), 10));
+      opt.textContent = `${indent} ${row.name}${row.type ? " • " + row.type : ""}`;
+      sel.appendChild(opt);
+    });
+
+    if(access.roleClass === "MANAGER"){
+      sel.value = String(access.viewerScopeId||"").trim() || "any";
+      $("#scopeHint").textContent = "Manager: scope-filter är låst till din subtree (visar bara val inom din subtree).";
+    }else{
+      $("#scopeHint").textContent = "Admin/System: du kan filtrera på valfritt scope (eller Alla).";
+      sel.value = "any";
+    }
+  }
+
+  function normalizeText(s){
+    return String(s||"").toLowerCase().trim();
+  }
+
+  function statusNorm(s){
+    const x = String(s||"").toLowerCase().trim();
+    if(x === "open" || x === "done" || x === "blocked") return x;
+    return "open";
+  }
+
+  function kindNorm(k){
+    const x = String(k||"").toLowerCase().trim();
+    return (x === "recurring") ? "recurring" : "oneoff";
+  }
+
+  function filterTasks(tasks){
+    const q = normalizeText($("#q").value);
+    const st = $("#status").value;
+    const emp = $("#empFilter").value;
+    const sc = $("#scopeFilter").value;
+    const kind = $("#kind").value;
+
+    return tasks.filter(t => {
+      const title = normalizeText(t?.title);
+      const text  = normalizeText(t?.text);
+      const note  = normalizeText(t?.adminNote);
+      const hay = (title + " " + text + " " + note).trim();
+
+      if(q && !hay.includes(q)) return false;
+
+      const s = statusNorm(t?.status);
+      if(st !== "any" && s !== st) return false;
+
+      const e = String(t?.empNo || "").trim();
+      if(emp !== "any" && e !== emp) return false;
+
+      const sid = String(t?.scopeId || "").trim();
+      if(sc !== "any" && sid !== sc) return false;
+
+      const k = kindNorm(t?.kind);
+      if(kind !== "any" && k !== kind) return false;
+
+      // fail-closed: saknar scopeId => visas inte
+      if(!sid) return false;
+
+      return true;
+    });
+  }
+
+  function sortTasks(tasks){
+    const mode = $("#sort").value;
+    const arr = tasks.slice();
+
+    function by(a,b){ return a < b ? -1 : a > b ? 1 : 0; }
+
+    if(mode === "newest"){
+      arr.sort((a,b)=> (Number(b?.createdAt||0) - Number(a?.createdAt||0)));
+    }else if(mode === "oldest"){
+      arr.sort((a,b)=> (Number(a?.createdAt||0) - Number(b?.createdAt||0)));
+    }else if(mode === "emp"){
+      arr.sort((a,b)=> by(String(a?.empNo||""), String(b?.empNo||"")) || (Number(b?.createdAt||0) - Number(a?.createdAt||0)));
+    }else if(mode === "scope"){
+      arr.sort((a,b)=> by(getOrgName(a?.scopeId), getOrgName(b?.scopeId)) || (Number(b?.createdAt||0) - Number(a?.createdAt||0)));
+    }else if(mode === "status"){
+      arr.sort((a,b)=> by(statusNorm(a?.status), statusNorm(b?.status)) || (Number(b?.createdAt||0) - Number(a?.createdAt||0)));
+    }
+
+    return arr;
+  }
+
+  // ------------------------------------------------------------
+  // Render table
+  // ------------------------------------------------------------
+  function renderSummary(allVisible, filtered){
+    const open = filtered.filter(t => statusNorm(t?.status) === "open").length;
+    const done = filtered.filter(t => statusNorm(t?.status) === "done").length;
+    const rec  = filtered.filter(t => kindNorm(t?.kind) === "recurring").length;
+
+    $("#sumShown").textContent = String(filtered.length);
+    $("#sumOpen").textContent  = String(open);
+    $("#sumDone").textContent  = String(done);
+    $("#sumRec").textContent   = String(rec);
+
+    // Om man vill se total synlig (inte bara filtrerad) kan vi skriva i msg vid behov, men håll det lugnt.
+  }
+
+  function tinyText(t){
+    const s = String(t||"").trim();
+    if(!s) return "";
+    if(s.length <= 80) return s;
+    return s.slice(0, 77) + "…";
+  }
+
+  function renderTable(rows){
+    const tb = $("#tbody");
+    tb.innerHTML = "";
+
+    if(!canList){
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td colspan="8" class="muted2">Listning är låst (fail-closed). Åtgärda ovan.</td>`;
+      tb.appendChild(tr);
+      return;
+    }
+
+    if(rows.length === 0){
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td colspan="8" class="muted2">Inga uppgifter matchar filtret.</td>`;
+      tb.appendChild(tr);
+      return;
+    }
+
+    rows.forEach(t => {
+      const created = formatTs(t?.createdAt);
+      const empNo = escapeHtml(String(t?.empNo||"—"));
+      const status = escapeHtml(statusNorm(t?.status));
+      const scopeId = String(t?.scopeId||"").trim();
+      const scopeName = escapeHtml(getOrgName(scopeId));
+      const kind = escapeHtml(kindNorm(t?.kind));
+      const endDate = escapeHtml(String(t?.endDate||"—") || "—");
+      const title = escapeHtml(String(t?.title||"Uppgift"));
+      const text = escapeHtml(tinyText(t?.text||""));
+      const prio = escapeHtml(String(t?.prio||"normal"));
+      const hasNote = String(t?.adminNote||"").trim().length > 0;
+
+      const tr = document.createElement("tr");
+
+      tr.innerHTML = `
+        <td class="nowrap">${escapeHtml(created)}</td>
+        <td class="nowrap mono">${empNo}</td>
+        <td>
+          <div><strong>${title}</strong></div>
+          <div class="muted2">${text || "—"}</div>
+          <div>
+            <span class="tag">prio: ${prio}</span>
+            ${hasNote ? `<span class="tag">notis</span>` : ``}
+          </div>
+        </td>
+        <td class="nowrap"><span class="tag">${status}</span></td>
+        <td class="nowrap">${scopeName}</td>
+        <td class="nowrap"><span class="tag">${kind}</span></td>
+        <td class="nowrap">${endDate}</td>
+        <td class="nowrap">
+          <div class="btnrow">
+            <button class="small btn secondary" type="button" data-act="view" data-id="${escapeHtml(String(t?.id||""))}">Visa</button>
+            <button class="small btn danger" type="button" data-act="del" data-id="${escapeHtml(String(t?.id||""))}">Radera</button>
+          </div>
+        </td>
+      `;
+
+      tb.appendChild(tr);
+    });
+  }
+
+  // ------------------------------------------------------------
+  // Modal
+  // ------------------------------------------------------------
+  let modalTaskId = null;
+
+  function openModal(task){
+    modalTaskId = String(task?.id || "");
+
+    $("#modalTitle").textContent = task?.title ? String(task.title) : "Uppgift";
+    $("#mEmp").textContent = String(task?.empNo || "—");
+    $("#mStatus").textContent = statusNorm(task?.status);
+    $("#mScope").textContent = getOrgName(task?.scopeId) + (task?.scopeId ? ` (${String(task.scopeId)})` : "");
+    $("#mTitle").textContent = String(task?.title || "Uppgift");
+    $("#mText").textContent = String(task?.text || "—");
+    $("#mNote").textContent = String(task?.adminNote || "—");
+    $("#mCreated").textContent = formatTs(task?.createdAt);
+    $("#mUpdated").textContent = formatTs(task?.updatedAt);
+    $("#mStart").textContent = String(task?.startDate || "—") || "—";
+    $("#mEnd").textContent = String(task?.endDate || "—") || "—";
+
+    const tags = [];
+    tags.push(`prio: ${String(task?.prio || "normal")}`);
+    tags.push(`typ: ${kindNorm(task?.kind)}`);
+    if(task?.recurring?.freq) tags.push(`freq: ${String(task.recurring.freq)}`);
+    if(task?.recurring?.interval) tags.push(`interval: ${String(task.recurring.interval)}`);
+    if(Array.isArray(task?.recurring?.byWeekday) && task.recurring.byWeekday.length){
+      tags.push(`veckodagar: ${task.recurring.byWeekday.join(",")}`);
+    }
+    if(task?.recurring?.untilDate) tags.push(`till: ${String(task.recurring.untilDate)}`);
+
+    $("#modalTags").innerHTML = tags.map(x => `<span class="tag">${escapeHtml(x)}</span>`).join("");
+
+    const rec = task?.recurring ? JSON.stringify(task.recurring, null, 2) : "—";
+    $("#mRecurring").textContent = rec;
+
+    $("#modalBack").style.display = "flex";
+  }
+
+  function closeModal(){
+    $("#modalBack").style.display = "none";
+    modalTaskId = null;
+  }
+
+  $("#btnModalClose").addEventListener("click", closeModal);
+  $("#modalBack").addEventListener("click", (e) => {
+    if(e.target === $("#modalBack")) closeModal();
+  });
+  document.addEventListener("keydown", (e) => {
+    if(e.key === "Escape" && $("#modalBack").style.display === "flex") closeModal();
+  });
+
+  // ------------------------------------------------------------
+  // Delete (fail-closed: only if task is visible to user)
+  // ------------------------------------------------------------
+  function deleteTaskById(id){
+    const all = loadTasks();
+    const visible = computeVisibleTasks(all);
+
+    const target = visible.find(t => String(t?.id||"") === String(id||""));
+    if(!target){
+      setMsg("err", "Kan inte radera: uppgiften finns inte, eller ligger utanför ditt scope.");
+      return false;
+    }
+
+    if(!confirm("Radera denna uppgift? Detta går inte att ångra.")) return false;
+
+    const next = all.filter(t => String(t?.id||"") !== String(id||""));
+    const res = saveFailClosed(TASKS_KEY, next);
+    if(!res.ok){
+      setMsg("err", "Kunde inte spara (localStorage fullt eller blockerad).");
+      return false;
+    }
+    setMsg("ok", "Uppgift raderad.");
+    return true;
+  }
+
+  $("#btnModalDelete").addEventListener("click", () => {
+    if(!modalTaskId) return;
+    const ok = deleteTaskById(modalTaskId);
+    if(ok){
+      closeModal();
+      refresh();
+    }
+  });
+
+  // ------------------------------------------------------------
+  // Main refresh
+  // ------------------------------------------------------------
+  function refresh(){
+    setMsg("", "");
+
+    const all = loadTasks();
+    const visible = computeVisibleTasks(all);
+
+    renderEmpFilter(visible);
+    // Behåll valt värde om möjligt
+    // (Gör inget avancerat – stabilt och fail-safe.)
+    renderScopeFilter();
+
+    const filtered = sortTasks(filterTasks(visible));
+    renderSummary(visible, filtered);
+    renderTable(filtered);
+  }
+
+  // ------------------------------------------------------------
+  // Wire filter events
+  // ------------------------------------------------------------
+  ["q","status","empFilter","scopeFilter","kind","sort"].forEach(id => {
+    const el = $("#"+id);
+    if(!el) return;
+    el.addEventListener("input", () => refresh());
+    el.addEventListener("change", () => refresh());
+  });
+
+  $("#btnReset").addEventListener("click", () => {
+    $("#q").value = "";
+    $("#status").value = "any";
+    $("#kind").value = "any";
+    $("#sort").value = "newest";
+    $("#empFilter").value = "any";
+    $("#scopeFilter").value = (access.roleClass === "MANAGER" ? String(access.viewerScopeId||"").trim() : "any") || "any";
+    refresh();
+  });
+
+  $("#btnRefresh").addEventListener("click", refresh);
+
+  // ------------------------------------------------------------
+  // Delegated row actions
+  // ------------------------------------------------------------
+  $("#tbody").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-act]");
+    if(!btn) return;
+
+    const act = btn.getAttribute("data-act");
+    const id  = btn.getAttribute("data-id");
+
+    if(!id) return;
+
+    if(act === "view"){
+      const all = loadTasks();
+      const visible = computeVisibleTasks(all);
+      const t = visible.find(x => String(x?.id||"") === String(id));
+      if(!t){
+        setMsg("err", "Kan inte visa: uppgiften finns inte, eller ligger utanför ditt scope.");
+        return;
+      }
+      openModal(t);
+      return;
+    }
+
+    if(act === "del"){
+      const ok = deleteTaskById(id);
+      if(ok) refresh();
+      return;
+    }
+  });
+
+  // ------------------------------------------------------------
+  // Init
+  // ------------------------------------------------------------
+  // För MANAGER utan HRApp-scope: listning låses. För ADMIN/SYSTEM_ADMIN: OK.
+  // (Org måste dock vara frisk för alla, eftersom scopeId annars inte kan valideras säkert.)
+  refresh();
+
+})();
+</script>
+
+</body>
+</html>
 
