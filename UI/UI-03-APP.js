@@ -1,5 +1,5 @@
 /* ============================================================
-AO-002 v1.5 | FILE: UI/UI-03-APP.js
+AO-002 v1.6 | FILE: UI/UI-03-APP.js
 Projekt: HR-System
 Syfte: CORE “hjärta” — Auth-guard, RBAC, fail-closed routing, scope-grund, XSS-helpers
 Nivå: UI-only (GitHub Pages) | localStorage-first
@@ -16,10 +16,10 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
 - v1.4 (PATCH): Deterministisk scopeId-resolve från befintliga assignments (AO-020_ROLE_ASSIGNMENTS_V2) när session saknar scopeId.
   * Skriver inget nytt. Läser endast befintliga keys.
   * getAuth exponerar empNo (om finns) + härleder scopeId utan att mutera session.
-- v1.5 (PATCH): Stöd för ".htm" routes + MANAGER-kompat för overview.htm
-  * isHtmlLikeRoute inkluderar .htm (så RBAC inte kan bypassas på .htm)
-  * matchRouteEntry stödjer exakt .htm som fil
-  * routeAfterLogin: om MANAGER default-route är /manager/*.html → skriv om till .htm (för overview.htm)
+- v1.6 (PATCH): Tar bort .htm-kompat helt (standard: .html)
+  * routeAfterLogin använder config exakt (ingen omskrivning)
+  * isHtmlLikeRoute klassar endast .html (samt "/" och prefix "/")
+  * matchRouteEntry stödjer endast .html som exakt fil (prefix-rader funkar som innan)
 ============================================================ */
 
 (function () {
@@ -183,8 +183,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
   }
 
   function normalizeEmpNo(empRaw) {
-    // EMPNO: tolerans i läsning (men vi "gissar" inte innehåll).
-    // Om session använder number/string, normalisera till sträng.
     const s = String(empRaw ?? "").trim();
     return s;
   }
@@ -195,7 +193,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
 
     const a = (s.auth && typeof s.auth === "object") ? s.auth : s;
 
-    // Stöd flera namn utan att kräva dem.
     const cand =
       a.empNo ?? s.empNo ??
       a.employeeNo ?? s.employeeNo ??
@@ -214,22 +211,18 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
   }
 
   function resolveScopeIdFromAssignments(empNo) {
-    // AO-002 v1.4: läs befintlig assignments-key och hitta scopeId för empNo.
-    // Skriver INGET.
     const me = normalizeEmpNo(empNo);
     if (!me) return "";
 
     const data = readLocalStorage(ASSIGNMENTS_KEY);
     if (!data) return "";
 
-    // Format A: Array[{ empNo, scopeId, ... }]
     if (Array.isArray(data)) {
       for (let i = 0; i < data.length; i++) {
         const row = data[i];
         if (!row || typeof row !== "object") continue;
 
-        const rowEmp =
-          normalizeEmpNo(row.empNo ?? row.employeeNo ?? row.emp ?? row.id ?? "");
+        const rowEmp = normalizeEmpNo(row.empNo ?? row.employeeNo ?? row.emp ?? row.id ?? "");
         if (!rowEmp || rowEmp !== me) continue;
 
         const scope = String(row.scopeId ?? row.scope ?? row.nodeId ?? row.orgId ?? "").trim();
@@ -238,7 +231,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
       return "";
     }
 
-    // Format B: Object-map { "3001": { scopeId:"UNIT_A", ... } } eller { "3001":"UNIT_A" }
     if (typeof data === "object") {
       const direct = data[me];
       if (direct && typeof direct === "object") {
@@ -250,7 +242,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
         if (scope) return scope;
       }
 
-      // Format C: { byEmpNo: { "3001": {scopeId} } }
       const byEmpNo = data.byEmpNo;
       if (byEmpNo && typeof byEmpNo === "object") {
         const row = byEmpNo[me];
@@ -279,16 +270,9 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
 
     const out = {
       isAuthed: a.isAuthed === true,
-
-      // RBAC: roll måste vara en av cfg.ROLES
       role: normalizeRole(a.role),
-
-      // AO-002 v1.4: om scope saknas i session => resolve via assignments
       scopeId: scopeFromSession || resolveScopeIdFromAssignments(empNo),
-
-      // empNo (tillåtet): behövs för filter i UI-sidor (utan att logga det)
       empNo: empNo,
-
       expiresAt: a.expiresAt ? Number(a.expiresAt) : null,
     };
 
@@ -305,11 +289,11 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
 
     if (auth.expiresAt && auth.expiresAt < Date.now()) return null;
 
-    return data; // PRC: returnera originalobjektet
+    return data;
   }
 
   // ============================================================
-  // PUBLIC ROUTES (explicit) — no implicit /UI/
+  // PUBLIC ROUTES (explicit)
   // ============================================================
 
   function stripQueryHash(urlLike) {
@@ -328,14 +312,14 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
   }
 
   // ============================================================
-  // RBAC (P0) — deterministic match on normalized relative path
+  // RBAC (P0)
   // ============================================================
 
   function isHtmlLikeRoute(appRelPath) {
     const p = String(appRelPath || "").toLowerCase();
     if (!p) return false;
-    // PATCH v1.5: inkludera .htm så RBAC inte kan bypassas på .htm-sidor
-    return p === "/" || p.endsWith(".html") || p.endsWith(".htm") || p.endsWith("/");
+    // Standard: endast .html (samt "/" och prefix "/")
+    return p === "/" || p.endsWith(".html") || p.endsWith("/");
   }
 
   function normalizeRelPathForCheck(inputPath) {
@@ -355,7 +339,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
   }
 
   function rootAwareStartsWith(path, prefix) {
-    // prefix "/admin" matchar "/admin" och "/admin/..." men INTE "/adminx"
     const p = String(path || "");
     const pre = String(prefix || "");
     if (!p || !pre) return false;
@@ -366,21 +349,14 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
   }
 
   function matchRouteEntry(relPath, entryRaw) {
-    // ============================================================
-    // AO-002 v1.3 (PATCH): detta är fixen som gör att
-    // "/admin/" betyder PREFIX och matchar "/admin/home.html"
-    // ============================================================
     const rel = String(relPath || "");
     const e = String(entryRaw || "").trim();
     if (!rel || !e) return false;
 
-    // Root exakt
     if (e === "/") return rel === "/";
 
-    const el = e.toLowerCase();
-
-    // Exakt fil (.html eller .htm)
-    if (el.endsWith(".html") || el.endsWith(".htm")) return rel === e;
+    // Exakt fil (.html)
+    if (e.toLowerCase().endsWith(".html")) return rel === e;
 
     // Prefix med trailing "/" (t.ex. "/admin/") => enkel startsWith räcker
     if (e.endsWith("/")) return rel.startsWith(e);
@@ -397,9 +373,8 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
     if (!r) return false;
 
     const rel = normalizeRelPathForCheck(pathname || window.location.pathname || "");
-    if (!rel) return false; // fail-closed
+    if (!rel) return false;
 
-    // Assets ska inte blockeras av denna kontroll
     if (!isHtmlLikeRoute(rel)) return true;
 
     const allowed = cfg.ROUTES_BY_ROLE[r];
@@ -445,21 +420,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
     return err ? (base + "?err=" + encodeURIComponent(String(err))) : base;
   }
 
-  function compatManagerHtm(destPath, role) {
-    // PATCH v1.5:
-    // Om MANAGER default-route pekar på /manager/*.html men filen i repo heter .htm,
-    // skriv om till .htm. (Detta är kompat och påverkar endast MANAGER + /manager/.)
-    const r = String(role || "");
-    const d = String(destPath || "");
-    if (r !== "MANAGER") return d;
-
-    const dl = d.toLowerCase();
-    if (!dl.startsWith("/manager/")) return d;
-    if (!dl.endsWith(".html")) return d;
-
-    return d.slice(0, -5) + ".htm";
-  }
-
   function routeAfterLogin(session) {
     const cfg = getConfig();
     if (!cfg) return loginUrl("config");
@@ -470,12 +430,10 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
     const dest = cfg.DEFAULT_ROUTE_BY_ROLE[auth.role];
     if (!dest) return loginUrl("route");
 
-    let appRel = String(dest || "").trim();
+    const appRel = String(dest || "").trim();
     if (!appRel.startsWith("/")) return loginUrl("route");
 
-    // PATCH v1.5: MANAGER-kompat för overview.htm
-    appRel = compatManagerHtm(appRel, auth.role);
-
+    // Viktigt: ingen omskrivning här. Config är “sanningen”.
     return absPathFromApp(appRel);
   }
 
@@ -491,7 +449,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
     }
   }
 
-  // requireAuth({ allowRoles?: [], redirectTo?: string })
   function requireAuth(opts) {
     const options = (opts && typeof opts === "object") ? opts : {};
     const allowRoles = Array.isArray(options.allowRoles) ? options.allowRoles : [];
@@ -514,7 +471,6 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
       return null;
     }
 
-    // Public route får nås utan session, men endast explicit allowlist
     if (isHtmlLikeRoute(rel) && isPublicRoute(rel)) {
       return { public: true };
     }
@@ -584,7 +540,7 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
   }
 
   // ============================================================
-  // DEBUG HOOKS (AV default) + P2 _paths exposure
+  // DEBUG HOOKS
   // ============================================================
 
   function debugEnabled() {
@@ -627,39 +583,22 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
   // ============================================================
 
   const api = {
-    // Storage/session
     safeJsonParse,
     readStorage,
     mustGetSession,
     clearSession,
-
-    // Canonical auth accessor (P1)
     getAuth,
-
-    // Auth/Routing/RBAC
     requireAuth,
     routeAfterLogin,
     canAccessRoute,
     hasPermission,
-
-    // Path hardening (P0) — exposed (no PII)
     getSafePathname,
-
-    // Scope grund
     getScopeId,
     sameOrMissingScope,
-
-    // AO-002 v1.4: scope resolver (read-only)
     resolveScopeIdFromAssignments,
-
-    // XSS helpers
     escapeHtml,
     setText,
-
-    // Debug
     debugLog,
-
-    // Convenience
     logout,
   };
 
