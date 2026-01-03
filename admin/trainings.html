@@ -1,1 +1,1446 @@
+<!-- ============================================================
+AO-060 (MASTER v1.0) | FIL-ID: admin/trainings.html
+Projekt: HR-System
+Syfte: ADMIN – Utbildningar (återanvändbart innehåll) – skapa/redigera/lista – UI-only
+
+POLICY (LÅST):
+- UI-only • Fail-closed • sessionStorage först • fallback localStorage (endast auth)
+- XSS-escape / textContent på all rendering från storage
+- Ingen känslig persondata (endast utbildningsinnehåll)
+- Inga nya storage-keys förutom denna AO
+- Hel-filsleverans
+- AI-stöd via extern endpoint (t.ex. Cloudflare Worker) – inga nycklar lagras i klienten
+
+KEYS (LÅST):
+- Läser auth: AO-001_LOGIN_V1 (sessionStorage → localStorage fallback)
+- Läser/Skriver: AO-060_TRAININGS_V1 (localStorage)
+
+RBAC (LÅST):
+- ADMIN-only (fail-closed: annars redirect till login)
+
+DATAMODELL (LÅST) – AO-060_TRAININGS_V1:
+[
+  {
+    "id": "trn_<uuid>",
+    "title": "Hygien – Grund",
+    "module": "Utbildning",
+    "summary": "Kort beskrivning…",
+    "tags": ["hygien","HACCP"],
+    "sections": [
+      { "id":"sec_<uuid>", "heading":"Mål", "body":"..." },
+      { "id":"sec_<uuid>", "heading":"Rutiner", "body":"..." }
+    ],
+    "version": 1,
+    "createdAt": 1730000000000,
+    "updatedAt": 1730000000000
+  }
+]
+
+INTEGRATION (senare):
+- Andra sidor väljer utbildning via trainingId (= id)
+- “Välj utbildning” ska alltid komma från AO-060_TRAININGS_V1 (ingen hårdkod)
+
+TESTNOTERINGAR:
+- Tom storage => tom lista, inga fel
+- Korrupt JSON => editor låses (fail-closed), inget skrivs
+- XSS: "<img onerror=...>" i titel/sektion ska renderas som text
+- AI: endpoint saknas => tydligt fel, ingen data skrivs
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Utbildningar</title>
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    :root{
+      --bg:#f6f7fb;
+      --card:#ffffff;
+      --ink:#0f172a;
+      --muted:#64748b;
+      --line:rgba(15,23,42,.12);
+      --good:rgba(217,247,214,.95);
+      --warn:rgba(255,247,194,.95);
+      --bad:rgba(254,226,226,.95);
+      --shadow: 0 10px 24px rgba(15,23,42,.08);
+      --r14: 14px;
+      --r18: 18px;
+    }
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--ink);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    }
+
+    .topbar{
+      position: sticky;
+      top:0;
+      z-index:10;
+      background: rgba(246,247,251,.92);
+      backdrop-filter: blur(10px);
+      border-bottom:1px solid var(--line);
+    }
+    .nav{
+      max-width:1200px;
+      margin:0 auto;
+      padding:10px 16px;
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .nav a{
+      text-decoration:none;
+      color:var(--ink);
+      font-size:14px;
+      padding:8px 10px;
+      border-radius:12px;
+      border:1px solid transparent;
+    }
+    .nav a:hover{ border-color:var(--line); background:#fff; }
+    .nav .spacer{ flex:1; }
+    .pill{
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid var(--line);
+      background:#fff;
+      padding:6px 10px;
+      border-radius:999px;
+      white-space:nowrap;
+    }
+    .pill.ok{ background: rgba(217,247,214,.9); border-color: rgba(16,185,129,.25); color:#065f46; }
+    .pill.warn{ background: rgba(255,247,194,.9); border-color: rgba(245,158,11,.25); color:#7c2d12; }
+    .pill.bad{ background: rgba(254,226,226,.9); border-color: rgba(239,68,68,.25); color:#7f1d1d; }
+
+    .wrap{
+      max-width:1200px;
+      margin:16px auto 28px;
+      padding:0 16px;
+    }
+
+    .guard{
+      border:1px solid rgba(239,68,68,.25);
+      background:rgba(254,242,242,.92);
+      color:#7f1d1d;
+      padding:12px 14px;
+      border-radius:14px;
+      margin:14px 0;
+      display:none;
+      white-space:pre-wrap;
+    }
+
+    .grid{
+      display:grid;
+      grid-template-columns: 1.05fr 1.6fr;
+      gap:12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .grid{ grid-template-columns: 1fr; }
+    }
+
+    .card{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius: var(--r18);
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+    .head{
+      padding:14px;
+      border-bottom:1px solid var(--line);
+      background: linear-gradient(180deg, #fff, #fafafa);
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+    .head h1, .head h2{
+      margin:0;
+      font-size:14px;
+      font-weight:950;
+    }
+    .sub{
+      margin-top:6px;
+      font-size:12px;
+      color:var(--muted);
+      line-height:1.35;
+    }
+    .tools{
+      padding:12px 14px;
+      border-bottom:1px solid var(--line);
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
+    .input, select, textarea{
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:10px 12px;
+      background:#fff;
+      font-size:13px;
+      width:100%;
+      box-sizing:border-box;
+    }
+    .btn{
+      border:1px solid var(--line);
+      background:#fff;
+      border-radius:12px;
+      padding:10px 12px;
+      cursor:pointer;
+      user-select:none;
+      font-weight:900;
+      font-size:13px;
+      line-height:1;
+      text-decoration:none;
+      color:inherit;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:8px;
+    }
+    .btn:hover{ background:#fafafa; }
+    .btn.primary{
+      border-color: rgba(59,130,246,.35);
+      background: rgba(59,130,246,.08);
+    }
+    .btn.danger{
+      border-color: rgba(239,68,68,.35);
+      background: rgba(254,242,242,.55);
+    }
+    .btn:disabled{ opacity:.55; cursor:not-allowed; }
+
+    .list{
+      padding:10px 14px 14px;
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+      max-height: 62vh;
+      overflow:auto;
+    }
+    .row{
+      border:1px solid var(--line);
+      border-radius:14px;
+      background:#fff;
+      padding:10px 10px;
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      justify-content:space-between;
+      cursor:pointer;
+    }
+    .row:hover{ background:#fafafa; }
+    .row.active{
+      outline:2px solid rgba(59,130,246,.35);
+      background: rgba(59,130,246,.06);
+    }
+    .rLeft{ min-width:0; flex:1; }
+    .rTitle{
+      font-weight:950;
+      font-size:13px;
+      margin:0;
+      line-height:1.2;
+    }
+    .rMeta{
+      margin-top:6px;
+      font-size:12px;
+      color:var(--muted);
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .tag{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:2px 8px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      background: rgba(250,250,250,.92);
+      font-size:12px;
+      color:var(--muted);
+      white-space:nowrap;
+    }
+
+    .body{
+      padding:12px 14px 14px;
+    }
+    .formGrid{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .formGrid{ grid-template-columns: 1fr; }
+    }
+    label{
+      display:block;
+      font-weight:900;
+      font-size:12px;
+      color:var(--muted);
+    }
+    label .req{ color:#b91c1c; font-weight:950; }
+    .field{ margin-top:6px; }
+
+    .hr{
+      height:1px;
+      background:var(--line);
+      margin:12px 0;
+    }
+
+    .secList{
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+    .secCard{
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:10px;
+      background:#fff;
+    }
+    .secTop{
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+    .secTop strong{ font-size:13px; }
+    .secBtns{ display:flex; gap:8px; flex-wrap:wrap; }
+    .miniBtn{
+      border:1px solid var(--line);
+      background:#fff;
+      border-radius:12px;
+      padding:8px 10px;
+      cursor:pointer;
+      user-select:none;
+      font-weight:900;
+      font-size:13px;
+      line-height:1;
+    }
+    .miniBtn:hover{ background:#fafafa; }
+    .miniBtn.danger{
+      border-color: rgba(239,68,68,.35);
+      background: rgba(254,242,242,.55);
+    }
+    .miniBtn:disabled{ opacity:.55; cursor:not-allowed; }
+
+    .msg{
+      margin-top:10px;
+      padding:10px 12px;
+      border-radius:14px;
+      border:1px solid var(--line);
+      background:#fff;
+      display:none;
+      white-space:pre-wrap;
+      font-size:13px;
+    }
+    .msg.ok{ border-color: rgba(16,185,129,.30); background: rgba(217,247,214,.55); color:#065f46; display:block; }
+    .msg.err{ border-color: rgba(239,68,68,.30); background: rgba(254,226,226,.65); color:#7f1d1d; display:block; }
+    .msg.warn{ border-color: rgba(245,158,11,.30); background: rgba(255,247,194,.7); color:#7c2d12; display:block; }
+
+    details{
+      border:1px dashed var(--line);
+      border-radius:14px;
+      padding:10px 12px;
+      background:#fff;
+    }
+    summary{
+      cursor:pointer;
+      font-weight:950;
+      font-size:13px;
+    }
+    .tiny{ font-size:12px; color:var(--muted); line-height:1.35; }
+
+    .preview{
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:12px;
+      background:#fff;
+    }
+    .preview h3{ margin:0 0 6px; font-size:14px; }
+    .preview p{ margin:0 0 10px; color:var(--muted); font-size:13px; line-height:1.45; }
+    .preview h4{ margin:12px 0 6px; font-size:13px; }
+    .preview .pBody{
+      white-space:pre-wrap;
+      font-size:13px;
+      line-height:1.45;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="topbar">
+    <div class="nav" aria-label="Primär navigation">
+      <a href="./dashboard.html">Dashboard</a>
+      <a href="./packages-list.html">Paket (översikt)</a>
+      <a href="./packages.html">Paket (editor)</a>
+      <a href="./trainings.html" aria-current="page">Utbildningar</a>
+      <div class="spacer"></div>
+      <span class="pill" id="whoPill">—</span>
+      <a href="#" id="logoutLink">Logga ut</a>
+    </div>
+  </div>
+
+  <main class="wrap">
+    <div class="guard" id="guardBox" role="alert"></div>
+
+    <div class="grid">
+      <!-- LEFT: list -->
+      <section class="card" aria-label="Utbildningslista">
+        <div class="head">
+          <div>
+            <h1>Utbildningar</h1>
+            <div class="sub">Återanvändbart innehåll. Du skapar först utbildningar här, sen kan andra sidor välja dem.</div>
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <span class="pill" id="countPill">—</span>
+          </div>
+        </div>
+
+        <div class="tools" aria-label="Listverktyg">
+          <input class="input" id="q" type="search" placeholder="Sök titel, modul, tag…" autocomplete="off" style="flex:1; min-width:220px;" />
+          <button class="btn primary" id="newBtn" type="button">+ Ny utbildning</button>
+        </div>
+
+        <div class="list" id="list"></div>
+      </section>
+
+      <!-- RIGHT: editor -->
+      <section class="card" aria-label="Editor">
+        <div class="head">
+          <div>
+            <h2 id="editorTitle">Välj en utbildning</h2>
+            <div class="sub" id="editorSub">Skapa ny eller välj från listan.</div>
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <button class="btn" id="cloneBtn" type="button" disabled>Klona</button>
+            <button class="btn danger" id="deleteBtn" type="button" disabled>Ta bort</button>
+            <button class="btn primary" id="saveBtn" type="button" disabled>Spara</button>
+          </div>
+        </div>
+
+        <div class="body">
+          <div class="msg" id="msgBox" role="status" aria-live="polite"></div>
+
+          <div class="formGrid">
+            <div>
+              <label>Titel <span class="req">*</span>
+                <div class="field"><input class="input" id="title" type="text" maxlength="80" placeholder="T.ex. Hygien – Grund" autocomplete="off" disabled /></div>
+              </label>
+            </div>
+            <div>
+              <label>Modul
+                <div class="field">
+                  <select class="input" id="module" disabled></select>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div style="margin-top:10px;">
+            <label>Kort beskrivning
+              <div class="field"><textarea class="input" id="summary" maxlength="240" placeholder="Kort sammanfattning…" disabled></textarea></div>
+            </label>
+          </div>
+
+          <div style="margin-top:10px;">
+            <label>Taggar (komma-separerade)
+              <div class="field"><input class="input" id="tags" type="text" maxlength="160" placeholder="t.ex. hygien, HACCP, rutiner" disabled /></div>
+            </label>
+            <div class="tiny" style="margin-top:6px;">Taggar är bara metadata (för sök/filter). Inget exekveras.</div>
+          </div>
+
+          <div class="hr"></div>
+
+          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+            <div>
+              <strong style="font-size:13px;">Innehåll (sektioner)</strong>
+              <div class="tiny">Bygg flera sektioner. Ordning sparas i <code>sections[]</code>.</div>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn" id="addSecBtn" type="button" disabled>+ Lägg till sektion</button>
+              <button class="btn" id="previewBtn" type="button" disabled>Förhandsgranska</button>
+            </div>
+          </div>
+
+          <div style="margin-top:10px;" class="secList" id="secList"></div>
+
+          <div class="hr"></div>
+
+          <details id="aiBox">
+            <summary>AI-stöd (valfritt)</summary>
+            <div class="tiny" style="margin-top:8px;">
+              Du kan låta en extern tjänst skapa ett första utkast. Vi sparar inga nycklar i klienten.
+              Rekommendation: Cloudflare Worker som tar emot prompt och returnerar en training-JSON.
+            </div>
+
+            <div style="margin-top:10px;">
+              <label>AI-endpoint (HTTPS, t.ex. Worker URL)
+                <div class="field"><input class="input" id="aiUrl" type="url" placeholder="https://<din-worker>..." autocomplete="off" /></div>
+              </label>
+              <div class="tiny" style="margin-top:6px;">
+                Endpoint ska svara med JSON: <code>{ training: { title,module,summary,tags[],sections[] } }</code>
+              </div>
+            </div>
+
+            <div style="margin-top:10px;" class="formGrid">
+              <div>
+                <label>Ämne / titel
+                  <div class="field"><input class="input" id="aiTopic" type="text" maxlength="80" placeholder="t.ex. Hygien" autocomplete="off" /></div>
+                </label>
+              </div>
+              <div>
+                <label>Önskad nivå / fokus (valfritt)
+                  <div class="field"><input class="input" id="aiFocus" type="text" maxlength="120" placeholder="t.ex. restaurang, grundnivå, HACCP" autocomplete="off" /></div>
+                </label>
+              </div>
+            </div>
+
+            <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="btn primary" id="aiGenerateBtn" type="button">Skapa utkast med AI</button>
+              <button class="btn" id="aiHelpBtn" type="button">Visa endpoint-format</button>
+            </div>
+
+            <pre class="preview" id="aiHelp" style="display:none; margin-top:10px; overflow:auto;"></pre>
+          </details>
+
+          <div class="tiny" style="margin-top:12px;">
+            Fail-closed: om storage är korrupt eller auth saknas, skriver sidan ingenting.
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- AO-002 beroenden (LÅSTA): config före app -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <script>
+    "use strict";
+
+    /* ===========================
+       LÅSTA keys
+    ============================ */
+    const KEY_SESSION   = "AO-001_LOGIN_V1";
+    const KEY_TRAININGS = "AO-060_TRAININGS_V1";
+
+    /* ===========================
+       DOM
+    ============================ */
+    const guardBox  = document.getElementById("guardBox");
+    const whoPill   = document.getElementById("whoPill");
+    const logoutLink= document.getElementById("logoutLink");
+
+    const qEl       = document.getElementById("q");
+    const countPill = document.getElementById("countPill");
+    const listEl    = document.getElementById("list");
+    const newBtn    = document.getElementById("newBtn");
+
+    const editorTitle = document.getElementById("editorTitle");
+    const editorSub   = document.getElementById("editorSub");
+    const msgBox      = document.getElementById("msgBox");
+
+    const titleEl   = document.getElementById("title");
+    const moduleEl  = document.getElementById("module");
+    const summaryEl = document.getElementById("summary");
+    const tagsEl    = document.getElementById("tags");
+
+    const secList   = document.getElementById("secList");
+    const addSecBtn = document.getElementById("addSecBtn");
+    const previewBtn= document.getElementById("previewBtn");
+
+    const cloneBtn  = document.getElementById("cloneBtn");
+    const deleteBtn = document.getElementById("deleteBtn");
+    const saveBtn   = document.getElementById("saveBtn");
+
+    const aiUrlEl   = document.getElementById("aiUrl");
+    const aiTopicEl = document.getElementById("aiTopic");
+    const aiFocusEl = document.getElementById("aiFocus");
+    const aiGenerateBtn = document.getElementById("aiGenerateBtn");
+    const aiHelpBtn     = document.getElementById("aiHelpBtn");
+    const aiHelp        = document.getElementById("aiHelp");
+
+    /* ===========================
+       Helpers (fail-closed)
+    ============================ */
+    function showGuard(msg){ guardBox.style.display = "block"; guardBox.textContent = String(msg || ""); }
+    function hideGuard(){ guardBox.style.display = "none"; guardBox.textContent = ""; }
+
+    function setMsg(kind, text){
+      msgBox.className = "msg" + (kind ? " " + kind : "");
+      msgBox.textContent = String(text || "");
+      msgBox.style.display = text ? "block" : "none";
+    }
+
+    function escapeHtml(input){
+      if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(input);
+      const s = String(input ?? "");
+      return s
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;")
+        .replaceAll('"',"&quot;")
+        .replaceAll("'","&#039;");
+    }
+
+    function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
+
+    function readAnyStorage(key){
+      try { const s1 = sessionStorage.getItem(key); if (s1) return s1; } catch {}
+      try { const s2 = localStorage.getItem(key);  if (s2) return s2; } catch {}
+      return null;
+    }
+
+    function normStr(s){ return String(s ?? "").trim(); }
+    function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
+
+    function uuid(prefix){
+      try{
+        if(window.crypto && typeof window.crypto.randomUUID === "function"){
+          return (prefix||"id") + "_" + window.crypto.randomUUID();
+        }
+      }catch{}
+      return (prefix||"id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+    }
+
+    function clampLen(s, n){ return String(s ?? "").slice(0, n); }
+
+    function splitTags(s){
+      const raw = String(s || "");
+      const parts = raw.split(",").map(x => x.trim()).filter(Boolean);
+      const out = [];
+      for(const p of parts){
+        const t = clampLen(p, 24);
+        if(!t) continue;
+        if(out.some(x => normKey(x) === normKey(t))) continue;
+        out.push(t);
+        if(out.length >= 12) break;
+      }
+      return out;
+    }
+
+    /* ===========================
+       RBAC via AO-002
+    ============================ */
+    function requireAdminOrStop(){
+      if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+        showGuard("Systemfel: HRApp saknas. (UI-03-APP.js)");
+        return null;
+      }
+      if (!window.HR_CONFIG || !window.HR_CONFIG.ROLES) {
+        showGuard("Systemfel: HR_CONFIG saknas. (UI-04-CONFIG.js)");
+        return null;
+      }
+
+      // ADMIN-only (LÅST)
+      const allow = [ window.HR_CONFIG.ROLES.ADMIN ];
+      const sess = window.HRApp.requireAuth({ allowRoles: allow });
+      if (!sess) return null;
+
+      const auth = window.HRApp.getAuth(sess);
+      if (!auth || auth.isAuthed !== true) {
+        showGuard("Fail-closed: saknar giltig session. Logga in igen.");
+        return null;
+      }
+      return { sess, auth };
+    }
+
+    logoutLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (window.HRApp && typeof window.HRApp.logout === "function") {
+        window.HRApp.logout();
+      } else {
+        try { sessionStorage.removeItem(KEY_SESSION); } catch {}
+        try { localStorage.removeItem(KEY_SESSION); } catch {}
+        window.location.href = "../UI/UI-01-SKELETON.html?err=logout";
+      }
+    });
+
+    /* ===========================
+       Locked modules list (metadata)
+       (Speglad från våra diskussioner / AO-052)
+    ============================ */
+    const MODULES = [
+      "Regelhantering",
+      "Policy",
+      "Ansvarsområden",
+      "Kompetenskartläggning",
+      "Utbildning",
+      "Mål & uppföljning",
+      "Utvecklingssamtal",
+      "Action Planning",
+      "CAPA / Root cause",
+      "Benchmarks / Heatmaps",
+      "Onboarding",
+      "Kommunikation",
+      "Arbetsmiljö / Säkerhet",
+      "Kvalitet",
+      "Driftplanering"
+    ];
+
+    function renderModuleOptions(){
+      moduleEl.innerHTML = "";
+      for(const m of MODULES){
+        const opt = document.createElement("option");
+        opt.value = m;
+        opt.textContent = m;
+        moduleEl.appendChild(opt);
+      }
+    }
+
+    /* ===========================
+       Storage: trainings (fail-closed)
+    ============================ */
+    function readTrainings(){
+      try{
+        const raw = localStorage.getItem(KEY_TRAININGS);
+        if(raw == null) return { ok:true, value: [] };
+        const v = safeJsonParse(raw);
+        if(!Array.isArray(v)) return { ok:false, err:"AO-060_TRAININGS_V1 är inte en array." };
+        return { ok:true, value: v };
+      }catch{
+        return { ok:false, err:"AO-060_TRAININGS_V1 är korrupt eller kan inte läsas." };
+      }
+    }
+
+    function saveTrainings(arr){
+      try{
+        localStorage.setItem(KEY_TRAININGS, JSON.stringify(arr));
+        return { ok:true };
+      }catch{
+        return { ok:false, err:"Kunde inte spara (localStorage fullt/blockerat)." };
+      }
+    }
+
+    function normalizeTraining(raw){
+      const t = (raw && typeof raw === "object") ? raw : {};
+      const id = normStr(t.id) || uuid("trn");
+      const title = clampLen(normStr(t.title), 80);
+      const module = MODULES.includes(normStr(t.module)) ? normStr(t.module) : (MODULES[0] || "Utbildning");
+      const summary = clampLen(normStr(t.summary), 240);
+      const tags = Array.isArray(t.tags) ? splitTags(t.tags.join(",")) : splitTags(t.tags);
+      const sectionsRaw = Array.isArray(t.sections) ? t.sections : [];
+      const sections = sectionsRaw.slice(0, 30).map(s => normalizeSection(s));
+      const createdAt = Number.isFinite(Number(t.createdAt)) ? Number(t.createdAt) : Date.now();
+      const updatedAt = Number.isFinite(Number(t.updatedAt)) ? Number(t.updatedAt) : createdAt;
+      const version = Number.isFinite(Number(t.version)) ? Math.max(1, Math.trunc(Number(t.version))) : 1;
+      return { id, title, module, summary, tags, sections, version, createdAt, updatedAt };
+    }
+
+    function normalizeSection(raw){
+      const s = (raw && typeof raw === "object") ? raw : {};
+      const id = normStr(s.id) || uuid("sec");
+      const heading = clampLen(normStr(s.heading), 80);
+      const body = clampLen(String(s.body ?? ""), 5000);
+      return { id, heading, body };
+    }
+
+    /* ===========================
+       State
+    ============================ */
+    const STATE = {
+      auth: null,
+      list: [],
+      selectedId: "",
+      draft: null,
+      isDirty: false,
+      locked: false,
+      previewMode: false
+    };
+
+    function setEditorEnabled(enabled){
+      const on = !!enabled;
+      titleEl.disabled = !on;
+      moduleEl.disabled = !on;
+      summaryEl.disabled = !on;
+      tagsEl.disabled = !on;
+      addSecBtn.disabled = !on;
+      previewBtn.disabled = !on;
+      cloneBtn.disabled = !on;
+      deleteBtn.disabled = !on;
+      saveBtn.disabled = !on;
+    }
+
+    function markDirty(v){
+      STATE.isDirty = !!v;
+      // Ingen aggressiv UX. Bara påverkar Spara-knappens enabled.
+      saveBtn.disabled = !(STATE.draft && STATE.isDirty && !STATE.locked);
+    }
+
+    /* ===========================
+       List render
+    ============================ */
+    function fmtDate(ms){
+      try{
+        const d = new Date(Number(ms));
+        if(Number.isNaN(d.getTime())) return "—";
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth()+1).padStart(2,"0");
+        const dd = String(d.getDate()).padStart(2,"0");
+        return `${yyyy}-${mm}-${dd}`;
+      }catch{ return "—"; }
+    }
+
+    function renderList(){
+      listEl.innerHTML = "";
+      const q = normKey(qEl.value || "");
+      const items = !q ? STATE.list : STATE.list.filter(t => {
+        const hay = normKey([t.title, t.module, (t.tags||[]).join(" ")].join(" "));
+        return hay.includes(q);
+      });
+
+      countPill.textContent = `${items.length} st`;
+
+      if(items.length === 0){
+        const empty = document.createElement("div");
+        empty.className = "tiny";
+        empty.style.padding = "10px 2px";
+        empty.textContent = "Inga utbildningar ännu. Klicka “Ny utbildning”.";
+        listEl.appendChild(empty);
+        return;
+      }
+
+      for(const t of items){
+        const row = document.createElement("div");
+        row.className = "row" + (t.id === STATE.selectedId ? " active" : "");
+        row.setAttribute("data-id", t.id);
+
+        const left = document.createElement("div");
+        left.className = "rLeft";
+
+        const title = document.createElement("p");
+        title.className = "rTitle";
+        title.textContent = t.title || "Namnlös utbildning";
+
+        const meta = document.createElement("div");
+        meta.className = "rMeta";
+
+        const m1 = document.createElement("span");
+        m1.className = "tag";
+        m1.textContent = t.module || "—";
+
+        const m2 = document.createElement("span");
+        m2.className = "tag";
+        m2.textContent = `Uppd: ${fmtDate(t.updatedAt)}`;
+
+        const m3 = document.createElement("span");
+        m3.className = "tag";
+        m3.textContent = `${(Array.isArray(t.sections)?t.sections.length:0)} sektioner`;
+
+        meta.appendChild(m1);
+        meta.appendChild(m2);
+        meta.appendChild(m3);
+
+        left.appendChild(title);
+        left.appendChild(meta);
+
+        row.appendChild(left);
+        listEl.appendChild(row);
+      }
+    }
+
+    listEl.addEventListener("click", (e) => {
+      const row = e.target && (e.target.closest ? e.target.closest(".row[data-id]") : null);
+      if(!row) return;
+      const id = row.getAttribute("data-id");
+      if(!id) return;
+
+      if(STATE.isDirty){
+        const ok = confirm("Du har osparade ändringar. Byt utbildning utan att spara?");
+        if(!ok) return;
+      }
+      selectTraining(id);
+    });
+
+    qEl.addEventListener("input", () => renderList());
+
+    /* ===========================
+       Editor bind/render
+    ============================ */
+    function setEditorHeader(){
+      if(!STATE.draft){
+        editorTitle.textContent = "Välj en utbildning";
+        editorSub.textContent = "Skapa ny eller välj från listan.";
+        return;
+      }
+      const t = STATE.draft;
+      editorTitle.textContent = t.title ? `Redigerar: ${t.title}` : "Redigerar: (namnlös)";
+      editorSub.textContent = `id: ${t.id} • version: ${t.version} • uppdaterad: ${fmtDate(t.updatedAt)}`;
+    }
+
+    function selectTraining(id){
+      const found = STATE.list.find(x => x.id === id);
+      if(!found) return;
+      STATE.selectedId = id;
+      STATE.draft = normalizeTraining(found);
+      STATE.isDirty = false;
+      STATE.previewMode = false;
+      setMsg("", "");
+      bindDraftToUI();
+      renderList();
+    }
+
+    function bindDraftToUI(){
+      if(!STATE.draft){
+        setEditorEnabled(false);
+        setEditorHeader();
+        secList.innerHTML = "";
+        return;
+      }
+      setEditorEnabled(!STATE.locked);
+      titleEl.value = STATE.draft.title || "";
+      moduleEl.value = STATE.draft.module || (MODULES[0] || "Utbildning");
+      summaryEl.value = STATE.draft.summary || "";
+      tagsEl.value = (Array.isArray(STATE.draft.tags) ? STATE.draft.tags.join(", ") : "");
+
+      renderSections();
+      setEditorHeader();
+      markDirty(false);
+
+      cloneBtn.disabled = STATE.locked;
+      deleteBtn.disabled = STATE.locked;
+      previewBtn.disabled = STATE.locked;
+      addSecBtn.disabled = STATE.locked;
+      saveBtn.disabled = true;
+    }
+
+    function renderSections(){
+      secList.innerHTML = "";
+
+      if(!STATE.draft) return;
+
+      if(STATE.previewMode){
+        const box = document.createElement("div");
+        box.className = "preview";
+
+        const h3 = document.createElement("h3");
+        h3.textContent = STATE.draft.title || "(namnlös utbildning)";
+        box.appendChild(h3);
+
+        const p = document.createElement("p");
+        p.textContent = STATE.draft.summary || "";
+        box.appendChild(p);
+
+        const meta = document.createElement("div");
+        meta.className = "tiny";
+        meta.textContent = `Modul: ${STATE.draft.module || "—"} • Taggar: ${(STATE.draft.tags||[]).join(", ") || "—"}`;
+        box.appendChild(meta);
+
+        const sections = Array.isArray(STATE.draft.sections) ? STATE.draft.sections : [];
+        for(const s of sections){
+          const h4 = document.createElement("h4");
+          h4.textContent = s.heading || "Sektion";
+          box.appendChild(h4);
+
+          const b = document.createElement("div");
+          b.className = "pBody";
+          b.textContent = String(s.body || "");
+          box.appendChild(b);
+        }
+
+        secList.appendChild(box);
+        return;
+      }
+
+      const sections = Array.isArray(STATE.draft.sections) ? STATE.draft.sections : [];
+      if(sections.length === 0){
+        const empty = document.createElement("div");
+        empty.className = "tiny";
+        empty.textContent = "Inga sektioner ännu. Klicka “Lägg till sektion”.";
+        secList.appendChild(empty);
+        return;
+      }
+
+      sections.forEach((s, idx) => {
+        const card = document.createElement("div");
+        card.className = "secCard";
+        card.setAttribute("data-id", s.id);
+
+        const top = document.createElement("div");
+        top.className = "secTop";
+
+        const left = document.createElement("div");
+        const strong = document.createElement("strong");
+        strong.textContent = s.heading ? s.heading : `Sektion ${idx+1}`;
+        left.appendChild(strong);
+
+        const right = document.createElement("div");
+        right.className = "secBtns";
+
+        const up = document.createElement("button");
+        up.className = "miniBtn";
+        up.type = "button";
+        up.textContent = "↑";
+        up.title = "Flytta upp";
+        up.disabled = (idx === 0) || STATE.locked;
+        up.addEventListener("click", () => moveSection(s.id, -1));
+
+        const down = document.createElement("button");
+        down.className = "miniBtn";
+        down.type = "button";
+        down.textContent = "↓";
+        down.title = "Flytta ner";
+        down.disabled = (idx === sections.length - 1) || STATE.locked;
+        down.addEventListener("click", () => moveSection(s.id, +1));
+
+        const del = document.createElement("button");
+        del.className = "miniBtn danger";
+        del.type = "button";
+        del.textContent = "Ta bort";
+        del.disabled = STATE.locked;
+        del.addEventListener("click", () => deleteSection(s.id));
+
+        right.appendChild(up);
+        right.appendChild(down);
+        right.appendChild(del);
+
+        top.appendChild(left);
+        top.appendChild(right);
+
+        const grid = document.createElement("div");
+        grid.className = "formGrid";
+        grid.style.marginTop = "10px";
+
+        const col1 = document.createElement("div");
+        const col2 = document.createElement("div");
+
+        const l1 = document.createElement("label");
+        l1.textContent = "Rubrik";
+        const inHeading = document.createElement("input");
+        inHeading.className = "input";
+        inHeading.type = "text";
+        inHeading.maxLength = 80;
+        inHeading.value = s.heading || "";
+        inHeading.disabled = STATE.locked;
+        inHeading.addEventListener("input", () => {
+          s.heading = clampLen(normStr(inHeading.value), 80);
+          markDirty(true);
+          // uppdatera titel i kortet direkt
+          strong.textContent = s.heading ? s.heading : `Sektion ${idx+1}`;
+        });
+        const wrap1 = document.createElement("div");
+        wrap1.className = "field";
+        wrap1.appendChild(inHeading);
+        l1.appendChild(wrap1);
+
+        const l2 = document.createElement("label");
+        l2.textContent = "Text";
+        const ta = document.createElement("textarea");
+        ta.className = "input";
+        ta.maxLength = 5000;
+        ta.value = String(s.body || "");
+        ta.disabled = STATE.locked;
+        ta.addEventListener("input", () => {
+          s.body = clampLen(String(ta.value ?? ""), 5000);
+          markDirty(true);
+        });
+        const wrap2 = document.createElement("div");
+        wrap2.className = "field";
+        wrap2.appendChild(ta);
+        l2.appendChild(wrap2);
+
+        col1.appendChild(l1);
+        col2.appendChild(l2);
+
+        grid.appendChild(col1);
+        grid.appendChild(col2);
+
+        card.appendChild(top);
+        card.appendChild(grid);
+        secList.appendChild(card);
+      });
+    }
+
+    function moveSection(secId, dir){
+      if(!STATE.draft || STATE.locked) return;
+      const arr = STATE.draft.sections;
+      const i = arr.findIndex(x => x.id === secId);
+      if(i < 0) return;
+      const j = i + dir;
+      if(j < 0 || j >= arr.length) return;
+      const tmp = arr[i];
+      arr[i] = arr[j];
+      arr[j] = tmp;
+      markDirty(true);
+      renderSections();
+    }
+
+    function deleteSection(secId){
+      if(!STATE.draft || STATE.locked) return;
+      const arr = STATE.draft.sections;
+      const i = arr.findIndex(x => x.id === secId);
+      if(i < 0) return;
+      const ok = confirm("Ta bort sektionen?");
+      if(!ok) return;
+      arr.splice(i, 1);
+      markDirty(true);
+      renderSections();
+    }
+
+    function addSection(){
+      if(!STATE.draft || STATE.locked) return;
+      STATE.draft.sections.push({ id: uuid("sec"), heading: "", body: "" });
+      markDirty(true);
+      renderSections();
+    }
+
+    addSecBtn.addEventListener("click", () => { setMsg("", ""); addSection(); });
+
+    previewBtn.addEventListener("click", () => {
+      if(!STATE.draft) return;
+      STATE.previewMode = !STATE.previewMode;
+      previewBtn.textContent = STATE.previewMode ? "Tillbaka" : "Förhandsgranska";
+      renderSections();
+    });
+
+    /* ===========================
+       Create / Clone / Delete / Save
+    ============================ */
+    function createNewTraining(){
+      const now = Date.now();
+      const t = normalizeTraining({
+        id: uuid("trn"),
+        title: "",
+        module: MODULES[0] || "Utbildning",
+        summary: "",
+        tags: [],
+        sections: [],
+        version: 1,
+        createdAt: now,
+        updatedAt: now
+      });
+      STATE.selectedId = t.id;
+      STATE.draft = t;
+      STATE.isDirty = true;
+      STATE.previewMode = false;
+      setMsg("warn", "Ny utbildning skapad (osparad). Fyll i titel och klicka Spara.");
+      bindDraftToUI();
+      renderList();
+      markDirty(true);
+    }
+
+    newBtn.addEventListener("click", () => {
+      if(STATE.isDirty){
+        const ok = confirm("Du har osparade ändringar. Skapa ny utan att spara?");
+        if(!ok) return;
+      }
+      createNewTraining();
+    });
+
+    cloneBtn.addEventListener("click", () => {
+      if(!STATE.draft || STATE.locked) return;
+      const now = Date.now();
+      const copy = normalizeTraining(JSON.parse(JSON.stringify(STATE.draft)));
+      copy.id = uuid("trn");
+      copy.title = copy.title ? (clampLen(copy.title + " (kopia)", 80)) : "Kopia";
+      copy.version = 1;
+      copy.createdAt = now;
+      copy.updatedAt = now;
+      // nya section ids för att undvika krockar
+      copy.sections = (copy.sections || []).map(s => ({ id: uuid("sec"), heading: s.heading || "", body: s.body || "" }));
+
+      STATE.selectedId = copy.id;
+      STATE.draft = copy;
+      STATE.isDirty = true;
+      STATE.previewMode = false;
+      setMsg("warn", "Kopia skapad (osparad). Klicka Spara för att lägga till i listan.");
+      bindDraftToUI();
+      renderList();
+      markDirty(true);
+    });
+
+    deleteBtn.addEventListener("click", () => {
+      if(!STATE.draft || STATE.locked) return;
+      const title = STATE.draft.title || "(namnlös)";
+      const ok = confirm(`Ta bort utbildningen "${title}"? Detta går inte att ångra.`);
+      if(!ok) return;
+
+      const idx = STATE.list.findIndex(x => x.id === STATE.draft.id);
+      if(idx < 0){
+        // osparad draft
+        STATE.draft = null;
+        STATE.selectedId = "";
+        STATE.isDirty = false;
+        setMsg("ok", "Osparad utbildning togs bort.");
+        bindDraftToUI();
+        renderList();
+        return;
+      }
+
+      const next = STATE.list.slice();
+      next.splice(idx, 1);
+
+      const res = saveTrainings(next);
+      if(!res.ok){
+        setMsg("err", res.err || "Kunde inte ta bort (fail-closed).");
+        return;
+      }
+
+      STATE.list = next.map(normalizeTraining);
+      STATE.draft = null;
+      STATE.selectedId = "";
+      STATE.isDirty = false;
+      setMsg("ok", "Borttagen.");
+      bindDraftToUI();
+      renderList();
+    });
+
+    function validateDraft(){
+      if(!STATE.draft) return { ok:false, err:"Ingen utbildning vald." };
+      const title = normStr(titleEl.value);
+      if(!title) return { ok:false, err:"Titel krävs (fail-closed)." };
+      return { ok:true };
+    }
+
+    function hydrateDraftFromUI(){
+      const t = STATE.draft;
+      t.title = clampLen(normStr(titleEl.value), 80);
+      t.module = MODULES.includes(normStr(moduleEl.value)) ? normStr(moduleEl.value) : (MODULES[0] || "Utbildning");
+      t.summary = clampLen(normStr(summaryEl.value), 240);
+      t.tags = splitTags(tagsEl.value);
+
+      // sections hålls uppdaterade via live input, men normalisera ändå
+      t.sections = Array.isArray(t.sections) ? t.sections.map(normalizeSection) : [];
+      t.updatedAt = Date.now();
+      t.version = Number.isFinite(Number(t.version)) ? Math.max(1, Math.trunc(Number(t.version))) : 1;
+    }
+
+    titleEl.addEventListener("input", () => { if(!STATE.draft || STATE.locked) return; markDirty(true); setEditorHeader(); });
+    moduleEl.addEventListener("change", () => { if(!STATE.draft || STATE.locked) return; markDirty(true); });
+    summaryEl.addEventListener("input", () => { if(!STATE.draft || STATE.locked) return; markDirty(true); });
+    tagsEl.addEventListener("input", () => { if(!STATE.draft || STATE.locked) return; markDirty(true); });
+
+    saveBtn.addEventListener("click", () => {
+      setMsg("", "");
+      if(STATE.locked){ setMsg("err","Editor låst (fail-closed)."); return; }
+
+      const v = validateDraft();
+      if(!v.ok){ setMsg("err", v.err || "Validering misslyckades."); return; }
+
+      hydrateDraftFromUI();
+
+      // upsert i listan
+      const idx = STATE.list.findIndex(x => x.id === STATE.draft.id);
+      const next = STATE.list.slice();
+
+      if(idx >= 0){
+        const prev = normalizeTraining(next[idx]);
+        STATE.draft.createdAt = prev.createdAt;
+        // bump version (enkelt): varje spar => +1
+        STATE.draft.version = (prev.version || 1) + 1;
+        next[idx] = normalizeTraining(STATE.draft);
+      }else{
+        STATE.draft.version = 1;
+        next.push(normalizeTraining(STATE.draft));
+      }
+
+      const res = saveTrainings(next);
+      if(!res.ok){
+        setMsg("err", res.err || "Kunde inte spara (fail-closed).");
+        return;
+      }
+
+      STATE.list = next.map(normalizeTraining).sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+      STATE.selectedId = STATE.draft.id;
+      STATE.draft = normalizeTraining(STATE.list.find(x => x.id === STATE.selectedId));
+      STATE.isDirty = false;
+
+      setMsg("ok", "Sparat.");
+      bindDraftToUI();
+      renderList();
+    });
+
+    /* ===========================
+       AI integration (valfritt, externt)
+    ============================ */
+    function showAiHelp(){
+      const example = {
+        method: "POST",
+        headers: { "content-type":"application/json" },
+        body: {
+          topic: "Hygien",
+          focus: "restaurang, grundnivå, HACCP",
+          module: "Utbildning",
+          constraints: {
+            maxSections: 8,
+            maxBodyCharsPerSection: 1200,
+            language: "sv-SE"
+          }
+        },
+        expectedResponse: {
+          training: {
+            title: "Hygien – Grund",
+            module: "Utbildning",
+            summary: "Kort sammanfattning…",
+            tags: ["hygien","HACCP"],
+            sections: [
+              { heading:"Mål", body:"..." },
+              { heading:"Rutiner", body:"..." }
+            ]
+          }
+        }
+      };
+      aiHelp.style.display = "block";
+      aiHelp.textContent = JSON.stringify(example, null, 2);
+    }
+
+    aiHelpBtn.addEventListener("click", () => {
+      if(aiHelp.style.display === "block"){
+        aiHelp.style.display = "none";
+        aiHelp.textContent = "";
+      }else{
+        showAiHelp();
+      }
+    });
+
+    async function generateWithAI(){
+      setMsg("", "");
+
+      const url = normStr(aiUrlEl.value);
+      if(!url || !url.startsWith("https://")){
+        setMsg("err", "AI-endpoint måste vara https://... (fail-closed).");
+        return;
+      }
+
+      const topic = clampLen(normStr(aiTopicEl.value), 80);
+      if(!topic){
+        setMsg("err", "Ange ämne/titel för AI (fail-closed).");
+        return;
+      }
+
+      // Skapa ny draft om ingen vald
+      if(!STATE.draft){
+        createNewTraining();
+      }
+
+      const payload = {
+        topic,
+        focus: clampLen(normStr(aiFocusEl.value), 120),
+        module: MODULES.includes(normStr(moduleEl.value)) ? normStr(moduleEl.value) : (STATE.draft.module || (MODULES[0]||"Utbildning")),
+        constraints: { maxSections: 10, maxBodyCharsPerSection: 1200, language: "sv-SE" }
+      };
+
+      const ctrl = new AbortController();
+      const tmo = setTimeout(() => ctrl.abort(), 20000);
+
+      try{
+        setMsg("warn", "Skapar utkast…");
+
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "content-type":"application/json" },
+          body: JSON.stringify(payload),
+          signal: ctrl.signal
+        });
+
+        const text = await res.text();
+        const data = safeJsonParse(text);
+
+        if(!res.ok){
+          setMsg("err", `AI-endpoint svarade ${res.status}. Inget sparades.\n${text.slice(0, 800)}`);
+          return;
+        }
+        if(!data || typeof data !== "object" || !data.training || typeof data.training !== "object"){
+          setMsg("err", "AI-svar har fel format. Förväntar { training: {...} }. Inget sparades.");
+          return;
+        }
+
+        const tr = data.training;
+
+        // fail-closed: normalisera strikt
+        const next = normalizeTraining({
+          id: STATE.draft.id,
+          title: clampLen(normStr(tr.title || topic), 80),
+          module: MODULES.includes(normStr(tr.module)) ? normStr(tr.module) : (STATE.draft.module || (MODULES[0]||"Utbildning")),
+          summary: clampLen(normStr(tr.summary), 240),
+          tags: Array.isArray(tr.tags) ? tr.tags : splitTags(tr.tags),
+          sections: Array.isArray(tr.sections) ? tr.sections.map(s => ({ heading: s.heading, body: s.body })) : [],
+          version: STATE.draft.version || 1,
+          createdAt: STATE.draft.createdAt || Date.now(),
+          updatedAt: Date.now()
+        });
+
+        // behåll id/createdAt i draft (ingen auto-save)
+        STATE.draft.title = next.title;
+        STATE.draft.module = next.module;
+        STATE.draft.summary = next.summary;
+        STATE.draft.tags = next.tags;
+        STATE.draft.sections = next.sections.map(s => normalizeSection({ id: uuid("sec"), heading: s.heading, body: s.body }));
+
+        STATE.previewMode = false;
+        previewBtn.textContent = "Förhandsgranska";
+
+        setMsg("ok", "AI-utkast klart. Granska och klicka Spara.");
+        bindDraftToUI();
+        markDirty(true);
+      }catch(err){
+        const msg = (err && err.name === "AbortError") ? "Timeout mot AI-endpoint." : "Kunde inte nå AI-endpoint.";
+        setMsg("err", msg + " Inget sparades.");
+      }finally{
+        clearTimeout(tmo);
+      }
+    }
+
+    aiGenerateBtn.addEventListener("click", () => {
+      if(STATE.locked){ setMsg("err","Editor låst (fail-closed)."); return; }
+      generateWithAI();
+    });
+
+    /* ===========================
+       Init
+    ============================ */
+    (function init(){
+      // auth
+      const res = requireAdminOrStop();
+      if(!res) return;
+      STATE.auth = res.auth;
+
+      const empNo = normStr(STATE.auth.empNo) || "—";
+      const role  = normStr(STATE.auth.role)  || "—";
+      whoPill.textContent = `${empNo} • ${role}`;
+
+      // modules dropdown
+      renderModuleOptions();
+
+      // read trainings
+      const read = readTrainings();
+      if(!read.ok){
+        STATE.locked = true;
+        showGuard("Fail-closed: " + (read.err || "Kunde inte läsa AO-060_TRAININGS_V1."));
+        setEditorEnabled(false);
+        setMsg("err", "Editor låst. Fixa storage och ladda om.");
+        return;
+      }
+
+      STATE.list = (Array.isArray(read.value) ? read.value : []).map(normalizeTraining);
+      STATE.list.sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+
+      hideGuard();
+      setMsg("", "");
+
+      // editor starts disabled until selection/new
+      setEditorEnabled(false);
+      bindDraftToUI();
+      renderList();
+
+      // prefill AI url from config if available (ingen lagring)
+      try{
+        const cfgUrl = window.HR_CONFIG && window.HR_CONFIG.AI && typeof window.HR_CONFIG.AI.WORKER_URL === "string"
+          ? window.HR_CONFIG.AI.WORKER_URL
+          : "";
+        if(cfgUrl) aiUrlEl.value = cfgUrl;
+      }catch{}
+    })();
+  </script>
+</body>
+</html>
 
