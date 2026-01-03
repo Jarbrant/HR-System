@@ -1,5 +1,5 @@
-<!-- ============================================================
-AO-052 | FIL-ID: admin/packages.html
+<!-- ============================================================ 
+AO-052 (PATCH v1.4) | FIL-ID: admin/packages.html
 Projekt: HR-System
 Syfte: Admin/Manager – Paket-editor (metadata, avancerat schema/intervall, moduler/område, block & ordning) – UI-only v1.3 (MASTER)
 
@@ -465,17 +465,9 @@ Keys (LÅST):
 
 <script>
 /* ============================================================
-AO-052 | admin/packages.html – v1.3 MASTER
-- Storage: Only AO-050_PACKAGES_V1 writable
-- Access: ADMIN, MANAGER
-- Schedule: advanced metadata (mode, startDate, intervalUnit, intervalEvery, byWeekdays, byMonthDay, time, endMode, endDate)
-- Modules: metadata tags (checkbox list)
-- Blocks: task | question | info | both
-  - taskAnswer: checkbox | scale (scale config)
-  - questionAnswer: text | choice (choice options)
-  - info: plain text only
-  - both: task(checkbox|scale) + question(text only)
-- Fail-closed: auth invalid => redirect; corrupt storage => lock
+AO-052 | admin/packages.html – v1.4 PATCH
+- PATCH v1.4: Utökad Typ-lista med rubriker (metadata) utan att ta bort något
+- Backward compatible: okänd befintlig typ visas som "(bevarad)" och sparas oförändrad
 ============================================================ */
 (function(){
   "use strict";
@@ -483,14 +475,31 @@ AO-052 | admin/packages.html – v1.3 MASTER
   const SESSION_KEY  = "AO-001_LOGIN_V1";
   const PACKAGES_KEY = "AO-050_PACKAGES_V1";
 
-  // Paket-typ-lista (låst)
+  // Paket-typ-lista (låst) – PATCH v1.4: lägg till rubriker som Typ (metadata)
+  // VIKTIGT: inga borttag. Befintliga typer behålls.
   const TYPES = [
+    // befintliga (behåll)
     "Onboarding",
     "Mål & uppföljning",
     "Utvecklingssamtal",
     "Utbildning",
     "Kompetenskartläggning",
-    "Regel/Policy"
+    "Regel/Policy",
+
+    // nya (tillägg enligt beslut)
+    "Regelhantering",
+    "Policy",
+    "Ansvarsområden",
+    "Action Planning",
+    "CAPA / Root cause",
+    "Benchmarks / Heatmaps",
+    "Kommunikation",
+    "Arbetsmiljö / Säkerhet",
+    "Kvalitet",
+    "Driftplanering",
+
+    // (valfritt men ofarligt): möjliggör ren rubrik om ni vill använda som typ
+    "Metadata"
   ];
 
   // "Allt ska in" som metadata-områden (utan ny key, utan exekvering)
@@ -724,17 +733,54 @@ AO-052 | admin/packages.html – v1.3 MASTER
     return out;
   }
 
-  // Render locked type dropdown
+  // PATCH v1.4: dedupe TYPES robust (if someone accidentally duplicates)
+  function uniqueTypeList(list){
+    const out = [];
+    const seen = new Set();
+    (Array.isArray(list)?list:[]).forEach(x => {
+      const s = String(x||"").trim();
+      if(!s) return;
+      if(seen.has(s)) return;
+      seen.add(s);
+      out.push(s);
+    });
+    return out;
+  }
+
+  // Render locked type dropdown (PATCH v1.4: preserve unknown current type)
   function renderTypeDropdown(current){
+    const uniqTypes = uniqueTypeList(TYPES);
+
     selType.innerHTML = "";
-    TYPES.forEach(t => {
+
+    const cur = String(current || "").trim();
+    const hasCur = cur && uniqTypes.includes(cur);
+
+    // If stored type is unknown, keep it as selectable "bevarad" (value stays original)
+    if(cur && !hasCur){
+      const optKeep = document.createElement("option");
+      optKeep.value = cur;
+      optKeep.textContent = `${cur} (bevarad)`;
+      selType.appendChild(optKeep);
+
+      const sep = document.createElement("option");
+      sep.disabled = true;
+      sep.textContent = "────────";
+      selType.appendChild(sep);
+    }
+
+    uniqTypes.forEach(t => {
       const opt = document.createElement("option");
       opt.value = t;
       opt.textContent = t;
       selType.appendChild(opt);
     });
-    if(current && TYPES.includes(current)) selType.value = current;
-    else selType.value = TYPES[0];
+
+    if(cur){
+      selType.value = cur;
+    }else{
+      selType.value = uniqTypes[0] || "";
+    }
   }
 
   // Render modules
@@ -786,11 +832,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
   function normalizeSchedule(raw){
     const sch = (raw && typeof raw === "object") ? raw : {};
 
-    // legacy fields (v1.0/v1.2):
-    // mode, startDate, interval, intervalEvery, endMode, endDate
-    // MASTER fields:
-    // intervalUnit, intervalEvery, byWeekdays[], byMonthDay, time, endMode/endDate
-
     const mode = (sch.mode === "recurring") ? "recurring" : "once";
     const startDate = isISODate(sch.startDate) ? sch.startDate : "";
 
@@ -830,23 +871,20 @@ AO-052 | admin/packages.html – v1.3 MASTER
     const title = String(b.title || "").trim();
     const text = (b.text == null) ? (b.description == null ? "" : String(b.description)) : String(b.text);
 
-    // Answer types
     const taskAnswer = (b.taskAnswer === "scale" || b.taskAnswer === "checkbox") ? b.taskAnswer : "checkbox";
     const questionAnswerLegacy = (b.questionAnswer === "choice" || b.questionAnswer === "text") ? b.questionAnswer : "text";
     const questionAnswer = (okKind && kind === "both") ? "text" : questionAnswerLegacy;
 
-    // Scale config (optional metadata)
     const scaleMin = clampInt(b.scaleMin, 1, 10, 1);
     const scaleMax = clampInt(b.scaleMax, 1, 10, 5);
     const scaleMinLabel = String(b.scaleMinLabel || "").slice(0, 40);
     const scaleMaxLabel = String(b.scaleMaxLabel || "").slice(0, 40);
 
-    // Choice options (optional)
     const options = Array.isArray(b.options) ? b.options.slice(0, 10).map(x => String(x||"").slice(0, 40)) : [];
 
     return {
       id,
-      kind: okKind ? kind : kind,   // keep unknown for display+lock
+      kind: okKind ? kind : kind,
       title,
       text,
       taskAnswer,
@@ -1052,18 +1090,15 @@ AO-052 | admin/packages.html – v1.3 MASTER
   }
 
   function addDefaultBlocks(){
-    // “default-block: ja” → lägg in en standardtrio, men endast om tom eller bekräftat
     if(STATE.edit.blocks.length > 0){
       if(!confirm("Lägga till standardblock efter befintliga block?")) return false;
     }
-    // 1) Info
     STATE.edit.blocks.push(normalizeBlock({
       id: genId("blk"),
       kind: "info",
       title: "Information",
       text: "Kort info om paketet och vad som förväntas."
     }));
-    // 2) Task
     STATE.edit.blocks.push(normalizeBlock({
       id: genId("blk"),
       kind: "task",
@@ -1071,7 +1106,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
       text: "Gör uppgiften och markera när du är klar.",
       taskAnswer: "checkbox"
     }));
-    // 3) Question
     STATE.edit.blocks.push(normalizeBlock({
       id: genId("blk"),
       kind: "question",
@@ -1169,7 +1203,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
     const col1 = document.createElement("div");
     const col2 = document.createElement("div");
 
-    // Title
     const lblTitle = document.createElement("label");
     lblTitle.textContent = "Titel";
     const inTitle = document.createElement("input");
@@ -1181,7 +1214,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
     if(block.__locked) inTitle.disabled = true;
     lblTitle.appendChild(inTitle);
 
-    // Text
     const lblText = document.createElement("label");
     lblText.textContent = (block.kind === "info") ? "Text (info)" : "Text";
     const inText = document.createElement("textarea");
@@ -1195,7 +1227,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
     col1.appendChild(lblTitle);
     col1.appendChild(lblText);
 
-    // Answer config
     const ansWrap = document.createElement("div");
     const ansLbl = document.createElement("div");
     ansLbl.style.fontWeight = "950";
@@ -1213,7 +1244,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
       hint.textContent = "Information har ingen svarstyp (metadata).";
       ansWrap.appendChild(hint);
     }else{
-      // Task part
       if(block.kind === "task" || block.kind === "both"){
         const lbl = document.createElement("label");
         lbl.textContent = "Uppgift – svarstyp";
@@ -1227,7 +1257,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
         if(block.kind === "both" || block.kind === "task") lbl.appendChild(sel);
         ansWrap.appendChild(lbl);
 
-        // Scale config
         const sc = document.createElement("div");
         sc.className = "subCard";
         sc.style.marginTop = "10px";
@@ -1284,7 +1313,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
         ansWrap.appendChild(sc);
       }
 
-      // Question part
       if(block.kind === "question"){
         const lbl = document.createElement("label");
         lbl.textContent = "Fråga – svarstyp";
@@ -1298,7 +1326,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
         lbl.appendChild(sel);
         ansWrap.appendChild(lbl);
 
-        // Choice options
         const opt = document.createElement("div");
         opt.className = "subCard";
         opt.style.marginTop = "10px";
@@ -1338,7 +1365,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
     card.appendChild(top);
     card.appendChild(body);
 
-    // DND events
     card.addEventListener("dragstart", (e) => {
       try{
         setMsg("", "");
@@ -1394,7 +1420,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
     arr.forEach((b, idx) => blocksList.appendChild(makeBlockCard(b, idx)));
   }
 
-  // Block input changes
   blocksList.addEventListener("input", (e) => {
     const t = e.target;
     if(!t) return;
@@ -1412,7 +1437,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
     if(field === "text") b.text = String(t.value || "").slice(0, 240);
 
     if(field === "optionsText"){
-      // Convert textarea to options array (max 10, non-empty)
       const lines = String(t.value || "").split("\n").map(s => s.trim()).filter(Boolean);
       b.options = lines.slice(0, 10).map(x => x.slice(0, 40));
     }
@@ -1453,10 +1477,9 @@ AO-052 | admin/packages.html – v1.3 MASTER
       b.scaleMaxLabel = String(t.value||"").slice(0, 40);
     }
 
-    if(b.kind === "both") b.questionAnswer = "text"; // lock
+    if(b.kind === "both") b.questionAnswer = "text";
   });
 
-  // Block actions
   blocksList.addEventListener("click", (e) => {
     const el = e.target && (e.target.closest ? e.target.closest("[data-action]") : null);
     if(!el) return;
@@ -1503,12 +1526,10 @@ AO-052 | admin/packages.html – v1.3 MASTER
     renderBlocks();
   });
 
-  // Schedule UI toggles
   schMode.addEventListener("change", () => { updateScheduleUIVisibility(); });
   schEndMode.addEventListener("change", () => { updateScheduleUIVisibility(); });
   schIntervalUnit.addEventListener("change", () => { updateScheduleUIVisibility(); });
 
-  // Validation
   function validateName(){
     return String(inpName.value || "").trim().length > 0;
   }
@@ -1584,7 +1605,6 @@ AO-052 | admin/packages.html – v1.3 MASTER
     p.type = String(selType.value || "").trim();
     p.modules = getSelectedModules();
 
-    // Schedule
     const mode = (schMode.value === "recurring") ? "recurring" : "once";
     const startDate = isISODate(schStart.value) ? schStart.value : "";
 
@@ -1605,20 +1625,15 @@ AO-052 | admin/packages.html – v1.3 MASTER
       p.schedule = normalizeSchedule({ mode:"recurring", startDate, intervalUnit, intervalEvery, byWeekdays, byMonthDay, time, endMode, endDate });
     }
 
-    // Blocks: normalize + enforce rules
     p.blocks = Array.isArray(p.blocks) ? p.blocks.map(normalizeBlock) : [];
     p.blocks.forEach(b => {
       if(!b || b.__locked) return;
       if(b.kind === "both") b.questionAnswer = "text";
       if(b.kind !== "question" && b.questionAnswer === "choice") b.questionAnswer = "text";
       if(b.questionAnswer !== "choice") b.options = [];
-      if(b.taskAnswer !== "scale") {
-        // keep scale config but it's metadata; allowed. no-op.
-      }
     });
   }
 
-  // Save
   saveBtn.addEventListener("click", () => {
     setMsg("", "");
 
@@ -1642,10 +1657,10 @@ AO-052 | admin/packages.html – v1.3 MASTER
     if(idx >= 0){
       const prev = normalizePackage(nextArray[idx]);
       STATE.edit.createdAt = prev.createdAt;
-      STATE.edit.isActive = prev.isActive; // read-only status here
+      STATE.edit.isActive = prev.isActive;
       nextArray[idx] = STATE.edit;
     }else{
-      STATE.edit.isActive = false; // default
+      STATE.edit.isActive = false;
       STATE.edit.createdAt = Date.now();
       nextArray.push(STATE.edit);
     }
@@ -1663,7 +1678,20 @@ AO-052 | admin/packages.html – v1.3 MASTER
     setHeader();
   });
 
-  // Init
+  function setHeader(){
+    if(STATE.isNew){
+      elTitle.textContent = "Skapa paket (Master)";
+      elIntro.textContent = "Du skapar ett nytt paket. Allt här är metadata. Ingen exekvering.";
+    }else{
+      elTitle.textContent = "Redigera paket (Master)";
+      elIntro.textContent = "Du redigerar ett befintligt paket. Status visas här (read-only).";
+    }
+
+    const active = !!STATE.edit.isActive;
+    elStatus.textContent = active ? "Status: Aktiv (read-only)" : "Status: Inaktiv (read-only)";
+    elStatus.className = "pill " + (active ? "ok" : "warn");
+  }
+
   (function init(){
     disableEditor(true);
     showLock("");
