@@ -504,15 +504,18 @@
     const KEY_SESSION      = "AO-001_LOGIN_V1";
     const KEY_TASKS        = "AO-014_TASKS_V1";
     const KEY_ASSIGNMENTS  = "AO-020_ROLE_ASSIGNMENTS_V2";
+
     // AO-053 (READ ONLY)
     const KEY_PACKAGES     = "AO-050_PACKAGES_V1";
     const KEY_QUESTIONS    = "AO-012_QUESTIONS_V1";
     const KEY_ANSWERS      = "AO-013_ANSWERS_V1";
 
-    // AO-EMP-HOME-ONBOARD-01 (READ ONLY) — MUST match AO-1/5–3/5 decided keys (NO NEW NAMES)
-    // NOTE: According to earlier AO-ONBOARD series, these are:
+    // AO-EMP-HOME-ONBOARD-01 (READ ONLY) — NO NEW NAMES
     const KEY_ONBOARD_PLANS_V1       = "AO-060_PLANS_V1";
     const KEY_ONBOARD_ASSIGNMENTS_V1 = "AO-061_PLAN_ASSIGNMENTS_V1";
+
+    // NEW READ (NO WRITES): needed to expand plan items -> blocks
+    const KEY_TRAININGS_V1 = "AO-057_TRAININGS_V1";
 
     /* ===========================
        DOM
@@ -558,7 +561,6 @@
     function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
 
     function readAnyStorage(key){
-      // fail-closed läsning: sessionStorage först, fallback localStorage
       try {
         const s1 = sessionStorage.getItem(key);
         if (s1) return s1;
@@ -571,7 +573,6 @@
     }
 
     function writeSessionPreferred(sessionObj){
-      // Skriver ENDAST befintlig key (KEY_SESSION). Ingen ny key.
       const raw = JSON.stringify(sessionObj);
       try { sessionStorage.setItem(KEY_SESSION, raw); return true; } catch {}
       try { localStorage.setItem(KEY_SESSION, raw); return true; } catch {}
@@ -593,7 +594,6 @@
         return null;
       }
 
-      // EMPLOYEE-sida: tillåt endast EMPLOYEE (fail-closed)
       const sess = window.HRApp.requireAuth({ allowRoles: [ window.HR_CONFIG.ROLES.EMPLOYEE ] });
       if (!sess) return null;
 
@@ -603,7 +603,6 @@
         return null;
       }
 
-      // PATCH v1.2: om scopeId saknas -> försök resolva via assignments och skriv tillbaka till session.
       if (!String(auth.scopeId || "").trim()) {
         const empNo = String(auth.empNo || "").trim();
         const role  = String(auth.role || "").trim();
@@ -613,7 +612,6 @@
           const patched = patchSessionScope(sess, scopeId);
           if (patched) {
             auth = window.HRApp.getAuth(patched) || auth;
-            // Vi fortsätter även om write misslyckas, men visar varning.
           } else {
             showGuard("Fail-closed: kunde inte uppdatera session med scopeId (korrupt session). Logga in igen.");
             return null;
@@ -697,7 +695,7 @@
     }
 
     /* ===========================
-       AO-053 READ helpers (NO WRITES)
+       Read helpers (NO NEW KEYS)
     ============================ */
     function readLocalArray(key){
       try{
@@ -710,7 +708,6 @@
     }
 
     function readLocalObjectOrArray(key){
-      // hardening: accept array OR object; everything else => null (fail-closed)
       try{
         const raw = localStorage.getItem(key);
         if(!raw) return null;
@@ -757,10 +754,7 @@
     selectedDate.setHours(12,0,0,0);
 
     /* ===========================
-       Task normalization (tolerant)
-       + FAIL-CLOSED FILTRERING:
-       - visa inte tasks utan scopeId
-       - visa inte tasks som inte är riktade till empNo (eller ALL)
+       Task normalization + filtering
     ============================ */
     function getTaskId(t, idx){
       const raw = (t && (t.id || t.taskId || t.uuid)) ?? `task_${idx}`;
@@ -802,7 +796,7 @@
 
     function taskBelongsToDay(t, dayISO){
       const iso = getTaskDateISO(t);
-      if(!iso) return (dayISO === toISODate(new Date())); // saknar datum => behandla som idag
+      if(!iso) return (dayISO === toISODate(new Date()));
       return iso === dayISO;
     }
 
@@ -833,7 +827,6 @@
       const mine  = String(myScopeId ?? "").trim();
       if (!scope || !mine) return false;
 
-      // Employee: exakt scope (inte subtree)
       if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function") {
         return window.HRApp.sameOrMissingScope(scope, mine);
       }
@@ -849,8 +842,7 @@
     }
 
     /* ===========================
-       AO-053: Schedule text (display-only, no engine)
-       - Supports legacy schedule.interval and MASTER schedule.intervalUnit
+       Schedule text (display-only)
     ============================ */
     function isISODate(s){ return /^\d{4}-\d{2}-\d{2}$/.test(String(s||"")); }
     function isHHMM(s){ return /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s||"")); }
@@ -878,30 +870,24 @@
         return start ? `Start ${start}` : "Engång";
       }
 
-      // Legacy support:
       const unitRaw = (s.intervalUnit || s.interval);
       const unit = (unitRaw === "day" || unitRaw === "week" || unitRaw === "month") ? unitRaw : "week";
       const every = Number.isFinite(Number(s.intervalEvery)) ? Math.max(1, Math.min(52, Math.trunc(Number(s.intervalEvery)))) : 1;
 
       const parts = [];
-
       parts.push(`Varje ${every} ${swUnit(unit, every)}`);
 
-      // Weekdays (only metadata)
       if(unit === "week" && Array.isArray(s.byWeekdays) && s.byWeekdays.length){
         const w = s.byWeekdays.map(weekdayLabel).filter(Boolean);
         if(w.length) parts.push(w.join(", "));
       }
 
-      // Month day (only metadata)
       if(unit === "month" && String(s.byMonthDay || "").trim()){
         const md = String(s.byMonthDay).trim();
         parts.push(`Dag ${md}`);
       }
 
-      // time (only metadata)
       if(isHHMM(s.time)) parts.push(`Kl ${s.time}`);
-
       if(start) parts.push(`Start ${start}`);
 
       const until = (String(s.endMode||"") === "until" && isISODate(s.endDate)) ? `Till ${s.endDate}` : "Tillsvidare";
@@ -911,9 +897,7 @@
     }
 
     /* ===========================
-       AO-053: Questions/Answers matching (tolerant)
-       - If answer has empNo, require it matches current empNo (fail-closed for cross-user)
-       - Backcompat: missing empNo => accept
+       Questions/Answers matching (tolerant)
     ============================ */
     function readQuestions(){ return readLocalArray(KEY_QUESTIONS); }
     function readAnswers(){ return readLocalArray(KEY_ANSWERS); }
@@ -932,7 +916,6 @@
     function answerMatchesQuestion(ans, qId, qTitle, myEmpNo){
       if(!ans || typeof ans !== "object") return false;
 
-      // If empNo present on answer => must match me
       const aEmp = answerEmpNo(ans);
       if(aEmp && String(myEmpNo||"").trim() && aEmp !== String(myEmpNo).trim()) return false;
 
@@ -952,7 +935,6 @@
       const answers = readAnswers();
       if(!Array.isArray(answers) || answers.length === 0) return false;
 
-      // Prefer: find questionId by questions list
       const questions = readQuestions();
       let qId = "";
       if(Array.isArray(questions) && questions.length){
@@ -964,7 +946,7 @@
     }
 
     /* ===========================
-       AO-053: Packages -> cards (read-only)
+       Packages -> cards (read-only)
     ============================ */
     function readPackagesActive(){
       const arr = readLocalArray(KEY_PACKAGES);
@@ -1034,13 +1016,12 @@
     }
 
     /* ===========================
-       AO-EMP-HOME-ONBOARD-01: Onboarding read helpers (NO WRITES)
-       - No new key names
-       - Fail-closed: corrupt/missing => return empty so behavior is identical to today
+       Onboarding (READ ONLY)
+       - FIX: expand plan items (trainingId/dayOffset) -> training.blocks via AO-057
+       - NO NEW KEYS, NO WRITES
     ============================ */
     function readOnboardPlans(){
       const data = readLocalObjectOrArray(KEY_ONBOARD_PLANS_V1);
-      // accept: array OR {plans:[...]} OR {items:[...]} (hardening, but fail-closed to [])
       if(Array.isArray(data)) return data;
       if(data && typeof data === "object"){
         if(Array.isArray(data.plans)) return data.plans;
@@ -1051,19 +1032,13 @@
 
     function readOnboardAssignments(){
       const data = readLocalObjectOrArray(KEY_ONBOARD_ASSIGNMENTS_V1);
-      // accept: array OR {assignments:[...]}
       if(Array.isArray(data)) return data;
       if(data && typeof data === "object" && Array.isArray(data.assignments)) return data.assignments;
       return [];
     }
 
-    function normalizeDayOffset(x){
-      // fail-closed: invalid => null
-      const n = Number(x);
-      if(!Number.isFinite(n)) return null;
-      const i = Math.trunc(n);
-      if(i < 0) return null;
-      return i;
+    function readTrainings(){
+      return readLocalArray(KEY_TRAININGS_V1);
     }
 
     function normalizeStartDateTs(x){
@@ -1074,15 +1049,25 @@
       return i;
     }
 
+    function normalizeDayOffset(x){
+      const n = Number(x);
+      if(!Number.isFinite(n)) return null;
+      const i = Math.trunc(n);
+      if(i < 0) return null;
+      return i;
+    }
+
     function getPlanId(p){
       return normStr(p?.id ?? p?.planId ?? "");
     }
 
+    function getPlanTitle(p){
+      return normStr(p?.title ?? p?.name ?? "");
+    }
+
     function planIsActive(p){
       const s = String(p?.status ?? "").toLowerCase().trim();
-      if(s === "active") return true;
-      // backcompat: missing status treated as active? FAIL-CLOSED: no => only explicit active
-      return false;
+      return s === "active";
     }
 
     function getPlanItems(p){
@@ -1094,193 +1079,175 @@
       return normStr(it?.trainingId ?? it?.training_id ?? it?.tid ?? "");
     }
 
-    function getItemBlockId(it){
-      // must exist for dedupe and stable mapping (fail-closed)
-      return normStr(it?.blockId ?? it?.block_id ?? it?.bid ?? it?.id ?? "");
-    }
-
-    function getItemTitle(it){
-      // title shown to employee: prefer blockTitle then title
-      return normStr(it?.blockTitle ?? it?.block_title ?? it?.title ?? it?.name ?? "");
-    }
-
-    function getItemDesc(it){
-      return normStr(it?.description ?? it?.desc ?? it?.text ?? "");
-    }
-
-    function getItemKind(it){
-      return normalizeBlockKind(it?.kind ?? it?.type ?? it?.blockKind ?? it?.block_type ?? "");
-    }
-
-    function getItemModule(it){
-      return normStr(it?.module ?? it?.modul ?? it?.moduleName ?? "");
-    }
-
-    function getItemArea(it){
-      return normStr(it?.area ?? it?.område ?? it?.domain ?? it?.category ?? "");
-    }
-
-    function getItemTrainingTitle(it){
-      return normStr(it?.trainingTitle ?? it?.training_title ?? it?.trainingName ?? "");
-    }
-
     function getItemOrder(it){
       const n = Number(it?.order ?? it?.sort ?? it?.index ?? NaN);
       return Number.isFinite(n) ? Math.trunc(n) : 999999;
     }
 
-    function getMyOnboardStartDateTs(empNo){
-      const me = normStr(empNo);
-      if(!me) return null;
-
-      const assigns = readOnboardAssignments();
-      if(!Array.isArray(assigns) || assigns.length === 0) return null;
-
-      // Level-1: startDateTs should come from onboarding assignment (timestamp)
-      // If multiple assignments exist, pick earliest valid startDateTs (fail-closed preference)
-      let best = null;
-      for(const a of assigns){
-        if(!a || typeof a !== "object") continue;
-        const aEmp = normStr(a.empNo ?? a.employeeNo ?? a.emp ?? "");
-        if(aEmp !== me) continue;
-        const ts = normalizeStartDateTs(a.startDateTs ?? a.startTs ?? a.startDate ?? a.start);
-        if(!ts) continue;
-        if(best == null || ts < best) best = ts;
-      }
-      return best;
-    }
-
-    function getMyPlanIds(empNo){
-      const me = normStr(empNo);
-      if(!me) return [];
-
-      const assigns = readOnboardAssignments();
-      if(!Array.isArray(assigns) || assigns.length === 0) return [];
-
-      const set = new Set();
-      for(const a of assigns){
-        if(!a || typeof a !== "object") continue;
-        const aEmp = normStr(a.empNo ?? a.employeeNo ?? a.emp ?? "");
-        if(aEmp !== me) continue;
-        const pid = normStr(a.planId ?? a.planID ?? a.plan ?? "");
-        if(pid) set.add(pid);
-      }
-      return Array.from(set);
-    }
-
     function computeDayNumber(selectedMiddayTs, startDateTs){
-      // floor((selectedDateMiddayTs - startDateTs) / 86400000)
       const diff = Number(selectedMiddayTs) - Number(startDateTs);
       if(!Number.isFinite(diff)) return null;
       return Math.floor(diff / DAY_MS);
     }
 
+    function blockIdFromTrainingBlock(trainingId, b, idx){
+      const bid = normStr(b?.id ?? b?.blockId ?? b?.block_id ?? "");
+      if(bid) return bid;
+      // stable fallback within training (idx)
+      return `idx_${idx}`;
+    }
+
+    function blockTitleFromTrainingBlock(b){
+      return normStr(b?.title ?? b?.name ?? b?.text ?? "");
+    }
+
+    function blockDescFromTrainingBlock(b){
+      return normStr(b?.description ?? b?.desc ?? b?.text ?? "");
+    }
+
+    function blockKindFromTrainingBlock(b){
+      // training blocks typically use "type" (task/question/info/both)
+      return normalizeBlockKind(b?.type ?? b?.kind ?? b?.blockKind ?? b?.block_type ?? "");
+    }
+
     function buildOnboardCards(selectedDateObj, auth, tasksVisibleAll){
-      // Fail-closed: missing startDateTs => no onboarding cards (behavior identical to today)
       const empNo = normStr(auth?.empNo ?? "");
       if(!empNo) return [];
 
-      const startDateTs = getMyOnboardStartDateTs(empNo);
-      if(!startDateTs) return [];
+      const assigns = readOnboardAssignments();
+      if(!Array.isArray(assigns) || assigns.length === 0) return [];
 
-      const planIds = getMyPlanIds(empNo);
-      if(planIds.length === 0) return [];
+      // Build map planId -> earliest startDateTs for me
+      const myPlanStart = new Map();
+      for(const a of assigns){
+        if(!a || typeof a !== "object") continue;
+        const aEmp = normStr(a.empNo ?? a.employeeNo ?? a.emp ?? "");
+        if(aEmp !== empNo) continue;
+
+        const pid = normStr(a.planId ?? a.planID ?? a.plan ?? "");
+        const ts = normalizeStartDateTs(a.startDateTs ?? a.startTs ?? a.startDate ?? a.start);
+        if(!pid || !ts) continue;
+
+        const cur = myPlanStart.get(pid);
+        if(cur == null || ts < cur) myPlanStart.set(pid, ts);
+      }
+      if(myPlanStart.size === 0) return [];
 
       const plansAll = readOnboardPlans();
       if(!Array.isArray(plansAll) || plansAll.length === 0) return [];
 
+      const trainings = readTrainings();
+      const trainingsById = new Map();
+      for(const t of (Array.isArray(trainings) ? trainings : [])){
+        const id = normStr(t?.id ?? t?.trainingId ?? "");
+        if(id && !trainingsById.has(id)) trainingsById.set(id, t);
+      }
+
       const selectedMid = middayDate(selectedDateObj);
       const selectedMidTs = selectedMid.getTime();
 
-      const dayN = computeDayNumber(selectedMidTs, startDateTs);
-      if(dayN == null) return [];
-
-      // Build a combined item list from all assigned active plans
       const combined = [];
+
       for(const p of plansAll){
         if(!p || typeof p !== "object") continue;
 
         const pid = getPlanId(p);
         if(!pid) continue;
-        if(!planIds.includes(pid)) continue;
-
+        if(!myPlanStart.has(pid)) continue;
         if(!planIsActive(p)) continue;
+
+        const planTitle = getPlanTitle(p) || "Onboarding";
+        const startDateTs = myPlanStart.get(pid);
 
         const items = getPlanItems(p);
         if(!Array.isArray(items) || items.length === 0) continue;
+
+        const dayN = computeDayNumber(selectedMidTs, startDateTs);
+        if(dayN == null) continue;
 
         for(const it of items){
           if(!it || typeof it !== "object") continue;
 
           const trainingId = getItemTrainingId(it);
-          const blockId = getItemBlockId(it);
-          const title = getItemTitle(it);
-          const kind = getItemKind(it);
           const dOff = normalizeDayOffset(it.dayOffset ?? it.day_offset ?? it.offsetDays ?? it.offset ?? null);
+          if(!trainingId || dOff == null) continue;
 
-          // Fail-closed: must have trainingId + blockId + title + dayOffset
-          if(!trainingId || !blockId || !title || dOff == null) continue;
+          // Ready gate for the TRAINING in plan: time-based only
+          if(dayN < dOff) continue;
 
-          combined.push({
-            planId: pid,
-            trainingId,
-            blockId,
-            title,
-            desc: getItemDesc(it),
-            kind,
-            dayOffset: dOff,
-            order: getItemOrder(it),
-            module: getItemModule(it),
-            area: getItemArea(it),
-            trainingTitle: getItemTrainingTitle(it)
-          });
+          const tr = trainingsById.get(trainingId) || null;
+          if(!tr) continue;
+
+          const module = normStr(tr?.module ?? "");
+          const area   = normStr(tr?.area ?? "");
+          const trainingTitle = normStr(tr?.title ?? "");
+
+          const blocks = Array.isArray(tr?.blocks) ? tr.blocks : [];
+          if(!blocks.length) continue;
+
+          const baseOrder = getItemOrder(it);
+
+          for(let bi=0; bi<blocks.length; bi++){
+            const b = blocks[bi];
+            if(!b || typeof b !== "object") continue;
+
+            const kind = blockKindFromTrainingBlock(b);
+            const title = blockTitleFromTrainingBlock(b);
+            if(!title) continue;
+
+            const blockId = blockIdFromTrainingBlock(trainingId, b, bi);
+            const desc = blockDescFromTrainingBlock(b) || "";
+
+            combined.push({
+              planId: pid,
+              planTitle,
+              trainingId,
+              trainingTitle,
+              module,
+              area,
+              dayOffset: dOff,
+              order: baseOrder,
+              blockId,
+              kind,
+              title,
+              desc
+            });
+          }
         }
       }
 
       if(combined.length === 0) return [];
 
-      // Sort for step numbering: dayOffset then order
       combined.sort((a,b)=>{
         if(a.dayOffset !== b.dayOffset) return a.dayOffset - b.dayOffset;
         if(a.order !== b.order) return a.order - b.order;
-        return (a.trainingId + a.blockId).localeCompare(b.trainingId + b.blockId);
+        const ak = (a.trainingId + "__" + a.blockId);
+        const bk = (b.trainingId + "__" + b.blockId);
+        return ak.localeCompare(bk, "sv");
       });
 
-      // Dedupe: trainingId + blockId across plans
       const seen = new Set();
-
       const cards = [];
+
       for(let idx=0; idx<combined.length; idx++){
         const it = combined[idx];
-
-        // Ready idag:
-        // floor((selectedDateMiddayTs - startDateTs) / 86400000) >= dayOffset
-        if(dayN < it.dayOffset) continue;
 
         const dedupeKey = `${it.trainingId}__${it.blockId}`;
         if(seen.has(dedupeKey)) continue;
         seen.add(dedupeKey);
 
-        const blockForDone = { kind: it.kind, title: it.title };
+        const doneNow = isPackageBlockDone({ kind: it.kind, title: it.title }, tasksVisibleAll, empNo);
 
-        const doneNow = isPackageBlockDone(blockForDone, tasksVisibleAll, empNo);
+        const parts = [];
+        parts.push("Onboarding");
+        if(it.planTitle) parts.push(it.planTitle);
+        if(it.module) parts.push(it.module);
+        if(it.area) parts.push(it.area);
+        if(it.trainingTitle) parts.push(it.trainingTitle);
+        parts.push(`Steg ${idx + 1}`);
+        parts.push(`Dag +${it.dayOffset}`);
 
-        const module = it.module || "Modul";
-        const area   = it.area || "Område";
-        const stepNo = idx + 1;
-        const dPlus  = it.dayOffset;
-
-        const subParts = [];
-        if(module) subParts.push(module);
-        if(area) subParts.push(area);
-
-        const tt = it.trainingTitle ? it.trainingTitle : "";
-        if(tt) subParts.push(tt);
-
-        subParts.push(`Steg ${stepNo}`);
-        subParts.push(`Dag +${dPlus}`);
-
-        const sub = subParts.filter(Boolean).join(" • ");
+        const sub = parts.filter(Boolean).join(" • ");
 
         const ui = { action:"none", primaryLabel:"", secondaryLabel:"" };
         if(it.kind === "info"){
@@ -1312,11 +1279,10 @@
           isDone: !!doneNow,
           ui,
           _dayOffset: it.dayOffset,
-          _stepNo: stepNo
+          _stepNo: idx + 1
         });
       }
 
-      // Sort: not-done first (like pkgCards), then earlier dayOffset/step
       cards.sort((a,b)=>{
         const da = Number(!!a.isDone), db = Number(!!b.isDone);
         if(da !== db) return da - db;
@@ -1382,7 +1348,6 @@
         return;
       }
 
-      // Calendar tasks (existing logic)
       const all = readTasksArray();
       const mineAll = visibleTasksForMe(all, empNo, scopeId);
       const todays = mineAll.filter(t => taskBelongsToDay(t, dayISO));
@@ -1394,10 +1359,7 @@
 
       renderCalendarLists(done, todo);
 
-      // AO-053: build extra cards from active definitions (read-only)
       const pkgCards = buildPackageCards(mineAll, empNo);
-
-      // AO-EMP-HOME-ONBOARD-01: onboarding-cards (read-only, fail-closed)
       const onboardCards = buildOnboardCards(selectedDate, auth, mineAll);
 
       const pkgTodoCount = pkgCards.filter(c => !c.isDone).length;
@@ -1409,7 +1371,6 @@
       const totalDone = pkgDoneCount + onbDoneCount;
       const totalTodo = pkgTodoCount + onbTodoCount;
 
-      // If onboardCards empty => counts are unchanged from today (identical behavior)
       boardPill.textContent = `${totalDone} klar • ${totalTodo} återstår`;
 
       renderNotesCombined(todo, onboardCards, pkgCards, auth);
@@ -1470,9 +1431,6 @@
       }
     }
 
-    /* ===========================
-       AO-053: Cards build (read-only)
-    ============================ */
     function buildPackageCards(tasksVisibleAll, myEmpNo){
       const activePkgs = readPackagesActive();
       if(!Array.isArray(activePkgs) || activePkgs.length === 0) return [];
@@ -1524,10 +1482,6 @@
       return cards;
     }
 
-    /* ===========================
-       Notes rendering (combined)
-       - onboarding first, then pkgCards, then todays todo tasks
-    ============================ */
     function renderNotesCombined(todoTasksForDay, onboardCards, pkgCards, auth){
       notesGrid.innerHTML = "";
 
@@ -1624,9 +1578,6 @@
       });
     }
 
-    /* ===========================
-       Mark done + Animate to trash
-    ============================ */
     function markTaskDone(taskId, auth){
       const empNo = String(auth.empNo ?? "").trim();
       const scopeId = String(auth.scopeId ?? "").trim();
@@ -1782,7 +1733,6 @@
       }
     });
 
-    // init (kopplat till kärnan)
     (function init(){
       const res = mustAuthOrStop();
       if (!res) return;
@@ -1793,21 +1743,16 @@
 
   <!-- ============================================================
   Ändringslogg (AO-053 + AO-EMP-HOME-ONBOARD-01) ≤ 8 rader
-  - AO-EMP-HOME-ONBOARD-01: Lagt till onboarding som extra card-källa (read-only) via AO-060_PLANS_V1 + AO-061_PLAN_ASSIGNMENTS_V1
-  - Onboarding-cards skapas endast för “Ready idag” baserat på startDateTs + dayOffset (DAY_MS=86400000)
-  - Dedupe: trainingId+blockId över flera planer
-  - Done-logik återanvänder exakt befintlig isPackageBlockDone (titelmatch tasks + question/answer) – ingen ny tolkning
-  - Rendering: onboarding-items läggs före pkgCards i renderNotesCombined; board-pill räknar båda
-  - Fail-closed: saknad/korrupt onboarding => returnerar [] och sidan beter sig identiskt som innan
+  - FIX: Onboarding bygger nu cards genom att expandera AO-060 plan items (trainingId/dayOffset) till training.blocks via AO-057_TRAININGS_V1 (read-only)
+  - Behåller keys: läser AO-060/AO-061/AO-057 (read-only), skriver inga nya keys
+  - Ready: tidsgating per planId med startDateTs (per assignment), per selectedDate (midday) + dayOffset
+  - Dedupe: trainingId+blockId (blockId fallback idx_n inom training om id saknas)
+  - Done-logik återanvänder exakt isPackageBlockDone (titelmatch tasks + question/answer)
+  - UI: subrad börjar med “Onboarding • {PlanTitel} … • Steg • Dag+”
   Testnoteringar:
-  - Test 1: ta bort AO-060/AO-061 => inga onboardingkort, allt fungerar som idag
-  - Test 2: AO-061 startDateTs=nu, AO-060 item dayOffset=0 => kort syns idag
-  - Test 3: dayOffset=3 => syns först när du klickar fram datum +3
-  - Test 4: två planer med samma trainingId+blockId => bara ett kort
-  - Test 5: matchande task (titel) redan done i AO-014 => onboardingkort blir “Klar” och hamnar sist
-  Tekniskt kvitto:
-  - Lästa onboarding-keys (read-only): AO-060_PLANS_V1, AO-061_PLAN_ASSIGNMENTS_V1
-  - Skriver keys: Inga (oförändrat; endast AO-014_TASKS_V1 skrivs som tidigare när man trycker “Klar” på tasks)
+  - Test A: AO-060 active plan + AO-061 assignment startDateTs=nu + item dayOffset=0 => onboardingkort syns idag
+  - Test B: dayOffset=3 => syns när du klickar fram datum +3
+  - Test C: saknar AO-057 eller training.blocks => fail-closed (inga onboardingkort), övrigt oförändrat
   ============================================================ -->
 </body>
 </html>
