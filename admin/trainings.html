@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-TRAININGS-CHOICE-UPGRADE-01 | FIL-ID: admin/trainings.html
+AO-TRAININGS-AI-DOCMODE-01 | FIL-ID: admin/trainings.html
 Projekt: HR-System
 Syfte: ADMIN – Skapa/Redigera utbildningar (återanvändbart innehåll) + AI-stöd
 UI-flow (enkelt): “Vad → vilken → vem → hur ofta” (den här sidan bygger “Vad/vilken” = modul/område + utbildning)
@@ -401,11 +401,19 @@ POLICY (LÅST):
 
         <div class="row3" style="margin-top:8px;">
           <label>
+            AI-läge <span class="tiny">(default: Utbildning)</span>
+            <select id="aiMode">
+              <option value="training" selected>Utbildning</option>
+              <option value="document">Dokument</option>
+            </select>
+          </label>
+
+          <label>
             Antal block <span class="tiny">(1–12)</span>
             <input id="aiBlockCount" type="number" min="1" max="12" step="1" inputmode="numeric" />
           </label>
 
-          <label style="grid-column: 2 / span 2;">
+          <label>
             AI-topic (valfritt)
             <input id="aiTopic" type="text" maxlength="90" placeholder="Lämna tomt → använder rubriken" autocomplete="off" />
           </label>
@@ -442,6 +450,7 @@ POLICY (LÅST):
                   <option value="task">Uppgift</option>
                   <option value="question">Fråga</option>
                   <option value="both">Uppgift + Fråga</option>
+                  <option value="document">Dokument</option>
                 </select>
               </label>
               <button class="miniBtn" id="btnAddBlock" type="button">+ Lägg till</button>
@@ -486,11 +495,11 @@ POLICY (LÅST):
 
 <script>
 /* ============================================================
-AO-TRAININGS-CHOICE-UPGRADE-01 | admin/trainings.html
+AO-TRAININGS-AI-DOCMODE-01 | admin/trainings.html
 Syfte:
-- Choice är default för nya "Fråga"-block (Text kräver aktivt val)
-- Stöd för 3–5 svarsalternativ (options) och 0–2 korrekta (correctOptions)
-- Bakåtkompatibelt: gamla block utan fälten fungerar och kan sparas
+- AI-läge: Utbildning (default) eller Dokument (endast document-block)
+- Stöd för document-block (kind="document") med längre text (max 2000)
+- Behåller AO-TRAININGS-CHOICE-UPGRADE-01: choice default + correctOptions
 Policy:
 - UI-only • Fail-closed • XSS-escape • inga nya storage-keys
 Keys (LÅST):
@@ -557,6 +566,7 @@ Keys (LÅST):
   const descInp = $("#descInp");
   const goalsInp = $("#goalsInp");
 
+  const aiMode = $("#aiMode");
   const aiBlockCount = $("#aiBlockCount");
   const aiTopic = $("#aiTopic");
   const btnAiTest = $("#btnAiTest");
@@ -671,15 +681,13 @@ Keys (LÅST):
 
   function normalizeOptions(raw){
     const arr = Array.isArray(raw) ? raw : [];
-    // trim, cap length, keep up to 10 (fail-closed: do not throw)
     return arr.slice(0,10).map(x => String(x||"").trim().slice(0,40));
   }
 
   function normalizeCorrectOptions(raw, options){
-    // fail-closed: must be array of strings matching options; max 2; trim+dedupe
     const opts = Array.isArray(options) ? options : [];
     const set = new Set(opts.map(x => String(x || "").trim()));
-    const cleaned = dedupeStrings(Array.isArray(raw) ? raw : []).slice(0, 20); // cap pre-filter
+    const cleaned = dedupeStrings(Array.isArray(raw) ? raw : []).slice(0, 20);
     const filtered = cleaned.filter(v => set.has(v));
     return filtered.slice(0,2);
   }
@@ -688,8 +696,29 @@ Keys (LÅST):
   function normalizeBlock(raw){
     const b = (raw && typeof raw === "object") ? raw : {};
     const kind0 = String(b.kind || "info").trim();
-    const okKind = (kind0 === "info" || kind0 === "task" || kind0 === "question" || kind0 === "both");
+
+    const okKind =
+      (kind0 === "info" || kind0 === "task" || kind0 === "question" || kind0 === "both" || kind0 === "document");
     const kind = okKind ? kind0 : "info";
+
+    const maxText = (kind === "document") ? 2000 : 240;
+
+    // document: fail-closed, inga task/question-fält krävs
+    if(kind === "document"){
+      return {
+        kind: "document",
+        title: String(b.title || "").slice(0,80),
+        text: String(b.text || b.description || "").slice(0,maxText),
+        taskAnswer: "checkbox",
+        questionAnswer: "text",
+        scaleMin: 1,
+        scaleMax: 5,
+        scaleMinLabel: "",
+        scaleMaxLabel: "",
+        options: [],
+        correctOptions: []
+      };
+    }
 
     const taskAnswer = (b.taskAnswer === "scale" || b.taskAnswer === "checkbox") ? b.taskAnswer : "checkbox";
 
@@ -709,21 +738,17 @@ Keys (LÅST):
     const scaleMax0 = clampInt(b.scaleMax, 1, 10, 5);
     const scaleMax = (scaleMax0 < scaleMin) ? scaleMin : scaleMax0;
 
-    // Options: only stored when questionAnswer===choice, else []
     const options0 = normalizeOptions(b.options);
 
-    // correctOptions: only meaningful for question/both when choice; else []
     let correctOptions = [];
     if(kind === "question" && questionAnswer === "choice"){
       correctOptions = normalizeCorrectOptions(b.correctOptions, options0);
     }else if(kind === "both"){
-      // AO says optional for both; we keep it empty to avoid risk (fail-closed)
       correctOptions = [];
     }else{
       correctOptions = [];
     }
 
-    // If question is text: ensure options/correctOptions are empty (fail-closed)
     const finalOptions = (kind === "question" && questionAnswer === "choice") ? options0 : [];
     if(kind === "question" && questionAnswer !== "choice"){
       correctOptions = [];
@@ -732,7 +757,7 @@ Keys (LÅST):
     return {
       kind,
       title: String(b.title || "").slice(0,80),
-      text: String(b.text || b.description || "").slice(0,240),
+      text: String(b.text || b.description || "").slice(0,maxText),
       taskAnswer,
       questionAnswer,
       scaleMin,
@@ -740,7 +765,6 @@ Keys (LÅST):
       scaleMinLabel: String(b.scaleMinLabel || "").slice(0,40),
       scaleMaxLabel: String(b.scaleMaxLabel || "").slice(0,40),
       options: finalOptions,
-      // NEW (AO-TRAININGS-CHOICE-UPGRADE-01): correct answers for choice-questions
       correctOptions
     };
   }
@@ -771,7 +795,6 @@ Keys (LÅST):
       lastSource: String(ai.lastSource || "")
     };
 
-    // fail-closed publish rule (normalize): published without blocks -> draft
     const safeStatus = (status === "published" && blocks.length === 0) ? "draft" : status;
 
     return { id, module, area, title, status: safeStatus, description, goals, blocks, version, createdAt, updatedAt, ai: outAi };
@@ -779,7 +802,6 @@ Keys (LÅST):
 
   function serializeGoalsFromTextarea(){
     const lines = String(goalsInp.value || "").split("\n").map(s => s.trim()).filter(Boolean);
-    // dedupe
     const out = [];
     lines.forEach(x => { if(!out.includes(x)) out.push(x); });
     return out.slice(0,20);
@@ -832,7 +854,6 @@ Keys (LÅST):
     });
     const sorted = Array.from(areas).sort((a,b) => a.localeCompare(b, "sv"));
 
-    // Populate dropdown (no innerHTML usage)
     while(areaSel.firstChild) areaSel.removeChild(areaSel.firstChild);
 
     const ph = document.createElement("option");
@@ -856,7 +877,6 @@ Keys (LÅST):
       ? `Sparade i "${mod}": ${sorted.slice(0,6).join(", ")}${sorted.length>6 ? "…" : ""}`
       : `Inga sparade områden ännu för "${mod}".`;
 
-    // Sync selection with current edit.area (fail-closed)
     syncAreaUIFromEdit();
   }
 
@@ -872,12 +892,10 @@ Keys (LÅST):
       areaNewWrap.style.display = "none";
       areaInp.value = "";
     }else if(cur){
-      // area exists but not in list for this module -> treat as custom/new
       areaSel.value = "__new__";
       areaNewWrap.style.display = "block";
       areaInp.value = cur;
     }else{
-      // empty
       areaSel.value = "";
       areaNewWrap.style.display = "none";
       areaInp.value = "";
@@ -907,6 +925,7 @@ Keys (LÅST):
     if(kind === "task") return "Uppgift";
     if(kind === "question") return "Fråga";
     if(kind === "both") return "Uppgift + Fråga";
+    if(kind === "document") return "Dokument";
     return "Block";
   }
 
@@ -927,10 +946,8 @@ Keys (LÅST):
       publishHint.textContent = "OK att publicera.";
     }
 
-    // UI hint + buttons
     btnSavePublish.disabled = (blocks === 0);
-    const b = blocks;
-    blocksInfo.textContent = (b === 0) ? "0 block (lägg till eller använd AI)" : (b + " block");
+    blocksInfo.textContent = (blocks === 0) ? "0 block (lägg till eller använd AI)" : (blocks + " block");
   }
 
   function makeBlockCard(block, index){
@@ -1042,12 +1059,13 @@ Keys (LÅST):
     lblTitle.appendChild(inTitle);
 
     const lblText = document.createElement("label");
-    lblText.textContent = (block.kind === "info") ? "Text (info)" : "Text";
+    lblText.textContent = (block.kind === "document") ? "Text (dokument)" : ((block.kind === "info") ? "Text (info)" : "Text");
     const inText = document.createElement("textarea");
-    inText.maxLength = 240;
+    inText.maxLength = (block.kind === "document") ? 2000 : 240;
     inText.value = block.text || "";
     inText.addEventListener("input", () => {
-      block.text = String(inText.value || "").slice(0,240);
+      const cap = (block.kind === "document") ? 2000 : 240;
+      block.text = String(inText.value || "").slice(0,cap);
       setDirty(true);
     });
     lblText.appendChild(inText);
@@ -1065,8 +1083,10 @@ Keys (LÅST):
     hint.className = "tiny";
     hint.style.marginTop = "6px";
 
-    if(block.kind === "info"){
-      hint.textContent = "Information har ingen svarstyp.";
+    if(block.kind === "info" || block.kind === "document"){
+      hint.textContent = (block.kind === "document")
+        ? "Dokument har ingen svarstyp (längre text)."
+        : "Information har ingen svarstyp.";
       ansWrap.appendChild(hint);
     }else{
       if(block.kind === "task" || block.kind === "both"){
@@ -1141,12 +1161,10 @@ Keys (LÅST):
         sel.value = (block.questionAnswer === "choice") ? "choice" : "text";
         sel.addEventListener("change", () => {
           block.questionAnswer = (sel.value === "choice") ? "choice" : "text";
-          // Fail-closed: switching away from choice clears options + correctOptions
           if(block.questionAnswer !== "choice"){
             block.options = [];
             block.correctOptions = [];
           }else{
-            // default 3 empty rows for convenience (do not force save if user doesn't fill)
             if(!Array.isArray(block.options) || block.options.length === 0){
               block.options = ["", "", ""];
             }
@@ -1158,7 +1176,6 @@ Keys (LÅST):
         lbl.appendChild(sel);
         ansWrap.appendChild(lbl);
 
-        // --- options editor (as today) ---
         const opt = document.createElement("div");
         opt.className = "subCard";
         opt.style.marginTop = "10px";
@@ -1172,22 +1189,18 @@ Keys (LÅST):
         optArea.placeholder = "Skriv ett alternativ per rad…";
         optArea.addEventListener("input", () => {
           const lines = String(optArea.value || "").split("\n").map(s => s.trim());
-          // keep empty lines during edit? we store trimmed; empty will be removed in normalize on save
           const cleaned = lines.filter(v => v.length > 0).slice(0,10).map(x => x.slice(0,40));
           block.options = cleaned;
-          // fail-closed: correctOptions must match options; remove invalid immediately
           if(Array.isArray(block.correctOptions)){
             block.correctOptions = normalizeCorrectOptions(block.correctOptions, block.options);
           }else{
             block.correctOptions = [];
           }
           setDirty(true);
-          // re-render to update checkbox list for correct answers
           renderBlocks();
         });
         opt.appendChild(optArea);
 
-        // --- correct answers UI (minsta möjliga, komplett) ---
         const corr = document.createElement("div");
         corr.className = "subCard";
         corr.style.marginTop = "10px";
@@ -1236,7 +1249,6 @@ Keys (LÅST):
             txt.textContent = optVal;
 
             cb.addEventListener("change", () => {
-              // fail-closed: max 2
               let next = Array.isArray(block.correctOptions) ? block.correctOptions.slice() : [];
               next = normalizeCorrectOptions(next, optsNow);
 
@@ -1245,7 +1257,6 @@ Keys (LÅST):
                   // nothing
                 }else{
                   if(next.length >= 2){
-                    // block third selection
                     cb.checked = false;
                     corrHint.style.display = "block";
                     corrHint.textContent = "Max 2 rätta svar. Avmarkera ett först.";
@@ -1270,7 +1281,6 @@ Keys (LÅST):
 
         corr.appendChild(list);
 
-        // show/hide based on questionAnswer
         if(block.questionAnswer !== "choice"){
           opt.style.opacity = "0.55";
           corr.style.opacity = "0.55";
@@ -1412,7 +1422,6 @@ Keys (LÅST):
 
     moduleSel.value = t.module || MODULES[0];
 
-    // PATCH (A): rebuild dropdown per module, then sync selection + optional input
     rebuildAreaSuggestions();
 
     titleInp.value = t.title || "";
@@ -1469,7 +1478,6 @@ Keys (LÅST):
     STATE.snapshot = JSON.parse(JSON.stringify(t));
     setSelected(t.id);
 
-    // PATCH (A)
     rebuildAreaSuggestions();
 
     syncEditorUI();
@@ -1481,10 +1489,7 @@ Keys (LÅST):
     const t = STATE.edit;
 
     t.module = String(moduleSel.value || "").trim();
-
-    // PATCH (A): area comes from dropdown or "new input"
     t.area = readAreaFromUI();
-
     t.title = String(titleInp.value || "").trim();
     t.description = String(descInp.value || "").trim().slice(0,240);
     t.goals = serializeGoalsFromTextarea();
@@ -1497,7 +1502,6 @@ Keys (LÅST):
       t.status = desired;
     }
 
-    // normalize blocks on every hydrate to keep fail-closed
     t.blocks = (Array.isArray(t.blocks) ? t.blocks : []).map(normalizeBlock);
 
     updatePublishHint();
@@ -1555,7 +1559,6 @@ Keys (LÅST):
     summarizeSavePill(t);
     setDirty(false);
 
-    // PATCH (A)
     rebuildAreaSuggestions();
 
     renderList();
@@ -1654,11 +1657,9 @@ Keys (LÅST):
   moduleSel.addEventListener("change", () => {
     hydrateFromInputs();
     setDirty(true);
-    // PATCH (A): when module changes, rebuild dropdown options for that module
     rebuildAreaSuggestions();
   });
 
-  // PATCH (A): area dropdown controls visibility of new input
   areaSel.addEventListener("change", () => {
     const v = String(areaSel.value || "");
     if(v === "__new__"){
@@ -1688,14 +1689,11 @@ Keys (LÅST):
     setMsg("", "");
     const k = String(addKind.value||"").trim();
     if(!STATE.edit) return;
-    if(k !== "info" && k !== "task" && k !== "question" && k !== "both"){
+
+    if(k !== "info" && k !== "task" && k !== "question" && k !== "both" && k !== "document"){
       setMsg("err", "Ogiltig blocktyp (fail-closed)."); return;
     }
 
-    // Default rules for new question-blocks:
-    // - questionAnswer defaults to "choice"
-    // - options starts with 3 empty rows (convenience)
-    // - correctOptions starts empty
     const base = {
       kind: k,
       title: "",
@@ -1718,6 +1716,11 @@ Keys (LÅST):
       base.options = [];
       base.correctOptions = [];
     }
+    if(k === "document"){
+      base.questionAnswer = "text";
+      base.options = [];
+      base.correctOptions = [];
+    }
 
     STATE.edit.blocks.push(normalizeBlock(base));
     setDirty(true);
@@ -1732,7 +1735,6 @@ Keys (LÅST):
     }
     STATE.edit.blocks.push(normalizeBlock({ kind:"info", title:"Information", text:"Kort info om utbildningen och vad som förväntas." }));
     STATE.edit.blocks.push(normalizeBlock({ kind:"task", title:"Uppgift", text:"Gör uppgiften och markera när du är klar.", taskAnswer:"checkbox" }));
-    // Default question is now choice (Text requires active selection)
     STATE.edit.blocks.push(normalizeBlock({ kind:"question", title:"Fråga", text:"Svara kort.", questionAnswer:"choice", options:["", "", ""], correctOptions:[] }));
     setDirty(true);
     renderBlocks();
@@ -1793,6 +1795,29 @@ Keys (LÅST):
     return out;
   }
 
+  function toDocumentBlock(raw){
+    const b = (raw && typeof raw === "object") ? raw : {};
+    const title = String(b.title || "").trim().slice(0,80);
+    let text =
+      (typeof b.text === "string" && b.text) ? b.text :
+      (typeof b.description === "string" && b.description) ? b.description :
+      "";
+
+    // fail-closed: om modellen skickar task/question-fält, ignoreras (konvertera utan blandning)
+    if(!text){
+      const parts = [];
+      if(typeof b.text === "string") parts.push(b.text);
+      if(typeof b.description === "string") parts.push(b.description);
+      text = parts.filter(Boolean).join("\n\n");
+    }
+
+    return normalizeBlock({
+      kind: "document",
+      title,
+      text: String(text || "").slice(0,2000)
+    });
+  }
+
   async function aiGenerate(){
     setMsg("", "");
     hydrateFromInputs();
@@ -1809,24 +1834,23 @@ Keys (LÅST):
       return;
     }
 
+    const mode = (String(aiMode.value || "training") === "document") ? "document" : "training";
+
     const url = aiUrl("/ai-generate");
     btnAiGenerate.disabled = true;
     btnAiTest.disabled = true;
     aiStatus.textContent = "Skapar med AI…";
 
     const payload = {
-      mode: "training",
+      mode,
       language: "sv",
       topic,
       module: t.module,
       area: t.area,
       blockCount: count,
-      schema: {
-        blocks: {
-          allowedKinds: ["info","task","question","both"],
-          maxText: 240
-        }
-      }
+      schema: (mode === "document")
+        ? { blocks: { allowedKinds: ["document"], maxText: 2000 } }
+        : { blocks: { allowedKinds: ["info","task","question","both"], maxText: 240 } }
     };
 
     try{
@@ -1862,7 +1886,12 @@ Keys (LÅST):
       }
 
       if(Array.isArray(res.blocks) && res.blocks.length){
-        t.blocks = res.blocks.map(normalizeBlock).slice(0,12);
+        if(mode === "document"){
+          // fail-closed: endast document-block. Konvertera allt till document.
+          t.blocks = res.blocks.slice(0,12).map(toDocumentBlock);
+        }else{
+          t.blocks = res.blocks.map(normalizeBlock).slice(0,12);
+        }
       }else{
         aiStatus.textContent = "AI gav inga block.";
         setMsg("warn", "AI gav inga block. Testa igen eller lägg till manuellt.");
@@ -1916,7 +1945,6 @@ Keys (LÅST):
       setMsg("ok", "Inga utbildningar ännu. Skapa din första.");
     }
 
-    // PATCH (A)
     rebuildAreaSuggestions();
 
     renderList();
@@ -1929,13 +1957,13 @@ Keys (LÅST):
 </script>
 
 <!-- ============================================================
-Ändringslogg (AO-TRAININGS-CHOICE-UPGRADE-01) ≤ 8 rader
-- Fråga-block: default svarstyp är nu "choice" för nya block (Text kräver aktivt val)
-- Ny property i question-block: correctOptions (0–2 strängar som måste matcha options)
-- normalizeBlock uppdaterad: fail-closed trim/dedupe/max 2 + filtrerar correctOptions mot options
-- UI: lade till "Rätt svar" (checkbox-lista) med max-2 guard (blockerar tredje val)
-- Byt till Text rensar options + correctOptions (fail-closed)
-- Standardblock: Fråga skapas som choice med 3 tomma rader
+Ändringslogg (AO-TRAININGS-AI-DOCMODE-01) ≤ 8 rader
+- AI-läge: Utbildning (default) / Dokument (nytt) i AI-sektionen
+- Ny blocktyp: kind="document" (normalize/render/edit) med text max 2000
+- AI-payload skickar mode=training|document + schema (fail-closed)
+- Dokumentläge: AI-resultat konverteras strikt till document-block (ingen blandning)
+- Block UI: "Dokument" kan även läggas till manuellt (dropdown)
+- Oförändrat: publish kräver blocks.length > 0 (document räknas)
 ============================================================ -->
 </body>
 </html>
