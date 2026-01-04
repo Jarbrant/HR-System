@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-TRAININGS-PATCH-01 | FIL-ID: admin/trainings.html
+AO-TRAININGS-CHOICE-UPGRADE-01 | FIL-ID: admin/trainings.html
 Projekt: HR-System
 Syfte: ADMIN – Skapa/Redigera utbildningar (återanvändbart innehåll) + AI-stöd
 UI-flow (enkelt): “Vad → vilken → vem → hur ofta” (den här sidan bygger “Vad/vilken” = modul/område + utbildning)
@@ -486,17 +486,16 @@ POLICY (LÅST):
 
 <script>
 /* ============================================================
-AO-TRAININGS-PATCH-01 | admin/trainings.html
-Fokus:
-- Modul först + område med förslag (från sparade)
-- Tydlig “sparat”-status: visar om blocks finns + antal
-- Publish fail-closed (blocks.length > 0) + tydlig hint
-- Behåller AI via Worker (generiskt tolerant svarstolk)
-- Inga nya storage-keys: AO-057_TRAININGS_V1 (array)
-
-PATCH (A):
-- Endast 1 område-kontroll: dropdown per modul
-- "Skapa nytt område…" visar textfält, annars dolt
+AO-TRAININGS-CHOICE-UPGRADE-01 | admin/trainings.html
+Syfte:
+- Choice är default för nya "Fråga"-block (Text kräver aktivt val)
+- Stöd för 3–5 svarsalternativ (options) och 0–2 korrekta (correctOptions)
+- Bakåtkompatibelt: gamla block utan fälten fungerar och kan sparas
+Policy:
+- UI-only • Fail-closed • XSS-escape • inga nya storage-keys
+Keys (LÅST):
+- AO-057_TRAININGS_V1 (data)
+- AO-001_LOGIN_V1 (auth)
 ============================================================ */
 (function(){
   "use strict";
@@ -659,29 +658,90 @@ PATCH (A):
     }catch{ return "—"; }
   }
 
+  // --- local helpers ---
+  function dedupeStrings(arr){
+    const out = [];
+    (Array.isArray(arr) ? arr : []).forEach(x => {
+      const s = String(x || "").trim();
+      if(!s) return;
+      if(!out.includes(s)) out.push(s);
+    });
+    return out;
+  }
+
+  function normalizeOptions(raw){
+    const arr = Array.isArray(raw) ? raw : [];
+    // trim, cap length, keep up to 10 (fail-closed: do not throw)
+    return arr.slice(0,10).map(x => String(x||"").trim().slice(0,40));
+  }
+
+  function normalizeCorrectOptions(raw, options){
+    // fail-closed: must be array of strings matching options; max 2; trim+dedupe
+    const opts = Array.isArray(options) ? options : [];
+    const set = new Set(opts.map(x => String(x || "").trim()));
+    const cleaned = dedupeStrings(Array.isArray(raw) ? raw : []).slice(0, 20); // cap pre-filter
+    const filtered = cleaned.filter(v => set.has(v));
+    return filtered.slice(0,2);
+  }
+
   // --- data model normalization (backward tolerant) ---
   function normalizeBlock(raw){
     const b = (raw && typeof raw === "object") ? raw : {};
-    const kind = String(b.kind || "info").trim();
-    const okKind = (kind === "info" || kind === "task" || kind === "question" || kind === "both");
+    const kind0 = String(b.kind || "info").trim();
+    const okKind = (kind0 === "info" || kind0 === "task" || kind0 === "question" || kind0 === "both");
+    const kind = okKind ? kind0 : "info";
+
     const taskAnswer = (b.taskAnswer === "scale" || b.taskAnswer === "checkbox") ? b.taskAnswer : "checkbox";
-    const questionAnswer = (b.questionAnswer === "choice" || b.questionAnswer === "text") ? b.questionAnswer : "text";
+
+    // Default rules:
+    // - question: default questionAnswer="choice" if missing/invalid
+    // - both: questionAnswer fixed to "text" (existing behavior)
+    let questionAnswer = (b.questionAnswer === "choice" || b.questionAnswer === "text") ? b.questionAnswer : "";
+    if(kind === "both"){
+      questionAnswer = "text";
+    }else if(kind === "question"){
+      questionAnswer = questionAnswer || "choice";
+    }else{
+      questionAnswer = questionAnswer || "text";
+    }
+
     const scaleMin = clampInt(b.scaleMin, 1, 10, 1);
     const scaleMax0 = clampInt(b.scaleMax, 1, 10, 5);
     const scaleMax = (scaleMax0 < scaleMin) ? scaleMin : scaleMax0;
-    const options = Array.isArray(b.options) ? b.options.slice(0,10).map(x => String(x||"").slice(0,40)) : [];
+
+    // Options: only stored when questionAnswer===choice, else []
+    const options0 = normalizeOptions(b.options);
+
+    // correctOptions: only meaningful for question/both when choice; else []
+    let correctOptions = [];
+    if(kind === "question" && questionAnswer === "choice"){
+      correctOptions = normalizeCorrectOptions(b.correctOptions, options0);
+    }else if(kind === "both"){
+      // AO says optional for both; we keep it empty to avoid risk (fail-closed)
+      correctOptions = [];
+    }else{
+      correctOptions = [];
+    }
+
+    // If question is text: ensure options/correctOptions are empty (fail-closed)
+    const finalOptions = (kind === "question" && questionAnswer === "choice") ? options0 : [];
+    if(kind === "question" && questionAnswer !== "choice"){
+      correctOptions = [];
+    }
 
     return {
-      kind: okKind ? kind : "info",
+      kind,
       title: String(b.title || "").slice(0,80),
       text: String(b.text || b.description || "").slice(0,240),
       taskAnswer,
-      questionAnswer: (kind === "both") ? "text" : questionAnswer,
+      questionAnswer,
       scaleMin,
       scaleMax,
       scaleMinLabel: String(b.scaleMinLabel || "").slice(0,40),
       scaleMaxLabel: String(b.scaleMaxLabel || "").slice(0,40),
-      options: (questionAnswer === "choice") ? options : []
+      options: finalOptions,
+      // NEW (AO-TRAININGS-CHOICE-UPGRADE-01): correct answers for choice-questions
+      correctOptions
     };
   }
 
@@ -1081,13 +1141,24 @@ PATCH (A):
         sel.value = (block.questionAnswer === "choice") ? "choice" : "text";
         sel.addEventListener("change", () => {
           block.questionAnswer = (sel.value === "choice") ? "choice" : "text";
-          if(block.questionAnswer !== "choice") block.options = [];
+          // Fail-closed: switching away from choice clears options + correctOptions
+          if(block.questionAnswer !== "choice"){
+            block.options = [];
+            block.correctOptions = [];
+          }else{
+            // default 3 empty rows for convenience (do not force save if user doesn't fill)
+            if(!Array.isArray(block.options) || block.options.length === 0){
+              block.options = ["", "", ""];
+            }
+            if(!Array.isArray(block.correctOptions)) block.correctOptions = [];
+          }
           setDirty(true);
           renderBlocks();
         });
         lbl.appendChild(sel);
         ansWrap.appendChild(lbl);
 
+        // --- options editor (as today) ---
         const opt = document.createElement("div");
         opt.className = "subCard";
         opt.style.marginTop = "10px";
@@ -1100,16 +1171,114 @@ PATCH (A):
         optArea.value = (Array.isArray(block.options) ? block.options : []).join("\n");
         optArea.placeholder = "Skriv ett alternativ per rad…";
         optArea.addEventListener("input", () => {
-          const lines = String(optArea.value || "").split("\n").map(s => s.trim()).filter(Boolean);
-          block.options = lines.slice(0,10).map(x => x.slice(0,40));
+          const lines = String(optArea.value || "").split("\n").map(s => s.trim());
+          // keep empty lines during edit? we store trimmed; empty will be removed in normalize on save
+          const cleaned = lines.filter(v => v.length > 0).slice(0,10).map(x => x.slice(0,40));
+          block.options = cleaned;
+          // fail-closed: correctOptions must match options; remove invalid immediately
+          if(Array.isArray(block.correctOptions)){
+            block.correctOptions = normalizeCorrectOptions(block.correctOptions, block.options);
+          }else{
+            block.correctOptions = [];
+          }
           setDirty(true);
+          // re-render to update checkbox list for correct answers
+          renderBlocks();
         });
         opt.appendChild(optArea);
 
+        // --- correct answers UI (minsta möjliga, komplett) ---
+        const corr = document.createElement("div");
+        corr.className = "subCard";
+        corr.style.marginTop = "10px";
+        const ch = document.createElement("h3"); ch.textContent = "Rätt svar";
+        const cht = document.createElement("div");
+        cht.className = "tiny";
+        cht.textContent = "Markera max 2 korrekta. Kräver att alternativet finns i listan ovan.";
+        corr.appendChild(ch);
+        corr.appendChild(cht);
+
+        const corrHint = document.createElement("div");
+        corrHint.className = "tiny";
+        corrHint.style.marginTop = "8px";
+        corrHint.style.display = "none";
+        corr.appendChild(corrHint);
+
+        const optsNow = Array.isArray(block.options) ? block.options : [];
+        const current = Array.isArray(block.correctOptions) ? block.correctOptions.slice() : [];
+        const safeCurrent = normalizeCorrectOptions(current, optsNow);
+        block.correctOptions = safeCurrent;
+
+        const list = document.createElement("div");
+        list.style.display = "flex";
+        list.style.flexDirection = "column";
+        list.style.gap = "6px";
+        list.style.marginTop = "8px";
+
+        if(optsNow.length === 0){
+          const e = document.createElement("div");
+          e.className = "tiny";
+          e.textContent = "Inga alternativ ännu. Lägg till alternativ för att kunna markera rätt svar.";
+          list.appendChild(e);
+        }else{
+          optsNow.slice(0,10).forEach((optVal) => {
+            const row = document.createElement("label");
+            row.style.display = "flex";
+            row.style.alignItems = "center";
+            row.style.gap = "8px";
+            row.style.fontWeight = "800";
+
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.checked = block.correctOptions.includes(optVal);
+
+            const txt = document.createElement("span");
+            txt.textContent = optVal;
+
+            cb.addEventListener("change", () => {
+              // fail-closed: max 2
+              let next = Array.isArray(block.correctOptions) ? block.correctOptions.slice() : [];
+              next = normalizeCorrectOptions(next, optsNow);
+
+              if(cb.checked){
+                if(next.includes(optVal)){
+                  // nothing
+                }else{
+                  if(next.length >= 2){
+                    // block third selection
+                    cb.checked = false;
+                    corrHint.style.display = "block";
+                    corrHint.textContent = "Max 2 rätta svar. Avmarkera ett först.";
+                    return;
+                  }
+                  next.push(optVal);
+                }
+              }else{
+                next = next.filter(v => v !== optVal);
+              }
+
+              corrHint.style.display = "none";
+              block.correctOptions = normalizeCorrectOptions(next, optsNow);
+              setDirty(true);
+            });
+
+            row.appendChild(cb);
+            row.appendChild(txt);
+            list.appendChild(row);
+          });
+        }
+
+        corr.appendChild(list);
+
+        // show/hide based on questionAnswer
         if(block.questionAnswer !== "choice"){
           opt.style.opacity = "0.55";
+          corr.style.opacity = "0.55";
+          corr.style.pointerEvents = "none";
         }
+
         ansWrap.appendChild(opt);
+        ansWrap.appendChild(corr);
       }
 
       if(block.kind === "both"){
@@ -1328,6 +1497,7 @@ PATCH (A):
       t.status = desired;
     }
 
+    // normalize blocks on every hydrate to keep fail-closed
     t.blocks = (Array.isArray(t.blocks) ? t.blocks : []).map(normalizeBlock);
 
     updatePublishHint();
@@ -1521,16 +1691,35 @@ PATCH (A):
     if(k !== "info" && k !== "task" && k !== "question" && k !== "both"){
       setMsg("err", "Ogiltig blocktyp (fail-closed)."); return;
     }
-    STATE.edit.blocks.push(normalizeBlock({
+
+    // Default rules for new question-blocks:
+    // - questionAnswer defaults to "choice"
+    // - options starts with 3 empty rows (convenience)
+    // - correctOptions starts empty
+    const base = {
       kind: k,
       title: "",
       text: "",
       taskAnswer: "checkbox",
-      questionAnswer: (k === "both") ? "text" : "text",
+      questionAnswer: "text",
       scaleMin: 1,
       scaleMax: 5,
-      options: []
-    }));
+      options: [],
+      correctOptions: []
+    };
+
+    if(k === "question"){
+      base.questionAnswer = "choice";
+      base.options = ["", "", ""];
+      base.correctOptions = [];
+    }
+    if(k === "both"){
+      base.questionAnswer = "text";
+      base.options = [];
+      base.correctOptions = [];
+    }
+
+    STATE.edit.blocks.push(normalizeBlock(base));
     setDirty(true);
     renderBlocks();
   });
@@ -1543,7 +1732,8 @@ PATCH (A):
     }
     STATE.edit.blocks.push(normalizeBlock({ kind:"info", title:"Information", text:"Kort info om utbildningen och vad som förväntas." }));
     STATE.edit.blocks.push(normalizeBlock({ kind:"task", title:"Uppgift", text:"Gör uppgiften och markera när du är klar.", taskAnswer:"checkbox" }));
-    STATE.edit.blocks.push(normalizeBlock({ kind:"question", title:"Fråga", text:"Svara kort.", questionAnswer:"text" }));
+    // Default question is now choice (Text requires active selection)
+    STATE.edit.blocks.push(normalizeBlock({ kind:"question", title:"Fråga", text:"Svara kort.", questionAnswer:"choice", options:["", "", ""], correctOptions:[] }));
     setDirty(true);
     renderBlocks();
   });
@@ -1739,11 +1929,13 @@ PATCH (A):
 </script>
 
 <!-- ============================================================
-Ändringslogg (AO-TRAININGS-PATCH-01) ≤ 8 rader
-- PATCH (A): Område är nu 1 kontroll (dropdown per modul)
-- Lagt “+ Skapa nytt område…” som visar textfält endast vid behov
-- Område-förslag och hint är modul-specifika (byggs från sparade utbildningar)
-- Inga nya storage-keys, ingen ändring av vänsterlistans block/info
+Ändringslogg (AO-TRAININGS-CHOICE-UPGRADE-01) ≤ 8 rader
+- Fråga-block: default svarstyp är nu "choice" för nya block (Text kräver aktivt val)
+- Ny property i question-block: correctOptions (0–2 strängar som måste matcha options)
+- normalizeBlock uppdaterad: fail-closed trim/dedupe/max 2 + filtrerar correctOptions mot options
+- UI: lade till "Rätt svar" (checkbox-lista) med max-2 guard (blockerar tredje val)
+- Byt till Text rensar options + correctOptions (fail-closed)
+- Standardblock: Fråga skapas som choice med 3 tomma rader
 ============================================================ -->
 </body>
 </html>
