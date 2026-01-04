@@ -9,17 +9,12 @@ Policy (LÅST):
 - Ingen känslig persondata (endast empNo om det finns i session; logga ej)
 - Inga nya storage-keys/datamodell utan AO (AO-002: skriver inget nytt)
 - XSS-escape på allt som renderas från storage (helpers erbjuds här)
-Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
-Ändringslogg:
-- v1.2: getSafePathname + prefix startsWith + BASE_PATH-trim + canonical getAuth + redirectTo + _paths endast i DEBUG
-- v1.3 (PATCH): ROUTES_BY_ROLE entries som slutar med "/" tolkas som PREFIX (inte exakt). Fixar att "/admin/" matchar "/admin/home.html" etc.
-- v1.4 (PATCH): Deterministisk scopeId-resolve från befintliga assignments (AO-020_ROLE_ASSIGNMENTS_V2) när session saknar scopeId.
-  * Skriver inget nytt. Läser endast befintliga keys.
-  * getAuth exponerar empNo (om finns) + härleder scopeId utan att mutera session.
-- v1.6 (PATCH): Tar bort .htm-kompat helt (standard: .html)
-  * routeAfterLogin använder config exakt (ingen omskrivning)
-  * isHtmlLikeRoute klassar endast .html (samt "/" och prefix "/")
-  * matchRouteEntry stödjer endast .html som exakt fil (prefix-rader funkar som innan)
+
+TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
+- Nya keys (exakt):
+  * AO-060_PLANS_V1 (Array av Plan)
+  * AO-061_PLAN_ASSIGNMENTS_V1 (Array av PlanAssignment)
+- Helpers: read/validate/save/upsert (UI-only, fail-closed, inga auto-writes)
 ============================================================ */
 
 (function () {
@@ -34,6 +29,13 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
 
   // STORAGE: Befintliga nycklar (läsning endast)
   const ASSIGNMENTS_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
+
+  // ============================================================
+  // STORAGE (AO-ONBOARD-PLANS-01 LÅST) — exakt nya keys
+  // ============================================================
+
+  const PLANS_KEY = "AO-060_PLANS_V1";
+  const PLAN_ASSIGNMENTS_KEY = "AO-061_PLAN_ASSIGNMENTS_V1";
 
   // GUARD: JSON-parse får aldrig kasta. Returnera null vid fel.
   function safeJsonParse(str) {
@@ -68,6 +70,21 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
       return safeJsonParse(raw || "");
     } catch {
       return null;
+    }
+  }
+
+  // STORAGE: skriv localStorage (fail-closed). Returnerar {ok, error?}
+  // SCOPE: används endast av explicita save/upsert-helpers (inga auto-writes).
+  function writeLocalStorageJson(key, value) {
+    const k = String(key || "");
+    if (!k) return { ok: false, error: "WRITE_INVALID_KEY" };
+
+    try {
+      const payload = JSON.stringify(value);
+      localStorage.setItem(k, payload);
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "WRITE_FAILED" };
     }
   }
 
@@ -521,6 +538,279 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
   }
 
   // ============================================================
+  // AO-ONBOARD-PLANS-01 (1/5) — MODELL + HELPERS (UI-only, fail-closed)
+  // ============================================================
+
+  function isPlainObject(v) {
+    return !!v && typeof v === "object" && !Array.isArray(v);
+  }
+
+  function toInt(v) {
+    const n = typeof v === "number" ? v : Number(v);
+    if (!Number.isFinite(n)) return null;
+    if (Math.floor(n) !== n) return null;
+    return n;
+  }
+
+  function toTs(v) {
+    const n = typeof v === "number" ? v : Number(v);
+    if (!Number.isFinite(n)) return null;
+    return n;
+  }
+
+  function validatePlanItem(item) {
+    if (!isPlainObject(item)) return { ok: false, error: "VALIDATION_ITEM_NOT_OBJECT" };
+
+    const trainingId = String(item.trainingId ?? "").trim();
+    const dayOffset = toInt(item.dayOffset);
+    const order = toInt(item.order);
+    const gateRequired = item.gateRequired;
+
+    if (!trainingId) return { ok: false, error: "VALIDATION_ITEM_TRAININGID_REQUIRED" };
+    if (dayOffset === null || dayOffset < 0) return { ok: false, error: "VALIDATION_ITEM_DAYOFFSET_INVALID" };
+    if (order === null || order < 1) return { ok: false, error: "VALIDATION_ITEM_ORDER_INVALID" };
+    if (typeof gateRequired !== "boolean") return { ok: false, error: "VALIDATION_ITEM_GATE_REQUIRED_BOOL" };
+
+    return { ok: true };
+  }
+
+  function validatePlan(plan) {
+    if (!isPlainObject(plan)) return { ok: false, error: "VALIDATION_PLAN_NOT_OBJECT" };
+
+    const id = String(plan.id ?? "").trim();
+    const title = String(plan.title ?? "").trim();
+    const status = String(plan.status ?? "").trim();
+    const createdAt = toTs(plan.createdAt);
+    const updatedAt = toTs(plan.updatedAt);
+    const items = plan.items;
+
+    if (!id) return { ok: false, error: "VALIDATION_PLAN_ID_REQUIRED" };
+    if (!title) return { ok: false, error: "VALIDATION_PLAN_TITLE_REQUIRED" };
+    if (status !== "draft" && status !== "active" && status !== "archived") {
+      return { ok: false, error: "VALIDATION_PLAN_STATUS_INVALID" };
+    }
+    if (createdAt === null) return { ok: false, error: "VALIDATION_PLAN_CREATEDAT_INVALID" };
+    if (updatedAt === null) return { ok: false, error: "VALIDATION_PLAN_UPDATEDAT_INVALID" };
+    if (!Array.isArray(items)) return { ok: false, error: "VALIDATION_PLAN_ITEMS_NOT_ARRAY" };
+
+    // Validate items + ensure no duplicate trainingId (save-side strict)
+    const seen = new Set();
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const vr = validatePlanItem(it);
+      if (!vr.ok) return vr;
+
+      const tId = String(it.trainingId ?? "").trim();
+      if (seen.has(tId)) return { ok: false, error: "VALIDATION_PLAN_DUP_TRAININGID" };
+      seen.add(tId);
+    }
+
+    return { ok: true };
+  }
+
+  function normalizePlanForRead(plan) {
+    // Read-side: tolerant + dedupe items by trainingId (keep first). NO WRITES.
+    if (!isPlainObject(plan)) return null;
+
+    const id = String(plan.id ?? "").trim();
+    const title = String(plan.title ?? "").trim();
+    const statusRaw = String(plan.status ?? "draft").trim();
+    const status = (statusRaw === "draft" || statusRaw === "active" || statusRaw === "archived") ? statusRaw : "draft";
+
+    const createdAt = toTs(plan.createdAt);
+    const updatedAt = toTs(plan.updatedAt);
+
+    const itemsIn = Array.isArray(plan.items) ? plan.items : [];
+    const seen = new Set();
+    const itemsOut = [];
+
+    for (let i = 0; i < itemsIn.length; i++) {
+      const it = itemsIn[i];
+      if (!isPlainObject(it)) continue;
+
+      const trainingId = String(it.trainingId ?? "").trim();
+      if (!trainingId) continue;
+      if (seen.has(trainingId)) continue;
+
+      const dayOffset = toInt(it.dayOffset);
+      const order = toInt(it.order);
+      const gateRequired = (typeof it.gateRequired === "boolean") ? it.gateRequired : true;
+
+      if (dayOffset === null || dayOffset < 0) continue;
+      if (order === null || order < 1) continue;
+
+      seen.add(trainingId);
+      itemsOut.push({ trainingId, dayOffset, order, gateRequired });
+    }
+
+    // Minimal required fields for consumer: id + title (others defaulted)
+    if (!id || !title) return null;
+    if (createdAt === null || updatedAt === null) return null;
+
+    return { id, title, status, createdAt, updatedAt, items: itemsOut };
+  }
+
+  function validatePlanAssignment(pa) {
+    if (!isPlainObject(pa)) return { ok: false, error: "VALIDATION_PA_NOT_OBJECT" };
+
+    const id = String(pa.id ?? "").trim();
+    const empNo = normalizeEmpNo(pa.empNo);
+    const planId = String(pa.planId ?? "").trim();
+    const startDateTs = toTs(pa.startDateTs);
+    const createdAt = toTs(pa.createdAt);
+    const updatedAt = toTs(pa.updatedAt);
+
+    if (!id || !id.startsWith("pa_")) return { ok: false, error: "VALIDATION_PA_ID_INVALID" };
+    if (!empNo) return { ok: false, error: "VALIDATION_PA_EMPNO_REQUIRED" };
+    if (!planId) return { ok: false, error: "VALIDATION_PA_PLANID_REQUIRED" };
+    if (startDateTs === null) return { ok: false, error: "VALIDATION_PA_STARTDATE_INVALID" };
+    if (createdAt === null) return { ok: false, error: "VALIDATION_PA_CREATEDAT_INVALID" };
+    if (updatedAt === null) return { ok: false, error: "VALIDATION_PA_UPDATEDAT_INVALID" };
+
+    return { ok: true };
+  }
+
+  function normalizePlanAssignmentForRead(pa) {
+    if (!isPlainObject(pa)) return null;
+
+    const id = String(pa.id ?? "").trim();
+    const empNo = normalizeEmpNo(pa.empNo);
+    const planId = String(pa.planId ?? "").trim();
+    const startDateTs = toTs(pa.startDateTs);
+    const createdAt = toTs(pa.createdAt);
+    const updatedAt = toTs(pa.updatedAt);
+
+    if (!id || !id.startsWith("pa_")) return null;
+    if (!empNo || !planId) return null;
+    if (startDateTs === null || createdAt === null || updatedAt === null) return null;
+
+    return { id, empNo, planId, startDateTs, createdAt, updatedAt };
+  }
+
+  function genId(prefix) {
+    // Ingen ny key. Unik via tid + random. Stabil i UI-only.
+    const p = String(prefix || "id_");
+    const t = Date.now();
+    const r = Math.random().toString(16).slice(2, 10);
+    return p + t.toString(16) + "_" + r;
+  }
+
+  function readArrayKeyOrEmpty(key) {
+    // Spec: missing key => []
+    // Corrupt JSON or not array => fail-closed (ok:false)
+    const raw = localStorage.getItem(String(key || ""));
+    if (raw === null) return { ok: true, data: [] };
+
+    const parsed = safeJsonParse(raw);
+    if (!Array.isArray(parsed)) return { ok: false, error: "CORRUPT_NOT_ARRAY" };
+
+    return { ok: true, data: parsed };
+  }
+
+  function readPlans() {
+    const res = readArrayKeyOrEmpty(PLANS_KEY);
+    if (!res.ok) return { ok: false, error: "CORRUPT_PLANS" };
+
+    const out = [];
+    for (let i = 0; i < res.data.length; i++) {
+      const n = normalizePlanForRead(res.data[i]);
+      if (n) out.push(n);
+    }
+    return { ok: true, data: out };
+  }
+
+  function readPlanAssignments() {
+    const res = readArrayKeyOrEmpty(PLAN_ASSIGNMENTS_KEY);
+    if (!res.ok) return { ok: false, error: "CORRUPT_PLAN_ASSIGNMENTS" };
+
+    const out = [];
+    for (let i = 0; i < res.data.length; i++) {
+      const n = normalizePlanAssignmentForRead(res.data[i]);
+      if (n) out.push(n);
+    }
+    return { ok: true, data: out };
+  }
+
+  function savePlans(plansArray) {
+    if (!Array.isArray(plansArray)) return { ok: false, error: "VALIDATION_PLANS_NOT_ARRAY" };
+
+    // Save-side: strict validate each plan (including dup trainingId check)
+    for (let i = 0; i < plansArray.length; i++) {
+      const vr = validatePlan(plansArray[i]);
+      if (!vr.ok) return vr;
+    }
+
+    return writeLocalStorageJson(PLANS_KEY, plansArray);
+  }
+
+  function savePlanAssignments(assignmentsArray) {
+    if (!Array.isArray(assignmentsArray)) return { ok: false, error: "VALIDATION_PA_LIST_NOT_ARRAY" };
+
+    // Save-side: strict validate each assignment
+    for (let i = 0; i < assignmentsArray.length; i++) {
+      const vr = validatePlanAssignment(assignmentsArray[i]);
+      if (!vr.ok) return vr;
+    }
+
+    // En per {empNo, planId} — dedupe enforcement at save-time (fail-closed if duplicates exist)
+    const seen = new Set();
+    for (let i = 0; i < assignmentsArray.length; i++) {
+      const a = assignmentsArray[i];
+      const k = normalizeEmpNo(a.empNo) + "::" + String(a.planId ?? "").trim();
+      if (seen.has(k)) return { ok: false, error: "VALIDATION_PA_DUP_EMP_PLAN" };
+      seen.add(k);
+    }
+
+    return writeLocalStorageJson(PLAN_ASSIGNMENTS_KEY, assignmentsArray);
+  }
+
+  function upsertPlanAssignment(existingArray, input) {
+    // En assignment per {empNo, planId}. Replace existing; update updatedAt.
+    if (!Array.isArray(existingArray)) return { ok: false, error: "VALIDATION_PA_LIST_NOT_ARRAY" };
+
+    const now = Date.now();
+    const empNo = normalizeEmpNo(input && input.empNo);
+    const planId = String(input && input.planId || "").trim();
+    const startDateTs = toTs(input && input.startDateTs);
+
+    if (!empNo) return { ok: false, error: "VALIDATION_PA_EMPNO_REQUIRED" };
+    if (!planId) return { ok: false, error: "VALIDATION_PA_PLANID_REQUIRED" };
+    if (startDateTs === null) return { ok: false, error: "VALIDATION_PA_STARTDATE_INVALID" };
+
+    // Find existing by composite key
+    let idx = -1;
+    for (let i = 0; i < existingArray.length; i++) {
+      const row = existingArray[i];
+      if (!isPlainObject(row)) continue;
+      const e = normalizeEmpNo(row.empNo);
+      const p = String(row.planId ?? "").trim();
+      if (e === empNo && p === planId) { idx = i; break; }
+    }
+
+    const base = (idx >= 0 && isPlainObject(existingArray[idx])) ? existingArray[idx] : null;
+    const id = (base && typeof base.id === "string" && base.id.startsWith("pa_")) ? base.id : genId("pa_");
+    const createdAt = (base && Number.isFinite(Number(base.createdAt))) ? Number(base.createdAt) : now;
+
+    const next = {
+      id: String(id),
+      empNo: empNo,
+      planId: planId,
+      startDateTs: Number(startDateTs),
+      createdAt: Number(createdAt),
+      updatedAt: Number(now),
+    };
+
+    const vr = validatePlanAssignment(next);
+    if (!vr.ok) return vr;
+
+    const out = existingArray.slice();
+    if (idx >= 0) out[idx] = next;
+    else out.push(next);
+
+    return { ok: true, data: out };
+  }
+
+  // ============================================================
   // XSS HELPERS
   // ============================================================
 
@@ -600,6 +890,18 @@ Senaste sanning: 2025-12-30 (AO-002 PATCH v1.3 PRC-beslut)
     setText,
     debugLog,
     logout,
+
+    // AO-ONBOARD-PLANS-01 (1/5) — public helpers (no side effects unless called)
+    PLANS_KEY,
+    PLAN_ASSIGNMENTS_KEY,
+    readPlans,
+    readPlanAssignments,
+    validatePlan,
+    validatePlanItem,
+    validatePlanAssignment,
+    savePlans,
+    savePlanAssignments,
+    upsertPlanAssignment,
   };
 
   if (debugEnabled()) {
