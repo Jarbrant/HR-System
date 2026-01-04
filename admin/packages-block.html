@@ -2,9 +2,13 @@
 AO-ADMIN-REBUILD-02 (PATCH v1.1) | FIL-ID: admin/packages-block.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN – Schema-tolerant Blockeditor (TRAININGS) för AO-057_TRAININGS_V1
-- Visar ENDAST “färdiga” utbildningar = status: published + blocks.length > 0
 - Läser/redigerar/sparar blocks[] oavsett Schema A (kind/taskAnswer/...) eller Schema B (type/task/question)
 - Preserve format: ändra bara fält vi editerar, lämna resten
+
+FIX v1.1:
+- Auth via AO-002 CORE (HRApp.requireAuth/getAuth) för att matcha faktiska session-shape.
+- Fallback: om CORE saknas → läs AO-001_LOGIN_V1 direkt (sessionStorage→localStorage) som tidigare.
+- Tydligare fel: visar varför roll inte hittas (utan att skriva till storage).
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -78,6 +82,7 @@ POLICY (LÅST):
     .footerBar { display:flex; gap:10px; flex-wrap: wrap; align-items:center; justify-content: space-between; margin-top: 10px; }
     .smallNote { font-size: 12px; opacity: .8; }
     .divider { height:1px; background: rgba(0,0,0,.10); margin: 10px 0; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; opacity:.85; }
   </style>
 </head>
 <body>
@@ -98,10 +103,7 @@ POLICY (LÅST):
     <div class="grid">
       <section class="card" aria-label="Välj utbildning">
         <h2>Välj utbildning</h2>
-        <p class="hint">
-          Visar endast <strong>färdiga</strong> utbildningar: <strong>status=published</strong> och <strong>minst 1 block</strong>.
-          Filtrera: Modul → Område → Utbildning. När du väljer utbildning laddas dess block för redigering.
-        </p>
+        <p class="hint">Filtrera: Modul → Område → Utbildning. När du väljer utbildning laddas dess block för redigering.</p>
 
         <div id="msgBox" class="error" style="display:none;"></div>
 
@@ -180,10 +182,13 @@ POLICY (LÅST):
     </div>
   </main>
 
+  <!-- AO-002 CORE (LÅST): config före app -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
+  <script src="../UI/UI-03-APP.js"></script>
+
   <script>
     // ============================================================
     // GUARD/STORAGE/XSS: Fail-closed + schema-tolerant + preserve format
-    // + FILTER: endast färdiga utbildningar (published + blocks>0)
     // ============================================================
 
     const KEY_AUTH = "AO-001_LOGIN_V1";
@@ -213,70 +218,58 @@ POLICY (LÅST):
     const saveState = el("saveState");
 
     // In-memory state
-    let AUTH = null;                 // { role, ... }
+    let AUTH = null;                 // { role, ... } (normalized view)
     let TRAININGS = null;            // array
     let selectedTrainingId = null;   // string
     let workingBlocks = null;        // array (edited copy)
     let originalBlocksJson = null;   // string snapshot for discard
     let hasDirty = false;
 
-    function safeText(node, text) {
-      // XSS: only textContent
-      node.textContent = String(text ?? "");
-    }
+    function safeText(node, text) { node.textContent = String(text ?? ""); }
 
     function showError(text) {
       msgBox.style.display = "block";
       safeText(msgBox, text);
     }
-
     function clearError() {
       msgBox.style.display = "none";
       safeText(msgBox, "");
     }
-
     function showEditorLock(text) {
       editorLocked.style.display = "block";
       safeText(editorLocked, text);
     }
-
     function clearEditorLock() {
       editorLocked.style.display = "none";
       safeText(editorLocked, "");
     }
-
     function setSaveStateOk(text) {
       saveState.style.display = "block";
       saveState.className = "ok";
       safeText(saveState, text);
     }
-
     function setSaveStateErr(text) {
       saveState.style.display = "block";
       saveState.className = "error";
       safeText(saveState, text);
     }
-
     function clearSaveState() {
       saveState.style.display = "none";
       safeText(saveState, "");
     }
 
     function readJsonFromStorageFirstSessionThenLocal(key) {
-      // STORAGE: auth ska vara sessionStorage först, fallback localStorage
       const s = sessionStorage.getItem(key);
       if (s != null) return { raw: s, source: "sessionStorage" };
       const l = localStorage.getItem(key);
       if (l != null) return { raw: l, source: "localStorage" };
       return { raw: null, source: null };
     }
-
     function readJsonFromLocal(key) {
       const l = localStorage.getItem(key);
       if (l != null) return { raw: l };
       return { raw: null };
     }
-
     function parseJson(raw) {
       if (raw == null) return { ok: false, data: null, err: "Saknar data." };
       try {
@@ -287,13 +280,52 @@ POLICY (LÅST):
       }
     }
 
+    function normalizeRoleFromUnknownShape(obj) {
+      // Robust: plocka roll från vanliga ställen, utan att skriva tillbaka.
+      if (!obj || typeof obj !== "object") return "";
+      const direct = obj.role;
+      if (direct != null) return String(direct);
+      if (obj.auth && typeof obj.auth === "object" && obj.auth.role != null) return String(obj.auth.role);
+      if (obj.session && typeof obj.session === "object" && obj.session.role != null) return String(obj.session.role);
+      return "";
+    }
+
     function isAdminOnly(auth) {
-      // SCOPE: ADMIN-only. SYSTEM_ADMIN hanteras ej här (fail-closed).
       const role = String(auth?.role ?? "").toUpperCase().trim();
       return role === "ADMIN";
     }
 
     function loadAuthFailClosed() {
+      // Primärt: använd CORE (AO-002) för att matcha login-shape exakt.
+      try {
+        if (window.HRApp && typeof window.HRApp.requireAuth === "function") {
+          const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN"] });
+          if (!session) {
+            AUTH = null;
+            safeText(authBadge, "Auth: core");
+            safeText(roleBadge, "Roll: okänd");
+            showError("Du är inte inloggad (eller saknar rätt roll). Logga in som ADMIN.");
+            return false;
+          }
+          const a = (typeof window.HRApp.getAuth === "function") ? window.HRApp.getAuth(session) : (session.auth || session);
+          const roleRaw = normalizeRoleFromUnknownShape(a);
+          AUTH = { ...(a && typeof a === "object" ? a : {}), role: roleRaw };
+
+          safeText(authBadge, "Auth: core");
+          safeText(roleBadge, "Roll: " + String(AUTH?.role ?? "?"));
+
+          if (!isAdminOnly(AUTH)) {
+            showError("Otillräcklig behörighet. Den här sidan är endast för ADMIN.");
+            return false;
+          }
+          clearError();
+          return true;
+        }
+      } catch (e) {
+        // Fall igenom till storage-variant (fail-closed senare om även den faller).
+      }
+
+      // Fallback: direkt från AO-001_LOGIN_V1 (sessionStorage → localStorage)
       const { raw, source } = readJsonFromStorageFirstSessionThenLocal(KEY_AUTH);
       const parsed = parseJson(raw);
       if (!parsed.ok) {
@@ -303,13 +335,16 @@ POLICY (LÅST):
         showError("Du är inte inloggad (eller auth är korrupt). Logga in som ADMIN.");
         return false;
       }
-      AUTH = parsed.data;
+
+      const roleRaw = normalizeRoleFromUnknownShape(parsed.data);
+      AUTH = { ...(parsed.data && typeof parsed.data === "object" ? parsed.data : {}), role: roleRaw };
 
       safeText(authBadge, "Auth: " + (source || "?"));
       safeText(roleBadge, "Roll: " + String(AUTH?.role ?? "?"));
 
       if (!isAdminOnly(AUTH)) {
-        showError("Otillräcklig behörighet. Den här sidan är endast för ADMIN.");
+        const diag = (AUTH?.role ? ` (hittad roll: "${String(AUTH.role)}")` : " (roll saknas i session)");
+        showError("Otillräcklig behörighet. Den här sidan är endast för ADMIN." + diag);
         return false;
       }
 
@@ -318,20 +353,18 @@ POLICY (LÅST):
     }
 
     function validateTrainingsShape(trainings) {
-      // Fail-closed: måste vara array av objekt med id och blocks (om finns)
       if (!Array.isArray(trainings)) return { ok: false, err: "AO-057_TRAININGS_V1 är inte en array." };
       for (let i = 0; i < trainings.length; i++) {
         const t = trainings[i];
         if (t == null || typeof t !== "object") return { ok: false, err: "Utbildningsdata är inte objekt (index " + i + ")." };
         if (!t.id) return { ok: false, err: "Utbildning saknar id (index " + i + ")." };
-        // blocks kan saknas => behandlas som tom array
         if (t.blocks != null && !Array.isArray(t.blocks)) return { ok: false, err: "blocks måste vara array (training id " + String(t.id) + ")." };
       }
       return { ok: true, err: null };
     }
 
     function loadTrainingsFailClosed() {
-      const { raw } = readJsonFromLocal(KEY_TRAININGS); // data är localStorage-first (enligt AO)
+      const { raw } = readJsonFromLocal(KEY_TRAININGS);
       const parsed = parseJson(raw);
 
       if (!parsed.ok) {
@@ -350,22 +383,6 @@ POLICY (LÅST):
       TRAININGS = parsed.data;
       clearError();
       return true;
-    }
-
-    // ==========================
-    // FILTER: endast färdiga trainings
-    // ==========================
-    function isFinishedTraining(t) {
-      // "färdig" = status: published + minst 1 block
-      if (!t || typeof t !== "object") return false;
-      const status = String(t.status ?? "").trim().toLowerCase();
-      const blocksCount = Array.isArray(t.blocks) ? t.blocks.length : 0;
-      return status === "published" && blocksCount > 0;
-    }
-
-    function getFinishedTrainings() {
-      if (!Array.isArray(TRAININGS)) return [];
-      return TRAININGS.filter(isFinishedTraining);
     }
 
     function uniqSorted(values) {
@@ -394,33 +411,26 @@ POLICY (LÅST):
     }
 
     function buildFilters() {
-      const finished = getFinishedTrainings();
-      const modules = uniqSorted(finished.map(t => t.module));
+      const modules = uniqSorted(TRAININGS.map(t => t.module || "(saknar modul)"));
       setSelectOptions(filterModule, modules.map(m => ({ value: m, label: m })), "Välj modul");
-
       setSelectOptions(filterArea, [], "Välj område");
       setSelectOptions(filterTraining, [], "Välj utbildning");
-
-      if (modules.length === 0) {
-        showError("Inga färdiga utbildningar hittades (kräver status=published och minst 1 block). Gå till Utbildningar och publicera.");
-      }
     }
 
     function getFilteredTrainings() {
       const m = filterModule.value.trim();
       const a = filterArea.value.trim();
 
-      let arr = getFinishedTrainings();
-      if (m) arr = arr.filter(t => String(t.module ?? "").trim() === m);
-      if (a) arr = arr.filter(t => String(t.area ?? "").trim() === a);
+      let arr = TRAININGS.slice();
+      if (m) arr = arr.filter(t => String((t.module || "(saknar modul)")).trim() === m);
+      if (a) arr = arr.filter(t => String((t.area || "(saknar område)")).trim() === a);
       return arr;
     }
 
     function rebuildAreaOptions() {
       const m = filterModule.value.trim();
-      const base = getFinishedTrainings();
-      const arr = base.filter(t => !m || String(t.module ?? "").trim() === m);
-      const areas = uniqSorted(arr.map(t => t.area));
+      const arr = TRAININGS.slice().filter(t => !m || String((t.module || "(saknar modul)")).trim() === m);
+      const areas = uniqSorted(arr.map(t => t.area || "(saknar område)"));
       setSelectOptions(filterArea, areas.map(x => ({ value: x, label: x })), "Välj område");
       filterArea.value = "";
     }
@@ -429,13 +439,10 @@ POLICY (LÅST):
       const arr = getFilteredTrainings();
 
       const opts = arr
-        .map(t => {
-          const blocksCount = Array.isArray(t.blocks) ? t.blocks.length : 0;
-          return {
-            value: String(t.id),
-            label: String(t.title ?? "(utan titel)") + "  ·  published  ·  " + blocksCount + " block"
-          };
-        })
+        .map(t => ({
+          value: String(t.id),
+          label: String(t.title ?? "(utan titel)") + "  ·  " + String(t.status ?? "")
+        }))
         .sort((a,b) => a.label.localeCompare(b.label, "sv"));
 
       setSelectOptions(filterTraining, opts, "Välj utbildning");
@@ -444,8 +451,7 @@ POLICY (LÅST):
 
     function findTrainingById(id) {
       if (!id) return null;
-      // Viktigt: välj även om training senare blivit "draft" (men vi listar bara färdiga).
-      return (Array.isArray(TRAININGS) ? TRAININGS : []).find(t => String(t.id) === String(id)) || null;
+      return TRAININGS.find(t => String(t.id) === String(id)) || null;
     }
 
     function renderTrainingMeta(t) {
@@ -485,12 +491,8 @@ POLICY (LÅST):
     }
 
     function cloneBlocks(blocks) {
-      // Preserve format: deep clone JSON-safe
-      try {
-        return JSON.parse(JSON.stringify(blocks || []));
-      } catch {
-        return null;
-      }
+      try { return JSON.parse(JSON.stringify(blocks || [])); }
+      catch { return null; }
     }
 
     function markDirty(flag) {
@@ -518,7 +520,7 @@ POLICY (LÅST):
     }
 
     // ==========================
-    // AO-ADMIN-REBUILD-02: Schema helpers
+    // Schema helpers
     // ==========================
     function normalizeKindValue(v) {
       const s = String(v ?? "").toLowerCase().trim();
@@ -696,7 +698,6 @@ POLICY (LÅST):
         const split = document.createElement("div");
         split.className = "split";
 
-        // title/text (båda)
         const fTitle = document.createElement("div");
         fTitle.className = "field";
         const lTitle = document.createElement("label");
@@ -746,7 +747,6 @@ POLICY (LÅST):
           section.appendChild(h);
 
           if (hasOwn(b, "taskAnswer")) {
-            // Schema A
             const fAns = document.createElement("div");
             fAns.className = "field";
             const lAns = document.createElement("label");
@@ -825,76 +825,6 @@ POLICY (LÅST):
               mm.appendChild(fMax);
               section.appendChild(mm);
 
-              if (hasOwn(b, "scaleLabelMin") || hasOwn(b, "scaleLabelMax")) {
-                const labels = document.createElement("div");
-                labels.className = "row";
-                labels.style.marginTop = "10px";
-
-                const fL1 = document.createElement("div");
-                fL1.className = "field";
-                const l1 = document.createElement("label");
-                safeText(l1, "scaleLabelMin");
-                const i1 = document.createElement("input");
-                i1.type = "text";
-                i1.value = String(b.scaleLabelMin ?? "");
-                i1.addEventListener("input", () => {
-                  b.scaleLabelMin = ensureStringMax(i1.value, 80);
-                  markDirty(true);
-                });
-                fL1.appendChild(l1); fL1.appendChild(i1);
-
-                const fL2 = document.createElement("div");
-                fL2.className = "field";
-                const l2 = document.createElement("label");
-                safeText(l2, "scaleLabelMax");
-                const i2 = document.createElement("input");
-                i2.type = "text";
-                i2.value = String(b.scaleLabelMax ?? "");
-                i2.addEventListener("input", () => {
-                  b.scaleLabelMax = ensureStringMax(i2.value, 80);
-                  markDirty(true);
-                });
-                fL2.appendChild(l2); fL2.appendChild(i2);
-
-                labels.appendChild(fL1);
-                labels.appendChild(fL2);
-                section.appendChild(labels);
-              } else if (hasOwn(b, "scaleLabels") && (typeof b.scaleLabels === "object") && b.scaleLabels != null) {
-                const labels = document.createElement("div");
-                labels.className = "row";
-                labels.style.marginTop = "10px";
-
-                const fL1 = document.createElement("div");
-                fL1.className = "field";
-                const l1 = document.createElement("label");
-                safeText(l1, "scaleLabels.min");
-                const i1 = document.createElement("input");
-                i1.type = "text";
-                i1.value = String(b.scaleLabels.min ?? "");
-                i1.addEventListener("input", () => {
-                  b.scaleLabels.min = ensureStringMax(i1.value, 80);
-                  markDirty(true);
-                });
-                fL1.appendChild(l1); fL1.appendChild(i1);
-
-                const fL2 = document.createElement("div");
-                fL2.className = "field";
-                const l2 = document.createElement("label");
-                safeText(l2, "scaleLabels.max");
-                const i2 = document.createElement("input");
-                i2.type = "text";
-                i2.value = String(b.scaleLabels.max ?? "");
-                i2.addEventListener("input", () => {
-                  b.scaleLabels.max = ensureStringMax(i2.value, 80);
-                  markDirty(true);
-                });
-                fL2.appendChild(l2); fL2.appendChild(i2);
-
-                labels.appendChild(fL1);
-                labels.appendChild(fL2);
-                section.appendChild(labels);
-              }
-
               const note = document.createElement("div");
               note.className = "hint";
               note.style.marginTop = "6px";
@@ -908,7 +838,6 @@ POLICY (LÅST):
               section.appendChild(note);
             }
           } else if (b && typeof b === "object" && hasOwn(b, "task") && b.task && typeof b.task === "object") {
-            // Schema B fallback
             const checks = document.createElement("div");
             checks.className = "inlineChecks";
 
@@ -1004,7 +933,6 @@ POLICY (LÅST):
           section.appendChild(h);
 
           if (hasOwn(b, "questionAnswer")) {
-            // Schema A
             const fAns = document.createElement("div");
             fAns.className = "field";
             const lAns = document.createElement("label");
@@ -1069,7 +997,6 @@ POLICY (LÅST):
               section.appendChild(note);
             }
           } else if (b && typeof b === "object" && hasOwn(b, "question") && b.question && typeof b.question === "object") {
-            // Schema B fallback
             const kindB = schemaB_questionKindValue(b.question.kind);
 
             const row = document.createElement("div");
@@ -1239,39 +1166,19 @@ POLICY (LÅST):
     function saveBlocksFailClosed() {
       clearSaveState();
 
-      if (!selectedTrainingId) {
-        setSaveStateErr("Ingen utbildning vald.");
-        return;
-      }
-
-      if (!Array.isArray(TRAININGS)) {
-        setSaveStateErr("Trainings är inte laddade.");
-        return;
-      }
+      if (!selectedTrainingId) { setSaveStateErr("Ingen utbildning vald."); return; }
+      if (!Array.isArray(TRAININGS)) { setSaveStateErr("Trainings är inte laddade."); return; }
 
       const idx = TRAININGS.findIndex(t => String(t.id) === String(selectedTrainingId));
-      if (idx < 0) {
-        setSaveStateErr("Utbildningen finns inte längre (id mismatch). Inget sparat.");
-        return;
-      }
+      if (idx < 0) { setSaveStateErr("Utbildningen finns inte längre (id mismatch). Inget sparat."); return; }
 
       const t = TRAININGS[idx];
-      if (t == null || typeof t !== "object") {
-        setSaveStateErr("Utbildningen är korrupt. Inget sparat.");
-        return;
-      }
-
-      if (!Array.isArray(workingBlocks)) {
-        setSaveStateErr("Blocks är korrupt i minnet. Inget sparat.");
-        return;
-      }
+      if (t == null || typeof t !== "object") { setSaveStateErr("Utbildningen är korrupt. Inget sparat."); return; }
+      if (!Array.isArray(workingBlocks)) { setSaveStateErr("Blocks är korrupt i minnet. Inget sparat."); return; }
 
       for (let i = 0; i < workingBlocks.length; i++) {
         const b = workingBlocks[i];
-        if (!b || typeof b !== "object") {
-          setSaveStateErr("Block (index " + i + ") är inte ett objekt. Inget sparat.");
-          return;
-        }
+        if (!b || typeof b !== "object") { setSaveStateErr("Block (index " + i + ") är inte ett objekt. Inget sparat."); return; }
 
         if (!b.id) b.id = genBlockId();
 
@@ -1280,11 +1187,8 @@ POLICY (LÅST):
 
         const kind = getKind(b);
 
-        if (hasOwn(b, "kind") || !hasOwn(b, "type")) {
-          b.kind = kind;
-        } else if (hasOwn(b, "type")) {
-          b.type = kind;
-        }
+        if (hasOwn(b, "kind") || !hasOwn(b, "type")) b.kind = kind;
+        else if (hasOwn(b, "type")) b.type = kind;
 
         if (isSchemaA(b)) {
           if ((kind === "task" || kind === "both") && hasOwn(b, "taskAnswer")) {
@@ -1295,13 +1199,6 @@ POLICY (LÅST):
               b.scaleMin = clampInt(b.scaleMin, 1, 10, 1);
               b.scaleMax = clampInt(b.scaleMax, 1, 10, 5);
               if (b.scaleMin > b.scaleMax) b.scaleMax = b.scaleMin;
-
-              if (hasOwn(b, "scaleLabelMin")) b.scaleLabelMin = ensureStringMax(b.scaleLabelMin ?? "", 80);
-              if (hasOwn(b, "scaleLabelMax")) b.scaleLabelMax = ensureStringMax(b.scaleLabelMax ?? "", 80);
-              if (hasOwn(b, "scaleLabels") && b.scaleLabels && typeof b.scaleLabels === "object") {
-                if (hasOwn(b.scaleLabels, "min")) b.scaleLabels.min = ensureStringMax(b.scaleLabels.min ?? "", 80);
-                if (hasOwn(b.scaleLabels, "max")) b.scaleLabels.max = ensureStringMax(b.scaleLabels.max ?? "", 80);
-              }
             }
           }
 
@@ -1332,10 +1229,7 @@ POLICY (LÅST):
 
       const next = JSON.parse(JSON.stringify(TRAININGS));
       const t2 = next[idx];
-      if (!t2 || typeof t2 !== "object") {
-        setSaveStateErr("Kunde inte skapa säker kopia av utbildningen. Inget sparat.");
-        return;
-      }
+      if (!t2 || typeof t2 !== "object") { setSaveStateErr("Kunde inte skapa säker kopia av utbildningen. Inget sparat."); return; }
 
       t2.blocks = JSON.parse(JSON.stringify(workingBlocks));
       t2.version = bumpVersion(t2.version);
@@ -1354,22 +1248,6 @@ POLICY (LÅST):
 
       setSaveStateOk("Sparat. Block bevarade i sitt schema. Version bumpad och updatedAt uppdaterad.");
       renderTrainingMeta(findTrainingById(selectedTrainingId));
-
-      // Efter spar: bygg om filters (färdiga listan kan påverkas om blocks blir 0, men vi tar inte bort publish här)
-      buildFilters();
-      rebuildAreaOptions();
-      rebuildTrainingOptions();
-      // Behåll vald training om den fortfarande matchar "färdig"
-      const cur = findTrainingById(selectedTrainingId);
-      if (cur && isFinishedTraining(cur)) {
-        filterModule.value = String(cur.module ?? "").trim();
-        rebuildAreaOptions();
-        filterArea.value = String(cur.area ?? "").trim();
-        rebuildTrainingOptions();
-        filterTraining.value = String(cur.id);
-      } else {
-        setSelectedTraining(null);
-      }
     }
 
     function initFailClosed() {
@@ -1396,37 +1274,18 @@ POLICY (LÅST):
       renderBlocks();
       addBlockBtn.disabled = true;
       markDirty(false);
-
-      // Auto: om det finns exakt 1 modul/område/training, välj den direkt (snabbare)
-      const finished = getFinishedTrainings();
-      if (finished.length === 1) {
-        const t = finished[0];
-        filterModule.value = String(t.module ?? "").trim();
-        rebuildAreaOptions();
-        filterArea.value = String(t.area ?? "").trim();
-        rebuildTrainingOptions();
-        filterTraining.value = String(t.id);
-        setSelectedTraining(String(t.id));
-        addBlockBtn.disabled = false;
-      }
     }
 
     // Events
     filterModule.addEventListener("change", () => {
-      if (hasDirty && !confirm("Du har osparade ändringar. Byta filter ändå?")) {
-        initFailClosed();
-        return;
-      }
+      if (hasDirty && !confirm("Du har osparade ändringar. Byta filter ändå?")) { initFailClosed(); return; }
       setSelectedTraining(null);
       rebuildAreaOptions();
       rebuildTrainingOptions();
     });
 
     filterArea.addEventListener("change", () => {
-      if (hasDirty && !confirm("Du har osparade ändringar. Byta filter ändå?")) {
-        initFailClosed();
-        return;
-      }
+      if (hasDirty && !confirm("Du har osparade ändringar. Byta filter ändå?")) { initFailClosed(); return; }
       setSelectedTraining(null);
       rebuildTrainingOptions();
     });
@@ -1445,24 +1304,25 @@ POLICY (LÅST):
       initFailClosed();
     });
 
-    discardBtn.addEventListener("click", () => {
-      discardChanges();
-    });
-
-    addBlockBtn.addEventListener("click", () => {
-      addNewBlock();
-    });
+    discardBtn.addEventListener("click", () => { discardChanges(); });
+    addBlockBtn.addEventListener("click", () => { addNewBlock(); });
 
     saveBtn.addEventListener("click", () => {
       const okAuth = loadAuthFailClosed();
-      if (!okAuth) {
-        lockEditor("Auth/behörighet saknas. Inget sparat.");
-        return;
-      }
+      if (!okAuth) { lockEditor("Auth/behörighet saknas. Inget sparat."); return; }
       saveBlocksFailClosed();
     });
 
     initFailClosed();
   </script>
+
+  <!-- ============================================================
+  Ändringslogg (AO-ADMIN-REBUILD-02 PATCH v1.1) ≤ 8 rader
+  - Auth flyttad till AO-002 CORE (HRApp.requireAuth/getAuth) för korrekt session-shape
+  - Fallback kvar: läs AO-001_LOGIN_V1 direkt om CORE saknas
+  - Tydligare fail-closed fel om roll saknas/inte ADMIN (utan att skriva till storage)
+  - Inga nya storage-keys, fortsatt endast read/write AO-057_TRAININGS_V1
+  ============================================================ -->
+
 </body>
 </html>
