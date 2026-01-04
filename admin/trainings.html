@@ -319,7 +319,7 @@ POLICY (LÅST):
       </div>
 
       <div class="tiny" style="margin-top:10px;">
-        Tips: Område-förslag byggs från tidigare sparade utbildningar inom vald modul.
+        Tips: Område-förslag byggs från tidigare skapade utbildningar inom vald modul.
       </div>
     </section>
 
@@ -340,19 +340,18 @@ POLICY (LÅST):
             <select id="moduleSel"></select>
           </label>
 
+          <!-- PATCH (A): Endast 1 område-kontroll (dropdown) + "nytt område" vid behov -->
           <label>
             Område <span class="tiny">(obligatoriskt)</span>
-
-            <!-- PATCH: riktig dropdown per modul (utan ny storage-key) -->
-            <select id="areaSel" aria-label="Välj sparat område">
-              <option value="">Välj sparat område…</option>
-            </select>
-
-            <!-- Behåll fri text + datalist (för nya områden) -->
-            <input id="areaInp" type="text" list="areaList" placeholder="Eller skriv nytt område… (t.ex. Hygien, Ergonomi…)" maxlength="60" autocomplete="off" />
-            <datalist id="areaList"></datalist>
-
+            <select id="areaSel"></select>
             <div class="tiny" id="areaHint">—</div>
+          </label>
+        </div>
+
+        <div id="areaNewWrap" style="display:none; margin-top:10px;">
+          <label>
+            Nytt område <span class="tiny">(skapas inom vald modul)</span>
+            <input id="areaInp" type="text" placeholder="T.ex. Hygien, Ergonomi…" maxlength="60" autocomplete="off" />
           </label>
         </div>
       </section>
@@ -488,10 +487,16 @@ POLICY (LÅST):
 <script>
 /* ============================================================
 AO-TRAININGS-PATCH-01 | admin/trainings.html
-PATCH (Område dropdown per modul):
-- Lägger till areaSel dropdown som visar sparade områden per vald modul
-- Bygger från AO-057_TRAININGS_V1 (inga nya keys)
-- Inga ändringar i block-/listkopplingar
+Fokus:
+- Modul först + område med förslag (från sparade)
+- Tydlig “sparat”-status: visar om blocks finns + antal
+- Publish fail-closed (blocks.length > 0) + tydlig hint
+- Behåller AI via Worker (generiskt tolerant svarstolk)
+- Inga nya storage-keys: AO-057_TRAININGS_V1 (array)
+
+PATCH (A):
+- Endast 1 område-kontroll: dropdown per modul
+- "Skapa nytt område…" visar textfält, annars dolt
 ============================================================ */
 (function(){
   "use strict";
@@ -540,10 +545,12 @@ PATCH (Område dropdown per modul):
   const btnSave = $("#btnSave");
 
   const moduleSel = $("#moduleSel");
-  const areaSel = $("#areaSel");     // PATCH
+
+  // PATCH (A): area dropdown + optional new input
+  const areaSel = $("#areaSel");
   const areaInp = $("#areaInp");
-  const areaList = $("#areaList");
   const areaHint = $("#areaHint");
+  const areaNewWrap = $("#areaNewWrap");
 
   const titleInp = $("#titleInp");
   const statusSel = $("#statusSel");
@@ -712,6 +719,7 @@ PATCH (Område dropdown per modul):
 
   function serializeGoalsFromTextarea(){
     const lines = String(goalsInp.value || "").split("\n").map(s => s.trim()).filter(Boolean);
+    // dedupe
     const out = [];
     lines.forEach(x => { if(!out.includes(x)) out.push(x); });
     return out.slice(0,20);
@@ -752,55 +760,76 @@ PATCH (Område dropdown per modul):
     btnDelete.disabled = !STATE.selectedId;
   }
 
-  // PATCH: rebuild suggestions per module and populate BOTH datalist + dropdown
+  // PATCH (A): build dropdown options per module, plus "Skapa nytt område…"
   function rebuildAreaSuggestions(){
     const mod = String(moduleSel.value || "").trim();
-
     const areas = new Set();
-
-    // from saved items
     STATE.items.forEach(t => {
       if(!t) return;
       if(String(t.module||"") !== mod) return;
       const a = String(t.area||"").trim();
       if(a) areas.add(a);
     });
-
-    // also include current edit (so it appears immediately while editing)
-    if(STATE.edit && String(STATE.edit.module||"") === mod){
-      const a2 = String(STATE.edit.area||"").trim();
-      if(a2) areas.add(a2);
-    }
-
     const sorted = Array.from(areas).sort((a,b) => a.localeCompare(b, "sv"));
 
-    // datalist (kept)
-    areaList.innerHTML = "";
-    sorted.slice(0,80).forEach(a => {
-      const opt = document.createElement("option");
-      opt.value = a;
-      areaList.appendChild(opt);
-    });
+    // Populate dropdown (no innerHTML usage)
+    while(areaSel.firstChild) areaSel.removeChild(areaSel.firstChild);
 
-    // dropdown (new)
-    areaSel.innerHTML = "";
-    const first = document.createElement("option");
-    first.value = "";
-    first.textContent = sorted.length ? "Välj sparat område…" : "Inga sparade områden…";
-    areaSel.appendChild(first);
+    const ph = document.createElement("option");
+    ph.value = "";
+    ph.textContent = "Välj område…";
+    areaSel.appendChild(ph);
 
-    sorted.slice(0,120).forEach(a => {
+    sorted.slice(0,200).forEach(a => {
       const opt = document.createElement("option");
       opt.value = a;
       opt.textContent = a;
       areaSel.appendChild(opt);
     });
 
-    areaSel.disabled = (sorted.length === 0);
+    const addNew = document.createElement("option");
+    addNew.value = "__new__";
+    addNew.textContent = "+ Skapa nytt område…";
+    areaSel.appendChild(addNew);
 
     areaHint.textContent = sorted.length
-      ? `Sparade områden i "${mod}": ${sorted.slice(0,6).join(", ")}${sorted.length>6 ? "…" : ""}`
+      ? `Sparade i "${mod}": ${sorted.slice(0,6).join(", ")}${sorted.length>6 ? "…" : ""}`
       : `Inga sparade områden ännu för "${mod}".`;
+
+    // Sync selection with current edit.area (fail-closed)
+    syncAreaUIFromEdit();
+  }
+
+  function syncAreaUIFromEdit(){
+    const t = STATE.edit;
+    if(!t) return;
+
+    const cur = String(t.area || "").trim();
+    const hasCur = Array.from(areaSel.options).some(o => o.value === cur);
+
+    if(cur && hasCur){
+      areaSel.value = cur;
+      areaNewWrap.style.display = "none";
+      areaInp.value = "";
+    }else if(cur){
+      // area exists but not in list for this module -> treat as custom/new
+      areaSel.value = "__new__";
+      areaNewWrap.style.display = "block";
+      areaInp.value = cur;
+    }else{
+      // empty
+      areaSel.value = "";
+      areaNewWrap.style.display = "none";
+      areaInp.value = "";
+    }
+  }
+
+  function readAreaFromUI(){
+    const sel = String(areaSel.value || "");
+    if(sel === "__new__"){
+      return String(areaInp.value || "").trim();
+    }
+    return String(sel || "").trim();
   }
 
   function renderModuleOptions(){
@@ -838,8 +867,10 @@ PATCH (Område dropdown per modul):
       publishHint.textContent = "OK att publicera.";
     }
 
+    // UI hint + buttons
     btnSavePublish.disabled = (blocks === 0);
-    blocksInfo.textContent = (blocks === 0) ? "0 block (lägg till eller använd AI)" : (blocks + " block");
+    const b = blocks;
+    blocksInfo.textContent = (b === 0) ? "0 block (lägg till eller använd AI)" : (b + " block");
   }
 
   function makeBlockCard(block, index){
@@ -1099,7 +1130,7 @@ PATCH (Område dropdown per modul):
   }
 
   function renderBlocks(){
-    while(blocksList.firstChild) blocksList.removeChild(blocksList.firstChild);
+    clearBlocksUI();
     const arr = (STATE.edit && Array.isArray(STATE.edit.blocks)) ? STATE.edit.blocks : [];
     if(arr.length === 0){
       const empty = document.createElement("div");
@@ -1211,12 +1242,10 @@ PATCH (Område dropdown per modul):
     if(!t) return;
 
     moduleSel.value = t.module || MODULES[0];
+
+    // PATCH (A): rebuild dropdown per module, then sync selection + optional input
     rebuildAreaSuggestions();
 
-    // PATCH: keep dropdown in sync (best-effort)
-    areaSel.value = "";
-
-    areaInp.value = t.area || "";
     titleInp.value = t.title || "";
     statusSel.value = t.status || "draft";
     descInp.value = t.description || "";
@@ -1270,7 +1299,10 @@ PATCH (Område dropdown per modul):
     STATE.edit = JSON.parse(JSON.stringify(t));
     STATE.snapshot = JSON.parse(JSON.stringify(t));
     setSelected(t.id);
+
+    // PATCH (A)
     rebuildAreaSuggestions();
+
     syncEditorUI();
     renderList();
     setMsg("ok", "Ny utbildning skapad (inte sparad än).");
@@ -1280,7 +1312,10 @@ PATCH (Område dropdown per modul):
     const t = STATE.edit;
 
     t.module = String(moduleSel.value || "").trim();
-    t.area = String(areaInp.value || "").trim();
+
+    // PATCH (A): area comes from dropdown or "new input"
+    t.area = readAreaFromUI();
+
     t.title = String(titleInp.value || "").trim();
     t.description = String(descInp.value || "").trim().slice(0,240);
     t.goals = serializeGoalsFromTextarea();
@@ -1349,7 +1384,10 @@ PATCH (Område dropdown per modul):
 
     summarizeSavePill(t);
     setDirty(false);
+
+    // PATCH (A)
     rebuildAreaSuggestions();
+
     renderList();
     debugPre.textContent = JSON.stringify(t, null, 2);
 
@@ -1446,28 +1484,25 @@ PATCH (Område dropdown per modul):
   moduleSel.addEventListener("change", () => {
     hydrateFromInputs();
     setDirty(true);
-    // PATCH: refresh module-specific area dropdown
+    // PATCH (A): when module changes, rebuild dropdown options for that module
     rebuildAreaSuggestions();
-    // reset dropdown selection (but keep typed value)
-    areaSel.value = "";
   });
 
-  // PATCH: selecting a saved area fills the input (no new keys)
+  // PATCH (A): area dropdown controls visibility of new input
   areaSel.addEventListener("change", () => {
-    setMsg("", "");
     const v = String(areaSel.value || "");
-    if(!v) return;
-    areaInp.value = v;
+    if(v === "__new__"){
+      areaNewWrap.style.display = "block";
+      areaInp.focus();
+    }else{
+      areaNewWrap.style.display = "none";
+      areaInp.value = "";
+    }
     hydrateFromInputs();
     setDirty(true);
   });
 
-  areaInp.addEventListener("input", () => {
-    hydrateFromInputs();
-    setDirty(true);
-    // keep dropdown unselected while typing
-    if(areaSel && areaSel.value) areaSel.value = "";
-  });
+  areaInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
 
   titleInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
   descInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
@@ -1691,7 +1726,9 @@ PATCH (Område dropdown per modul):
       setMsg("ok", "Inga utbildningar ännu. Skapa din första.");
     }
 
+    // PATCH (A)
     rebuildAreaSuggestions();
+
     renderList();
     updatePublishHint();
   }
@@ -1703,10 +1740,10 @@ PATCH (Område dropdown per modul):
 
 <!-- ============================================================
 Ändringslogg (AO-TRAININGS-PATCH-01) ≤ 8 rader
-- PATCH: Område dropdown (areaSel) som visar sparade områden per vald modul
-- Bygger dropdown/datalist från AO-057_TRAININGS_V1 (ingen ny storage-key)
-- Dropdown-val fyller areaInp (fri text kvar för nya områden)
-- Inga ändringar i block/list-kopplingar eller sparformat
+- PATCH (A): Område är nu 1 kontroll (dropdown per modul)
+- Lagt “+ Skapa nytt område…” som visar textfält endast vid behov
+- Område-förslag och hint är modul-specifika (byggs från sparade utbildningar)
+- Inga nya storage-keys, ingen ändring av vänsterlistans block/info
 ============================================================ -->
 </body>
 </html>
