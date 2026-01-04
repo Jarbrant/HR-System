@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.2) | FIL-ID: admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.3) | FIL-ID: admin/onboard-progress.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN/SYSTEM_ADMIN – Plan → Progress per medarbetare (read-only v1)
 
@@ -22,13 +22,12 @@ Keys (LÅST – läs endast):
 - AO-020_ORG_V1
 - AO-020_ROLE_ASSIGNMENTS_V2
 
-Senaste sanning: 2026-01-04
-Ändringslogg (PATCH v1.2):
-- P0: Laddar CORE korrekt (UI-04-CONFIG.js + UI-03-APP.js) före sidans script.
-- P0: Default-lista visar ALLA employees i systemet (från AO-020_ROLE_ASSIGNMENTS_V2), även om ej tilldelade till plan.
-- P0: Ej tilldelad => visas tydligt, med fail-closed status (ingen startDateTs => ingen progress-beräkning).
-- P1: Planhint visar “employees totalt” + “tilldelade” + ev scope-exkludering.
-- Oförändrat: read-only, inga writes, inga nya keys.
+Senaste sanning: 2026-01-05
+Ändringslogg (PATCH v1.3):
+- P0: Robust inläsning av AO-060_PLANS_V1 och AO-061_PLAN_ASSIGNMENTS_V1 (stöd för array ELLER wrapper-objekt {plans:[...]} / {data:[...]} / {items:[...]} / map->values).
+- P0: Status-normalisering (case-insensitive) + tolerans för "ACTIVE"/"active" och liknande (utan writes).
+- Oförändrat: Default visar ALLA employees (AO-020_ROLE_ASSIGNMENTS_V2) och “Ej tilldelad” fail-closed.
+- Oförändrat: read-only, inga nya keys, XSS-safe, fail-closed.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -293,7 +292,7 @@ Senaste sanning: 2026-01-04
 
 <script>
 /* ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.2) | admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.3) | admin/onboard-progress.html
 Read-only • Fail-closed • XSS-safe rendering
 ============================================================ */
 (function(){
@@ -347,33 +346,86 @@ Read-only • Fail-closed • XSS-safe rendering
     }
   }
 
-  function readLocalArray(key, opts){
-    const missingAsEmpty = !!(opts && opts.missingAsEmpty);
+  function readLocalAny(key){
     const raw = readLocalRaw(key);
-    if(raw === null){
-      if(missingAsEmpty) return { ok:true, value:[], missing:true, corrupt:false, typeOk:true };
-      return { ok:true, value:[], missing:true, corrupt:false, typeOk:true };
-    }
+    if(raw === null) return { ok:true, value:null, missing:true, corrupt:false };
     const parsed = safeJsonParse(raw);
-    if(!parsed.ok) return { ok:false, value:[], missing:false, corrupt:true, typeOk:false };
-    const v = parsed.value;
-    if(v === null || v === undefined){
-      if(missingAsEmpty) return { ok:true, value:[], missing:true, corrupt:false, typeOk:true };
-      return { ok:true, value:[], missing:true, corrupt:false, typeOk:true };
-    }
-    if(!Array.isArray(v)) return { ok:false, value:[], missing:false, corrupt:false, typeOk:false };
-    return { ok:true, value:v, missing:false, corrupt:false, typeOk:true };
+    if(!parsed.ok) return { ok:false, value:null, missing:false, corrupt:true };
+    return { ok:true, value: parsed.value, missing:false, corrupt:false };
   }
 
-  function readLocalAny(key, opts){
-    const missingOk = !!(opts && opts.missingOk);
-    const raw = readLocalRaw(key);
-    if(raw === null){
-      return { ok:true, value: null, missing:true, corrupt:false, typeOk:true, missingOk };
+  function isPlainObject(v){
+    if(!v || typeof v !== "object") return false;
+    if(Array.isArray(v)) return false;
+    const proto = Object.getPrototypeOf(v);
+    return proto === Object.prototype || proto === null;
+  }
+
+  function own(obj, k){
+    return Object.prototype.hasOwnProperty.call(obj, k);
+  }
+
+  function extractArrayFromAny(value){
+    // Accept:
+    // 1) array
+    // 2) wrapper object: {plans:[...]} / {data:[...]} / {items:[...]} / {list:[...]} / {rows:[...]} / {value:[...]}
+    // 3) map object: { "<id>": {...}, "<id2>": {...} }  => Object.values()
+    if(Array.isArray(value)) return { ok:true, arr:value, mode:"array" };
+    if(!isPlainObject(value)) return { ok:false, arr:[], mode:"none" };
+
+    // block special keys top-level
+    for(const k of Object.keys(value)){
+      if(SPECIAL_KEYS.has(String(k))) return { ok:false, arr:[], mode:"blocked" };
     }
-    const parsed = safeJsonParse(raw);
-    if(!parsed.ok) return { ok:false, value:null, missing:false, corrupt:true, typeOk:false };
-    return { ok:true, value: parsed.value, missing:false, corrupt:false, typeOk:true };
+
+    const wrapperKeys = ["plans","data","items","list","rows","value"];
+    for(const k of wrapperKeys){
+      if(own(value, k) && !SPECIAL_KEYS.has(String(k)) && Array.isArray(value[k])){
+        return { ok:true, arr:value[k], mode:"wrapper:"+k };
+      }
+    }
+
+    // map -> values (only if values look like objects)
+    const keys = Object.keys(value).filter(k => !SPECIAL_KEYS.has(String(k)));
+    if(keys.length === 0) return { ok:true, arr:[], mode:"empty-map" };
+
+    let looksLikePlanMap = true;
+    for(const k of keys){
+      const v = value[k];
+      if(v === null || v === undefined) continue;
+      if(typeof v !== "object" || Array.isArray(v)){
+        looksLikePlanMap = false;
+        break;
+      }
+    }
+    if(looksLikePlanMap){
+      const vals = keys.map(k => value[k]).filter(v => v && typeof v === "object" && !Array.isArray(v));
+      return { ok:true, arr:vals, mode:"map-values" };
+    }
+
+    return { ok:false, arr:[], mode:"none" };
+  }
+
+  function readLocalArrayFlexible(key, opts){
+    const missingAsEmpty = !!(opts && opts.missingAsEmpty);
+    const any = readLocalAny(key);
+    if(!any.ok){
+      return { ok:false, value:[], missing:false, corrupt:true, typeOk:false, mode:"corrupt" };
+    }
+    if(any.missing || any.value === null || any.value === undefined){
+      return { ok:true, value:[], missing:true, corrupt:false, typeOk:true, mode:"missing" };
+    }
+
+    const ex = extractArrayFromAny(any.value);
+    if(ex.ok){
+      return { ok:true, value: ex.arr, missing:false, corrupt:false, typeOk:true, mode: ex.mode };
+    }
+
+    // if strict type mismatch
+    if(missingAsEmpty){
+      return { ok:true, value:[], missing:true, corrupt:false, typeOk:true, mode:"type-mismatch->empty" };
+    }
+    return { ok:false, value:[], missing:false, corrupt:false, typeOk:false, mode:"type-mismatch" };
   }
 
   function formatISODateFromTs(ts){
@@ -384,6 +436,16 @@ Read-only • Fail-closed • XSS-safe rendering
     const m = String(d.getMonth()+1).padStart(2,"0");
     const day = String(d.getDate()).padStart(2,"0");
     return y + "-" + m + "-" + day;
+  }
+
+  function normStatusLoose(s){
+    const v = String(s ?? "").trim().toLowerCase();
+    if(!v) return "";
+    // tolerate a few common variants (read-only)
+    if(v === "active" || v === "aktiv" || v === "enabled" || v === "published") return "active";
+    if(v === "draft" || v === "utkast") return "draft";
+    if(v === "archived" || v === "arkiverad" || v === "inactive" || v === "disabled") return "archived";
+    return v;
   }
 
   // ---------------------------
@@ -542,13 +604,6 @@ Read-only • Fail-closed • XSS-safe rendering
     return false;
   }
 
-  function isPlainObject(v){
-    if(!v || typeof v !== "object") return false;
-    if(Array.isArray(v)) return false;
-    const proto = Object.getPrototypeOf(v);
-    return proto === Object.prototype || proto === null;
-  }
-
   function hasBlockedKeysOneLevel(obj){
     if(!isPlainObject(obj)) return false;
     for(const k of Object.keys(obj)){
@@ -620,28 +675,28 @@ Read-only • Fail-closed • XSS-safe rendering
     if(text) warnings.push(String(text));
   }
 
-  // Plans
-  const plansRead = readLocalArray(PLANS_KEY, { missingAsEmpty:true });
+  // Plans (FLEX)
+  const plansRead = readLocalArrayFlexible(PLANS_KEY, { missingAsEmpty:true });
   if(!plansRead.ok){
-    addWarn("AO-060_PLANS_V1 är korrupt eller fel typ (förväntar array).");
+    addWarn("AO-060_PLANS_V1 är korrupt eller har fel format (förväntar array eller wrapper).");
   }
 
-  // Plan assignments
-  const paRead = readLocalArray(PLAN_ASSIGNMENTS_KEY, { missingAsEmpty:true });
+  // Plan assignments (FLEX)
+  const paRead = readLocalArrayFlexible(PLAN_ASSIGNMENTS_KEY, { missingAsEmpty:true });
   if(!paRead.ok){
-    addWarn("AO-061_PLAN_ASSIGNMENTS_V1 är korrupt eller fel typ (förväntar array).");
+    addWarn("AO-061_PLAN_ASSIGNMENTS_V1 är korrupt eller har fel format (förväntar array eller wrapper).");
   }
 
   // Trainings
-  const trainingsRead = readLocalArray(TRAININGS_KEY, { missingAsEmpty:true });
+  const trainingsRead = readLocalArrayFlexible(TRAININGS_KEY, { missingAsEmpty:true });
   if(!trainingsRead.ok){
     addWarn("AO-057_TRAININGS_V1 är korrupt eller fel typ (förväntar array).");
   }
 
   // Tasks/questions/answers – if corrupt => Done fail-closed (0 Done)
-  const tasksRead = readLocalArray(TASKS_KEY, { missingAsEmpty:true });
-  const questionsRead = readLocalArray(QUESTIONS_KEY, { missingAsEmpty:true });
-  const answersRead = readLocalArray(ANSWERS_KEY, { missingAsEmpty:true });
+  const tasksRead = readLocalArrayFlexible(TASKS_KEY, { missingAsEmpty:true });
+  const questionsRead = readLocalArrayFlexible(QUESTIONS_KEY, { missingAsEmpty:true });
+  const answersRead = readLocalArrayFlexible(ANSWERS_KEY, { missingAsEmpty:true });
 
   const doneDataOk = tasksRead.ok && questionsRead.ok && answersRead.ok;
   if(!tasksRead.ok) addWarn("AO-014_TASKS_V1 är korrupt → Done fail-closed.");
@@ -649,12 +704,12 @@ Read-only • Fail-closed • XSS-safe rendering
   if(!answersRead.ok) addWarn("AO-013_ANSWERS_V1 är korrupt → Done fail-closed.");
 
   // Org + assignmentsV2 for scope filtering + employee list
-  const orgAny = readLocalAny(ORG_KEY, { missingOk:true });
+  const orgAny = readLocalAny(ORG_KEY);
   const orgNodes = normalizeOrgNodes(orgAny.ok ? orgAny.value : []);
   const orgIndex = buildOrgIndex(orgNodes);
   const orgIntegrity = validateOrgIntegrity(orgNodes);
 
-  const asgRaw = readLocalAny(ASG_V2_KEY, { missingOk:true });
+  const asgRaw = readLocalAny(ASG_V2_KEY);
   const asgV2 = normalizeAssignmentsV2(asgRaw.ok ? asgRaw.value : null);
 
   // ---------------------------
@@ -922,10 +977,16 @@ Read-only • Fail-closed • XSS-safe rendering
     if(!raw || typeof raw !== "object") return null;
     const id = String(raw.id||"").trim();
     const title = String(raw.title||"").trim();
-    const status = String(raw.status||"").trim();
+    const status = normStatusLoose(raw.status);
+
     const createdAt = Number(raw.createdAt);
     const updatedAt = Number(raw.updatedAt);
-    const itemsRaw = Array.isArray(raw.items) ? raw.items : [];
+
+    // items kan heta items (förväntat), men acceptera även planItems/steps (read-only tolerans)
+    const itemsRaw =
+      Array.isArray(raw.items) ? raw.items :
+      (Array.isArray(raw.planItems) ? raw.planItems :
+      (Array.isArray(raw.steps) ? raw.steps : []));
 
     if(!id || !title) return null;
     if(status !== "draft" && status !== "active" && status !== "archived") return null;
@@ -1023,7 +1084,7 @@ Read-only • Fail-closed • XSS-safe rendering
     return planAssignmentsAll.filter(a => a.planId === pid);
   }
 
-  // NEW: all employees from AO-020_ROLE_ASSIGNMENTS_V2 (default view)
+  // all employees from AO-020_ROLE_ASSIGNMENTS_V2 (default view)
   function listAllEmployees(){
     if(!asgV2.ok) return { list: [], excludedMissingScope:0, excludedOutOfScope:0, reason:"asgV2" };
 
@@ -1095,7 +1156,7 @@ Read-only • Fail-closed • XSS-safe rendering
       };
     }
 
-    // NEW: no assignment => fail-closed (no startDateTs => no time gating)
+    // no assignment => fail-closed (no startDateTs => no time gating)
     if(!assignment || !isFiniteNumber(Number(assignment.startDateTs)) || Number(assignment.startDateTs) <= 0){
       return {
         status: "locked",
@@ -1189,7 +1250,7 @@ Read-only • Fail-closed • XSS-safe rendering
     if(!plansRead.ok){
       if(empty){
         empty.style.display = "block";
-        empty.textContent = "Kan inte läsa planer (AO-060 är korrupt).";
+        empty.textContent = "Kan inte läsa planer (AO-060 är korrupt eller fel format).";
       }
       return;
     }
@@ -1200,7 +1261,7 @@ Read-only • Fail-closed • XSS-safe rendering
     if(!pid || !plan){
       if(empty){
         empty.style.display = "block";
-        empty.textContent = "Välj en aktiv plan för att se progress.";
+        empty.textContent = plansActive.length ? "Välj en aktiv plan för att se progress." : "Inga aktiva planer hittades i AO-060.";
       }
       return;
     }
@@ -1481,7 +1542,11 @@ Read-only • Fail-closed • XSS-safe rendering
     });
   }
 
-  setText($("#planHint"), plansRead.ok ? "Välj en aktiv plan för att se progress." : "Kan inte läsa planer (AO-060 är korrupt).");
+  setText($("#planHint"), plansRead.ok
+    ? (plansActive.length ? "Välj en aktiv plan för att se progress." : "Inga aktiva planer hittades i AO-060.")
+    : "Kan inte läsa planer (AO-060 är korrupt eller fel format)."
+  );
+
   renderRows("");
 
 })();
