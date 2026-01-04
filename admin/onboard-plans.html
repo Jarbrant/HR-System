@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-UI-01 | FIL-ID: admin/onboard-plans.html
+AO-ONBOARD-PLANS-UI-01 (PATCH v1.2) | FIL-ID: admin/onboard-plans.html
 Projekt: HR-System
 Syfte: ADMIN – Skapa/Redigera Onboarding Plans + Tidsaxel (drag/drop light via ↑↓) UI-only
 
@@ -17,18 +17,17 @@ Keys (LÅST):
 - Läser: AO-001_LOGIN_V1 (via HRApp), AO-057_TRAININGS_V1, AO-060_PLANS_V1
 - Skriver: AO-060_PLANS_V1
 
-Ändringslogg (PATCH v1.1):
-- P0: Tog bort all .innerHTML-användning (även innerHTML="") → ersatt med clearNode()/textContent.
-- Hardening: safeJsonParse stödjer både HRApp.safeJsonParse-format ({ok,value}) och “direkt objekt”.
-- Hardening: getAuth stödjer både getAuth() och getAuth(session) utan att gissa mer än role-fält.
-- Oförändrat: Alla befintliga funktioner/knappar/flöden kvar, inga keys ändrade, inga nya keys.
+Ändringslogg (PATCH v1.2):
+- FIX: Trainings-filter inkluderar nu status=published OR status=verified (med blocks>0) → “Verifierade moduler” visas.
+- UI-text uppdaterad: “Endast published/verified + blocks>0” (ingen redesign).
+- Validerings-/feltexter justerade så de inte felaktigt säger “published-only” när verified är tillåtet.
+- Oförändrat: inga nya keys, inga schemaändringar, writes endast AO-060 vid Spara.
 
 Testnoteringar:
-1) Som ADMIN: sidan laddar, trainings-lista visas (published + blocks>0), planer kan skapas, sparas (AO-060), verifieras (UI).
-2) Som icke-ADMIN: requireAuth ska stoppa (fail-closed) → sidan fortsätter inte exekvera.
-3) Om AO-057 saknas/korrupt: trainings blockeras (fail-closed) och “+ Lägg till i plan” blockerar med tydlig status.
-4) Om AO-060 korrupt: spar/ny/verifiera blockeras (fail-closed) med tydlig status.
-5) Kontroll: inga nya storage-keys skrivs; endast AO-060 vid “Spara”.
+1) ADMIN: i trainings.html verifiera en utbildning (status=verified) med blocks>0 → syns i onboard-plans listan och kan läggas till i plan.
+2) ADMIN: published utbildning med blocks>0 syns fortfarande och funkar.
+3) Om utbildning saknar blocks → syns ej (fail-closed).
+4) Save: plan med verified trainingId sparar till AO-060 utan fel.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -82,7 +81,6 @@ Testnoteringar:
     .divider { height: 1px; background: rgba(0,0,0,0.10); margin: 10px 0; }
     .footerNote { margin-top: 10px; }
 
-    /* Minimal responsivitet (behåller allt) */
     @media (max-width: 980px){
       .row { flex-direction: column; }
       .col { min-width: auto; }
@@ -111,7 +109,7 @@ Testnoteringar:
     <div class="col card" aria-label="Tillgängliga utbildningar">
       <div class="splitHeader">
         <h2>Tillgängliga utbildningar</h2>
-        <div class="muted">Endast published + blocks&gt;0</div>
+        <div class="muted">Endast published/verified + blocks&gt;0</div>
       </div>
 
       <div class="grid3" style="margin-bottom:10px;">
@@ -182,9 +180,6 @@ Testnoteringar:
 (function(){
   "use strict";
 
-  // ============================
-  // PATCH HELPERS (XSS/policy)
-  // ============================
   function clearNode(el){
     if(!el) return;
     while(el.firstChild) el.removeChild(el.firstChild);
@@ -194,15 +189,12 @@ Testnoteringar:
   // AUTH (ADMIN-only)
   // ============================
   if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-    // Fail-closed: om core saknas, visa tydligt men försök inte fortsätta.
     const sb = document.getElementById("statusBox");
     sb.className = "card error";
     sb.textContent = "CORE saknas (HRApp). Kan inte köra sidan. (fail-closed)";
     return;
   }
 
-  // BUGHUNT-P0: defensiv hantering om requireAuth inte stoppar exekvering.
-  // SCOPE: Vi gissar inte core-kontrakt — vi hanterar endast säkra signaler.
   let _authResult = null;
   try {
     _authResult = window.HRApp.requireAuth({ allowRoles: ["ADMIN"] });
@@ -212,17 +204,14 @@ Testnoteringar:
     sb.textContent = "Auth-guard kraschade i CORE. Kan inte fortsätta. (fail-closed)";
     return;
   }
-  // Om core returnerar en explicit "false" eller {ok:false} så stoppar vi hårt.
   if (_authResult === false || (_authResult && typeof _authResult === "object" && _authResult.ok === false)) {
     const sb = document.getElementById("statusBox");
     sb.className = "card error";
     sb.textContent = "Åtkomst nekad (requireAuth). (fail-closed)";
     return;
   }
-  // Om getAuth finns kan vi göra en extra roll-check utan att gissa mer än "role"-fält.
   if (typeof window.HRApp.getAuth === "function") {
     try {
-      // Hardening: stöd både getAuth() och getAuth(session/authResult)
       let a = null;
       try { a = window.HRApp.getAuth(_authResult); } catch { a = window.HRApp.getAuth(); }
       const role = a && typeof a === "object" ? String(a.role || "") : "";
@@ -250,11 +239,11 @@ Testnoteringar:
   // STATE
   // ============================
   let trainingsOk = false;
-  let trainings = []; // normalized published trainings with blocks
+  let trainings = []; // normalized allowed trainings (published/verified) with blocks
   let plansOk = true;
-  let plans = []; // raw normalized for UI (safe subset)
+  let plans = [];
   let selectedPlanId = "";
-  let currentPlan = null; // UI model (editable copy)
+  let currentPlan = null;
 
   // ============================
   // DOM
@@ -278,25 +267,16 @@ Testnoteringar:
   // ============================
   // HELPERS (fail-closed)
   // ============================
-
   function setStatus(type, msg) {
     statusBox.className = "card " + (type || "");
     statusBox.textContent = String(msg || "");
   }
 
   function safeJsonParseFallback(raw) {
-    // BUGHUNT-P0: om HRApp.safeJsonParse saknas, fallbacka defensivt.
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return null;
-    }
+    try { return JSON.parse(raw); } catch { return null; }
   }
 
   function extractParsedValue(parsed){
-    // Hardening: stöd flera format utan att gissa för mycket
-    // - HRApp.safeJsonParse kan returnera { ok:true, value: ... }
-    // - eller direkt objekt/array
     if (parsed && typeof parsed === "object" && parsed.ok === true && "value" in parsed) return parsed.value;
     return parsed;
   }
@@ -306,7 +286,6 @@ Testnoteringar:
       const raw = localStorage.getItem(String(key || ""));
       if (raw === null) return { ok: true, missing: true, data: null };
 
-      // Guard om HRApp.safeJsonParse saknas.
       let parsed = null;
       if (window.HRApp && typeof window.HRApp.safeJsonParse === "function") {
         parsed = window.HRApp.safeJsonParse(raw);
@@ -356,7 +335,6 @@ Testnoteringar:
   }
 
   function sanitizePlansArray(input) {
-    // BUGHUNT-P0: schema-guard även i fallback-save för att undvika dataförgiftning.
     if (!Array.isArray(input)) return { ok:false, error:"PLANS_NOT_ARRAY" };
 
     const out = [];
@@ -416,6 +394,11 @@ Testnoteringar:
   // ============================
   // LOAD: Trainings (AO-057)
   // ============================
+  function isAllowedTrainingStatusForPlans(status){
+    const st = normStr(status);
+    return (st === "published" || st === "verified");
+  }
+
   function loadTrainings() {
     trainingsOk = false;
     trainings = [];
@@ -434,7 +417,7 @@ Testnoteringar:
       return { ok: false, error: "AO-057 har fel format (inte array)" };
     }
 
-    // Filter: published + must have id,module,area,title + blocks length>0
+    // Filter: published OR verified + must have id,module,area,title + blocks length>0
     const out = [];
     for (let i = 0; i < res.data.length; i++) {
       const t = res.data[i];
@@ -450,7 +433,7 @@ Testnoteringar:
       const hasBlocks = Array.isArray(blocks) && blocks.length > 0;
 
       if (!id || !module || !area || !title) continue;
-      if (status !== "published") continue;
+      if (!isAllowedTrainingStatusForPlans(status)) continue;
       if (!hasBlocks) continue;
 
       out.push({ id, module, area, title });
@@ -468,7 +451,7 @@ Testnoteringar:
   }
 
   // ============================
-  // LOAD: Plans (AO-060) via HRApp.readPlans if available (fail-closed if corrupt)
+  // LOAD: Plans (AO-060)
   // ============================
   function loadPlans() {
     plansOk = true;
@@ -484,7 +467,6 @@ Testnoteringar:
       return { ok: true };
     }
 
-    // Fallback (should not happen if AO-1 is present): strict read.
     const res = safeParseLocalStorage(PLANS_KEY);
     if (!res.ok) { plansOk = false; return { ok:false, error:"AO-060 korrupt/oläsbar" }; }
     if (res.missing) { plans = []; return { ok:true }; }
@@ -550,7 +532,7 @@ Testnoteringar:
     if (filtered.length === 0) {
       const d = document.createElement("div");
       d.className = "muted";
-      d.textContent = "Inga matchande published-utbildningar.";
+      d.textContent = "Inga matchande published/verified-utbildningar.";
       trainingsBox.appendChild(d);
       return;
     }
@@ -600,7 +582,6 @@ Testnoteringar:
   // UI: Plans list
   // ============================
   function attachPlanKeyboardActivation(el, onActivate) {
-    // BUGHUNT-P2: keyboard-åtkomst utan redesign
     el.tabIndex = 0;
     el.setAttribute("role", "button");
     el.addEventListener("keydown", function(ev){
@@ -686,7 +667,6 @@ Testnoteringar:
     const itemsIn = Array.isArray(plan.items) ? plan.items : [];
     const itemsOut = [];
 
-    // Normalize items and collect candidates
     for (let i = 0; i < itemsIn.length; i++) {
       const it = itemsIn[i];
       if (!isPlainObject(it)) continue;
@@ -708,8 +688,6 @@ Testnoteringar:
       });
     }
 
-    // Dedupe trainingId for UI (keep first)
-    // (Behålls oförändrat: ändring kan skapa framtida regressionsrisk)
     const seen = new Set();
     const deduped = [];
     for (const it of itemsOut) {
@@ -718,8 +696,6 @@ Testnoteringar:
       deduped.push(it);
     }
 
-    // Stable order generation:
-    // sort by provided order (null last), then dayOffset, then existing index
     const withIdx = deduped.map((it, idx) => ({ it, idx }));
     withIdx.sort((a, b) => {
       const ao = a.it.order === null ? 999999 : a.it.order;
@@ -736,7 +712,6 @@ Testnoteringar:
       gateRequired: x.it.gateRequired
     }));
 
-    // Active but empty => warn + switch UI to draft (no write until save)
     let statusUi = status;
     if (statusUi === "active" && normalizedItems.length === 0) statusUi = "draft";
 
@@ -766,7 +741,6 @@ Testnoteringar:
     currentPlan = normalizePlanForUi(raw);
     if (!currentPlan) { setStatus("error", "Plan kunde inte normaliseras (fail-closed)."); return; }
 
-    // Warn if we had to downgrade active->draft
     if (String(raw.status || "") === "active" && currentPlan.items.length === 0) {
       setStatus("warn", "Plan var 'active' men saknar items. UI har satt status till 'draft'. (Ingen write förrän du sparar)");
     } else {
@@ -802,7 +776,6 @@ Testnoteringar:
   function addItemToCurrentPlan(trainingId) {
     if (!currentPlan) return;
 
-    // Duplicate prevention
     for (let i = 0; i < currentPlan.items.length; i++) {
       if (currentPlan.items[i].trainingId === trainingId) {
         setStatus("warn", "Dubblett: training finns redan i plan. (Inget tillagt)");
@@ -810,10 +783,10 @@ Testnoteringar:
       }
     }
 
-    // Fail-closed: must exist and be published in trainings list
+    // Fail-closed: must exist in allowed trainings (published/verified list)
     const idx = trainings.findIndex(t => t.id === trainingId);
     if (idx < 0) {
-      setStatus("error", "Training finns inte i published-listan (fail-closed).");
+      setStatus("error", "Training finns inte i listan (published/verified + blocks>0). (fail-closed)");
       return;
     }
 
@@ -832,7 +805,6 @@ Testnoteringar:
 
   function renumberOrder() {
     if (!currentPlan) return;
-    // Stable: keep current array order and assign 1..n
     for (let i = 0; i < currentPlan.items.length; i++) currentPlan.items[i].order = i + 1;
   }
 
@@ -870,7 +842,6 @@ Testnoteringar:
 
     const idxById = buildTrainingIndexById();
 
-    // Sort items: order then dayOffset (per spec)
     const itemsSorted = currentPlan.items.slice().sort((a,b) => {
       const ao = toInt(a.order) ?? 999999;
       const bo = toInt(b.order) ?? 999999;
@@ -880,7 +851,6 @@ Testnoteringar:
       return ad - bd;
     });
 
-    // Keep as-is (risk-minimering): sidan bygger intern ordning från sort och renumrerar.
     currentPlan.items = itemsSorted.map(x => ({...x}));
     renumberOrder();
     syncPlanFormFromState();
@@ -904,7 +874,6 @@ Testnoteringar:
       const row = document.createElement("div");
       row.className = "timelineRow";
 
-      // dayOffset input
       const left = document.createElement("div");
       const lab = document.createElement("label");
       lab.textContent = "Dag (offset)";
@@ -928,7 +897,6 @@ Testnoteringar:
       left.appendChild(lab);
       left.appendChild(inp);
 
-      // meta
       const mid = document.createElement("div");
       mid.className = "timelineMeta";
       const line1 = document.createElement("div");
@@ -941,7 +909,6 @@ Testnoteringar:
       line3.className = "muted";
       line3.textContent = "order: " + String(it.order);
 
-      // gateRequired (nivå 1: tillåten toggle, default true)
       const gateWrap = document.createElement("div");
       gateWrap.style.marginTop = "6px";
       const gateLabel = document.createElement("label");
@@ -965,7 +932,6 @@ Testnoteringar:
       mid.appendChild(line3);
       mid.appendChild(gateWrap);
 
-      // actions
       const right = document.createElement("div");
       right.className = "rightActions";
       const up = document.createElement("button");
@@ -1014,13 +980,11 @@ Testnoteringar:
     const st = normStr(currentPlan.status);
     if (st !== "draft" && st !== "active" && st !== "archived") return { ok:false, error:"Ogiltig status" };
 
-    // If verify: we attempt to set active if valid
     const requireItems = (setActiveOnVerify === true) ? true : (st === "active");
     if (requireItems && currentPlan.items.length < 1) return { ok:false, error:"Active kräver minst 1 item" };
 
     const idxById = buildTrainingIndexById();
 
-    // Validate items:
     const seenTraining = new Set();
     const seenOrder = new Set();
 
@@ -1029,8 +993,8 @@ Testnoteringar:
       const trainingId = normStr(it.trainingId);
       if (!trainingId) return { ok:false, error:"Item saknar trainingId" };
 
-      // Must exist & be published (trainings list is already published-filtered)
-      if (!idxById[trainingId]) return { ok:false, error:"Item refererar trainingId som ej är published/ok: " + trainingId };
+      // Must exist & be allowed (published/verified list)
+      if (!idxById[trainingId]) return { ok:false, error:"Item refererar trainingId som ej är allowed (published/verified + blocks>0): " + trainingId };
 
       if (seenTraining.has(trainingId)) return { ok:false, error:"Dubblett trainingId i plan" };
       seenTraining.add(trainingId);
@@ -1053,7 +1017,6 @@ Testnoteringar:
   // SAVE (writes AO-060 only)
   // ============================
   function commitPlanToPlansArray(nextPlan) {
-    // Replace by id or append
     const out = plans.slice();
     let idx = -1;
     for (let i = 0; i < out.length; i++) {
@@ -1065,18 +1028,15 @@ Testnoteringar:
   }
 
   function saveAllPlans(outArray) {
-    // Schema-guard alltid innan write (även om HRApp.savePlans finns)
     const cleaned = sanitizePlansArray(outArray);
     if (!cleaned.ok) return { ok:false, error:"SCHEMA_GUARD:" + cleaned.error };
 
-    // Use HRApp.savePlans if available (strict schema + fail-closed)
     if (window.HRApp.savePlans && typeof window.HRApp.savePlans === "function") {
       const r = window.HRApp.savePlans(cleaned.data);
       if (!r || r.ok !== true) return { ok:false, error: (r && r.error) ? r.error : "WRITE_FAILED" };
       return { ok:true };
     }
 
-    // Fallback strict write
     try {
       localStorage.setItem(PLANS_KEY, JSON.stringify(cleaned.data));
       return { ok:true };
@@ -1093,7 +1053,6 @@ Testnoteringar:
     const rawExisting = getPlanById(currentPlan.id);
     const createdAt = rawExisting && typeof rawExisting.createdAt === "number" ? rawExisting.createdAt : now;
 
-    // Ensure internal items order is consistent
     currentPlan.items.sort((a,b) => (toInt(a.order) ?? 999999) - (toInt(b.order) ?? 999999));
     renumberOrder();
 
@@ -1115,7 +1074,6 @@ Testnoteringar:
     const wr = saveAllPlans(next);
     if (!wr.ok) { setStatus("error", "Spara misslyckades (fail-closed): " + wr.error); return; }
 
-    // Reload in-memory plans from storage to reflect canonical normalization
     const lp = loadPlans();
     if (!lp.ok) { setStatus("warn", "Sparat, men kunde inte läsa tillbaka plans (AO-060 korrupt?)"); return; }
 
@@ -1128,7 +1086,6 @@ Testnoteringar:
     const v = validateCurrentPlanBeforeSave(true);
     if (!v.ok) { setStatus("error", "Verifiering misslyckades: " + v.error); return; }
 
-    // Only changes status in UI; write happens on Save (explicit)
     syncStateFromForm();
     currentPlan.status = "active";
     planStatus.value = "active";
@@ -1189,7 +1146,6 @@ Testnoteringar:
     renderTrainingsList();
     renderPlansList();
 
-    // Auto-select first plan if exists
     if (plansOk && plans.length > 0) {
       const firstId = String(plans[0].id || "");
       if (firstId) selectPlanById(firstId);
@@ -1199,7 +1155,6 @@ Testnoteringar:
       renderTimeline();
     }
 
-    // Disable actions if fail-closed on plans
     if (!plansOk) {
       btnNewPlan.disabled = true;
       btnSavePlan.disabled = true;
