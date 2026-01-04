@@ -1,1 +1,1461 @@
+<!-- ============================================================
+AO-ONBOARD-PROGRESS-01 (4/5) | FIL-ID: admin/onboard-progress.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: ADMIN/SYSTEM_ADMIN – Plan → Progress per medarbetare (read-only v1)
+
+POLICY (LÅST):
+- UI-only • Fail-closed
+- sessionStorage först (auth) • fallback localStorage (auth) via AO-002 (HRApp)
+- XSS-escape på all rendering från storage (textContent, aldrig osäker innerHTML)
+- Read-only: inga writes alls
+- Inga nya storage-keys • läs endast keys listade i AO
+- Hel-filsleverans
+
+Keys (LÅST – läs endast):
+- AO-001_LOGIN_V1 (auth via HRApp/AO-002)
+- AO-060_PLANS_V1
+- AO-061_PLAN_ASSIGNMENTS_V1
+- AO-057_TRAININGS_V1
+- AO-014_TASKS_V1
+- AO-012_QUESTIONS_V1
+- AO-013_ANSWERS_V1
+- AO-020_ORG_V1
+- AO-020_ROLE_ASSIGNMENTS_V2
+
+Senaste sanning: 2026-01-04
+Ändringslogg (PATCH v1.1):
+- P0: Tog bort innerHTML helt (policy).
+- P0: Förstärkt hardening för AO-020_ROLE_ASSIGNMENTS_V2 (top-level + 1 nivå, plain-object).
+- P0: DOM-guards för navLogout och andra kritiska noder (undvik krasch).
+- P1: Tydligare “Done kan inte beräknas” (mapping sanity-check + warnings + detaljer).
+- P1: ADMIN: varnar när kopplingar exkluderas pga saknat scopeId i AO-020.
+- P2: Tog bort död kod (hasLocalKey / toLocalMidnightTsFromDateInput / redundant const).
+- P2: Lokal debounce-timer (ingen global window.__*-krock).
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Onboarding Progress (Read-only)</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <style>
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.88rem;
+      color: var(--muted);
+      white-space:nowrap;
+    }
+    .pill strong{ color:#111; }
+    .pill.warn{ background: rgba(253,230,138,.25); }
+    .pill.err{ background: rgba(254,202,202,.28); }
+    .pill.ok{ background: rgba(167,243,208,.22); }
+
+    .lockbox{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px dashed var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      color: var(--muted);
+    }
+    .lockbox strong{ color:#111; }
+    .lockbox ul{ margin:8px 0 0; padding-left: 18px; }
+    .lockbox li{ margin: 3px 0; }
+
+    .grid2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items:end;
+    }
+    @media (max-width: 820px){
+      .grid2{ grid-template-columns: 1fr; }
+    }
+
+    table{
+      width:100%;
+      border-collapse: collapse;
+      background:#fff;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      overflow:hidden;
+    }
+    thead th{
+      text-align:left;
+      font-size:.92rem;
+      padding: 10px 10px;
+      border-bottom: 1px solid var(--line);
+      color: #111;
+      background: rgba(255,255,255,.9);
+    }
+    tbody td{
+      padding: 10px 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    tbody tr:hover{ background: rgba(167,243,208,.10); }
+
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .muted2{ color: var(--muted); font-size:.92rem; }
+
+    .panel{
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.86);
+    }
+    .panel .panel-title{ display:flex; align-items:center; gap:10px; }
+    .panel-title .right{ margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+    .kpi{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+
+    .detailsList{
+      margin-top: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      overflow:hidden;
+    }
+    .detailsHeader{
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display:flex;
+      flex-wrap:wrap;
+      gap:10px;
+      align-items:center;
+      justify-content: space-between;
+      background: rgba(255,255,255,.92);
+    }
+    .detailsBody{
+      padding: 10px 12px;
+    }
+    .itemRow{
+      display:grid;
+      grid-template-columns: 90px 1fr 140px 120px;
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+      align-items:center;
+    }
+    .itemRow:last-child{ border-bottom:none; }
+    @media (max-width: 820px){
+      .itemRow{ grid-template-columns: 1fr; }
+    }
+
+    .status{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font-size:.88rem;
+      white-space:nowrap;
+      background:#fff;
+    }
+    .status.locked{ background: rgba(226,232,240,.6); color:#111; }
+    .status.ready{ background: rgba(191,219,254,.35); color:#111; }
+    .status.done{ background: rgba(167,243,208,.28); color:#111; }
+    .status.missing{ background: rgba(254,202,202,.28); color:#111; }
+    .status.unknown{ background: rgba(253,230,138,.25); color:#111; }
+
+    .toplinks{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:flex-end;
+    }
+  </style>
+</head>
+
+<body>
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin • Onboarding Progress (Read-only)</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Skapa uppgift</a>
+    <a href="./tasks-list.html">Översikt</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Onboarding – Progress per plan</h1>
+  <p class="muted">
+    Välj en aktiv plan och se progress per medarbetare baserat på <span class="mono">startDateTs</span> + <span class="mono">dayOffset</span>.
+    Sidan är <strong>read-only</strong> och gör inga writes.
+  </p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
+      </div>
+      <div class="toplinks">
+        <span id="warnPills"></span>
+      </div>
+    </div>
+
+    <div id="lockBox" class="lockbox" style="display:none;"></div>
+
+    <section class="panel" aria-label="Plan progress">
+      <div class="panel-title">
+        <span>Välj plan</span>
+        <div class="right">
+          <span class="pill"><strong>Read-only</strong> • inga writes</span>
+        </div>
+      </div>
+
+      <div class="grid2" style="padding: 12px;">
+        <label>
+          Aktiv plan
+          <select id="planSelect"></select>
+        </label>
+
+        <label>
+          Filter (empNo)
+          <input id="empFilter" type="text" inputmode="numeric" placeholder="t.ex. 1234" />
+        </label>
+      </div>
+
+      <div style="padding: 0 12px 12px;">
+        <p id="planHint" class="muted2" style="margin:0;"></p>
+      </div>
+
+      <div style="padding: 0 12px 12px;">
+        <table aria-label="Progress per medarbetare">
+          <thead>
+            <tr>
+              <th>Medarbetare</th>
+              <th>Startdatum</th>
+              <th>Totalt</th>
+              <th>Done</th>
+              <th>Ready</th>
+              <th>Locked</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="rows"></tbody>
+        </table>
+
+        <p id="emptyState" class="muted2" style="margin-top:10px; display:none;"></p>
+
+        <div id="detailsPanel" class="detailsList" style="display:none;">
+          <div class="detailsHeader">
+            <div>
+              <strong id="detailsTitle">Detaljer</strong>
+              <div class="muted2" id="detailsSub" style="margin-top:2px;"></div>
+            </div>
+            <div class="kpi" id="detailsKpi"></div>
+          </div>
+          <div class="detailsBody" id="detailsBody"></div>
+        </div>
+      </div>
+    </section>
+  </section>
+</main>
+
+<script>
+/* ============================================================
+AO-ONBOARD-PROGRESS-01 (4/5) | admin/onboard-progress.html
+Read-only • Fail-closed • XSS-safe rendering
+============================================================ */
+(function(){
+  "use strict";
+
+  // ---------------------------
+  // Keys (LÅST – READ ONLY)
+  // ---------------------------
+  const PLANS_KEY = "AO-060_PLANS_V1";
+  const PLAN_ASSIGNMENTS_KEY = "AO-061_PLAN_ASSIGNMENTS_V1";
+  const TRAININGS_KEY = "AO-057_TRAININGS_V1";
+  const TASKS_KEY = "AO-014_TASKS_V1";
+  const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
+  const ANSWERS_KEY = "AO-013_ANSWERS_V1";
+
+  // Org/scope keys
+  const ORG_KEY = "AO-020_ORG_V1";
+  const ASG_V2_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
+
+  const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+  const MAX_CHAIN_GUARD = 200;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  const $ = (s) => document.querySelector(s);
+
+  function setText(el, v){
+    if(!el) return;
+    el.textContent = String(v ?? "");
+  }
+
+  function normalizeDigits(s){
+    return String(s ?? "").trim().replace(/[^\d]/g, "");
+  }
+
+  function isFiniteNumber(n){
+    return Number.isFinite(n) && typeof n === "number";
+  }
+
+  function safeJsonParse(str){
+    if(typeof str !== "string" || !str) return { ok:true, value:null, corrupt:false };
+    try{
+      return { ok:true, value: JSON.parse(str), corrupt:false };
+    }catch{
+      return { ok:false, value:null, corrupt:true };
+    }
+  }
+
+  function readLocalRaw(key){
+    try{
+      return localStorage.getItem(String(key||""));
+    }catch{
+      return null;
+    }
+  }
+
+  function readLocalArray(key, opts){
+    const missingAsEmpty = !!(opts && opts.missingAsEmpty);
+    const raw = readLocalRaw(key);
+    if(raw === null){
+      if(missingAsEmpty) return { ok:true, value:[], missing:true, corrupt:false, typeOk:true };
+      return { ok:true, value:[], missing:true, corrupt:false, typeOk:true };
+    }
+    const parsed = safeJsonParse(raw);
+    if(!parsed.ok) return { ok:false, value:[], missing:false, corrupt:true, typeOk:false };
+    const v = parsed.value;
+    if(v === null || v === undefined){
+      if(missingAsEmpty) return { ok:true, value:[], missing:true, corrupt:false, typeOk:true };
+      return { ok:true, value:[], missing:true, corrupt:false, typeOk:true };
+    }
+    if(!Array.isArray(v)) return { ok:false, value:[], missing:false, corrupt:false, typeOk:false };
+    return { ok:true, value:v, missing:false, corrupt:false, typeOk:true };
+  }
+
+  function readLocalAny(key, opts){
+    const missingOk = !!(opts && opts.missingOk);
+    const raw = readLocalRaw(key);
+    if(raw === null){
+      return { ok:true, value: null, missing:true, corrupt:false, typeOk:true, missingOk };
+    }
+    const parsed = safeJsonParse(raw);
+    if(!parsed.ok) return { ok:false, value:null, missing:false, corrupt:true, typeOk:false };
+    return { ok:true, value: parsed.value, missing:false, corrupt:false, typeOk:true };
+  }
+
+  function formatISODateFromTs(ts){
+    if(!isFiniteNumber(ts) || ts <= 0) return "—";
+    const d = new Date(ts);
+    if(String(d) === "Invalid Date") return "—";
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const day = String(d.getDate()).padStart(2,"0");
+    return y + "-" + m + "-" + day;
+  }
+
+  // ---------------------------
+  // Auth / RBAC via HRApp (AO-002)
+  // ---------------------------
+  function redirectLogin(err){
+    try{
+      const base = "../UI/UI-01-SKELETON.html";
+      window.location.replace(err ? (base + "?err=" + encodeURIComponent(String(err))) : base);
+    }catch{
+      window.location.href = "../UI/UI-01-SKELETON.html";
+    }
+  }
+
+  if(!window.HRApp || typeof window.HRApp.requireAuth !== "function" || typeof window.HRApp.getAuth !== "function"){
+    redirectLogin("core");
+    return;
+  }
+
+  const session = window.HRApp.requireAuth({ allowRoles:["ADMIN","SYSTEM_ADMIN"] });
+  if(!session) return; // HRApp har redirectat fail-closed
+
+  const auth = window.HRApp.getAuth(session);
+  if(!auth || auth.isAuthed !== true || !auth.role){
+    redirectLogin("auth");
+    return;
+  }
+
+  const role = String(auth.role || "");
+  const viewerScopeId = String(auth.scopeId || "").trim();
+
+  setText($("#whoName"), (session && session.auth && session.auth.displayName) ? session.auth.displayName : "—");
+  setText($("#whoRole"), (role || "—").toLowerCase());
+
+  function doLogout(){
+    if(window.HRApp && typeof window.HRApp.logout === "function"){
+      window.HRApp.logout();
+      return;
+    }
+    redirectLogin("logout");
+  }
+
+  const navLogout = $("#navLogout");
+  if(navLogout){
+    navLogout.addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+  }
+
+  // ---------------------------
+  // Scope/org helpers
+  // ---------------------------
+  function normalizeOrgNodes(raw){
+    const arr = Array.isArray(raw) ? raw : [];
+    const out = [];
+    for(const n of arr){
+      const id = String(n && n.id ? n.id : "").trim();
+      const name = String(n && n.name ? n.name : "").trim();
+      const type = String(n && n.type ? n.type : "").trim();
+      const parentId = (n && (n.parentId === null || n.parentId === undefined))
+        ? null
+        : String(n && n.parentId ? n.parentId : "").trim();
+
+      if(!id || !name) continue;
+      out.push({ id, name, type, parentId });
+    }
+    return out;
+  }
+
+  function buildOrgIndex(nodes){
+    const byId = new Map();
+    for(const n of nodes){
+      if(!byId.has(n.id)) byId.set(n.id, n);
+    }
+    const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
+    const children = new Map();
+    nodes.forEach(n => children.set(n.id, []));
+    nodes.forEach(n => {
+      if(n.parentId && children.has(n.parentId)) children.get(n.parentId).push(n.id);
+    });
+    return { byId, parentOf, children };
+  }
+
+  function validateOrgIntegrity(nodes){
+    const issues = [];
+    if(!Array.isArray(nodes) || nodes.length === 0){
+      return { ok:false, issues:["Org saknas/korrupt (tom eller fel format)."], rootIds: [], hasOrphans:false, hasLoop:false };
+    }
+
+    const idx = buildOrgIndex(nodes);
+    const ids = new Set(nodes.map(n => n.id));
+    const rootIds = nodes.filter(n => n.parentId === null).map(n => n.id);
+
+    if(rootIds.length === 0) issues.push("Org saknar root (ingen nod med parentId=null).");
+    if(rootIds.length > 1) issues.push("Org har flera root-noder (förväntar exakt 1).");
+
+    let hasOrphans = false;
+    for(const n of nodes){
+      if(n.parentId === null) continue;
+      if(!n.parentId || !ids.has(n.parentId)){
+        hasOrphans = true;
+        break;
+      }
+    }
+    if(hasOrphans) issues.push("Org har orphan-noder (parentId pekar på saknad nod).");
+
+    let hasLoop = false;
+    for(const n of nodes){
+      let cur = n.id;
+      let steps = 0;
+      const seen = new Set([cur]);
+      while(steps < MAX_CHAIN_GUARD){
+        const p = idx.parentOf.get(cur);
+        if(p === null) break;
+        if(!p || !idx.byId.has(p)) break; // orphan chain => orphan, NOT loop
+        if(seen.has(p)){
+          hasLoop = true;
+          break;
+        }
+        seen.add(p);
+        cur = p;
+        steps++;
+      }
+      if(hasLoop) break;
+      if(steps >= MAX_CHAIN_GUARD){
+        hasLoop = true;
+        break;
+      }
+    }
+    if(hasLoop) issues.push("Org har loop i parent-kedjan (återbesök upptäckt).");
+
+    const ok = (rootIds.length === 1) && !hasOrphans && !hasLoop;
+    return { ok, issues, rootIds, hasOrphans, hasLoop };
+  }
+
+  function isInScope(viewerScopeId, itemScopeId, orgIndex){
+    const v = String(viewerScopeId || "").trim();
+    const s = String(itemScopeId || "").trim();
+    if(!v || !s) return false;
+    const { byId, parentOf } = orgIndex;
+    if(!byId.has(v)) return false;
+    if(!byId.has(s)) return false;
+    if(v === s) return true;
+
+    let cur = s;
+    let steps = 0;
+    const seen = new Set([cur]);
+    while(cur && steps < MAX_CHAIN_GUARD){
+      const p = parentOf.get(cur);
+      if(p === null) return false;
+      if(!p || !byId.has(p)) return false;
+      if(p === v) return true;
+      if(seen.has(p)) return false;
+      seen.add(p);
+      cur = p;
+      steps++;
+    }
+    return false;
+  }
+
+  function isPlainObject(v){
+    if(!v || typeof v !== "object") return false;
+    if(Array.isArray(v)) return false;
+    const proto = Object.getPrototypeOf(v);
+    return proto === Object.prototype || proto === null;
+  }
+
+  function hasBlockedKeysOneLevel(obj){
+    if(!isPlainObject(obj)) return false;
+    for(const k of Object.keys(obj)){
+      if(SPECIAL_KEYS.has(String(k))) return true;
+    }
+    return false;
+  }
+
+  // Hardening: top-level + 1 nivå (plain-object + block special keys)
+  function normalizeAssignmentsV2(raw){
+    const issues = [];
+    if(raw === null || raw === undefined){
+      return { ok:false, map: Object.create(null), issues:["Assignments är korrupt (null/undefined)."] };
+    }
+    if(typeof raw !== "object" || Array.isArray(raw)){
+      return { ok:false, map: Object.create(null), issues:["Assignments korrupt (förväntar objekt)."] };
+    }
+
+    const out = Object.create(null);
+    let blocked = false;
+    let deepBlocked = false;
+    let nonPlain = false;
+
+    for(const k of Object.keys(raw)){ // egna keys only
+      const key = String(k);
+      if(SPECIAL_KEYS.has(key)){
+        blocked = true;
+        continue;
+      }
+
+      const val = raw[key];
+
+      // 1 nivå hardening: assignment-record ska vara plain object (eller null)
+      if(val !== null && val !== undefined){
+        if(!isPlainObject(val)){
+          nonPlain = true;
+          continue;
+        }
+        if(hasBlockedKeysOneLevel(val)){
+          deepBlocked = true;
+          continue;
+        }
+      }
+
+      out[key] = val;
+    }
+
+    if(blocked){
+      issues.push("Assignments innehåller blockerade special-keys (__proto__/constructor/prototype) på top-level.");
+      return { ok:false, map: out, issues };
+    }
+    if(deepBlocked){
+      issues.push("Assignments innehåller blockerade special-keys i record-nivå (1 nivå hardening).");
+      return { ok:false, map: out, issues };
+    }
+    if(nonPlain){
+      issues.push("Assignments innehåller record som inte är plain object (1 nivå hardening).");
+      return { ok:false, map: out, issues };
+    }
+
+    return { ok:true, map: out, issues: [] };
+  }
+
+  // ---------------------------
+  // Read storage (fail-closed)
+  // ---------------------------
+  const warnings = [];
+  function addWarn(text){
+    if(text) warnings.push(String(text));
+  }
+
+  // Plans
+  const plansRead = readLocalArray(PLANS_KEY, { missingAsEmpty:true });
+  if(!plansRead.ok){
+    addWarn("AO-060_PLANS_V1 är korrupt eller fel typ (förväntar array).");
+  }
+
+  // Plan assignments
+  const paRead = readLocalArray(PLAN_ASSIGNMENTS_KEY, { missingAsEmpty:true });
+  if(!paRead.ok){
+    addWarn("AO-061_PLAN_ASSIGNMENTS_V1 är korrupt eller fel typ (förväntar array).");
+  }
+
+  // Trainings
+  const trainingsRead = readLocalArray(TRAININGS_KEY, { missingAsEmpty:true });
+  if(!trainingsRead.ok){
+    addWarn("AO-057_TRAININGS_V1 är korrupt eller fel typ (förväntar array).");
+  }
+
+  // Tasks/questions/answers – if corrupt => Done fail-closed (0 Done)
+  const tasksRead = readLocalArray(TASKS_KEY, { missingAsEmpty:true });
+  const questionsRead = readLocalArray(QUESTIONS_KEY, { missingAsEmpty:true });
+  const answersRead = readLocalArray(ANSWERS_KEY, { missingAsEmpty:true });
+
+  const doneDataOk = tasksRead.ok && questionsRead.ok && answersRead.ok;
+  if(!tasksRead.ok) addWarn("AO-014_TASKS_V1 är korrupt → Done fail-closed.");
+  if(!questionsRead.ok) addWarn("AO-012_QUESTIONS_V1 är korrupt → Done fail-closed.");
+  if(!answersRead.ok) addWarn("AO-013_ANSWERS_V1 är korrupt → Done fail-closed.");
+
+  // Org + assignmentsV2 for scope filtering
+  const orgAny = readLocalAny(ORG_KEY, { missingOk:true });
+  const orgNodes = normalizeOrgNodes(orgAny.ok ? orgAny.value : []);
+  const orgIndex = buildOrgIndex(orgNodes);
+  const orgIntegrity = validateOrgIntegrity(orgNodes);
+
+  const asgRaw = readLocalAny(ASG_V2_KEY, { missingOk:true });
+  const asgV2 = normalizeAssignmentsV2(asgRaw.ok ? asgRaw.value : null);
+
+  // ---------------------------
+  // Fail-closed access guard for ADMIN scope
+  // ---------------------------
+  const lockReasons = [];
+
+  if(role === "ADMIN"){
+    if(!viewerScopeId) lockReasons.push("ADMIN: scopeId saknas i session (fail-closed).");
+    if(!orgIntegrity.ok) lockReasons.push(...orgIntegrity.issues);
+    if(!asgV2.ok) lockReasons.push(...asgV2.issues);
+    if(viewerScopeId && orgIntegrity.ok && !orgIndex.byId.has(viewerScopeId)){
+      lockReasons.push("ADMIN: ditt scopeId finns inte i org (fail-closed).");
+    }
+  }
+
+  // SYSTEM_ADMIN: får se allt. Org kan saknas utan att blockera, men varna.
+  if(role === "SYSTEM_ADMIN"){
+    if(!orgIntegrity.ok){
+      addWarn("Org är saknas/korrupt. SYSTEM_ADMIN kan fortfarande se progress (utan scope-beroende).");
+    }
+    if(!asgV2.ok){
+      addWarn("AssignmentsV2 är saknas/korrupt. Namn/scope-info kan saknas i UI.");
+    }
+  }
+
+  function renderWarnPills(){
+    const wrap = $("#warnPills");
+    if(!wrap) return;
+    wrap.textContent = "";
+    if(!warnings.length) return;
+
+    const max = 3;
+    const show = warnings.slice(0, max);
+    show.forEach(w => {
+      const s = document.createElement("span");
+      s.className = "pill warn";
+      s.title = w;
+      s.textContent = "Varning";
+      wrap.appendChild(s);
+    });
+
+    if(warnings.length > max){
+      const more = document.createElement("span");
+      more.className = "pill warn";
+      more.title = warnings.join("\n");
+      more.textContent = "+" + (warnings.length - max);
+      wrap.appendChild(more);
+    }
+  }
+
+  function showLockBox(lines){
+    const box = $("#lockBox");
+    if(!box) return;
+    if(!lines || !lines.length){
+      box.style.display = "none";
+      box.textContent = "";
+      return;
+    }
+    box.style.display = "block";
+    box.textContent = "";
+    const strong = document.createElement("strong");
+    strong.textContent = "Låst (fail-closed):";
+    box.appendChild(strong);
+
+    const ul = document.createElement("ul");
+    lines.forEach(x => {
+      const li = document.createElement("li");
+      li.textContent = String(x);
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+  }
+
+  renderWarnPills();
+  showLockBox(lockReasons);
+
+  // If locked, stop rendering interactive content
+  if(lockReasons.length){
+    const ps = $("#planSelect");
+    const ef = $("#empFilter");
+    if(ps) ps.disabled = true;
+    if(ef) ef.disabled = true;
+
+    const empty = $("#emptyState");
+    if(empty){
+      empty.style.display = "block";
+      empty.textContent = "Åtkomst är låst (fail-closed). Åtgärda scope/org/assignments först.";
+    }
+    return;
+  }
+
+  // ---------------------------
+  // Build indexes: trainings, questions, answers, tasks
+  // ---------------------------
+  const trainingsById = new Map();
+  (Array.isArray(trainingsRead.value) ? trainingsRead.value : []).forEach(t => {
+    const id = String(t && t.id ? t.id : "").trim();
+    if(id && !trainingsById.has(id)) trainingsById.set(id, t);
+  });
+
+  const tasks = Array.isArray(tasksRead.value) ? tasksRead.value : [];
+  const questions = Array.isArray(questionsRead.value) ? questionsRead.value : [];
+  const answers = Array.isArray(answersRead.value) ? answersRead.value : [];
+
+  // ---------------------------
+  // Mapping sanity-check (P1)
+  // ---------------------------
+  function detectDoneMappingAbility(){
+    if(!doneDataOk) return { ok:false, reason:"fail-closed" };
+
+    let hasTaskTrainingId = false;
+    let hasTaskEmpNo = false;
+    let hasTaskStatus = false;
+
+    for(const t of tasks){
+      if(!t || typeof t !== "object") continue;
+      if(String(t.trainingId||"").trim()) hasTaskTrainingId = true;
+      if(String(t.empNo||"").trim()) hasTaskEmpNo = true;
+      if(String(t.status||"").trim()) hasTaskStatus = true;
+      if(hasTaskTrainingId && hasTaskEmpNo && hasTaskStatus) break;
+    }
+
+    let hasQuestionTrainingId = false;
+    let hasQuestionId = false;
+
+    for(const q of questions){
+      if(!q || typeof q !== "object") continue;
+      if(String(q.trainingId||"").trim()) hasQuestionTrainingId = true;
+      if(String(q.id||"").trim()) hasQuestionId = true;
+      if(hasQuestionTrainingId && hasQuestionId) break;
+    }
+
+    let hasAnswerQuestionId = false;
+    let hasAnswerEmpNo = false;
+
+    for(const a of answers){
+      if(!a || typeof a !== "object") continue;
+      if(String(a.questionId||"").trim()) hasAnswerQuestionId = true;
+      if(String(a.empNo||"").trim()) hasAnswerEmpNo = true;
+      if(hasAnswerQuestionId && hasAnswerEmpNo) break;
+    }
+
+    const taskMappable = hasTaskTrainingId && hasTaskEmpNo && hasTaskStatus;
+    const questionMappable = hasQuestionTrainingId && hasQuestionId && hasAnswerQuestionId && hasAnswerEmpNo;
+
+    return {
+      ok: taskMappable || questionMappable,
+      taskMappable,
+      questionMappable,
+      details: { hasTaskTrainingId, hasTaskEmpNo, hasTaskStatus, hasQuestionTrainingId, hasQuestionId, hasAnswerQuestionId, hasAnswerEmpNo }
+    };
+  }
+
+  const mappingAbility = detectDoneMappingAbility();
+  if(doneDataOk && !mappingAbility.ok){
+    addWarn("Datamodell mismatch: Done kan inte beräknas (saknar förväntade fält i tasks/questions/answers).");
+    renderWarnPills();
+  }
+
+  // Only explicit, non-guessy mapping:
+  // - task done: requires task.trainingId === trainingId AND empNo match AND status indicates done.
+  // - question done: requires question.trainingId === trainingId AND answer.questionId match AND empNo match.
+  function taskIsDoneForTraining(empNo, trainingId){
+    if(!doneDataOk) return { ok:false, done:false, reason:"fail-closed" };
+    const e = String(empNo||"").trim();
+    const tid = String(trainingId||"").trim();
+    if(!e || !tid) return { ok:false, done:false, reason:"missing" };
+
+    const doneStatuses = new Set(["done","closed","completed","complete"]);
+    let hasAnyMapped = false;
+
+    for(const t of tasks){
+      if(!t || typeof t !== "object") continue;
+      if(String(t.empNo||"").trim() !== e) continue;
+      if(String(t.trainingId||"").trim() !== tid) continue; // explicit only
+      hasAnyMapped = true;
+      const st = String(t.status||"").toLowerCase().trim();
+      if(doneStatuses.has(st)) return { ok:true, done:true, reason:"task" };
+    }
+
+    if(!hasAnyMapped) return { ok:false, done:false, reason:"unknown-mapping" };
+    return { ok:true, done:false, reason:"task" };
+  }
+
+  function questionIsDoneForTraining(empNo, trainingId){
+    if(!doneDataOk) return { ok:false, done:false, reason:"fail-closed" };
+    const e = String(empNo||"").trim();
+    const tid = String(trainingId||"").trim();
+    if(!e || !tid) return { ok:false, done:false, reason:"missing" };
+
+    const qIds = [];
+    for(const q of questions){
+      if(!q || typeof q !== "object") continue;
+      if(String(q.trainingId||"").trim() !== tid) continue; // explicit only
+      const qid = String(q.id||"").trim();
+      if(qid) qIds.push(qid);
+    }
+
+    if(qIds.length === 0) return { ok:false, done:false, reason:"unknown-mapping" };
+
+    const qSet = new Set(qIds);
+    for(const a of answers){
+      if(!a || typeof a !== "object") continue;
+      if(String(a.empNo||"").trim() !== e) continue;
+      const qid = String(a.questionId||"").trim();
+      if(!qid) continue;
+      if(qSet.has(qid)) return { ok:true, done:true, reason:"question" };
+    }
+
+    return { ok:true, done:false, reason:"question" };
+  }
+
+  function trainingDoneStatus(empNo, training){
+    if(!training || typeof training !== "object") return { done:false, reason:"missing training" };
+
+    const blocks = Array.isArray(training.blocks) ? training.blocks : null;
+    if(!blocks || blocks.length === 0){
+      // Spec: blocks saknas ⇒ Done=0
+      return { done:false, reason:"no blocks" };
+    }
+
+    // Evaluate per block (fail-closed). Overall done requires all blocks done.
+    let unknownMapping = false;
+
+    for(let i=0;i<blocks.length;i++){
+      const b = blocks[i];
+      const tp = String(b && b.type ? b.type : "").toLowerCase().trim();
+
+      if(tp === "info"){
+        continue;
+      }
+
+      if(tp === "task"){
+        const r = taskIsDoneForTraining(empNo, String(training.id||""));
+        if(r.reason === "unknown-mapping") unknownMapping = true;
+        if(r.ok !== true || r.done !== true) return { done:false, reason:"task", note: unknownMapping ? "Oklar mapping" : "" };
+        continue;
+      }
+
+      if(tp === "question"){
+        const r = questionIsDoneForTraining(empNo, String(training.id||""));
+        if(r.reason === "unknown-mapping") unknownMapping = true;
+        if(r.ok !== true || r.done !== true) return { done:false, reason:"question", note: unknownMapping ? "Oklar mapping" : "" };
+        continue;
+      }
+
+      if(tp === "both"){
+        const rt = taskIsDoneForTraining(empNo, String(training.id||""));
+        const rq = questionIsDoneForTraining(empNo, String(training.id||""));
+        if(rt.reason === "unknown-mapping" || rq.reason === "unknown-mapping") unknownMapping = true;
+        if(rt.ok !== true || rt.done !== true) return { done:false, reason:"both", note: unknownMapping ? "Oklar mapping" : "" };
+        if(rq.ok !== true || rq.done !== true) return { done:false, reason:"both", note: unknownMapping ? "Oklar mapping" : "" };
+        continue;
+      }
+
+      // Unknown block type => fail-closed
+      return { done:false, reason:"unknown", note:"Unknown block type" };
+    }
+
+    if(!doneDataOk){
+      return { done:false, reason:"fail-closed", note:"Kan inte läsa tasks/answers" };
+    }
+
+    // all blocks were info or satisfied conditions above
+    return { done:true, reason:"ok" };
+  }
+
+  // ---------------------------
+  // Plan + assignments normalization (read-only)
+  // ---------------------------
+  function normalizePlan(raw){
+    if(!raw || typeof raw !== "object") return null;
+    const id = String(raw.id||"").trim();
+    const title = String(raw.title||"").trim();
+    const status = String(raw.status||"").trim();
+    const createdAt = Number(raw.createdAt);
+    const updatedAt = Number(raw.updatedAt);
+    const itemsRaw = Array.isArray(raw.items) ? raw.items : [];
+
+    if(!id || !title) return null;
+    if(status !== "draft" && status !== "active" && status !== "archived") return null;
+
+    const items = itemsRaw.map((it) => {
+      const trainingId = String(it && it.trainingId ? it.trainingId : "").trim();
+      const dayOffset = Number(it && it.dayOffset !== undefined ? it.dayOffset : NaN);
+      const order = Number(it && it.order !== undefined ? it.order : NaN);
+      const gateRequired = (it && typeof it.gateRequired === "boolean") ? it.gateRequired : true;
+
+      return { trainingId, dayOffset, order, gateRequired };
+    });
+
+    return {
+      id,
+      title,
+      status,
+      createdAt: Number.isFinite(createdAt) ? createdAt : null,
+      updatedAt: Number.isFinite(updatedAt) ? updatedAt : null,
+      items
+    };
+  }
+
+  function normalizePlanAssignment(raw){
+    if(!raw || typeof raw !== "object") return null;
+    const empNo = String(raw.empNo||"").trim();
+    const planId = String(raw.planId||"").trim();
+    const startDateTs = Number(raw.startDateTs);
+
+    if(!empNo || !planId) return null;
+    if(!Number.isFinite(startDateTs) || startDateTs <= 0) return null;
+
+    const createdAt = Number(raw.createdAt);
+    const updatedAt = Number(raw.updatedAt);
+
+    return {
+      id: String(raw.id||"").trim(),
+      empNo,
+      planId,
+      startDateTs,
+      createdAt: Number.isFinite(createdAt) ? createdAt : null,
+      updatedAt: Number.isFinite(updatedAt) ? updatedAt : null
+    };
+  }
+
+  const plansAll = (plansRead.ok ? plansRead.value : []).map(normalizePlan).filter(Boolean);
+  const plansActive = plansAll.filter(p => p.status === "active");
+
+  const planAssignmentsAllRaw = (paRead.ok ? paRead.value : []);
+  const planAssignmentsAll = planAssignmentsAllRaw.map(normalizePlanAssignment).filter(Boolean);
+
+  // P1: varna om normalisering droppar rader (read-only info)
+  if(paRead.ok && Array.isArray(planAssignmentsAllRaw) && planAssignmentsAll.length !== planAssignmentsAllRaw.length){
+    addWarn("AO-061: vissa rader ignorerades pga ogiltigt format (read-only).");
+    renderWarnPills();
+  }
+
+  // ---------------------------
+  // UI rendering
+  // ---------------------------
+  function clearNode(el){
+    while(el && el.firstChild) el.removeChild(el.firstChild);
+  }
+
+  function renderPlanSelect(){
+    const sel = $("#planSelect");
+    if(!sel) return;
+    clearNode(sel);
+
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = plansActive.length ? "(Välj aktiv plan)" : "(Inga aktiva planer)";
+    sel.appendChild(opt0);
+
+    plansActive
+      .slice()
+      .sort((a,b) => a.title.localeCompare(b.title, "sv"))
+      .forEach(p => {
+        const count = Array.isArray(p.items) ? p.items.length : 0;
+        const o = document.createElement("option");
+        o.value = p.id;
+        o.textContent = `${p.title} • items: ${count}`;
+        sel.appendChild(o);
+      });
+
+    sel.disabled = !plansActive.length || !plansRead.ok;
+  }
+
+  function findEmployeeMeta(empNo){
+    const e = String(empNo||"").trim();
+    if(!e || !asgV2.ok) return { empNo:e, name:"", scopeId:"" };
+    const rec = asgV2.map[e] || null;
+    const name =
+      String((rec && (rec.name || rec.displayName || rec.fullName)) ? (rec.name || rec.displayName || rec.fullName) : "").trim();
+    const scopeId = String(rec && (rec.scopeId || rec.scope || rec.nodeId || rec.orgId) ? (rec.scopeId || rec.scope || rec.nodeId || rec.orgId) : "").trim();
+    return { empNo:e, name, scopeId };
+  }
+
+  function planAssignmentsForPlan(planId){
+    const pid = String(planId||"").trim();
+    return planAssignmentsAll.filter(a => a.planId === pid);
+  }
+
+  function applyScopeFilter(assignments){
+    if(role === "SYSTEM_ADMIN") return { list: assignments, excludedMissingScope:0, excludedOutOfScope:0 };
+
+    let excludedMissingScope = 0;
+    let excludedOutOfScope = 0;
+    const out = [];
+
+    for(const a of assignments){
+      const meta = findEmployeeMeta(a.empNo);
+      if(!meta.scopeId){
+        excludedMissingScope++;
+        continue; // fail-closed: if missing employee scope, exclude
+      }
+      if(!isInScope(viewerScopeId, meta.scopeId, orgIndex)){
+        excludedOutOfScope++;
+        continue;
+      }
+      out.push(a);
+    }
+
+    return { list: out, excludedMissingScope, excludedOutOfScope };
+  }
+
+  function normalizePlanItemsForDisplay(plan){
+    const items = Array.isArray(plan && plan.items) ? plan.items.slice() : [];
+    return items
+      .map((it, idx) => {
+        const trainingId = String(it.trainingId||"").trim();
+        const dayOffset = Number(it.dayOffset);
+        const order = Number(it.order);
+        const gateRequired = (typeof it.gateRequired === "boolean") ? it.gateRequired : true;
+        return { trainingId, dayOffset, order, gateRequired, _idx: idx };
+      })
+      .sort((a,b) => {
+        const ad = Number.isFinite(a.dayOffset) ? a.dayOffset : Number.POSITIVE_INFINITY;
+        const bd = Number.isFinite(b.dayOffset) ? b.dayOffset : Number.POSITIVE_INFINITY;
+        if(ad !== bd) return ad - bd;
+
+        const ao = Number.isFinite(a.order) ? a.order : Number.POSITIVE_INFINITY;
+        const bo = Number.isFinite(b.order) ? b.order : Number.POSITIVE_INFINITY;
+        if(ao !== bo) return ao - bo;
+
+        return a._idx - b._idx;
+      });
+  }
+
+  function computeItemStatus(empNo, assignment, item, nowTs){
+    const trainingId = String(item.trainingId||"").trim();
+    const training = trainingsById.get(trainingId) || null;
+
+    if(!trainingId || !training){
+      return {
+        status: "missing",
+        label: "Missing training",
+        done: false,
+        doneReason: "missing",
+        availableTs: null,
+        note: "TrainingId saknas eller hittas inte i AO-057."
+      };
+    }
+
+    const startTs = Number(assignment.startDateTs);
+    if(!Number.isFinite(startTs) || startTs <= 0){
+      return { status:"locked", label:"Locked", done:false, doneReason:"invalid start", availableTs:null, note:"Ogiltig startDateTs." };
+    }
+
+    const dayOffset = Number(item.dayOffset);
+    if(!Number.isFinite(dayOffset) || dayOffset < 0 || Math.floor(dayOffset) !== dayOffset){
+      return {
+        status: "locked",
+        label: "Locked",
+        done: false,
+        doneReason: "invalid offset",
+        availableTs: null,
+        note: "Ogiltig dayOffset (måste vara heltal >= 0)."
+      };
+    }
+
+    const availableTs = startTs + (dayOffset * DAY_MS);
+    if(!Number.isFinite(availableTs)){
+      return { status:"locked", label:"Locked", done:false, doneReason:"invalid time", availableTs:null, note:"Tidsberäkning overflow/NaN." };
+    }
+
+    if(nowTs < availableTs){
+      return { status:"locked", label:"Locked", done:false, doneReason:"time", availableTs, note:"Inte tillgänglig ännu." };
+    }
+
+    // Ready or Done
+    const doneInfo = trainingDoneStatus(empNo, training);
+    if(doneInfo.done === true){
+      return { status:"done", label:"Done", done:true, doneReason: doneInfo.reason, availableTs, note:"" };
+    }
+
+    // Mapping unknown / fail-closed => Ready, men markera tydligt
+    if(doneInfo.reason === "unknown" || doneInfo.reason === "fail-closed" || doneInfo.reason === "task" || doneInfo.reason === "question" || doneInfo.reason === "both"){
+      const why = doneInfo.note || "Kan inte avgöra Done (datamodell/mapping).";
+      return {
+        status:"ready",
+        label:"Ready",
+        done:false,
+        doneReason:"unknown",
+        availableTs,
+        note: why
+      };
+    }
+
+    return { status:"ready", label:"Ready", done:false, doneReason:"ready", availableTs, note: doneInfo.note || "" };
+  }
+
+  function computeSummaryForEmployee(plan, assignment){
+    const nowTs = Date.now();
+    const items = normalizePlanItemsForDisplay(plan);
+
+    let done = 0, ready = 0, locked = 0;
+    let hasUnknownDone = false;
+    const details = [];
+
+    for(const it of items){
+      const st = computeItemStatus(assignment.empNo, assignment, it, nowTs);
+      if(st.status === "done") done++;
+      else if(st.status === "ready") ready++;
+      else locked++;
+
+      if(st.status === "ready" && st.doneReason === "unknown") hasUnknownDone = true;
+
+      details.push({ item: it, status: st });
+    }
+
+    return { total: items.length, done, ready, locked, hasUnknownDone, details };
+  }
+
+  function renderRows(planId){
+    const tbody = $("#rows");
+    if(!tbody) return;
+    clearNode(tbody);
+
+    const detailsPanel = $("#detailsPanel");
+    const detailsBody = $("#detailsBody");
+    const detailsTitle = $("#detailsTitle");
+    const detailsSub = $("#detailsSub");
+    const detailsKpi = $("#detailsKpi");
+
+    if(detailsPanel) detailsPanel.style.display = "none";
+    if(detailsBody) detailsBody.textContent = "";
+    setText(detailsTitle, "Detaljer");
+    setText(detailsSub, "");
+    clearNode(detailsKpi);
+
+    const empty = $("#emptyState");
+    if(empty){
+      empty.style.display = "none";
+      empty.textContent = "";
+    }
+
+    if(!plansRead.ok){
+      if(empty){
+        empty.style.display = "block";
+        empty.textContent = "Kan inte läsa planer (AO-060 är korrupt).";
+      }
+      return;
+    }
+    if(!paRead.ok){
+      if(empty){
+        empty.style.display = "block";
+        empty.textContent = "Kan inte läsa plan-kopplingar (AO-061 är korrupt).";
+      }
+      return;
+    }
+
+    const pid = String(planId||"").trim();
+    const plan = plansActive.find(p => p.id === pid) || null;
+
+    if(!pid || !plan){
+      if(empty){
+        empty.style.display = "block";
+        empty.textContent = "Välj en aktiv plan för att se progress.";
+      }
+      return;
+    }
+
+    const items = Array.isArray(plan.items) ? plan.items : [];
+    if(items.length === 0){
+      if(empty){
+        empty.style.display = "block";
+        empty.textContent = "Plan saknar innehåll (items).";
+      }
+      return;
+    }
+
+    const all = planAssignmentsForPlan(pid);
+    const scopedRes = applyScopeFilter(all);
+    const scoped = scopedRes.list;
+
+    // ADMIN: varna om många exkluderas pga saknat scopeId
+    if(role === "ADMIN" && scopedRes.excludedMissingScope > 0){
+      addWarn(`ADMIN: ${scopedRes.excludedMissingScope} koppling(ar) exkluderades (saknar scopeId i AO-020_ROLE_ASSIGNMENTS_V2).`);
+      renderWarnPills();
+    }
+
+    const empFilterEl = $("#empFilter");
+    const empFilter = normalizeDigits(empFilterEl ? (empFilterEl.value || "") : "");
+    const filtered = empFilter ? scoped.filter(a => String(a.empNo||"").includes(empFilter)) : scoped;
+
+    setText($("#planHint"), `Plan: ${plan.title} • assignments: ${filtered.length}${role==="ADMIN" ? " (scope-filter aktiv)" : ""}`);
+
+    if(filtered.length === 0){
+      if(empty){
+        empty.style.display = "block";
+        empty.textContent = role==="ADMIN"
+          ? "Inga kopplingar hittades för denna plan inom din subtree (eller exkluderade pga saknat scopeId)."
+          : "Inga kopplingar hittades för denna plan.";
+      }
+      return;
+    }
+
+    const rows = filtered
+      .slice()
+      .sort((a,b) => String(a.empNo||"").localeCompare(String(b.empNo||""), "sv"))
+      .map(a => {
+        const meta = findEmployeeMeta(a.empNo);
+        const summary = computeSummaryForEmployee(plan, a);
+        return { a, meta, summary };
+      });
+
+    rows.forEach(r => {
+      const tr = document.createElement("tr");
+
+      const tdEmp = document.createElement("td");
+      const empLine = document.createElement("div");
+      const empStrong = document.createElement("strong");
+      empStrong.className = "mono";
+      empStrong.textContent = r.a.empNo;
+      empLine.appendChild(empStrong);
+
+      if(r.meta.name){
+        const nm = document.createElement("span");
+        nm.className = "muted2";
+        nm.style.marginLeft = "8px";
+        nm.textContent = "(" + r.meta.name + ")";
+        empLine.appendChild(nm);
+      }
+      tdEmp.appendChild(empLine);
+      tr.appendChild(tdEmp);
+
+      const tdStart = document.createElement("td");
+      tdStart.textContent = formatISODateFromTs(Number(r.a.startDateTs));
+      tr.appendChild(tdStart);
+
+      const tdTotal = document.createElement("td");
+      tdTotal.textContent = String(r.summary.total);
+      tr.appendChild(tdTotal);
+
+      const tdDone = document.createElement("td");
+      tdDone.textContent = String(r.summary.done);
+      tr.appendChild(tdDone);
+
+      const tdReady = document.createElement("td");
+      tdReady.textContent = String(r.summary.ready);
+      tr.appendChild(tdReady);
+
+      const tdLocked = document.createElement("td");
+      tdLocked.textContent = String(r.summary.locked);
+      tr.appendChild(tdLocked);
+
+      const tdBtn = document.createElement("td");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "secondary";
+      btn.textContent = "Visa detaljer";
+      btn.addEventListener("click", () => {
+        renderDetails(plan, r.a, r.meta, r.summary);
+      });
+      tdBtn.appendChild(btn);
+      tr.appendChild(tdBtn);
+
+      tbody.appendChild(tr);
+    });
+
+    // Done data fail-closed hint
+    if(!doneDataOk){
+      addWarn("Done är fail-closed (kan inte läsa tasks/questions/answers).");
+      renderWarnPills();
+    }else if(!mappingAbility.ok){
+      addWarn("Done: okänd (datamodell mismatch).");
+      renderWarnPills();
+    }
+  }
+
+  function renderDetails(plan, assignment, meta, summary){
+    const panel = $("#detailsPanel");
+    const title = $("#detailsTitle");
+    const sub = $("#detailsSub");
+    const kpi = $("#detailsKpi");
+    const body = $("#detailsBody");
+    if(!panel || !title || !sub || !kpi || !body) return;
+
+    panel.style.display = "block";
+
+    setText(title, "Detaljer – " + String(assignment.empNo||""));
+    setText(sub, `Plan: ${plan.title} • Start: ${formatISODateFromTs(Number(assignment.startDateTs))}`);
+
+    clearNode(kpi);
+
+    const pillDone = document.createElement("span");
+    pillDone.className = "pill ok";
+    pillDone.textContent = "Done: " + summary.done;
+
+    const pillReady = document.createElement("span");
+    pillReady.className = "pill";
+    pillReady.textContent = "Ready: " + summary.ready;
+
+    const pillLocked = document.createElement("span");
+    pillLocked.className = "pill";
+    pillLocked.textContent = "Locked: " + summary.locked;
+
+    kpi.appendChild(pillDone);
+    kpi.appendChild(pillReady);
+    kpi.appendChild(pillLocked);
+
+    // P1: tydlig Done-oklarhet
+    if(!doneDataOk || !mappingAbility.ok || summary.hasUnknownDone){
+      const p = document.createElement("span");
+      p.className = "pill warn";
+      p.textContent = "Done: okänd";
+      p.title = !doneDataOk
+        ? "tasks/questions/answers är korrupta → Done fail-closed."
+        : "Datamodell/mapping saknas → Done kan inte beräknas säkert.";
+      kpi.appendChild(p);
+    }
+
+    clearNode(body);
+
+    const note = document.createElement("div");
+    note.className = "muted2";
+    note.style.marginBottom = "10px";
+    note.textContent = (!doneDataOk)
+      ? "Obs: tasks/questions/answers är korrupta → Done är fail-closed (0 Done)."
+      : (!mappingAbility.ok
+        ? "Obs: Datamodell mismatch → Done kan inte beräknas säkert. Ready visar bara tidsgrind."
+        : "Status: Locked före available-datum. Ready efter available-datum. Done enligt blocks (fail-closed vid oklar mapping).");
+    body.appendChild(note);
+
+    const itemsWrap = document.createElement("div");
+    summary.details.forEach(d => {
+      const it = d.item;
+      const st = d.status;
+
+      const training = trainingsById.get(String(it.trainingId||"").trim()) || null;
+      const module = training ? String(training.module||"").trim() : "";
+      const area = training ? String(training.area||"").trim() : "";
+      const ttitle = training ? String(training.title||"").trim() : "";
+
+      const row = document.createElement("div");
+      row.className = "itemRow";
+
+      const c1 = document.createElement("div");
+      c1.className = "mono";
+      c1.textContent = (Number.isFinite(it.dayOffset) ? ("D+" + it.dayOffset) : "D+?");
+      row.appendChild(c1);
+
+      const c2 = document.createElement("div");
+      const line1 = document.createElement("div");
+      line1.textContent = [module, area, ttitle].filter(Boolean).join(" • ") || "(Saknar training-data)";
+      const line2 = document.createElement("div");
+      line2.className = "muted2";
+      line2.textContent = "trainingId: " + (String(it.trainingId||"").trim() || "—");
+      c2.appendChild(line1);
+      c2.appendChild(line2);
+      row.appendChild(c2);
+
+      const c3 = document.createElement("div");
+      const avail = st.availableTs ? formatISODateFromTs(Number(st.availableTs)) : "—";
+      c3.textContent = avail;
+      row.appendChild(c3);
+
+      const c4 = document.createElement("div");
+      const badge = document.createElement("span");
+      if(st.status === "done") badge.className = "status done";
+      else if(st.status === "ready") badge.className = "status ready";
+      else if(st.status === "missing") badge.className = "status missing";
+      else if(st.status === "unknown") badge.className = "status unknown";
+      else badge.className = "status locked";
+
+      badge.textContent = st.label || st.status;
+      badge.title = st.note || ("Reason: " + (st.doneReason || ""));
+
+      c4.appendChild(badge);
+
+      const dr = document.createElement("div");
+      dr.className = "muted2";
+      dr.style.marginTop = "4px";
+      dr.textContent = st.note
+        ? ("Obs: " + String(st.note))
+        : ("Done reason: " + String(st.doneReason || "—"));
+      c4.appendChild(dr);
+
+      row.appendChild(c4);
+      itemsWrap.appendChild(row);
+    });
+
+    body.appendChild(itemsWrap);
+
+    try{ panel.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
+  }
+
+  // ---------------------------
+  // Init
+  // ---------------------------
+  renderPlanSelect();
+
+  function onChange(){
+    const sel = $("#planSelect");
+    renderRows(sel ? sel.value : "");
+  }
+
+  const planSel = $("#planSelect");
+  if(planSel) planSel.addEventListener("change", onChange);
+
+  let empFilterTimer = null;
+  const empFilterEl = $("#empFilter");
+  if(empFilterEl){
+    empFilterEl.addEventListener("input", () => {
+      if(empFilterTimer) window.clearTimeout(empFilterTimer);
+      empFilterTimer = window.setTimeout(onChange, 120);
+    });
+  }
+
+  setText($("#planHint"), plansRead.ok ? "Välj en aktiv plan för att se progress." : "Kan inte läsa planer (AO-060 är korrupt).");
+  renderRows("");
+
+})();
+</script>
+
+</body>
+</html>
 
