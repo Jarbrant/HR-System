@@ -1,7 +1,9 @@
 <!-- ============================================================
-AO-ADMIN-REBUILD-01 | FIL-ID: admin/packages-block.html
+AO-ADMIN-REBUILD-02 (PATCH) | FIL-ID: admin/packages-block.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
-Syfte: ADMIN – Finjustera block i utbildning (Training Block Editor) baserat på AO-057_TRAININGS_V1
+Syfte: ADMIN – Schema-tolerant Blockeditor (TRAININGS) för AO-057_TRAININGS_V1
+- Läser/redigerar/sparar blocks[] oavsett Schema A (kind/taskAnswer/...) eller Schema B (type/task/question)
+- Preserve format: ändra bara fält vi editerar, lämna resten
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -176,7 +178,7 @@ POLICY (LÅST):
 
   <script>
     // ============================================================
-    // GUARD/STORAGE/XSS: Fail-closed + safe rendering
+    // GUARD/STORAGE/XSS: Fail-closed + schema-tolerant + preserve format
     // ============================================================
 
     const KEY_AUTH = "AO-001_LOGIN_V1";
@@ -455,7 +457,7 @@ POLICY (LÅST):
     }
 
     function cloneBlocks(blocks) {
-      // Keep unknown fields by deep cloning JSON-safe
+      // Preserve format: deep clone JSON-safe
       try {
         return JSON.parse(JSON.stringify(blocks || []));
       } catch {
@@ -487,10 +489,32 @@ POLICY (LÅST):
       addBlockBtn.disabled = false;
     }
 
-    function normalizeType(t) {
-      const s = String(t ?? "").toLowerCase().trim();
+    // ==========================
+    // AO-ADMIN-REBUILD-02: Schema helpers
+    // ==========================
+    function normalizeKindValue(v) {
+      const s = String(v ?? "").toLowerCase().trim();
       if (s === "info" || s === "task" || s === "question" || s === "both") return s;
       return "info";
+    }
+
+    function getKind(b) {
+      // A) Typdetektion: kind -> type -> info
+      if (b && typeof b === "object") {
+        if ("kind" in b && b.kind != null && String(b.kind).trim() !== "") return normalizeKindValue(b.kind);
+        if ("type" in b && b.type != null && String(b.type).trim() !== "") return normalizeKindValue(b.type);
+      }
+      return "info";
+    }
+
+    function isSchemaA(b) {
+      // Schema A: kind/taskAnswer/scaleMin/scaleMax/questionAnswer/options
+      if (!b || typeof b !== "object") return false;
+      return ("kind" in b) || ("taskAnswer" in b) || ("questionAnswer" in b) || ("options" in b) || ("scaleMin" in b) || ("scaleMax" in b);
+    }
+
+    function hasOwn(obj, key) {
+      return obj && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, key);
     }
 
     function ensureStringMax(s, max) {
@@ -501,6 +525,30 @@ POLICY (LÅST):
     function safeNumber(n, def) {
       const x = Number(n);
       return Number.isFinite(x) ? x : def;
+    }
+
+    function clampInt(n, min, max, def) {
+      const x = Math.floor(safeNumber(n, def));
+      if (!Number.isFinite(x)) return def;
+      return Math.max(min, Math.min(max, x));
+    }
+
+    function schemaA_taskAnswerValue(v) {
+      const s = String(v ?? "").toLowerCase().trim();
+      if (s === "checkbox" || s === "scale") return s;
+      return "checkbox";
+    }
+
+    function schemaA_questionAnswerValue(v) {
+      const s = String(v ?? "").toLowerCase().trim();
+      if (s === "text" || s === "choice") return s;
+      return "text";
+    }
+
+    function schemaB_questionKindValue(v) {
+      const s = String(v ?? "").toLowerCase().trim();
+      if (s === "text" || s === "choice") return s;
+      return "text";
     }
 
     function renderBlocks() {
@@ -530,7 +578,8 @@ POLICY (LÅST):
       }
 
       workingBlocks.forEach((b, idx) => {
-        const type = normalizeType(b?.type);
+        const kind = getKind(b);
+        const schema = isSchemaA(b) ? "A" : "B";
 
         const card = document.createElement("div");
         card.className = "blockCard";
@@ -546,8 +595,13 @@ POLICY (LÅST):
 
         const pill = document.createElement("span");
         pill.className = "pill";
-        safeText(pill, "Typ: " + type);
+        safeText(pill, "Typ: " + kind);
         left.appendChild(pill);
+
+        const schemaPill = document.createElement("span");
+        schemaPill.className = "pill";
+        safeText(schemaPill, "Schema: " + schema);
+        left.appendChild(schemaPill);
 
         const idPill = document.createElement("span");
         idPill.className = "pill";
@@ -616,7 +670,7 @@ POLICY (LÅST):
         const split = document.createElement("div");
         split.className = "split";
 
-        // Title
+        // B) Render – title/text (finns i båda)
         const fTitle = document.createElement("div");
         fTitle.className = "field";
         const lTitle = document.createElement("label");
@@ -634,7 +688,6 @@ POLICY (LÅST):
         fTitle.appendChild(lTitle);
         fTitle.appendChild(iTitle);
 
-        // Text
         const fText = document.createElement("div");
         fText.className = "field";
         const lText = document.createElement("label");
@@ -653,11 +706,10 @@ POLICY (LÅST):
 
         split.appendChild(fTitle);
         split.appendChild(fText);
-
         body.appendChild(split);
 
-        // Task config (when relevant)
-        if (type === "task" || type === "both") {
+        // C) Render – Task-config (schema-tolerant, preserve format)
+        if (kind === "task" || kind === "both") {
           const section = document.createElement("div");
           section.style.marginTop = "10px";
 
@@ -667,87 +719,259 @@ POLICY (LÅST):
           safeText(h, "Task-config");
           section.appendChild(h);
 
-          // We keep keys stable within block: b.task = { enabled, scale, min, max }
-          if (b.task == null || typeof b.task !== "object") b.task = {};
+          if (hasOwn(b, "taskAnswer")) {
+            // Schema A
+            const fAns = document.createElement("div");
+            fAns.className = "field";
+            const lAns = document.createElement("label");
+            safeText(lAns, "taskAnswer");
+            const sAns = document.createElement("select");
+            const o1 = document.createElement("option"); o1.value = "checkbox"; safeText(o1, "checkbox");
+            const o2 = document.createElement("option"); o2.value = "scale"; safeText(o2, "scale");
+            sAns.appendChild(o1); sAns.appendChild(o2);
 
-          const checks = document.createElement("div");
-          checks.className = "inlineChecks";
+            const cur = schemaA_taskAnswerValue(b.taskAnswer);
+            sAns.value = cur;
 
-          const cEnabledLabel = document.createElement("label");
-          const cEnabled = document.createElement("input");
-          cEnabled.type = "checkbox";
-          cEnabled.checked = !!b.task.enabled;
-          cEnabled.addEventListener("change", () => {
-            b.task.enabled = !!cEnabled.checked;
-            markDirty(true);
-          });
-          cEnabledLabel.appendChild(cEnabled);
-          const cEnabledText = document.createElement("span");
-          safeText(cEnabledText, "Aktiv");
-          cEnabledLabel.appendChild(cEnabledText);
+            sAns.addEventListener("change", () => {
+              b.taskAnswer = schemaA_taskAnswerValue(sAns.value);
+              // Preserve format: skapa inte nya fält utöver schema A:s egna
+              if (b.taskAnswer === "scale") {
+                // ensure min/max keys exist (schema A keys)
+                if (!hasOwn(b, "scaleMin")) b.scaleMin = 1;
+                if (!hasOwn(b, "scaleMax")) b.scaleMax = 5;
+                b.scaleMin = clampInt(b.scaleMin, 1, 10, 1);
+                b.scaleMax = clampInt(b.scaleMax, 1, 10, 5);
+                if (b.scaleMin > b.scaleMax) b.scaleMax = b.scaleMin;
+              }
+              markDirty(true);
+              renderBlocks();
+            });
 
-          const cScaleLabel = document.createElement("label");
-          const cScale = document.createElement("input");
-          cScale.type = "checkbox";
-          cScale.checked = !!b.task.scale;
-          cScale.addEventListener("change", () => {
-            b.task.scale = !!cScale.checked;
-            markDirty(true);
-          });
-          cScaleLabel.appendChild(cScale);
-          const cScaleText = document.createElement("span");
-          safeText(cScaleText, "Skala (min/max)");
-          cScaleLabel.appendChild(cScaleText);
+            fAns.appendChild(lAns);
+            fAns.appendChild(sAns);
+            section.appendChild(fAns);
 
-          checks.appendChild(cEnabledLabel);
-          checks.appendChild(cScaleLabel);
-          section.appendChild(checks);
+            if (schemaA_taskAnswerValue(b.taskAnswer) === "scale") {
+              const mm = document.createElement("div");
+              mm.className = "row";
+              mm.style.marginTop = "10px";
 
-          const mm = document.createElement("div");
-          mm.className = "row";
-          mm.style.marginTop = "10px";
+              const fMin = document.createElement("div");
+              fMin.className = "field";
+              const lMin = document.createElement("label");
+              safeText(lMin, "scaleMin (1–10)");
+              const iMin = document.createElement("input");
+              iMin.type = "number";
+              iMin.min = "1";
+              iMin.max = "10";
+              iMin.value = String(clampInt(b.scaleMin, 1, 10, 1));
+              iMin.addEventListener("input", () => {
+                b.scaleMin = clampInt(iMin.value, 1, 10, 1);
+                if (hasOwn(b, "scaleMax")) {
+                  b.scaleMax = clampInt(b.scaleMax, 1, 10, 5);
+                  if (b.scaleMin > b.scaleMax) b.scaleMax = b.scaleMin;
+                }
+                markDirty(true);
+              });
+              fMin.appendChild(lMin);
+              fMin.appendChild(iMin);
 
-          const fMin = document.createElement("div");
-          fMin.className = "field";
-          const lMin = document.createElement("label");
-          safeText(lMin, "Min");
-          const iMin = document.createElement("input");
-          iMin.type = "number";
-          iMin.value = String(safeNumber(b.task.min, 1));
-          iMin.addEventListener("input", () => {
-            b.task.min = safeNumber(iMin.value, 1);
-            markDirty(true);
-          });
-          fMin.appendChild(lMin); fMin.appendChild(iMin);
+              const fMax = document.createElement("div");
+              fMax.className = "field";
+              const lMax = document.createElement("label");
+              safeText(lMax, "scaleMax (1–10)");
+              const iMax = document.createElement("input");
+              iMax.type = "number";
+              iMax.min = "1";
+              iMax.max = "10";
+              iMax.value = String(clampInt(b.scaleMax, 1, 10, 5));
+              iMax.addEventListener("input", () => {
+                b.scaleMax = clampInt(iMax.value, 1, 10, 5);
+                if (hasOwn(b, "scaleMin")) {
+                  b.scaleMin = clampInt(b.scaleMin, 1, 10, 1);
+                  if (b.scaleMin > b.scaleMax) b.scaleMin = b.scaleMax;
+                }
+                markDirty(true);
+              });
+              fMax.appendChild(lMax);
+              fMax.appendChild(iMax);
 
-          const fMax = document.createElement("div");
-          fMax.className = "field";
-          const lMax = document.createElement("label");
-          safeText(lMax, "Max");
-          const iMax = document.createElement("input");
-          iMax.type = "number";
-          iMax.value = String(safeNumber(b.task.max, 5));
-          iMax.addEventListener("input", () => {
-            b.task.max = safeNumber(iMax.value, 5);
-            markDirty(true);
-          });
-          fMax.appendChild(lMax); fMax.appendChild(iMax);
+              mm.appendChild(fMin);
+              mm.appendChild(fMax);
+              section.appendChild(mm);
 
-          mm.appendChild(fMin);
-          mm.appendChild(fMax);
-          section.appendChild(mm);
+              // Labels only if they already exist (preserve format: do not invent new keys)
+              if (hasOwn(b, "scaleLabelMin") || hasOwn(b, "scaleLabelMax")) {
+                const labels = document.createElement("div");
+                labels.className = "row";
+                labels.style.marginTop = "10px";
 
-          const note = document.createElement("div");
-          note.className = "hint";
-          note.style.marginTop = "6px";
-          safeText(note, "Tips: Skala används när uppgiften bedöms på en min/max-skala. Lämna ändå värden för att undvika null.");
-          section.appendChild(note);
+                const fL1 = document.createElement("div");
+                fL1.className = "field";
+                const l1 = document.createElement("label");
+                safeText(l1, "scaleLabelMin");
+                const i1 = document.createElement("input");
+                i1.type = "text";
+                i1.value = String(b.scaleLabelMin ?? "");
+                i1.addEventListener("input", () => {
+                  b.scaleLabelMin = ensureStringMax(i1.value, 80);
+                  markDirty(true);
+                });
+                fL1.appendChild(l1); fL1.appendChild(i1);
+
+                const fL2 = document.createElement("div");
+                fL2.className = "field";
+                const l2 = document.createElement("label");
+                safeText(l2, "scaleLabelMax");
+                const i2 = document.createElement("input");
+                i2.type = "text";
+                i2.value = String(b.scaleLabelMax ?? "");
+                i2.addEventListener("input", () => {
+                  b.scaleLabelMax = ensureStringMax(i2.value, 80);
+                  markDirty(true);
+                });
+                fL2.appendChild(l2); fL2.appendChild(i2);
+
+                labels.appendChild(fL1);
+                labels.appendChild(fL2);
+                section.appendChild(labels);
+              } else if (hasOwn(b, "scaleLabels") && (typeof b.scaleLabels === "object") && b.scaleLabels != null) {
+                // common alt: scaleLabels: { min: "...", max: "..." } — edit only if exists
+                const labels = document.createElement("div");
+                labels.className = "row";
+                labels.style.marginTop = "10px";
+
+                const fL1 = document.createElement("div");
+                fL1.className = "field";
+                const l1 = document.createElement("label");
+                safeText(l1, "scaleLabels.min");
+                const i1 = document.createElement("input");
+                i1.type = "text";
+                i1.value = String(b.scaleLabels.min ?? "");
+                i1.addEventListener("input", () => {
+                  b.scaleLabels.min = ensureStringMax(i1.value, 80);
+                  markDirty(true);
+                });
+                fL1.appendChild(l1); fL1.appendChild(i1);
+
+                const fL2 = document.createElement("div");
+                fL2.className = "field";
+                const l2 = document.createElement("label");
+                safeText(l2, "scaleLabels.max");
+                const i2 = document.createElement("input");
+                i2.type = "text";
+                i2.value = String(b.scaleLabels.max ?? "");
+                i2.addEventListener("input", () => {
+                  b.scaleLabels.max = ensureStringMax(i2.value, 80);
+                  markDirty(true);
+                });
+                fL2.appendChild(l2); fL2.appendChild(i2);
+
+                labels.appendChild(fL1);
+                labels.appendChild(fL2);
+                section.appendChild(labels);
+              }
+
+              const note = document.createElement("div");
+              note.className = "hint";
+              note.style.marginTop = "6px";
+              safeText(note, "Skala: min/max klampas till 1–10.");
+              section.appendChild(note);
+            } else {
+              const note = document.createElement("div");
+              note.className = "hint";
+              note.style.marginTop = "6px";
+              safeText(note, "Checkbox: ingen skala används.");
+              section.appendChild(note);
+            }
+          } else if (b && typeof b === "object" && hasOwn(b, "task") && b.task && typeof b.task === "object") {
+            // Schema B fallback (behåll stöd)
+            const checks = document.createElement("div");
+            checks.className = "inlineChecks";
+
+            const cEnabledLabel = document.createElement("label");
+            const cEnabled = document.createElement("input");
+            cEnabled.type = "checkbox";
+            cEnabled.checked = !!b.task.enabled;
+            cEnabled.addEventListener("change", () => {
+              b.task.enabled = !!cEnabled.checked;
+              markDirty(true);
+            });
+            cEnabledLabel.appendChild(cEnabled);
+            const cEnabledText = document.createElement("span");
+            safeText(cEnabledText, "Aktiv");
+            cEnabledLabel.appendChild(cEnabledText);
+
+            const cScaleLabel = document.createElement("label");
+            const cScale = document.createElement("input");
+            cScale.type = "checkbox";
+            cScale.checked = !!b.task.scale;
+            cScale.addEventListener("change", () => {
+              b.task.scale = !!cScale.checked;
+              markDirty(true);
+            });
+            cScaleLabel.appendChild(cScale);
+            const cScaleText = document.createElement("span");
+            safeText(cScaleText, "Skala (min/max)");
+            cScaleLabel.appendChild(cScaleText);
+
+            checks.appendChild(cEnabledLabel);
+            checks.appendChild(cScaleLabel);
+            section.appendChild(checks);
+
+            const mm = document.createElement("div");
+            mm.className = "row";
+            mm.style.marginTop = "10px";
+
+            const fMin = document.createElement("div");
+            fMin.className = "field";
+            const lMin = document.createElement("label");
+            safeText(lMin, "Min");
+            const iMin = document.createElement("input");
+            iMin.type = "number";
+            iMin.value = String(safeNumber(b.task.min, 1));
+            iMin.addEventListener("input", () => {
+              b.task.min = safeNumber(iMin.value, 1);
+              markDirty(true);
+            });
+            fMin.appendChild(lMin); fMin.appendChild(iMin);
+
+            const fMax = document.createElement("div");
+            fMax.className = "field";
+            const lMax = document.createElement("label");
+            safeText(lMax, "Max");
+            const iMax = document.createElement("input");
+            iMax.type = "number";
+            iMax.value = String(safeNumber(b.task.max, 5));
+            iMax.addEventListener("input", () => {
+              b.task.max = safeNumber(iMax.value, 5);
+              markDirty(true);
+            });
+            fMax.appendChild(lMax); fMax.appendChild(iMax);
+
+            mm.appendChild(fMin);
+            mm.appendChild(fMax);
+            section.appendChild(mm);
+
+            const note = document.createElement("div");
+            note.className = "hint";
+            note.style.marginTop = "6px";
+            safeText(note, "Schema B: task{ enabled, scale, min, max }.");
+            section.appendChild(note);
+          } else {
+            const note = document.createElement("div");
+            note.className = "hint";
+            note.style.marginTop = "6px";
+            safeText(note, "Inga task-fält hittades i blocket (preserve format).");
+            section.appendChild(note);
+          }
 
           body.appendChild(section);
         }
 
-        // Question config (when relevant)
-        if (type === "question" || type === "both") {
+        // D) Render – Question-config (schema-tolerant, preserve format)
+        if (kind === "question" || kind === "both") {
           const section = document.createElement("div");
           section.style.marginTop = "10px";
 
@@ -757,73 +981,144 @@ POLICY (LÅST):
           safeText(h, "Question-config");
           section.appendChild(h);
 
-          // Keep keys stable within block: b.question = { kind: "text"|"choice", options: [] }
-          if (b.question == null || typeof b.question !== "object") b.question = {};
-          const kind = String(b.question.kind ?? "text").toLowerCase() === "choice" ? "choice" : "text";
+          if (hasOwn(b, "questionAnswer")) {
+            // Schema A
+            const fAns = document.createElement("div");
+            fAns.className = "field";
+            const lAns = document.createElement("label");
+            safeText(lAns, "questionAnswer");
+            const sAns = document.createElement("select");
+            const o1 = document.createElement("option"); o1.value = "text"; safeText(o1, "text");
+            const o2 = document.createElement("option"); o2.value = "choice"; safeText(o2, "choice");
+            sAns.appendChild(o1); sAns.appendChild(o2);
 
-          const row = document.createElement("div");
-          row.className = "row";
+            const cur = schemaA_questionAnswerValue(b.questionAnswer);
+            sAns.value = cur;
 
-          const fKind = document.createElement("div");
-          fKind.className = "field";
-          const lKind = document.createElement("label");
-          safeText(lKind, "Typ");
-          const sKind = document.createElement("select");
-          const o1 = document.createElement("option"); o1.value="text"; safeText(o1,"text");
-          const o2 = document.createElement("option"); o2.value="choice"; safeText(o2,"choice");
-          sKind.appendChild(o1); sKind.appendChild(o2);
-          sKind.value = kind;
-          sKind.addEventListener("change", () => {
-            b.question.kind = sKind.value === "choice" ? "choice" : "text";
-            if (b.question.kind !== "choice") {
-              // Fail-safe: behåll options men de används inte
-            } else {
-              if (!Array.isArray(b.question.options)) b.question.options = [];
-            }
-            markDirty(true);
-            renderBlocks();
-          });
-          fKind.appendChild(lKind);
-          fKind.appendChild(sKind);
-
-          row.appendChild(fKind);
-          section.appendChild(row);
-
-          if (kind === "choice") {
-            if (!Array.isArray(b.question.options)) b.question.options = [];
-
-            const fOpts = document.createElement("div");
-            fOpts.className = "field";
-            fOpts.style.marginTop = "10px";
-
-            const lOpts = document.createElement("label");
-            safeText(lOpts, "Alternativ (en per rad)");
-            const ta = document.createElement("textarea");
-            ta.value = b.question.options.map(x => String(x ?? "")).join("\n");
-            ta.addEventListener("input", () => {
-              const lines = String(ta.value ?? "")
-                .split("\n")
-                .map(s => s.trim())
-                .filter(s => s.length > 0);
-              b.question.options = lines;
+            sAns.addEventListener("change", () => {
+              b.questionAnswer = schemaA_questionAnswerValue(sAns.value);
+              if (b.questionAnswer === "choice") {
+                if (!hasOwn(b, "options") || !Array.isArray(b.options)) b.options = [];
+              }
               markDirty(true);
+              renderBlocks();
             });
 
-            fOpts.appendChild(lOpts);
-            fOpts.appendChild(ta);
+            fAns.appendChild(lAns);
+            fAns.appendChild(sAns);
+            section.appendChild(fAns);
 
-            const note = document.createElement("div");
-            note.className = "hint";
-            note.style.marginTop = "6px";
-            safeText(note, "Endast icke-tomma rader sparas som options[].");
-            fOpts.appendChild(note);
+            if (schemaA_questionAnswerValue(b.questionAnswer) === "choice") {
+              const fOpts = document.createElement("div");
+              fOpts.className = "field";
+              fOpts.style.marginTop = "10px";
 
-            section.appendChild(fOpts);
+              const lOpts = document.createElement("label");
+              safeText(lOpts, "options (en per rad, max 10)");
+              const ta = document.createElement("textarea");
+              const arr = Array.isArray(b.options) ? b.options : [];
+              ta.value = arr.map(x => String(x ?? "")).join("\n");
+
+              ta.addEventListener("input", () => {
+                const lines = String(ta.value ?? "")
+                  .split("\n")
+                  .map(s => s.trim())
+                  .filter(s => s.length > 0)
+                  .slice(0, 10);
+                b.options = lines;
+                markDirty(true);
+              });
+
+              fOpts.appendChild(lOpts);
+              fOpts.appendChild(ta);
+
+              const note = document.createElement("div");
+              note.className = "hint";
+              note.style.marginTop = "6px";
+              safeText(note, "Endast icke-tomma rader sparas. Max 10 options.");
+              fOpts.appendChild(note);
+
+              section.appendChild(fOpts);
+            } else {
+              const note = document.createElement("div");
+              note.className = "hint";
+              note.style.marginTop = "8px";
+              safeText(note, "Textfråga: inga options används.");
+              section.appendChild(note);
+            }
+          } else if (b && typeof b === "object" && hasOwn(b, "question") && b.question && typeof b.question === "object") {
+            // Schema B fallback
+            const kindB = schemaB_questionKindValue(b.question.kind);
+
+            const row = document.createElement("div");
+            row.className = "row";
+
+            const fKind = document.createElement("div");
+            fKind.className = "field";
+            const lKind = document.createElement("label");
+            safeText(lKind, "Typ");
+            const sKind = document.createElement("select");
+            const o1 = document.createElement("option"); o1.value="text"; safeText(o1,"text");
+            const o2 = document.createElement("option"); o2.value="choice"; safeText(o2,"choice");
+            sKind.appendChild(o1); sKind.appendChild(o2);
+            sKind.value = kindB;
+
+            sKind.addEventListener("change", () => {
+              b.question.kind = schemaB_questionKindValue(sKind.value);
+              if (b.question.kind === "choice") {
+                if (!Array.isArray(b.question.options)) b.question.options = [];
+              }
+              markDirty(true);
+              renderBlocks();
+            });
+
+            fKind.appendChild(lKind);
+            fKind.appendChild(sKind);
+            row.appendChild(fKind);
+            section.appendChild(row);
+
+            if (kindB === "choice") {
+              if (!Array.isArray(b.question.options)) b.question.options = [];
+
+              const fOpts = document.createElement("div");
+              fOpts.className = "field";
+              fOpts.style.marginTop = "10px";
+
+              const lOpts = document.createElement("label");
+              safeText(lOpts, "Alternativ (en per rad)");
+              const ta = document.createElement("textarea");
+              ta.value = b.question.options.map(x => String(x ?? "")).join("\n");
+              ta.addEventListener("input", () => {
+                const lines = String(ta.value ?? "")
+                  .split("\n")
+                  .map(s => s.trim())
+                  .filter(s => s.length > 0);
+                b.question.options = lines;
+                markDirty(true);
+              });
+
+              fOpts.appendChild(lOpts);
+              fOpts.appendChild(ta);
+
+              const note = document.createElement("div");
+              note.className = "hint";
+              note.style.marginTop = "6px";
+              safeText(note, "Schema B: question{ kind, options }.");
+              fOpts.appendChild(note);
+
+              section.appendChild(fOpts);
+            } else {
+              const note = document.createElement("div");
+              note.className = "hint";
+              note.style.marginTop = "8px";
+              safeText(note, "Textfråga: inga alternativ behövs.");
+              section.appendChild(note);
+            }
           } else {
             const note = document.createElement("div");
             note.className = "hint";
-            note.style.marginTop = "8px";
-            safeText(note, "Textfråga: inga alternativ behövs.");
+            note.style.marginTop = "6px";
+            safeText(note, "Inga question-fält hittades i blocket (preserve format).");
             section.appendChild(note);
           }
 
@@ -885,29 +1180,33 @@ POLICY (LÅST):
       return "b_" + Date.now() + "_" + r;
     }
 
+    // E) Add new block: skapa i Schema A
     function addNewBlock() {
       if (!workingBlocks || !Array.isArray(workingBlocks)) return;
-      const type = normalizeType(newBlockType.value);
 
-      // SCOPE: skapa minimal blockstruktur. (AO kräver configfält vid relevans.)
+      const kind = normalizeKindValue(newBlockType.value);
+
       const block = {
         id: genBlockId(),
-        type,
+        kind: kind,
         title: "",
         text: ""
       };
 
-      if (type === "task" || type === "both") {
-        block.task = { enabled: true, scale: false, min: 1, max: 5 };
+      if (kind === "task" || kind === "both") {
+        block.taskAnswer = "checkbox";
+        block.scaleMin = 1;
+        block.scaleMax = 5;
       }
-      if (type === "question" || type === "both") {
-        block.question = { kind: "text", options: [] };
+
+      if (kind === "question" || kind === "both") {
+        block.questionAnswer = "text";
+        block.options = [];
       }
 
       workingBlocks.push(block);
       markDirty(true);
       renderBlocks();
-      // scroll to bottom (no innerHTML; safe)
       setTimeout(() => { window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); }, 0);
     }
 
@@ -917,6 +1216,7 @@ POLICY (LÅST):
       return Math.floor(n) + 1;
     }
 
+    // F) Save: fail-closed + preserve format
     function saveBlocksFailClosed() {
       clearSaveState();
 
@@ -947,39 +1247,78 @@ POLICY (LÅST):
         return;
       }
 
-      // Light validation: title/text limits + types
+      // Validate/normalize per block without converting schema:
       for (let i = 0; i < workingBlocks.length; i++) {
         const b = workingBlocks[i];
-        const type = normalizeType(b?.type);
-        b.type = type;
-        b.title = ensureStringMax(b?.title ?? "", 80);
-        b.text = ensureStringMax(b?.text ?? "", 240);
+        if (!b || typeof b !== "object") {
+          setSaveStateErr("Block (index " + i + ") är inte ett objekt. Inget sparat.");
+          return;
+        }
 
         if (!b.id) b.id = genBlockId();
 
-        // Keep configs in sync for relevant types (fail-soft but safe)
-        if (type === "task" || type === "both") {
-          if (b.task == null || typeof b.task !== "object") b.task = {};
-          b.task.enabled = !!b.task.enabled;
-          b.task.scale = !!b.task.scale;
-          b.task.min = safeNumber(b.task.min, 1);
-          b.task.max = safeNumber(b.task.max, 5);
+        // Clamp title/text (always same keys)
+        b.title = ensureStringMax(b.title ?? "", 80);
+        b.text = ensureStringMax(b.text ?? "", 240);
+
+        const kind = getKind(b); // validates kind/type values (fail-soft -> info)
+
+        // Preserve format: update whichever key exists (kind or type), otherwise default to kind for safety.
+        if (hasOwn(b, "kind") || !hasOwn(b, "type")) {
+          b.kind = kind;
+        } else if (hasOwn(b, "type")) {
+          b.type = kind;
         }
-        if (type === "question" || type === "both") {
-          if (b.question == null || typeof b.question !== "object") b.question = {};
-          const k = String(b.question.kind ?? "text").toLowerCase();
-          b.question.kind = (k === "choice") ? "choice" : "text";
-          if (b.question.kind === "choice") {
+
+        // Schema A consistency (only if Schema A keys exist)
+        if (isSchemaA(b)) {
+          if ((kind === "task" || kind === "both") && hasOwn(b, "taskAnswer")) {
+            b.taskAnswer = schemaA_taskAnswerValue(b.taskAnswer);
+            if (b.taskAnswer === "scale") {
+              if (!hasOwn(b, "scaleMin")) b.scaleMin = 1;
+              if (!hasOwn(b, "scaleMax")) b.scaleMax = 5;
+              b.scaleMin = clampInt(b.scaleMin, 1, 10, 1);
+              b.scaleMax = clampInt(b.scaleMax, 1, 10, 5);
+              if (b.scaleMin > b.scaleMax) b.scaleMax = b.scaleMin;
+
+              if (hasOwn(b, "scaleLabelMin")) b.scaleLabelMin = ensureStringMax(b.scaleLabelMin ?? "", 80);
+              if (hasOwn(b, "scaleLabelMax")) b.scaleLabelMax = ensureStringMax(b.scaleLabelMax ?? "", 80);
+              if (hasOwn(b, "scaleLabels") && b.scaleLabels && typeof b.scaleLabels === "object") {
+                if (hasOwn(b.scaleLabels, "min")) b.scaleLabels.min = ensureStringMax(b.scaleLabels.min ?? "", 80);
+                if (hasOwn(b.scaleLabels, "max")) b.scaleLabels.max = ensureStringMax(b.scaleLabels.max ?? "", 80);
+              }
+            }
+          }
+
+          if ((kind === "question" || kind === "both") && hasOwn(b, "questionAnswer")) {
+            b.questionAnswer = schemaA_questionAnswerValue(b.questionAnswer);
+            if (b.questionAnswer === "choice") {
+              if (!hasOwn(b, "options") || !Array.isArray(b.options)) b.options = [];
+              b.options = b.options.map(x => String(x ?? "").trim()).filter(x => x.length > 0).slice(0, 10);
+            }
+          }
+        }
+
+        // Schema B consistency (only if keys exist, do not create new)
+        if (hasOwn(b, "task") && b.task && typeof b.task === "object") {
+          // Keep as-is but ensure booleans/numbers are sane if user edited
+          if (hasOwn(b.task, "enabled")) b.task.enabled = !!b.task.enabled;
+          if (hasOwn(b.task, "scale")) b.task.scale = !!b.task.scale;
+          if (hasOwn(b.task, "min")) b.task.min = safeNumber(b.task.min, 1);
+          if (hasOwn(b.task, "max")) b.task.max = safeNumber(b.task.max, 5);
+        }
+
+        if (hasOwn(b, "question") && b.question && typeof b.question === "object") {
+          if (hasOwn(b.question, "kind")) b.question.kind = schemaB_questionKindValue(b.question.kind);
+          if (b.question.kind === "choice" && hasOwn(b.question, "options")) {
             if (!Array.isArray(b.question.options)) b.question.options = [];
             b.question.options = b.question.options.map(x => String(x ?? "").trim()).filter(x => x.length > 0);
-          } else {
-            // keep options if exists, but irrelevant
           }
         }
       }
 
       // Write-back: endast blocks[] + version + updatedAt
-      const next = JSON.parse(JSON.stringify(TRAININGS)); // deep clone to avoid weird refs
+      const next = JSON.parse(JSON.stringify(TRAININGS)); // deep clone
       const t2 = next[idx];
       if (!t2 || typeof t2 !== "object") {
         setSaveStateErr("Kunde inte skapa säker kopia av utbildningen. Inget sparat.");
@@ -990,7 +1329,6 @@ POLICY (LÅST):
       t2.version = bumpVersion(t2.version);
       t2.updatedAt = Date.now();
 
-      // STORAGE: Only write AO-057_TRAININGS_V1
       try {
         localStorage.setItem(KEY_TRAININGS, JSON.stringify(next));
       } catch (e) {
@@ -998,13 +1336,11 @@ POLICY (LÅST):
         return;
       }
 
-      // Update in-memory from what we saved
       TRAININGS = next;
       originalBlocksJson = JSON.stringify(workingBlocks);
       markDirty(false);
 
-      setSaveStateOk("Sparat. Version bumpad och updatedAt uppdaterad.");
-      // re-render meta (shows version)
+      setSaveStateOk("Sparat. Block bevarade i sitt schema. Version bumpad och updatedAt uppdaterad.");
       renderTrainingMeta(findTrainingById(selectedTrainingId));
     }
 
@@ -1014,7 +1350,6 @@ POLICY (LÅST):
 
       const okAuth = loadAuthFailClosed();
       if (!okAuth) {
-        // Fail-closed: lås allt
         addBlockBtn.disabled = true;
         saveBtn.disabled = true;
         discardBtn.disabled = true;
@@ -1023,26 +1358,21 @@ POLICY (LÅST):
 
       const okTrainings = loadTrainingsFailClosed();
       if (!okTrainings) {
-        // Fail-closed: lås editor men låt user försöka ladda om
         lockEditor("Kunde inte ladda utbildningar. Kontrollera AO-057_TRAININGS_V1.");
         buildFilters(); // safe reset
         return;
       }
 
-      // Ready
       buildFilters();
       unlockEditor();
-      renderBlocks(); // shows "Välj en utbildning"
+      renderBlocks();
       addBlockBtn.disabled = true;
       markDirty(false);
     }
 
     // Events
     filterModule.addEventListener("change", () => {
-      // Changing filter discards selection (fail-safe)
       if (hasDirty && !confirm("Du har osparade ändringar. Byta filter ändå?")) {
-        // revert by re-init filter values based on current selection
-        // simplest fail-closed: reload entire state
         initFailClosed();
         return;
       }
@@ -1062,7 +1392,6 @@ POLICY (LÅST):
 
     filterTraining.addEventListener("change", () => {
       if (hasDirty && !confirm("Du har osparade ändringar. Byta utbildning ändå?")) {
-        // revert selection by resetting to current selected training
         filterTraining.value = selectedTrainingId ? String(selectedTrainingId) : "";
         return;
       }
@@ -1084,7 +1413,6 @@ POLICY (LÅST):
     });
 
     saveBtn.addEventListener("click", () => {
-      // Final fail-closed guard: ensure auth still valid
       const okAuth = loadAuthFailClosed();
       if (!okAuth) {
         lockEditor("Auth/behörighet saknas. Inget sparat.");
@@ -1093,7 +1421,6 @@ POLICY (LÅST):
       saveBlocksFailClosed();
     });
 
-    // Bootstrap
     initFailClosed();
   </script>
 </body>
