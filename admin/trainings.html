@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-TRAININGS-PATCH-01 | FIL-ID: admin/trainings.html
+AO-TRAININGS-PATCH-01 (HOTFIX v1.1) | FIL-ID: admin/trainings.html
 Projekt: HR-System
 Syfte: ADMIN – Skapa/Redigera utbildningar (återanvändbart innehåll) + AI-stöd
 UI-flow (enkelt): “Vad → vilken → vem → hur ofta” (den här sidan bygger “Vad/vilken” = modul/område + utbildning)
@@ -8,7 +8,7 @@ POLICY (LÅST):
 - UI-only • Fail-closed • localStorage-first (data), sessionStorage först (auth) • fallback localStorage
 - XSS-escape på all rendering från storage (använd textContent, aldrig osäker innerHTML)
 - Inga nya storage-keys (endast AO-057_TRAININGS_V1 för utbildningar, AO-001_LOGIN_V1 för auth)
-- ADMIN-only (SYSTEM_ADMIN hanteras ej här enligt önskemål)
+- Åtkomst: ADMIN + SYSTEM_ADMIN (HOTFIX: undvik unauth om du är inloggad som SYSTEM_ADMIN)
 - Ingen “vem/vilka” / inga assignments här (det kommer i egen sida senare)
 - Publish fail-closed: status=published kräver blocks.length > 0
 ============================================================ -->
@@ -479,13 +479,11 @@ POLICY (LÅST):
 
 <script>
 /* ============================================================
-AO-TRAININGS-PATCH-01 | admin/trainings.html
+AO-TRAININGS-PATCH-01 (HOTFIX v1.1) | admin/trainings.html
 Fokus:
-- Modul först + område med förslag (från sparade)
-- Tydlig “sparat”-status: visar om blocks finns + antal
-- Publish fail-closed (blocks.length > 0) + tydlig hint
-- Behåller AI via Worker (generiskt tolerant svarstolk)
-- Inga nya storage-keys: AO-057_TRAININGS_V1 (array)
+- FIX: undvik unauth för SYSTEM_ADMIN som är legitimt inloggad i admin
+- Redirect till skeleton med err=unauth för tydlighet
+- I övrigt: oförändrat beteende
 ============================================================ */
 (function(){
   "use strict";
@@ -569,30 +567,35 @@ Fokus:
     elMsg.style.display = text ? "block" : "none";
   }
 
-  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+  function redirectLogin(reason){
+    const r = reason ? String(reason) : "unauth";
+    window.location.replace("../UI/UI-01-SKELETON.html?err=" + encodeURIComponent(r));
+  }
 
   function doLogout(){
     if (window.HRApp && typeof window.HRApp.logout === "function") { window.HRApp.logout(); return; }
     try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
     try{ localStorage.removeItem(SESSION_KEY); }catch{}
-    redirectLogin();
+    redirectLogin("logout");
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  // --- CORE auth guard (ADMIN-only) ---
+  // --- CORE auth guard (ADMIN + SYSTEM_ADMIN) ---
   if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-    redirectLogin(); return;
+    redirectLogin("core"); return;
   }
-  const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN"] });
+
+  const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN","SYSTEM_ADMIN"] });
   if(!session) return;
 
   const auth = window.HRApp.getAuth(session);
-  if(!auth || !auth.role || String(auth.role) !== "ADMIN"){
-    redirectLogin(); return;
+  const role = String((auth && auth.role) || "").trim();
+  if(!(role === "ADMIN" || role === "SYSTEM_ADMIN")){
+    redirectLogin("unauth"); return;
   }
 
   const empNo = String((session.auth && session.auth.empNo) || "").trim();
-  elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ADMIN`;
+  elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ${role}`;
 
   // --- storage ---
   function safeParseArray(key){
@@ -705,7 +708,6 @@ Fokus:
 
   function serializeGoalsFromTextarea(){
     const lines = String(goalsInp.value || "").split("\n").map(s => s.trim()).filter(Boolean);
-    // dedupe
     const out = [];
     lines.forEach(x => { if(!out.includes(x)) out.push(x); });
     return out.slice(0,20);
@@ -803,10 +805,8 @@ Fokus:
       publishHint.textContent = "OK att publicera.";
     }
 
-    // UI hint + buttons
     btnSavePublish.disabled = (blocks === 0);
-    const b = blocks;
-    blocksInfo.textContent = (b === 0) ? "0 block (lägg till eller använd AI)" : (b + " block");
+    blocksInfo.textContent = (blocks === 0) ? "0 block (lägg till eller använd AI)" : (blocks + " block");
   }
 
   function makeBlockCard(block, index){
@@ -913,7 +913,6 @@ Fokus:
     inTitle.addEventListener("input", () => {
       block.title = String(inTitle.value || "").slice(0,80);
       setDirty(true);
-      // refresh just header title quickly
       t.textContent = block.title ? block.title : "Namnlöst block";
     });
     lblTitle.appendChild(inTitle);
@@ -946,7 +945,6 @@ Fokus:
       hint.textContent = "Information har ingen svarstyp.";
       ansWrap.appendChild(hint);
     }else{
-      // task config
       if(block.kind === "task" || block.kind === "both"){
         const lbl = document.createElement("label");
         lbl.textContent = "Uppgift – svarstyp";
@@ -958,7 +956,7 @@ Fokus:
         sel.addEventListener("change", () => {
           block.taskAnswer = (sel.value === "scale") ? "scale" : "checkbox";
           setDirty(true);
-          renderBlocks(); // to reflect scale panel meaningfully
+          renderBlocks();
         });
         lbl.appendChild(sel);
         ansWrap.appendChild(lbl);
@@ -1009,7 +1007,6 @@ Fokus:
         ansWrap.appendChild(sc);
       }
 
-      // question config
       if(block.kind === "question"){
         const lbl = document.createElement("label");
         lbl.textContent = "Fråga – svarstyp";
@@ -1086,7 +1083,6 @@ Fokus:
     updatePublishHint();
   }
 
-  // --- list rendering ---
   function rowMatches(t, q, status){
     if(status && String(t.status) !== status) return false;
     if(!q) return true;
@@ -1195,7 +1191,6 @@ Fokus:
 
     debugPre.textContent = JSON.stringify(t, null, 2);
 
-    // state pills
     summarizeSavePill(t);
     setDirty(false);
   }
@@ -1254,7 +1249,6 @@ Fokus:
     t.goals = serializeGoalsFromTextarea();
 
     const desired = (String(statusSel.value) === "published") ? "published" : "draft";
-    // publish fail-closed
     if(desired === "published" && (!Array.isArray(t.blocks) || t.blocks.length === 0)){
       t.status = "draft";
       statusSel.value = "draft";
@@ -1262,7 +1256,6 @@ Fokus:
       t.status = desired;
     }
 
-    // normalize blocks
     t.blocks = (Array.isArray(t.blocks) ? t.blocks : []).map(normalizeBlock);
 
     updatePublishHint();
@@ -1285,7 +1278,6 @@ Fokus:
 
   function upsertAndSave(){
     const t = normalizeTraining(STATE.edit);
-    // bump version on save
     const existing = STATE.items.find(x => String(x.id) === String(t.id));
     if(existing){
       const prev = normalizeTraining(existing);
@@ -1297,7 +1289,6 @@ Fokus:
     }
     t.updatedAt = now();
 
-    // ensure publish rule
     if(t.status === "published" && t.blocks.length === 0){
       t.status = "draft";
     }
@@ -1329,7 +1320,6 @@ Fokus:
     return { ok:true };
   }
 
-  // --- UI events ---
   qInp.addEventListener("input", () => renderList());
   filterStatus.addEventListener("change", () => renderList());
 
@@ -1428,7 +1418,6 @@ Fokus:
 
   statusSel.addEventListener("change", () => {
     hydrateFromInputs();
-    // if user tries publish without blocks, fail-closed will revert to draft
     updatePublishHint();
     setDirty(true);
   });
@@ -1473,7 +1462,6 @@ Fokus:
       const u = new URL(window.location.href);
       const p = String(u.searchParams.get("ai") || "").trim();
       if(p){
-        // allow https only
         if(p.startsWith("https://")) return p.replace(/\/+$/,"");
       }
     }catch{}
@@ -1510,12 +1498,6 @@ Fokus:
   }
 
   function coerceAiTraining(json){
-    // Tolerant to various response shapes
-    // Accept:
-    // - { ok:true, training:{...} }
-    // - { ok:true, result:{...} }
-    // - { training:{...} }
-    // - { ... } containing blocks/goals/description
     const root = (json && typeof json === "object") ? json : {};
     const pack = (root.training && typeof root.training === "object") ? root.training
                : (root.result && typeof root.result === "object") ? root.result
@@ -1525,7 +1507,6 @@ Fokus:
     if(typeof pack.description === "string") out.description = pack.description;
     if(Array.isArray(pack.goals)) out.goals = pack.goals;
     if(Array.isArray(pack.blocks)) out.blocks = pack.blocks;
-    // sometimes blocks might be under "items"
     if(!out.blocks && Array.isArray(pack.items)) out.blocks = pack.items;
     return out;
   }
@@ -1558,7 +1539,6 @@ Fokus:
       module: t.module,
       area: t.area,
       blockCount: count,
-      // hint to AI: keep blocks within the same schema
       schema: {
         blocks: {
           allowedKinds: ["info","task","question","both"],
@@ -1592,7 +1572,6 @@ Fokus:
         descInp.value = t.description;
       }
 
-      // goals: only auto-fill if empty currently
       if(Array.isArray(res.goals) && res.goals.length){
         if(!Array.isArray(t.goals) || t.goals.length === 0){
           t.goals = res.goals.map(x => String(x||"").trim()).filter(Boolean).slice(0,20);
@@ -1603,7 +1582,6 @@ Fokus:
       if(Array.isArray(res.blocks) && res.blocks.length){
         t.blocks = res.blocks.map(normalizeBlock).slice(0,12);
       }else{
-        // fail-closed: if AI returns no blocks, do not publish and inform
         aiStatus.textContent = "AI gav inga block.";
         setMsg("warn", "AI gav inga block. Testa igen eller lägg till manuellt.");
       }
@@ -1645,10 +1623,8 @@ Fokus:
       STATE.items = (read.value || []).map(normalizeTraining);
     }
 
-    // default block count
     aiBlockCount.value = "7";
 
-    // load last updated if exists, else new
     if(STATE.items.length){
       const sorted = STATE.items.slice().sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
       loadForEdit(sorted[0].id);
@@ -1669,13 +1645,10 @@ Fokus:
 </script>
 
 <!-- ============================================================
-Ändringslogg (AO-TRAININGS-PATCH-01) ≤ 8 rader
-- Lagt “Modul → Område” som första steg + område-förslag från sparade utbildningar
-- Tydlig sparstatus (pill): antal block/mål + version + status
-- Publish fail-closed: kan inte publicera utan block (UI + validering)
-- Förbättrad listvy (sök + statusfilter + kopiera/ta bort)
-- AI: blockCount + worker test + tolerant parsning av svar (utan nya keys)
-- Debug kvar som collapsible (för felsök), inte i vägen
+Ändringslogg (AO-TRAININGS-PATCH-01 HOTFIX v1.1) ≤ 8 rader
+- FIX: allowRoles = ADMIN + SYSTEM_ADMIN (undvik falsk unauth)
+- FIX: redirect till UI-01-SKELETON.html?err=... för tydlig orsak
+- I övrigt: ingen ändring i träningslogik/keys/UI
 ============================================================ -->
 </body>
 </html>
