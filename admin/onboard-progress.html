@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-ONBOARD-PROGRESS-01 (4/5) | FIL-ID: admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.2) | FIL-ID: admin/onboard-progress.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN/SYSTEM_ADMIN – Plan → Progress per medarbetare (read-only v1)
 
@@ -23,14 +23,12 @@ Keys (LÅST – läs endast):
 - AO-020_ROLE_ASSIGNMENTS_V2
 
 Senaste sanning: 2026-01-04
-Ändringslogg (PATCH v1.1):
-- P0: Tog bort innerHTML helt (policy).
-- P0: Förstärkt hardening för AO-020_ROLE_ASSIGNMENTS_V2 (top-level + 1 nivå, plain-object).
-- P0: DOM-guards för navLogout och andra kritiska noder (undvik krasch).
-- P1: Tydligare “Done kan inte beräknas” (mapping sanity-check + warnings + detaljer).
-- P1: ADMIN: varnar när kopplingar exkluderas pga saknat scopeId i AO-020.
-- P2: Tog bort död kod (hasLocalKey / toLocalMidnightTsFromDateInput / redundant const).
-- P2: Lokal debounce-timer (ingen global window.__*-krock).
+Ändringslogg (PATCH v1.2):
+- P0: Laddar CORE korrekt (UI-04-CONFIG.js + UI-03-APP.js) före sidans script.
+- P0: Default-lista visar ALLA employees i systemet (från AO-020_ROLE_ASSIGNMENTS_V2), även om ej tilldelade till plan.
+- P0: Ej tilldelad => visas tydligt, med fail-closed status (ingen startDateTs => ingen progress-beräkning).
+- P1: Planhint visar “employees totalt” + “tilldelade” + ev scope-exkludering.
+- Oförändrat: read-only, inga writes, inga nya keys.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -40,6 +38,9 @@ Senaste sanning: 2026-01-04
   <title>HR-System – Admin • Onboarding Progress (Read-only)</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <!-- CORE (MÅSTE LADDAS FÖRE SIDANS SCRIPT) -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
   <script src="../UI/UI-03-APP.js"></script>
 
   <style>
@@ -178,6 +179,19 @@ Senaste sanning: 2026-01-04
       align-items:center;
       justify-content:flex-end;
     }
+
+    .badge-na{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(254,202,202,.20);
+      color:#111;
+      font-size:.88rem;
+      white-space:nowrap;
+    }
   </style>
 </head>
 
@@ -190,6 +204,8 @@ Senaste sanning: 2026-01-04
 
   <nav class="nav" aria-label="Meny">
     <a href="./home.html">Hem</a>
+    <a href="./onboard-plans.html">Onboarding Plans</a>
+    <a href="./onboard-progress.html" aria-current="page">Onboarding Progress</a>
     <a href="./tasks.html">Skapa uppgift</a>
     <a href="./tasks-list.html">Översikt</a>
     <a href="./questions.html">Frågor</a>
@@ -277,7 +293,7 @@ Senaste sanning: 2026-01-04
 
 <script>
 /* ============================================================
-AO-ONBOARD-PROGRESS-01 (4/5) | admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.2) | admin/onboard-progress.html
 Read-only • Fail-closed • XSS-safe rendering
 ============================================================ */
 (function(){
@@ -292,8 +308,6 @@ Read-only • Fail-closed • XSS-safe rendering
   const TASKS_KEY = "AO-014_TASKS_V1";
   const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
   const ANSWERS_KEY = "AO-013_ANSWERS_V1";
-
-  // Org/scope keys
   const ORG_KEY = "AO-020_ORG_V1";
   const ASG_V2_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
 
@@ -634,7 +648,7 @@ Read-only • Fail-closed • XSS-safe rendering
   if(!questionsRead.ok) addWarn("AO-012_QUESTIONS_V1 är korrupt → Done fail-closed.");
   if(!answersRead.ok) addWarn("AO-013_ANSWERS_V1 är korrupt → Done fail-closed.");
 
-  // Org + assignmentsV2 for scope filtering
+  // Org + assignmentsV2 for scope filtering + employee list
   const orgAny = readLocalAny(ORG_KEY, { missingOk:true });
   const orgNodes = normalizeOrgNodes(orgAny.ok ? orgAny.value : []);
   const orgIndex = buildOrgIndex(orgNodes);
@@ -663,7 +677,7 @@ Read-only • Fail-closed • XSS-safe rendering
       addWarn("Org är saknas/korrupt. SYSTEM_ADMIN kan fortfarande se progress (utan scope-beroende).");
     }
     if(!asgV2.ok){
-      addWarn("AssignmentsV2 är saknas/korrupt. Namn/scope-info kan saknas i UI.");
+      addWarn("AssignmentsV2 är saknas/korrupt. Employee-lista kan saknas i UI.");
     }
   }
 
@@ -802,8 +816,6 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   // Only explicit, non-guessy mapping:
-  // - task done: requires task.trainingId === trainingId AND empNo match AND status indicates done.
-  // - question done: requires question.trainingId === trainingId AND answer.questionId match AND empNo match.
   function taskIsDoneForTraining(empNo, trainingId){
     if(!doneDataOk) return { ok:false, done:false, reason:"fail-closed" };
     const e = String(empNo||"").trim();
@@ -816,7 +828,7 @@ Read-only • Fail-closed • XSS-safe rendering
     for(const t of tasks){
       if(!t || typeof t !== "object") continue;
       if(String(t.empNo||"").trim() !== e) continue;
-      if(String(t.trainingId||"").trim() !== tid) continue; // explicit only
+      if(String(t.trainingId||"").trim() !== tid) continue;
       hasAnyMapped = true;
       const st = String(t.status||"").toLowerCase().trim();
       if(doneStatuses.has(st)) return { ok:true, done:true, reason:"task" };
@@ -835,7 +847,7 @@ Read-only • Fail-closed • XSS-safe rendering
     const qIds = [];
     for(const q of questions){
       if(!q || typeof q !== "object") continue;
-      if(String(q.trainingId||"").trim() !== tid) continue; // explicit only
+      if(String(q.trainingId||"").trim() !== tid) continue;
       const qid = String(q.id||"").trim();
       if(qid) qIds.push(qid);
     }
@@ -859,20 +871,16 @@ Read-only • Fail-closed • XSS-safe rendering
 
     const blocks = Array.isArray(training.blocks) ? training.blocks : null;
     if(!blocks || blocks.length === 0){
-      // Spec: blocks saknas ⇒ Done=0
       return { done:false, reason:"no blocks" };
     }
 
-    // Evaluate per block (fail-closed). Overall done requires all blocks done.
     let unknownMapping = false;
 
     for(let i=0;i<blocks.length;i++){
       const b = blocks[i];
       const tp = String(b && b.type ? b.type : "").toLowerCase().trim();
 
-      if(tp === "info"){
-        continue;
-      }
+      if(tp === "info") continue;
 
       if(tp === "task"){
         const r = taskIsDoneForTraining(empNo, String(training.id||""));
@@ -897,7 +905,6 @@ Read-only • Fail-closed • XSS-safe rendering
         continue;
       }
 
-      // Unknown block type => fail-closed
       return { done:false, reason:"unknown", note:"Unknown block type" };
     }
 
@@ -905,7 +912,6 @@ Read-only • Fail-closed • XSS-safe rendering
       return { done:false, reason:"fail-closed", note:"Kan inte läsa tasks/answers" };
     }
 
-    // all blocks were info or satisfied conditions above
     return { done:true, reason:"ok" };
   }
 
@@ -929,14 +935,11 @@ Read-only • Fail-closed • XSS-safe rendering
       const dayOffset = Number(it && it.dayOffset !== undefined ? it.dayOffset : NaN);
       const order = Number(it && it.order !== undefined ? it.order : NaN);
       const gateRequired = (it && typeof it.gateRequired === "boolean") ? it.gateRequired : true;
-
       return { trainingId, dayOffset, order, gateRequired };
     });
 
     return {
-      id,
-      title,
-      status,
+      id, title, status,
       createdAt: Number.isFinite(createdAt) ? createdAt : null,
       updatedAt: Number.isFinite(updatedAt) ? updatedAt : null,
       items
@@ -957,9 +960,7 @@ Read-only • Fail-closed • XSS-safe rendering
 
     return {
       id: String(raw.id||"").trim(),
-      empNo,
-      planId,
-      startDateTs,
+      empNo, planId, startDateTs,
       createdAt: Number.isFinite(createdAt) ? createdAt : null,
       updatedAt: Number.isFinite(updatedAt) ? updatedAt : null
     };
@@ -971,14 +972,13 @@ Read-only • Fail-closed • XSS-safe rendering
   const planAssignmentsAllRaw = (paRead.ok ? paRead.value : []);
   const planAssignmentsAll = planAssignmentsAllRaw.map(normalizePlanAssignment).filter(Boolean);
 
-  // P1: varna om normalisering droppar rader (read-only info)
   if(paRead.ok && Array.isArray(planAssignmentsAllRaw) && planAssignmentsAll.length !== planAssignmentsAllRaw.length){
     addWarn("AO-061: vissa rader ignorerades pga ogiltigt format (read-only).");
     renderWarnPills();
   }
 
   // ---------------------------
-  // UI rendering
+  // UI helpers
   // ---------------------------
   function clearNode(el){
     while(el && el.firstChild) el.removeChild(el.firstChild);
@@ -1023,27 +1023,38 @@ Read-only • Fail-closed • XSS-safe rendering
     return planAssignmentsAll.filter(a => a.planId === pid);
   }
 
-  function applyScopeFilter(assignments){
-    if(role === "SYSTEM_ADMIN") return { list: assignments, excludedMissingScope:0, excludedOutOfScope:0 };
+  // NEW: all employees from AO-020_ROLE_ASSIGNMENTS_V2 (default view)
+  function listAllEmployees(){
+    if(!asgV2.ok) return { list: [], excludedMissingScope:0, excludedOutOfScope:0, reason:"asgV2" };
 
+    const allEmpNos = Object.keys(asgV2.map || Object.create(null))
+      .map(x => String(x||"").trim())
+      .filter(Boolean);
+
+    // SYSTEM_ADMIN: show all (even if org missing)
+    if(role === "SYSTEM_ADMIN"){
+      return { list: allEmpNos, excludedMissingScope:0, excludedOutOfScope:0, reason:"ok" };
+    }
+
+    // ADMIN: require scope + org integrity already guarded above
     let excludedMissingScope = 0;
     let excludedOutOfScope = 0;
     const out = [];
 
-    for(const a of assignments){
-      const meta = findEmployeeMeta(a.empNo);
+    for(const empNo of allEmpNos){
+      const meta = findEmployeeMeta(empNo);
       if(!meta.scopeId){
         excludedMissingScope++;
-        continue; // fail-closed: if missing employee scope, exclude
+        continue; // fail-closed
       }
       if(!isInScope(viewerScopeId, meta.scopeId, orgIndex)){
         excludedOutOfScope++;
         continue;
       }
-      out.push(a);
+      out.push(empNo);
     }
 
-    return { list: out, excludedMissingScope, excludedOutOfScope };
+    return { list: out, excludedMissingScope, excludedOutOfScope, reason:"scope" };
   }
 
   function normalizePlanItemsForDisplay(plan){
@@ -1084,11 +1095,19 @@ Read-only • Fail-closed • XSS-safe rendering
       };
     }
 
-    const startTs = Number(assignment.startDateTs);
-    if(!Number.isFinite(startTs) || startTs <= 0){
-      return { status:"locked", label:"Locked", done:false, doneReason:"invalid start", availableTs:null, note:"Ogiltig startDateTs." };
+    // NEW: no assignment => fail-closed (no startDateTs => no time gating)
+    if(!assignment || !isFiniteNumber(Number(assignment.startDateTs)) || Number(assignment.startDateTs) <= 0){
+      return {
+        status: "locked",
+        label: "Ej tilldelad",
+        done: false,
+        doneReason: "no-assignment",
+        availableTs: null,
+        note: "Saknar plan-tilldelning (AO-061) för denna medarbetare."
+      };
     }
 
+    const startTs = Number(assignment.startDateTs);
     const dayOffset = Number(item.dayOffset);
     if(!Number.isFinite(dayOffset) || dayOffset < 0 || Math.floor(dayOffset) !== dayOffset){
       return {
@@ -1110,23 +1129,14 @@ Read-only • Fail-closed • XSS-safe rendering
       return { status:"locked", label:"Locked", done:false, doneReason:"time", availableTs, note:"Inte tillgänglig ännu." };
     }
 
-    // Ready or Done
     const doneInfo = trainingDoneStatus(empNo, training);
     if(doneInfo.done === true){
       return { status:"done", label:"Done", done:true, doneReason: doneInfo.reason, availableTs, note:"" };
     }
 
-    // Mapping unknown / fail-closed => Ready, men markera tydligt
     if(doneInfo.reason === "unknown" || doneInfo.reason === "fail-closed" || doneInfo.reason === "task" || doneInfo.reason === "question" || doneInfo.reason === "both"){
       const why = doneInfo.note || "Kan inte avgöra Done (datamodell/mapping).";
-      return {
-        status:"ready",
-        label:"Ready",
-        done:false,
-        doneReason:"unknown",
-        availableTs,
-        note: why
-      };
+      return { status:"ready", label:"Ready", done:false, doneReason:"unknown", availableTs, note: why };
     }
 
     return { status:"ready", label:"Ready", done:false, doneReason:"ready", availableTs, note: doneInfo.note || "" };
@@ -1141,13 +1151,12 @@ Read-only • Fail-closed • XSS-safe rendering
     const details = [];
 
     for(const it of items){
-      const st = computeItemStatus(assignment.empNo, assignment, it, nowTs);
+      const st = computeItemStatus(assignment ? assignment.empNo : "", assignment, it, nowTs);
       if(st.status === "done") done++;
       else if(st.status === "ready") ready++;
       else locked++;
 
       if(st.status === "ready" && st.doneReason === "unknown") hasUnknownDone = true;
-
       details.push({ item: it, status: st });
     }
 
@@ -1184,13 +1193,6 @@ Read-only • Fail-closed • XSS-safe rendering
       }
       return;
     }
-    if(!paRead.ok){
-      if(empty){
-        empty.style.display = "block";
-        empty.textContent = "Kan inte läsa plan-kopplingar (AO-061 är korrupt).";
-      }
-      return;
-    }
 
     const pid = String(planId||"").trim();
     const plan = plansActive.find(p => p.id === pid) || null;
@@ -1212,39 +1214,60 @@ Read-only • Fail-closed • XSS-safe rendering
       return;
     }
 
-    const all = planAssignmentsForPlan(pid);
-    const scopedRes = applyScopeFilter(all);
-    const scoped = scopedRes.list;
+    // Employees (default ALL)
+    const empAllRes = listAllEmployees();
+    let empNos = empAllRes.list.slice();
 
-    // ADMIN: varna om många exkluderas pga saknat scopeId
-    if(role === "ADMIN" && scopedRes.excludedMissingScope > 0){
-      addWarn(`ADMIN: ${scopedRes.excludedMissingScope} koppling(ar) exkluderades (saknar scopeId i AO-020_ROLE_ASSIGNMENTS_V2).`);
-      renderWarnPills();
-    }
-
-    const empFilterEl = $("#empFilter");
-    const empFilter = normalizeDigits(empFilterEl ? (empFilterEl.value || "") : "");
-    const filtered = empFilter ? scoped.filter(a => String(a.empNo||"").includes(empFilter)) : scoped;
-
-    setText($("#planHint"), `Plan: ${plan.title} • assignments: ${filtered.length}${role==="ADMIN" ? " (scope-filter aktiv)" : ""}`);
-
-    if(filtered.length === 0){
+    if(!empNos.length){
+      if(role === "SYSTEM_ADMIN" && !asgV2.ok){
+        addWarn("Kan inte lista employees (AO-020_ROLE_ASSIGNMENTS_V2 saknas/korrupt).");
+        renderWarnPills();
+      }
       if(empty){
         empty.style.display = "block";
-        empty.textContent = role==="ADMIN"
-          ? "Inga kopplingar hittades för denna plan inom din subtree (eller exkluderade pga saknat scopeId)."
-          : "Inga kopplingar hittades för denna plan.";
+        empty.textContent = "Inga employees hittades att visa (kräver AO-020_ROLE_ASSIGNMENTS_V2).";
       }
       return;
     }
 
-    const rows = filtered
+    // Apply empNo filter
+    const empFilterEl = $("#empFilter");
+    const empFilter = normalizeDigits(empFilterEl ? (empFilterEl.value || "") : "");
+    if(empFilter){
+      empNos = empNos.filter(e => String(e||"").includes(empFilter));
+    }
+
+    // Assignments for plan (can be empty)
+    const assignmentsForPlan = planAssignmentsForPlan(pid);
+    const byEmp = new Map();
+    assignmentsForPlan.forEach(a => {
+      const e = String(a.empNo||"").trim();
+      if(e && !byEmp.has(e)) byEmp.set(e, a);
+    });
+
+    // Hint
+    const assignedCount = empNos.reduce((acc, e) => acc + (byEmp.has(String(e||"").trim()) ? 1 : 0), 0);
+    const scopeNote = (role === "ADMIN")
+      ? ` • scope-filter: -${empAllRes.excludedMissingScope} (saknar scopeId), -${empAllRes.excludedOutOfScope} (utanför)`
+      : "";
+    setText($("#planHint"), `Plan: ${plan.title} • employees: ${empNos.length} • tilldelade: ${assignedCount}${scopeNote}`);
+
+    if(empNos.length === 0){
+      if(empty){
+        empty.style.display = "block";
+        empty.textContent = "Inga employees matchar filtret.";
+      }
+      return;
+    }
+
+    const rows = empNos
       .slice()
-      .sort((a,b) => String(a.empNo||"").localeCompare(String(b.empNo||""), "sv"))
-      .map(a => {
-        const meta = findEmployeeMeta(a.empNo);
-        const summary = computeSummaryForEmployee(plan, a);
-        return { a, meta, summary };
+      .sort((a,b) => String(a||"").localeCompare(String(b||""), "sv"))
+      .map(empNo => {
+        const meta = findEmployeeMeta(empNo);
+        const assignment = byEmp.get(String(empNo||"").trim()) || null;
+        const summary = computeSummaryForEmployee(plan, assignment ? assignment : null);
+        return { empNo: String(empNo||"").trim(), assignment, meta, summary };
       });
 
     rows.forEach(r => {
@@ -1254,7 +1277,7 @@ Read-only • Fail-closed • XSS-safe rendering
       const empLine = document.createElement("div");
       const empStrong = document.createElement("strong");
       empStrong.className = "mono";
-      empStrong.textContent = r.a.empNo;
+      empStrong.textContent = r.empNo;
       empLine.appendChild(empStrong);
 
       if(r.meta.name){
@@ -1268,7 +1291,7 @@ Read-only • Fail-closed • XSS-safe rendering
       tr.appendChild(tdEmp);
 
       const tdStart = document.createElement("td");
-      tdStart.textContent = formatISODateFromTs(Number(r.a.startDateTs));
+      tdStart.textContent = r.assignment ? formatISODateFromTs(Number(r.assignment.startDateTs)) : "—";
       tr.appendChild(tdStart);
 
       const tdTotal = document.createElement("td");
@@ -1276,32 +1299,41 @@ Read-only • Fail-closed • XSS-safe rendering
       tr.appendChild(tdTotal);
 
       const tdDone = document.createElement("td");
-      tdDone.textContent = String(r.summary.done);
+      tdDone.textContent = String(r.assignment ? r.summary.done : 0);
       tr.appendChild(tdDone);
 
       const tdReady = document.createElement("td");
-      tdReady.textContent = String(r.summary.ready);
+      tdReady.textContent = String(r.assignment ? r.summary.ready : 0);
       tr.appendChild(tdReady);
 
       const tdLocked = document.createElement("td");
-      tdLocked.textContent = String(r.summary.locked);
+      tdLocked.textContent = String(r.assignment ? r.summary.locked : r.summary.total);
       tr.appendChild(tdLocked);
 
       const tdBtn = document.createElement("td");
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "secondary";
-      btn.textContent = "Visa detaljer";
-      btn.addEventListener("click", () => {
-        renderDetails(plan, r.a, r.meta, r.summary);
-      });
-      tdBtn.appendChild(btn);
-      tr.appendChild(tdBtn);
 
+      if(!r.assignment){
+        const na = document.createElement("span");
+        na.className = "badge-na";
+        na.textContent = "Ej tilldelad";
+        na.title = "Saknar AO-061 plan-koppling (startDateTs).";
+        tdBtn.appendChild(na);
+      }else{
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "secondary";
+        btn.textContent = "Visa detaljer";
+        btn.addEventListener("click", () => {
+          renderDetails(plan, r.assignment, r.meta, r.summary);
+        });
+        tdBtn.appendChild(btn);
+      }
+
+      tr.appendChild(tdBtn);
       tbody.appendChild(tr);
     });
 
-    // Done data fail-closed hint
+    // Done data hints
     if(!doneDataOk){
       addWarn("Done är fail-closed (kan inte läsa tasks/questions/answers).");
       renderWarnPills();
@@ -1342,7 +1374,6 @@ Read-only • Fail-closed • XSS-safe rendering
     kpi.appendChild(pillReady);
     kpi.appendChild(pillLocked);
 
-    // P1: tydlig Done-oklarhet
     if(!doneDataOk || !mappingAbility.ok || summary.hasUnknownDone){
       const p = document.createElement("span");
       p.className = "pill warn";
@@ -1403,7 +1434,7 @@ Read-only • Fail-closed • XSS-safe rendering
       if(st.status === "done") badge.className = "status done";
       else if(st.status === "ready") badge.className = "status ready";
       else if(st.status === "missing") badge.className = "status missing";
-      else if(st.status === "unknown") badge.className = "status unknown";
+      else if(st.label === "Ej tilldelad") badge.className = "status unknown";
       else badge.className = "status locked";
 
       badge.textContent = st.label || st.status;
@@ -1458,4 +1489,3 @@ Read-only • Fail-closed • XSS-safe rendering
 
 </body>
 </html>
-
