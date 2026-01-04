@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-TRAININGS-PATCH-01 (HOTFIX v1.1) | FIL-ID: admin/trainings.html
+AO-TRAININGS-PATCH-01 | FIL-ID: admin/trainings.html
 Projekt: HR-System
 Syfte: ADMIN – Skapa/Redigera utbildningar (återanvändbart innehåll) + AI-stöd
 UI-flow (enkelt): “Vad → vilken → vem → hur ofta” (den här sidan bygger “Vad/vilken” = modul/område + utbildning)
@@ -8,7 +8,7 @@ POLICY (LÅST):
 - UI-only • Fail-closed • localStorage-first (data), sessionStorage först (auth) • fallback localStorage
 - XSS-escape på all rendering från storage (använd textContent, aldrig osäker innerHTML)
 - Inga nya storage-keys (endast AO-057_TRAININGS_V1 för utbildningar, AO-001_LOGIN_V1 för auth)
-- Åtkomst: ADMIN + SYSTEM_ADMIN (HOTFIX: undvik unauth om du är inloggad som SYSTEM_ADMIN)
+- ADMIN-only (SYSTEM_ADMIN hanteras ej här enligt önskemål)
 - Ingen “vem/vilka” / inga assignments här (det kommer i egen sida senare)
 - Publish fail-closed: status=published kräver blocks.length > 0
 ============================================================ -->
@@ -479,11 +479,13 @@ POLICY (LÅST):
 
 <script>
 /* ============================================================
-AO-TRAININGS-PATCH-01 (HOTFIX v1.1) | admin/trainings.html
+AO-TRAININGS-PATCH-01 | admin/trainings.html
 Fokus:
-- FIX: undvik unauth för SYSTEM_ADMIN som är legitimt inloggad i admin
-- Redirect till skeleton med err=unauth för tydlighet
-- I övrigt: oförändrat beteende
+- Modul först + område med förslag (från sparade)
+- Tydlig “sparat”-status: visar om blocks finns + antal
+- Publish fail-closed (blocks.length > 0) + tydlig hint
+- Behåller AI via Worker (generiskt tolerant svarstolk)
+- Inga nya storage-keys: AO-057_TRAININGS_V1 (array)
 ============================================================ */
 (function(){
   "use strict";
@@ -567,35 +569,30 @@ Fokus:
     elMsg.style.display = text ? "block" : "none";
   }
 
-  function redirectLogin(reason){
-    const r = reason ? String(reason) : "unauth";
-    window.location.replace("../UI/UI-01-SKELETON.html?err=" + encodeURIComponent(r));
-  }
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
   function doLogout(){
     if (window.HRApp && typeof window.HRApp.logout === "function") { window.HRApp.logout(); return; }
     try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
     try{ localStorage.removeItem(SESSION_KEY); }catch{}
-    redirectLogin("logout");
+    redirectLogin();
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  // --- CORE auth guard (ADMIN + SYSTEM_ADMIN) ---
+  // --- CORE auth guard (ADMIN-only) ---
   if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-    redirectLogin("core"); return;
+    redirectLogin(); return;
   }
-
-  const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN","SYSTEM_ADMIN"] });
+  const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN"] });
   if(!session) return;
 
   const auth = window.HRApp.getAuth(session);
-  const role = String((auth && auth.role) || "").trim();
-  if(!(role === "ADMIN" || role === "SYSTEM_ADMIN")){
-    redirectLogin("unauth"); return;
+  if(!auth || !auth.role || String(auth.role) !== "ADMIN"){
+    redirectLogin(); return;
   }
 
   const empNo = String((session.auth && session.auth.empNo) || "").trim();
-  elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ${role}`;
+  elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ADMIN`;
 
   // --- storage ---
   function safeParseArray(key){
@@ -653,24 +650,30 @@ Fokus:
     const b = (raw && typeof raw === "object") ? raw : {};
     const kind = String(b.kind || "info").trim();
     const okKind = (kind === "info" || kind === "task" || kind === "question" || kind === "both");
+
     const taskAnswer = (b.taskAnswer === "scale" || b.taskAnswer === "checkbox") ? b.taskAnswer : "checkbox";
-    const questionAnswer = (b.questionAnswer === "choice" || b.questionAnswer === "text") ? b.questionAnswer : "text";
+
+    const qa0 = (b.questionAnswer === "choice" || b.questionAnswer === "text") ? b.questionAnswer : "text";
+    const finalQuestionAnswer = (kind === "both") ? "text" : qa0;
+
     const scaleMin = clampInt(b.scaleMin, 1, 10, 1);
     const scaleMax0 = clampInt(b.scaleMax, 1, 10, 5);
     const scaleMax = (scaleMax0 < scaleMin) ? scaleMin : scaleMax0;
-    const options = Array.isArray(b.options) ? b.options.slice(0,10).map(x => String(x||"").slice(0,40)) : [];
+
+    const options0 = Array.isArray(b.options) ? b.options.slice(0,10).map(x => String(x||"").slice(0,40)) : [];
+    const finalOptions = (finalQuestionAnswer === "choice") ? options0 : [];
 
     return {
       kind: okKind ? kind : "info",
       title: String(b.title || "").slice(0,80),
       text: String(b.text || b.description || "").slice(0,240),
       taskAnswer,
-      questionAnswer: (kind === "both") ? "text" : questionAnswer,
+      questionAnswer: finalQuestionAnswer,
       scaleMin,
       scaleMax,
       scaleMinLabel: String(b.scaleMinLabel || "").slice(0,40),
       scaleMaxLabel: String(b.scaleMaxLabel || "").slice(0,40),
-      options: (questionAnswer === "choice") ? options : []
+      options: finalOptions
     };
   }
 
@@ -998,7 +1001,6 @@ Fokus:
 
         r.appendChild(l1);
         r.appendChild(l2);
-
         sc.appendChild(r);
 
         if(block.taskAnswer !== "scale"){
@@ -1320,6 +1322,7 @@ Fokus:
     return { ok:true };
   }
 
+  // --- UI events ---
   qInp.addEventListener("input", () => renderList());
   filterStatus.addEventListener("change", () => renderList());
 
@@ -1478,22 +1481,42 @@ Fokus:
     }
   }
 
+  function safeSnippet(s, n){
+    const t = String(s || "");
+    return t.length > n ? (t.slice(0, n) + "…") : t;
+  }
+
+  async function tryGet(url){
+    const r = await fetch(url, { method:"GET", cache:"no-store" });
+    const txt = await r.text();
+    return { ok: r.ok, status: r.status, text: txt };
+  }
+
   async function aiTest(){
-    const url = aiUrl("/health");
+    const origin = getAiOrigin();
+    const paths = ["/health", "/healthz", "/"];
     aiStatus.textContent = "Testar worker…";
-    try{
-      const r = await fetch(url, { method:"GET", cache:"no-store" });
-      const txt = await r.text();
-      if(!r.ok){
-        aiStatus.textContent = `Worker fel: HTTP ${r.status}`;
-        setMsg("err", "Worker svarade med fel (se AI-status).");
+
+    for(let i=0;i<paths.length;i++){
+      const url = aiUrl(paths[i]);
+      try{
+        const res = await tryGet(url);
+        if(res.ok){
+          aiStatus.textContent = `Worker OK • ${url} • ${safeSnippet(res.text, 120)}`;
+          setMsg("ok", "Worker verkar igång.");
+          return;
+        }
+        // 404/500 etc: fortsätt prova nästa path, men spara info om sista
+        aiStatus.textContent = `Worker svar • ${url} • HTTP ${res.status} • ${safeSnippet(res.text, 120)}`;
+        if(i === paths.length - 1){
+          setMsg("err", "Worker nås men endpoint verkar saknas (404/ej OK). Se AI-status för exakt URL.");
+          return;
+        }
+      }catch{
+        aiStatus.textContent = `Worker kunde inte nås • ${origin}`;
+        setMsg("err", "Kunde inte nå worker (nät / url).");
         return;
       }
-      aiStatus.textContent = `Worker OK: ${txt.slice(0,120)}`;
-      setMsg("ok", "Worker verkar igång.");
-    }catch{
-      aiStatus.textContent = "Worker kunde inte nås.";
-      setMsg("err", "Kunde inte nå worker (nät / url).");
     }
   }
 
@@ -1560,8 +1583,8 @@ Fokus:
 
       if(!r.ok || (json && json.ok === false)){
         const msg = (json && (json.error || json.message)) ? String(json.error || json.message) : ("HTTP " + r.status);
-        aiStatus.textContent = "AI-fel.";
-        setMsg("err", "AI/Worker fel: " + msg);
+        aiStatus.textContent = `AI-fel • ${url} • HTTP ${r.status}`;
+        setMsg("err", "AI/Worker fel: " + msg + " (se AI-status för URL).");
         return;
       }
 
@@ -1582,7 +1605,7 @@ Fokus:
       if(Array.isArray(res.blocks) && res.blocks.length){
         t.blocks = res.blocks.map(normalizeBlock).slice(0,12);
       }else{
-        aiStatus.textContent = "AI gav inga block.";
+        aiStatus.textContent = `AI gav inga block • ${url}`;
         setMsg("warn", "AI gav inga block. Testa igen eller lägg till manuellt.");
       }
 
@@ -1591,14 +1614,14 @@ Fokus:
       t.ai.lastRunAt = now();
       t.ai.lastSource = "worker";
 
-      aiStatus.textContent = `AI OK: ${Array.isArray(t.blocks)?t.blocks.length:0} block`;
+      aiStatus.textContent = `AI OK • ${url} • ${Array.isArray(t.blocks)?t.blocks.length:0} block`;
       setDirty(true);
       renderBlocks();
       debugPre.textContent = JSON.stringify(t, null, 2);
 
-    }catch(e){
-      aiStatus.textContent = "AI kunde inte köras.";
-      setMsg("err", "Kunde inte nå AI/Worker (nät / endpoint).");
+    }catch{
+      aiStatus.textContent = `AI kunde inte köras • ${url}`;
+      setMsg("err", "Kunde inte nå AI/Worker (nät / endpoint). Se AI-status för URL.");
     }finally{
       btnAiGenerate.disabled = false;
       btnAiTest.disabled = false;
@@ -1645,10 +1668,11 @@ Fokus:
 </script>
 
 <!-- ============================================================
-Ändringslogg (AO-TRAININGS-PATCH-01 HOTFIX v1.1) ≤ 8 rader
-- FIX: allowRoles = ADMIN + SYSTEM_ADMIN (undvik falsk unauth)
-- FIX: redirect till UI-01-SKELETON.html?err=... för tydlig orsak
-- I övrigt: ingen ändring i träningslogik/keys/UI
+Ändringslogg (AO-TRAININGS-PATCH-01) ≤ 8 rader
+- BUGFIX: normalizeBlock behåller inte options för kind="both" (questionAnswer tvingas korrekt till text)
+- Worker test: provar /health, /healthz, / och visar exakt URL + HTTP-status + snippet
+- AI generate: visar exakt URL vid fel/404 för snabb felsökning av saknade routes
+- I övrigt oförändrat beteende, inga nya keys, fortsatt fail-closed
 ============================================================ -->
 </body>
 </html>
