@@ -1,799 +1,1100 @@
 <!-- ============================================================
-AO-056 (NEW v1.0) | FIL-ID: admin/packages-block.html
-Projekt: HR-System
-Syfte: ADMIN/SYSTEM_ADMIN – Paket → Block → status per medarbetare (READ ONLY)
+AO-ADMIN-REBUILD-01 | FIL-ID: admin/packages-block.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: ADMIN – Finjustera block i utbildning (Training Block Editor) baserat på AO-057_TRAININGS_V1
 
-Policy (LÅST):
-- UI-only • fail-closed
-- Inga nya storage-keys
-- Read-only (ingen ändring av status)
-- XSS-escape på allt från storage
-- Samma logik/tolerans som AO-054/AO-055 (ingen ny tolkning)
-- Läser endast:
-  AO-050_PACKAGES_V1, AO-014_TASKS_V1, AO-012_QUESTIONS_V1, AO-013_ANSWERS_V1,
-  AO-020_ROLE_ASSIGNMENTS_V2, AO-020_ORG_V1, AO-001_LOGIN_V1
-
-RBAC (LÅST):
-- ADMIN + SYSTEM_ADMIN
-- Scope:
-  ADMIN -> egen subtree (kräver org + scopeId)
-  SYSTEM_ADMIN -> allt (utan org: fallback exakt scope-match, ej subtree)
-
-Not:
-- Ingen navigation till employee
-- Ingen historik/export/notifiering
-- Saknad data -> visa inget hellre än fel (fail-closed)
+POLICY (LÅST):
+- UI-only • Fail-closed
+- Auth: sessionStorage först, fallback localStorage (AO-001_LOGIN_V1)
+- ADMIN-only (SYSTEM_ADMIN hanteras ej här)
+- XSS-escape på all rendering från storage (textContent, inga osäkra innerHTML)
+- Inga nya storage-keys/datamodell utan explicit AO
+- Endast read/write: AO-057_TRAININGS_V1
+- Läs auth: AO-001_LOGIN_V1
+- Ingen publish-/statuslogik här (endast blocks[] redigering)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Paket → Block</title>
+  <title>HR-System – Blockeditor (Utbildning)</title>
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
   <style>
-    :root{
-      --bg:#f6f7fb;
-      --card:#ffffff;
-      --ink:#0f172a;
-      --muted:#64748b;
-      --line:rgba(15,23,42,.12);
-      --okbg:#d4edda; --okfg:#155724;
-      --nobg:#f8d7da; --nofg:#721c24;
-      --warnbg:#fff3cd; --warnfg:#7a5b00;
+    /* SCOPE: UI-only, ingen redesign utanför AO */
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+    .topnav {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 12px 16px; border: 1px solid rgba(0,0,0,.08);
+      border-radius: 12px; background: #fff; margin: 12px auto;
+      max-width: 1100px;
     }
-    body{
-      margin:0;
-      background:var(--bg);
-      color:var(--ink);
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    .topnav .left, .topnav .right { display:flex; gap:10px; align-items:center; flex-wrap: wrap; }
+    .topnav a { text-decoration: none; }
+    .badge { font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid rgba(0,0,0,.12); }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+    @media (min-width: 980px){ .grid { grid-template-columns: 420px 1fr; } }
+
+    .card {
+      background:#fff; border:1px solid rgba(0,0,0,.08); border-radius: 12px;
+      padding: 14px;
     }
-    .wrap{ max-width:1100px; margin:16px auto 28px; padding:0 16px; }
-    h2{ margin:0 0 12px; font-size:18px; font-weight:950; }
-    .controls{
-      display:flex; gap:12px; flex-wrap:wrap;
-      margin:12px 0 14px;
-      background:var(--card);
-      border:1px solid var(--line);
-      border-radius:14px;
-      padding:12px;
-      align-items:center;
+    .card h2 { margin: 0 0 10px 0; font-size: 16px; }
+    .row { display:flex; gap:10px; flex-wrap: wrap; align-items: end; }
+    .row > .field { flex: 1 1 180px; min-width: 160px; }
+    .field label { display:block; font-size: 12px; opacity: .8; margin-bottom: 6px; }
+    .field input[type="text"], .field input[type="number"], .field select, .field textarea {
+      width: 100%; box-sizing: border-box; padding: 10px 10px;
+      border-radius: 10px; border: 1px solid rgba(0,0,0,.12);
+      background: #fff;
     }
-    select, input{
-      border:1px solid var(--line);
-      border-radius:12px;
-      padding:10px 12px;
-      background:#fff;
-      font-size:13px;
-      color:var(--ink);
-      min-width: 220px;
+    .field textarea { min-height: 88px; resize: vertical; }
+    .hint { font-size: 12px; opacity: .75; }
+    .muted { opacity: .75; }
+    .error { border-left: 4px solid #b00020; padding: 10px 12px; background: rgba(176,0,32,.06); border-radius: 10px; }
+    .ok { border-left: 4px solid #1b7f3a; padding: 10px 12px; background: rgba(27,127,58,.08); border-radius: 10px; }
+    .actions { display:flex; gap:10px; flex-wrap: wrap; }
+    .btn {
+      padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(0,0,0,.12);
+      background: #fff; cursor: pointer; user-select: none;
     }
-    input{ min-width: 180px; }
-    .badge{
-      padding:4px 10px;
-      border-radius:999px;
-      font-size:12px;
-      border:1px solid rgba(15,23,42,.10);
-      background:#eef2ff;
-      white-space:nowrap;
-    }
-    .ok{ background:var(--okbg); color:var(--okfg); border-color:rgba(21,87,36,.2); }
-    .no{ background:var(--nobg); color:var(--nofg); border-color:rgba(114,28,36,.2); }
-    .warn{ background:var(--warnbg); color:var(--warnfg); border-color:rgba(122,91,0,.2); }
-    .muted{ color:var(--muted); font-size:13px; }
-    .guard{
-      padding:12px 14px;
-      background:rgba(254,242,242,.9);
-      border:1px solid rgba(239,68,68,.25);
-      border-radius:14px;
-      margin:12px 0;
-      display:none;
-      color:#7f1d1d;
-    }
-    .note{
-      margin:10px 0 0;
-      font-size:12px;
-      color:var(--muted);
-    }
-    table{
-      width:100%;
-      border-collapse:separate;
-      border-spacing:0;
-      background:var(--card);
-      border:1px solid var(--line);
-      border-radius:14px;
-      overflow:hidden;
-    }
-    th, td{
-      padding:10px 12px;
-      border-bottom:1px solid var(--line);
-      text-align:left;
-      font-size:13px;
-      vertical-align:top;
-    }
-    th{
-      font-size:12px;
-      color:var(--muted);
-      font-weight:900;
-      background: rgba(248,250,252,.9);
-      white-space:nowrap;
-    }
-    tr:last-child td{ border-bottom:none; }
-    .mono{
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
-      font-size:12px;
-      color:var(--muted);
-    }
-    .topline{
-      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
-      margin: 10px 0 12px;
-    }
+    .btn.primary { background: #0b5fff; color: #fff; border-color: #0b5fff; }
+    .btn.danger { background: #fff; color:#b00020; border-color: rgba(176,0,32,.35); }
+    .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+    .list { display:flex; flex-direction: column; gap: 12px; }
+    .blockCard { border: 1px solid rgba(0,0,0,.10); border-radius: 12px; padding: 12px; background:#fff; }
+    .blockHead { display:flex; align-items:center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+    .pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(0,0,0,.12); }
+    .mini { font-size: 12px; padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,.12); background:#fff; cursor:pointer; }
+    .mini:disabled { opacity:.55; cursor:not-allowed; }
+    .inlineChecks { display:flex; gap: 12px; align-items:center; flex-wrap: wrap; }
+    .inlineChecks label { display:flex; gap:8px; align-items:center; margin:0; font-size: 13px; }
+    .split { display:grid; grid-template-columns: 1fr; gap: 10px; }
+    @media (min-width: 900px){ .split { grid-template-columns: 1fr 1fr; } }
+    .footerBar { display:flex; gap:10px; flex-wrap: wrap; align-items:center; justify-content: space-between; margin-top: 10px; }
+    .smallNote { font-size: 12px; opacity: .8; }
+    .divider { height:1px; background: rgba(0,0,0,.10); margin: 10px 0; }
   </style>
 </head>
-
 <body>
+
+  <nav class="topnav" aria-label="Admin top navigation">
+    <div class="left">
+      <strong>HR-System</strong>
+      <span class="badge" id="authBadge">Auth: ?</span>
+      <span class="badge" id="roleBadge">Roll: ?</span>
+    </div>
+    <div class="right">
+      <a class="btn" href="./trainings.html">Till utbildningar</a>
+      <a class="btn" href="./home.html">Admin start</a>
+    </div>
+  </nav>
+
   <main class="wrap">
-    <h2>Paket → Block</h2>
+    <div class="grid">
+      <section class="card" aria-label="Välj utbildning">
+        <h2>Välj utbildning</h2>
+        <p class="hint">Filtrera: Modul → Område → Utbildning. När du väljer utbildning laddas dess block för redigering.</p>
 
-    <div id="guard" class="guard" role="alert"></div>
+        <div id="msgBox" class="error" style="display:none;"></div>
 
-    <div class="topline">
-      <span class="badge" id="whoPill">—</span>
-      <span class="badge" id="scopeModePill" style="display:none;"></span>
-      <span class="muted" id="hint">Read-only. Ingen status lagras.</span>
-    </div>
+        <div class="row" style="margin-top:10px;">
+          <div class="field">
+            <label for="filterModule">Modul</label>
+            <select id="filterModule" aria-label="Filter modul"></select>
+          </div>
+          <div class="field">
+            <label for="filterArea">Område</label>
+            <select id="filterArea" aria-label="Filter område"></select>
+          </div>
+          <div class="field">
+            <label for="filterTraining">Utbildning</label>
+            <select id="filterTraining" aria-label="Välj utbildning"></select>
+          </div>
+        </div>
 
-    <div class="controls" aria-label="Filter">
-      <select id="pkgSelect" aria-label="Välj paket">
-        <option value="">Välj paket</option>
-      </select>
+        <div class="divider"></div>
 
-      <select id="blockSelect" aria-label="Välj block" disabled>
-        <option value="">Välj block</option>
-      </select>
+        <div class="card" style="padding:12px; border-radius:12px; border:1px solid rgba(0,0,0,.10);">
+          <div class="muted" style="font-size:12px;">Vald utbildning</div>
+          <div id="trainingMeta" style="margin-top:6px;">
+            <div class="muted">Ingen vald.</div>
+          </div>
+        </div>
 
-      <input id="empFilter" type="search" placeholder="Sök empNo" autocomplete="off" aria-label="Sök empNo" />
+        <div class="divider"></div>
 
-      <span class="badge" id="countPill">—</span>
-    </div>
+        <div class="actions">
+          <button class="btn" id="reloadBtn" type="button">Ladda om från storage</button>
+          <button class="btn" id="discardBtn" type="button" disabled>Ångra osparade ändringar</button>
+        </div>
 
-    <div id="result"></div>
+        <p class="smallNote" style="margin-top:10px;">
+          Obs: Den här sidan ändrar aldrig status/publish. Endast blocks[] uppdateras.
+        </p>
+      </section>
 
-    <div class="note">
-      Matchning (tolerant): task via titel + done; question via questionId/titel; both kräver båda.
-      Task med assignedTo ALL/* räknas som tilldelad till alla inom scope (AO-054-linje).
+      <section class="card" aria-label="Blockeditor">
+        <h2>Block-editor</h2>
+        <p class="hint">Redigera titel/text och konfiguration. Flytta upp/ner, ta bort eller lägg till nytt block.</p>
+
+        <div id="editorLocked" class="error" style="display:none;"></div>
+
+        <div class="footerBar">
+          <div class="actions">
+            <div class="field" style="min-width:220px; max-width:280px;">
+              <label for="newBlockType">Lägg till nytt block</label>
+              <select id="newBlockType" aria-label="Välj blocktyp för nytt block">
+                <option value="info">info</option>
+                <option value="task">task</option>
+                <option value="question">question</option>
+                <option value="both">both</option>
+              </select>
+            </div>
+            <button class="btn" id="addBlockBtn" type="button" disabled>Lägg till</button>
+          </div>
+
+          <div class="actions">
+            <button class="btn primary" id="saveBtn" type="button" disabled>Spara</button>
+          </div>
+        </div>
+
+        <div style="margin-top:12px;">
+          <div id="saveState" class="ok" style="display:none;"></div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div id="blocksList" class="list" aria-label="Lista med block">
+          <div class="muted">Välj en utbildning för att börja.</div>
+        </div>
+
+      </section>
     </div>
   </main>
 
-  <!-- AO-002 beroenden (LÅSTA): config måste laddas före app -->
-  <script src="../UI/UI-04-CONFIG.js"></script>
-  <script src="../UI/UI-03-APP.js"></script>
-
   <script>
-    "use strict";
+    // ============================================================
+    // GUARD/STORAGE/XSS: Fail-closed + safe rendering
+    // ============================================================
 
-    /* ===========================
-       Keys (LÅST)
-    ============================ */
-    const KEY_SESSION      = "AO-001_LOGIN_V1";
-    const KEY_PACKAGES     = "AO-050_PACKAGES_V1";
-    const KEY_TASKS        = "AO-014_TASKS_V1";
-    const KEY_QUESTIONS    = "AO-012_QUESTIONS_V1";
-    const KEY_ANSWERS      = "AO-013_ANSWERS_V1";
-    const KEY_ASSIGNMENTS  = "AO-020_ROLE_ASSIGNMENTS_V2";
-    const KEY_ORG          = "AO-020_ORG_V1";
+    const KEY_AUTH = "AO-001_LOGIN_V1";
+    const KEY_TRAININGS = "AO-057_TRAININGS_V1";
 
-    /* ===========================
-       DOM
-    ============================ */
-    const guardEl   = document.getElementById("guard");
-    const pkgSel    = document.getElementById("pkgSelect");
-    const blockSel  = document.getElementById("blockSelect");
-    const resultEl  = document.getElementById("result");
-    const filterEl  = document.getElementById("empFilter");
-    const whoPill   = document.getElementById("whoPill");
-    const countPill = document.getElementById("countPill");
-    const scopeModePill = document.getElementById("scopeModePill");
+    const el = (id) => document.getElementById(id);
 
-    function showGuard(msg){
-      guardEl.style.display = "block";
-      guardEl.textContent = String(msg || "");
-    }
-    function hideGuard(){
-      guardEl.style.display = "none";
-      guardEl.textContent = "";
-    }
+    const msgBox = el("msgBox");
+    const authBadge = el("authBadge");
+    const roleBadge = el("roleBadge");
+    const editorLocked = el("editorLocked");
 
-    function escapeHtml(input){
-      if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(input);
-      const s = String(input ?? "");
-      return s
-        .replaceAll("&","&amp;")
-        .replaceAll("<","&lt;")
-        .replaceAll(">","&gt;")
-        .replaceAll('"',"&quot;")
-        .replaceAll("'","&#039;");
+    const filterModule = el("filterModule");
+    const filterArea = el("filterArea");
+    const filterTraining = el("filterTraining");
+
+    const trainingMeta = el("trainingMeta");
+    const blocksList = el("blocksList");
+
+    const reloadBtn = el("reloadBtn");
+    const discardBtn = el("discardBtn");
+    const saveBtn = el("saveBtn");
+
+    const newBlockType = el("newBlockType");
+    const addBlockBtn = el("addBlockBtn");
+
+    const saveState = el("saveState");
+
+    // In-memory state
+    let AUTH = null;                 // { role, ... }
+    let TRAININGS = null;            // array
+    let selectedTrainingId = null;   // string
+    let workingBlocks = null;        // array (edited copy)
+    let originalBlocksJson = null;   // string snapshot for discard
+    let hasDirty = false;
+
+    function safeText(node, text) {
+      // XSS: only textContent
+      node.textContent = String(text ?? "");
     }
 
-    function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
-
-    function readAnyStorage(key){
-      try { const s1 = sessionStorage.getItem(key); if (s1) return s1; } catch {}
-      try { const s2 = localStorage.getItem(key);  if (s2) return s2; } catch {}
-      return null;
+    function showError(text) {
+      msgBox.style.display = "block";
+      safeText(msgBox, text);
     }
 
-    function readLocalArray(key){
-      try{
-        const raw = localStorage.getItem(key);
-        const data = safeJsonParse(raw || "");
-        return Array.isArray(data) ? data : [];
-      }catch{
-        return [];
+    function clearError() {
+      msgBox.style.display = "none";
+      safeText(msgBox, "");
+    }
+
+    function showEditorLock(text) {
+      editorLocked.style.display = "block";
+      safeText(editorLocked, text);
+    }
+
+    function clearEditorLock() {
+      editorLocked.style.display = "none";
+      safeText(editorLocked, "");
+    }
+
+    function setSaveStateOk(text) {
+      saveState.style.display = "block";
+      saveState.className = "ok";
+      safeText(saveState, text);
+    }
+
+    function setSaveStateErr(text) {
+      saveState.style.display = "block";
+      saveState.className = "error";
+      safeText(saveState, text);
+    }
+
+    function clearSaveState() {
+      saveState.style.display = "none";
+      safeText(saveState, "");
+    }
+
+    function readJsonFromStorageFirstSessionThenLocal(key) {
+      // STORAGE: auth ska vara sessionStorage först, fallback localStorage
+      const s = sessionStorage.getItem(key);
+      if (s != null) return { raw: s, source: "sessionStorage" };
+      const l = localStorage.getItem(key);
+      if (l != null) return { raw: l, source: "localStorage" };
+      return { raw: null, source: null };
+    }
+
+    function readJsonFromLocal(key) {
+      const l = localStorage.getItem(key);
+      if (l != null) return { raw: l };
+      return { raw: null };
+    }
+
+    function parseJson(raw) {
+      if (raw == null) return { ok: false, data: null, err: "Saknar data." };
+      try {
+        const data = JSON.parse(raw);
+        return { ok: true, data, err: null };
+      } catch (e) {
+        return { ok: false, data: null, err: "Kunde inte tolka JSON (korrupt storage)." };
       }
     }
 
-    function normStr(s){ return String(s ?? "").trim(); }
-    function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
+    function isAdminOnly(auth) {
+      // SCOPE: ADMIN-only. SYSTEM_ADMIN hanteras ej här (fail-closed).
+      const role = String(auth?.role ?? "").toUpperCase().trim();
+      return role === "ADMIN";
+    }
 
-    /* ===========================
-       AO-002 AUTH (kopplat)
-    ============================ */
-    function mustAuthOrStop(){
-      if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-        showGuard("Systemfel: HRApp saknas. (UI-03-APP.js)");
+    function loadAuthFailClosed() {
+      const { raw, source } = readJsonFromStorageFirstSessionThenLocal(KEY_AUTH);
+      const parsed = parseJson(raw);
+      if (!parsed.ok) {
+        AUTH = null;
+        safeText(authBadge, "Auth: saknas/korrupt");
+        safeText(roleBadge, "Roll: okänd");
+        showError("Du är inte inloggad (eller auth är korrupt). Logga in som ADMIN.");
+        return false;
+      }
+      AUTH = parsed.data;
+
+      safeText(authBadge, "Auth: " + (source || "?"));
+      safeText(roleBadge, "Roll: " + String(AUTH?.role ?? "?"));
+
+      if (!isAdminOnly(AUTH)) {
+        // Fail-closed: inga verktyg om fel roll
+        showError("Otillräcklig behörighet. Den här sidan är endast för ADMIN.");
+        return false;
+      }
+
+      clearError();
+      return true;
+    }
+
+    function validateTrainingsShape(trainings) {
+      // Fail-closed: måste vara array av objekt med id och blocks (om finns)
+      if (!Array.isArray(trainings)) return { ok: false, err: "AO-057_TRAININGS_V1 är inte en array." };
+      for (let i = 0; i < trainings.length; i++) {
+        const t = trainings[i];
+        if (t == null || typeof t !== "object") return { ok: false, err: "Utbildningsdata är inte objekt (index " + i + ")." };
+        if (!t.id) return { ok: false, err: "Utbildning saknar id (index " + i + ")." };
+        // blocks kan saknas => behandlas som tom array
+        if (t.blocks != null && !Array.isArray(t.blocks)) return { ok: false, err: "blocks måste vara array (training id " + String(t.id) + ")." };
+      }
+      return { ok: true, err: null };
+    }
+
+    function loadTrainingsFailClosed() {
+      const { raw } = readJsonFromLocal(KEY_TRAININGS); // data är localStorage-first (enligt AO)
+      const parsed = parseJson(raw);
+
+      if (!parsed.ok) {
+        TRAININGS = null;
+        showError("Kunde inte läsa AO-057_TRAININGS_V1. " + parsed.err);
+        return false;
+      }
+
+      const v = validateTrainingsShape(parsed.data);
+      if (!v.ok) {
+        TRAININGS = null;
+        showError("AO-057_TRAININGS_V1 har fel format. " + v.err);
+        return false;
+      }
+
+      TRAININGS = parsed.data;
+      clearError();
+      return true;
+    }
+
+    function uniqSorted(values) {
+      const set = new Set();
+      for (const v of values) {
+        const s = String(v ?? "").trim();
+        if (s) set.add(s);
+      }
+      return Array.from(set).sort((a,b) => a.localeCompare(b, "sv"));
+    }
+
+    function setSelectOptions(selectEl, options, placeholder) {
+      while (selectEl.firstChild) selectEl.removeChild(selectEl.firstChild);
+
+      const ph = document.createElement("option");
+      ph.value = "";
+      safeText(ph, placeholder);
+      selectEl.appendChild(ph);
+
+      for (const opt of options) {
+        const o = document.createElement("option");
+        o.value = opt.value;
+        safeText(o, opt.label);
+        selectEl.appendChild(o);
+      }
+    }
+
+    function buildFilters() {
+      // Modul options
+      const modules = uniqSorted(TRAININGS.map(t => t.module));
+      setSelectOptions(filterModule, modules.map(m => ({ value: m, label: m })), "Välj modul");
+
+      // Reset downstream
+      setSelectOptions(filterArea, [], "Välj område");
+      setSelectOptions(filterTraining, [], "Välj utbildning");
+    }
+
+    function getFilteredTrainings() {
+      const m = filterModule.value.trim();
+      const a = filterArea.value.trim();
+
+      let arr = TRAININGS.slice();
+      if (m) arr = arr.filter(t => String(t.module ?? "").trim() === m);
+      if (a) arr = arr.filter(t => String(t.area ?? "").trim() === a);
+      return arr;
+    }
+
+    function rebuildAreaOptions() {
+      const m = filterModule.value.trim();
+      const arr = TRAININGS.slice().filter(t => !m || String(t.module ?? "").trim() === m);
+      const areas = uniqSorted(arr.map(t => t.area));
+      setSelectOptions(filterArea, areas.map(x => ({ value: x, label: x })), "Välj område");
+      filterArea.value = "";
+    }
+
+    function rebuildTrainingOptions() {
+      const arr = getFilteredTrainings();
+
+      const opts = arr
+        .map(t => ({
+          value: String(t.id),
+          label: String(t.title ?? "(utan titel)") + "  ·  " + String(t.status ?? "")
+        }))
+        .sort((a,b) => a.label.localeCompare(b.label, "sv"));
+
+      setSelectOptions(filterTraining, opts, "Välj utbildning");
+      filterTraining.value = "";
+    }
+
+    function findTrainingById(id) {
+      if (!id) return null;
+      return TRAININGS.find(t => String(t.id) === String(id)) || null;
+    }
+
+    function renderTrainingMeta(t) {
+      while (trainingMeta.firstChild) trainingMeta.removeChild(trainingMeta.firstChild);
+
+      if (!t) {
+        const d = document.createElement("div");
+        d.className = "muted";
+        safeText(d, "Ingen vald.");
+        trainingMeta.appendChild(d);
+        return;
+      }
+
+      const title = document.createElement("div");
+      title.style.fontWeight = "700";
+      safeText(title, String(t.title ?? "(utan titel)"));
+      trainingMeta.appendChild(title);
+
+      const line1 = document.createElement("div");
+      line1.className = "muted";
+      safeText(line1, "Modul: " + String(t.module ?? "-") + "  ·  Område: " + String(t.area ?? "-"));
+      trainingMeta.appendChild(line1);
+
+      const line2 = document.createElement("div");
+      line2.className = "muted";
+      const v = (t.version == null ? "-" : String(t.version));
+      const blocksCount = Array.isArray(t.blocks) ? t.blocks.length : 0;
+      safeText(line2, "ID: " + String(t.id) + "  ·  Status: " + String(t.status ?? "-") + "  ·  Version: " + v + "  ·  Block: " + blocksCount);
+      trainingMeta.appendChild(line2);
+
+      if (t.description) {
+        const desc = document.createElement("div");
+        desc.style.marginTop = "6px";
+        safeText(desc, String(t.description));
+        trainingMeta.appendChild(desc);
+      }
+    }
+
+    function cloneBlocks(blocks) {
+      // Keep unknown fields by deep cloning JSON-safe
+      try {
+        return JSON.parse(JSON.stringify(blocks || []));
+      } catch {
         return null;
       }
-      if (!window.HR_CONFIG || !window.HR_CONFIG.ROLES) {
-        showGuard("Systemfel: HR_CONFIG saknas. (UI-04-CONFIG.js)");
-        return null;
-      }
-
-      const allow = [ window.HR_CONFIG.ROLES.ADMIN, window.HR_CONFIG.ROLES.SYSTEM_ADMIN ];
-      const sess = window.HRApp.requireAuth({ allowRoles: allow });
-      if (!sess) return null;
-
-      const auth = window.HRApp.getAuth(sess);
-      if (!auth || auth.isAuthed !== true) {
-        showGuard("Fail-closed: saknar giltig session. Logga in igen.");
-        return null;
-      }
-      return { sess, auth };
     }
 
-    /* ===========================
-       ORG helpers (subtree)
-    ============================ */
-    function readOrg(){
-      const arr = readLocalArray(KEY_ORG);
-      return Array.isArray(arr) ? arr : [];
+    function markDirty(flag) {
+      hasDirty = !!flag;
+      discardBtn.disabled = !hasDirty;
+      saveBtn.disabled = !hasDirty;
     }
 
-    function buildOrgIndex(nodes){
-      const byId = new Map();
-      for(const n of (Array.isArray(nodes)?nodes:[])){
-        if(!n || typeof n !== "object") continue;
-        const id = normStr(n.id ?? n.scopeId ?? "");
-        if(!id) continue;
-        byId.set(id, {
-          id,
-          parentId: normStr(n.parentId ?? n.parent ?? ""),
-          label: normStr(n.label ?? n.name ?? n.title ?? id) || id
+    function lockEditor(reason) {
+      clearSaveState();
+      showEditorLock(reason);
+      blocksList.innerHTML = "";
+      const d = document.createElement("div");
+      d.className = "muted";
+      safeText(d, "Blockeditor är låst.");
+      blocksList.appendChild(d);
+
+      addBlockBtn.disabled = true;
+      markDirty(false);
+    }
+
+    function unlockEditor() {
+      clearEditorLock();
+      addBlockBtn.disabled = false;
+    }
+
+    function normalizeType(t) {
+      const s = String(t ?? "").toLowerCase().trim();
+      if (s === "info" || s === "task" || s === "question" || s === "both") return s;
+      return "info";
+    }
+
+    function ensureStringMax(s, max) {
+      const v = String(s ?? "");
+      return v.length > max ? v.slice(0, max) : v;
+    }
+
+    function safeNumber(n, def) {
+      const x = Number(n);
+      return Number.isFinite(x) ? x : def;
+    }
+
+    function renderBlocks() {
+      blocksList.innerHTML = "";
+      clearSaveState();
+
+      if (!workingBlocks) {
+        const m = document.createElement("div");
+        m.className = "muted";
+        safeText(m, "Välj en utbildning för att börja.");
+        blocksList.appendChild(m);
+        addBlockBtn.disabled = true;
+        markDirty(false);
+        return;
+      }
+
+      if (!Array.isArray(workingBlocks)) {
+        lockEditor("blocks[] är korrupt i minnet. Ladda om sidan.");
+        return;
+      }
+
+      if (workingBlocks.length === 0) {
+        const z = document.createElement("div");
+        z.className = "muted";
+        safeText(z, "Inga block ännu. Lägg till ett nytt block ovan.");
+        blocksList.appendChild(z);
+      }
+
+      workingBlocks.forEach((b, idx) => {
+        const type = normalizeType(b?.type);
+
+        const card = document.createElement("div");
+        card.className = "blockCard";
+
+        const head = document.createElement("div");
+        head.className = "blockHead";
+
+        const left = document.createElement("div");
+        left.style.display = "flex";
+        left.style.alignItems = "center";
+        left.style.gap = "10px";
+        left.style.flexWrap = "wrap";
+
+        const pill = document.createElement("span");
+        pill.className = "pill";
+        safeText(pill, "Typ: " + type);
+        left.appendChild(pill);
+
+        const idPill = document.createElement("span");
+        idPill.className = "pill";
+        safeText(idPill, "ID: " + String(b?.id ?? "(saknas)"));
+        left.appendChild(idPill);
+
+        head.appendChild(left);
+
+        const right = document.createElement("div");
+        right.style.display = "flex";
+        right.style.gap = "8px";
+        right.style.flexWrap = "wrap";
+        right.style.alignItems = "center";
+
+        const up = document.createElement("button");
+        up.type = "button";
+        up.className = "mini";
+        safeText(up, "Upp");
+        up.disabled = idx === 0;
+        up.addEventListener("click", () => {
+          if (idx <= 0) return;
+          const tmp = workingBlocks[idx - 1];
+          workingBlocks[idx - 1] = workingBlocks[idx];
+          workingBlocks[idx] = tmp;
+          markDirty(true);
+          renderBlocks();
         });
-      }
-      return byId;
-    }
 
-    function isInSubtree(childId, ancestorId, byId){
-      const c = normStr(childId);
-      const a = normStr(ancestorId);
-      if(!c || !a) return false;
-      if(c === a) return true;
-
-      let cur = byId.get(c);
-      let steps = 0;
-      while(cur && steps < 1000){
-        const pid = normStr(cur.parentId);
-        if(!pid) break;
-        if(pid === a) return true;
-        cur = byId.get(pid);
-        steps++;
-      }
-      return false;
-    }
-
-    function scopeLabel(scopeId, byId){
-      const id = normStr(scopeId);
-      if(!id) return "—";
-      const n = byId.get(id);
-      return n ? (n.label || id) : id;
-    }
-
-    /* ===========================
-       ASSIGNMENTS -> employees visible
-    ============================ */
-    function readAssignments(){
-      const raw = readAnyStorage(KEY_ASSIGNMENTS);
-      if(!raw) return [];
-      const data = safeJsonParse(raw);
-      if(Array.isArray(data)) return data;
-      if(data && typeof data === "object" && Array.isArray(data.assignments)) return data.assignments;
-      return [];
-    }
-
-    function pickEmpNo(a){ return normStr(a?.empNo ?? a?.employeeNo ?? a?.id ?? ""); }
-    function pickRole(a){ return normStr(a?.role ?? a?.roleId ?? ""); }
-    function pickScope(a){ return normStr(a?.scopeId ?? a?.scope ?? ""); }
-
-    function uniqueByEmpNo(list){
-      const out = [];
-      const seen = new Set();
-      for(const e of list){
-        if(!e || typeof e !== "object") continue;
-        if(!e.empNo) continue;
-        if(seen.has(e.empNo)) continue;
-        seen.add(e.empNo);
-        out.push(e);
-      }
-      return out;
-    }
-
-    function employeesVisibleToViewer(auth, orgById, orgNodes){
-      const viewerRole  = normStr(auth.role);
-      const viewerScope = normStr(auth.scopeId);
-
-      const assigns = readAssignments();
-      if(!Array.isArray(assigns) || assigns.length === 0) return [];
-
-      const emps = assigns
-        .map(a => ({ empNo: pickEmpNo(a), role: pickRole(a), scopeId: pickScope(a) }))
-        .filter(x => x.empNo && x.scopeId && x.role === "EMPLOYEE");
-
-      const uniq = uniqueByEmpNo(emps);
-
-      if(viewerRole === "SYSTEM_ADMIN"){
-        return uniq; // all (scoping applied later by package scope)
-      }
-
-      // ADMIN: need org to subtree (fail-closed)
-      if(!viewerScope) return [];
-      if(!Array.isArray(orgNodes) || orgNodes.length === 0) return [];
-
-      if(window.HRApp && typeof window.HRApp.isInScope === "function"){
-        return uniq.filter(e => {
-          try { return window.HRApp.isInScope(e.scopeId, viewerScope, orgNodes) === true; } catch { return false; }
+        const down = document.createElement("button");
+        down.type = "button";
+        down.className = "mini";
+        safeText(down, "Ner");
+        down.disabled = idx === workingBlocks.length - 1;
+        down.addEventListener("click", () => {
+          if (idx >= workingBlocks.length - 1) return;
+          const tmp = workingBlocks[idx + 1];
+          workingBlocks[idx + 1] = workingBlocks[idx];
+          workingBlocks[idx] = tmp;
+          markDirty(true);
+          renderBlocks();
         });
-      }
 
-      return uniq.filter(e => isInSubtree(e.scopeId, viewerScope, orgById));
-    }
+        const del = document.createElement("button");
+        del.type = "button";
+        del.className = "mini";
+        del.style.borderColor = "rgba(176,0,32,.35)";
+        del.style.color = "#b00020";
+        safeText(del, "Ta bort");
+        del.addEventListener("click", () => {
+          if (!confirm("Ta bort blocket?")) return;
+          workingBlocks.splice(idx, 1);
+          markDirty(true);
+          renderBlocks();
+        });
 
-    /* ===========================
-       Packages (active + scope + blocks)
-    ============================ */
-    function readActiveNonEmptyPackages(){
-      const arr = readLocalArray(KEY_PACKAGES);
-      const list = Array.isArray(arr) ? arr : [];
-      return list.filter(p => {
-        if(!p || typeof p !== "object") return false;
-        if(p.isActive !== true) return false;
-        const scopeId = normStr(p?.scopeId ?? p?.targetScopeId ?? p?.scope ?? "");
-        if(!scopeId) return false;
-        const blocks = Array.isArray(p.blocks) ? p.blocks : [];
-        if(blocks.length === 0) return false;
-        return true;
+        right.appendChild(up);
+        right.appendChild(down);
+        right.appendChild(del);
+
+        head.appendChild(right);
+        card.appendChild(head);
+
+        const body = document.createElement("div");
+        body.style.marginTop = "10px";
+
+        const split = document.createElement("div");
+        split.className = "split";
+
+        // Title
+        const fTitle = document.createElement("div");
+        fTitle.className = "field";
+        const lTitle = document.createElement("label");
+        lTitle.setAttribute("for", "t_" + idx);
+        safeText(lTitle, "Titel (max 80)");
+        const iTitle = document.createElement("input");
+        iTitle.type = "text";
+        iTitle.id = "t_" + idx;
+        iTitle.maxLength = 80;
+        iTitle.value = ensureStringMax(b?.title ?? "", 80);
+        iTitle.addEventListener("input", () => {
+          b.title = ensureStringMax(iTitle.value, 80);
+          markDirty(true);
+        });
+        fTitle.appendChild(lTitle);
+        fTitle.appendChild(iTitle);
+
+        // Text
+        const fText = document.createElement("div");
+        fText.className = "field";
+        const lText = document.createElement("label");
+        lText.setAttribute("for", "x_" + idx);
+        safeText(lText, "Text (max 240)");
+        const iText = document.createElement("textarea");
+        iText.id = "x_" + idx;
+        iText.maxLength = 240;
+        iText.value = ensureStringMax(b?.text ?? "", 240);
+        iText.addEventListener("input", () => {
+          b.text = ensureStringMax(iText.value, 240);
+          markDirty(true);
+        });
+        fText.appendChild(lText);
+        fText.appendChild(iText);
+
+        split.appendChild(fTitle);
+        split.appendChild(fText);
+
+        body.appendChild(split);
+
+        // Task config (when relevant)
+        if (type === "task" || type === "both") {
+          const section = document.createElement("div");
+          section.style.marginTop = "10px";
+
+          const h = document.createElement("div");
+          h.style.fontWeight = "700";
+          h.style.marginBottom = "6px";
+          safeText(h, "Task-config");
+          section.appendChild(h);
+
+          // We keep keys stable within block: b.task = { enabled, scale, min, max }
+          if (b.task == null || typeof b.task !== "object") b.task = {};
+
+          const checks = document.createElement("div");
+          checks.className = "inlineChecks";
+
+          const cEnabledLabel = document.createElement("label");
+          const cEnabled = document.createElement("input");
+          cEnabled.type = "checkbox";
+          cEnabled.checked = !!b.task.enabled;
+          cEnabled.addEventListener("change", () => {
+            b.task.enabled = !!cEnabled.checked;
+            markDirty(true);
+          });
+          cEnabledLabel.appendChild(cEnabled);
+          const cEnabledText = document.createElement("span");
+          safeText(cEnabledText, "Aktiv");
+          cEnabledLabel.appendChild(cEnabledText);
+
+          const cScaleLabel = document.createElement("label");
+          const cScale = document.createElement("input");
+          cScale.type = "checkbox";
+          cScale.checked = !!b.task.scale;
+          cScale.addEventListener("change", () => {
+            b.task.scale = !!cScale.checked;
+            markDirty(true);
+          });
+          cScaleLabel.appendChild(cScale);
+          const cScaleText = document.createElement("span");
+          safeText(cScaleText, "Skala (min/max)");
+          cScaleLabel.appendChild(cScaleText);
+
+          checks.appendChild(cEnabledLabel);
+          checks.appendChild(cScaleLabel);
+          section.appendChild(checks);
+
+          const mm = document.createElement("div");
+          mm.className = "row";
+          mm.style.marginTop = "10px";
+
+          const fMin = document.createElement("div");
+          fMin.className = "field";
+          const lMin = document.createElement("label");
+          safeText(lMin, "Min");
+          const iMin = document.createElement("input");
+          iMin.type = "number";
+          iMin.value = String(safeNumber(b.task.min, 1));
+          iMin.addEventListener("input", () => {
+            b.task.min = safeNumber(iMin.value, 1);
+            markDirty(true);
+          });
+          fMin.appendChild(lMin); fMin.appendChild(iMin);
+
+          const fMax = document.createElement("div");
+          fMax.className = "field";
+          const lMax = document.createElement("label");
+          safeText(lMax, "Max");
+          const iMax = document.createElement("input");
+          iMax.type = "number";
+          iMax.value = String(safeNumber(b.task.max, 5));
+          iMax.addEventListener("input", () => {
+            b.task.max = safeNumber(iMax.value, 5);
+            markDirty(true);
+          });
+          fMax.appendChild(lMax); fMax.appendChild(iMax);
+
+          mm.appendChild(fMin);
+          mm.appendChild(fMax);
+          section.appendChild(mm);
+
+          const note = document.createElement("div");
+          note.className = "hint";
+          note.style.marginTop = "6px";
+          safeText(note, "Tips: Skala används när uppgiften bedöms på en min/max-skala. Lämna ändå värden för att undvika null.");
+          section.appendChild(note);
+
+          body.appendChild(section);
+        }
+
+        // Question config (when relevant)
+        if (type === "question" || type === "both") {
+          const section = document.createElement("div");
+          section.style.marginTop = "10px";
+
+          const h = document.createElement("div");
+          h.style.fontWeight = "700";
+          h.style.marginBottom = "6px";
+          safeText(h, "Question-config");
+          section.appendChild(h);
+
+          // Keep keys stable within block: b.question = { kind: "text"|"choice", options: [] }
+          if (b.question == null || typeof b.question !== "object") b.question = {};
+          const kind = String(b.question.kind ?? "text").toLowerCase() === "choice" ? "choice" : "text";
+
+          const row = document.createElement("div");
+          row.className = "row";
+
+          const fKind = document.createElement("div");
+          fKind.className = "field";
+          const lKind = document.createElement("label");
+          safeText(lKind, "Typ");
+          const sKind = document.createElement("select");
+          const o1 = document.createElement("option"); o1.value="text"; safeText(o1,"text");
+          const o2 = document.createElement("option"); o2.value="choice"; safeText(o2,"choice");
+          sKind.appendChild(o1); sKind.appendChild(o2);
+          sKind.value = kind;
+          sKind.addEventListener("change", () => {
+            b.question.kind = sKind.value === "choice" ? "choice" : "text";
+            if (b.question.kind !== "choice") {
+              // Fail-safe: behåll options men de används inte
+            } else {
+              if (!Array.isArray(b.question.options)) b.question.options = [];
+            }
+            markDirty(true);
+            renderBlocks();
+          });
+          fKind.appendChild(lKind);
+          fKind.appendChild(sKind);
+
+          row.appendChild(fKind);
+          section.appendChild(row);
+
+          if (kind === "choice") {
+            if (!Array.isArray(b.question.options)) b.question.options = [];
+
+            const fOpts = document.createElement("div");
+            fOpts.className = "field";
+            fOpts.style.marginTop = "10px";
+
+            const lOpts = document.createElement("label");
+            safeText(lOpts, "Alternativ (en per rad)");
+            const ta = document.createElement("textarea");
+            ta.value = b.question.options.map(x => String(x ?? "")).join("\n");
+            ta.addEventListener("input", () => {
+              const lines = String(ta.value ?? "")
+                .split("\n")
+                .map(s => s.trim())
+                .filter(s => s.length > 0);
+              b.question.options = lines;
+              markDirty(true);
+            });
+
+            fOpts.appendChild(lOpts);
+            fOpts.appendChild(ta);
+
+            const note = document.createElement("div");
+            note.className = "hint";
+            note.style.marginTop = "6px";
+            safeText(note, "Endast icke-tomma rader sparas som options[].");
+            fOpts.appendChild(note);
+
+            section.appendChild(fOpts);
+          } else {
+            const note = document.createElement("div");
+            note.className = "hint";
+            note.style.marginTop = "8px";
+            safeText(note, "Textfråga: inga alternativ behövs.");
+            section.appendChild(note);
+          }
+
+          body.appendChild(section);
+        }
+
+        card.appendChild(body);
+        blocksList.appendChild(card);
       });
     }
 
-    function packageId(p){ return normStr(p?.id ?? ""); }
-    function packageName(p){ return normStr(p?.name ?? p?.title ?? "—") || "—"; }
-    function packageScopeId(p){ return normStr(p?.scopeId ?? p?.targetScopeId ?? p?.scope ?? ""); }
+    function setSelectedTraining(id) {
+      selectedTrainingId = id || null;
+      const t = findTrainingById(selectedTrainingId);
+      renderTrainingMeta(t);
 
-    /* ===========================
-       Blocks normalization (stable id)
-    ============================ */
-    function normalizeBlockKind(kind){
-      const k = String(kind || "").toLowerCase().trim();
-      if(k === "task" || k === "uppgift") return "task";
-      if(k === "question" || k === "fråga") return "question";
-      if(k === "info" || k === "information") return "info";
-      if(k === "both") return "both";
-      return "unknown";
-    }
-
-    function stableIdFrom(kind, title){
-      const base = normKey(kind) + "::" + normKey(title);
-      // simple stable hash (no crypto, UI-only)
-      let h = 0;
-      for(let i=0;i<base.length;i++){
-        h = ((h<<5) - h) + base.charCodeAt(i);
-        h |= 0;
-      }
-      return "blk_" + Math.abs(h).toString(16);
-    }
-
-    function blocksFromPackage(pkg){
-      const blocks = Array.isArray(pkg?.blocks) ? pkg.blocks : [];
-      return blocks.map(b => {
-        const kind = normalizeBlockKind(b?.kind);
-        const title = normStr(b?.title) || "—";
-        const id = normStr(b?.id) || stableIdFrom(kind, title);
-        const questionId = normStr(b?.questionId ?? b?.qid ?? "");
-        return { id, kind, title, questionId, raw:b };
-      }).filter(b => b.kind !== "unknown" && b.title !== "—");
-    }
-
-    /* ===========================
-       Tolerant matching (AO-054 spirit)
-    ============================ */
-    function getTaskTitle(t){ return String(t?.title ?? t?.name ?? t?.text ?? ""); }
-    function isTaskDone(t){
-      const s = String(t?.status ?? t?.state ?? "").toLowerCase();
-      if(t?.done === true) return true;
-      if(t?.isDone === true) return true;
-      if(s === "done" || s === "klar" || s === "completed" || s === "complete") return true;
-      return false;
-    }
-
-    function getQuestionId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? ""); }
-    function getQuestionTitle(q){ return String(q?.title ?? q?.name ?? q?.text ?? ""); }
-
-    function answerMatchesQuestion(ans, qId, qTitle){
-      if(!ans || typeof ans !== "object") return false;
-      const aQid = String(ans.questionId ?? ans.qid ?? ans.question_id ?? "");
-      if(qId && aQid && aQid === qId) return true;
-
-      const aTitle = String(ans.questionTitle ?? ans.title ?? ans.questionText ?? "");
-      if(qTitle && aTitle && normKey(aTitle) === normKey(qTitle)) return true;
-
-      return false;
-    }
-
-    function answersForEmpNo(empNo, answers){
-      const me = normStr(empNo);
-      return (Array.isArray(answers)?answers:[]).filter(a => normStr(a?.empNo ?? a?.employeeNo ?? a?.byEmpNo ?? a?.respondentEmpNo ?? "") === me);
-    }
-
-    function taskDoneForEmp(blockTitle, empNo, scopeId, tasks){
-      const me = normStr(empNo);
-      const sc = normStr(scopeId);
-      const bt = normKey(blockTitle);
-      if(!me || !sc || !bt) return false;
-
-      const list = Array.isArray(tasks) ? tasks : [];
-      for(const t of list){
-        if(!t || typeof t !== "object") continue;
-
-        const tScope = normStr(t?.scopeId ?? "");
-        if(!tScope || tScope !== sc) continue;
-
-        const assigned = t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
-        const assignedStr = (typeof assigned === "string" || typeof assigned === "number") ? String(assigned).trim() : "";
-
-        // AO-054 patch: ALL/* counts as assigned to everyone within scope
-        const isAssignedToMe = (assignedStr === me) || (assignedStr === "ALL") || (assignedStr === "*");
-        if(!isAssignedToMe) continue;
-
-        const tt = normKey(getTaskTitle(t));
-        if(tt && tt === bt){
-          return isTaskDone(t);
-        }
-      }
-      return false;
-    }
-
-    function questionDoneForEmp(block, empNo, questions, answers){
-      const me = normStr(empNo);
-      const title = normStr(block?.title);
-      const explicitQid = normStr(block?.questionId);
-      if(!me || !title) return false;
-
-      let qId = explicitQid;
-
-      const qs = Array.isArray(questions) ? questions : [];
-      if(!qId){
-        const foundQ = qs.find(q => normKey(getQuestionTitle(q)) === normKey(title));
-        if(foundQ) qId = getQuestionId(foundQ);
-      }
-
-      // If still no qId, we can still try match by title via answers
-      const myAns = answersForEmpNo(me, answers);
-      return myAns.some(a => answerMatchesQuestion(a, qId, title));
-    }
-
-    function blockDoneForEmp(block, emp, data){
-      const kind = block.kind;
-      if(kind === "info") return true;
-
-      if(kind === "task"){
-        return taskDoneForEmp(block.title, emp.empNo, emp.scopeId, data.tasks);
-      }
-      if(kind === "question"){
-        return questionDoneForEmp(block, emp.empNo, data.questions, data.answers);
-      }
-      if(kind === "both"){
-        const tOk = taskDoneForEmp(block.title, emp.empNo, emp.scopeId, data.tasks);
-        const qOk = questionDoneForEmp(block, emp.empNo, data.questions, data.answers);
-        return tOk && qOk;
-      }
-      return false;
-    }
-
-    /* ===========================
-       UI helpers
-    ============================ */
-    function clear(el){ while(el.firstChild) el.removeChild(el.firstChild); }
-
-    function fillPackages(pkgs){
-      // Reset to default option
-      pkgSel.innerHTML = '<option value="">Välj paket</option>';
-
-      for(const p of pkgs){
-        const opt = document.createElement("option");
-        opt.value = packageId(p);                 // IMPORTANT: raw id, not escaped
-        opt.textContent = packageName(p);         // safe as textContent
-        pkgSel.appendChild(opt);
-      }
-    }
-
-    function fillBlocks(blocks){
-      blockSel.innerHTML = '<option value="">Välj block</option>';
-      for(const b of blocks){
-        const opt = document.createElement("option");
-        opt.value = b.id;                         // stable id
-        opt.textContent = b.title;
-        blockSel.appendChild(opt);
-      }
-      blockSel.disabled = blocks.length === 0;
-    }
-
-    function renderTable(rows){
-      resultEl.innerHTML = "";
-
-      if(rows.length === 0){
-        resultEl.innerHTML = '<span class="badge warn">0 medarbetare i scope</span>';
-        countPill.textContent = "0 rader";
+      if (!t) {
+        workingBlocks = null;
+        originalBlocksJson = null;
+        markDirty(false);
+        addBlockBtn.disabled = true;
+        renderBlocks();
         return;
       }
 
-      const table = document.createElement("table");
-      table.innerHTML = `
-        <thead>
-          <tr>
-            <th>empNo</th>
-            <th>Scope</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody></tbody>
-      `;
+      // Fail-closed: blocks måste vara clonable array
+      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+      const cloned = cloneBlocks(blocks);
 
-      const tb = table.querySelector("tbody");
-      for(const r of rows){
-        const tr = document.createElement("tr");
-
-        const tdEmp = document.createElement("td");
-        tdEmp.innerHTML = `<strong>${escapeHtml(r.empNo)}</strong><div class="mono">scopeId: ${escapeHtml(r.scopeId || "")}</div>`;
-
-        const tdScope = document.createElement("td");
-        tdScope.textContent = r.scopeLabel || "—";
-
-        const tdSt = document.createElement("td");
-        tdSt.innerHTML = `<span class="badge ${r.done ? "ok" : "no"}">${r.done ? "Klar" : "Inte klar"}</span>`;
-
-        tr.appendChild(tdEmp);
-        tr.appendChild(tdScope);
-        tr.appendChild(tdSt);
-        tb.appendChild(tr);
-      }
-
-      resultEl.appendChild(table);
-      countPill.textContent = `${rows.length} rader`;
-    }
-
-    /* ===========================
-       State + init
-    ============================ */
-    const STATE = {
-      auth:null,
-      viewerRole:"",
-      viewerScope:"",
-      orgNodes:[],
-      orgById:new Map(),
-      scopeMode:"", // text pill if needed
-      employeesAll:[],
-      packages:[],
-      blocksByPkgId:new Map(),
-      data:{ tasks:[], questions:[], answers:[] }
-    };
-
-    function init(){
-      const res = mustAuthOrStop();
-      if(!res) return;
-
-      STATE.auth = res.auth;
-      STATE.viewerRole = normStr(STATE.auth.role);
-      STATE.viewerScope = normStr(STATE.auth.scopeId);
-
-      whoPill.textContent = `${normStr(STATE.auth.empNo)||"—"} • ${STATE.viewerRole||"—"}`;
-
-      // Read org + build index
-      STATE.orgNodes = readOrg();
-      STATE.orgById  = buildOrgIndex(STATE.orgNodes);
-
-      // ADMIN requires org + scopeId (fail-closed)
-      if(STATE.viewerRole !== "SYSTEM_ADMIN"){
-        if(!STATE.viewerScope || !Array.isArray(STATE.orgNodes) || STATE.orgNodes.length === 0){
-          showGuard("Fail-closed: ADMIN kräver org + scopeId för subtree. (Behöver AO-020_ORG_V1 + scopeId i session.)");
-          return;
-        }
-      }
-
-      // SYSTEM_ADMIN without org: allow, but mark mode
-      if(STATE.viewerRole === "SYSTEM_ADMIN" && (!Array.isArray(STATE.orgNodes) || STATE.orgNodes.length === 0)){
-        STATE.scopeMode = "ORG saknas: subtree=av, använder exakt scope-match där det behövs.";
-        scopeModePill.style.display = "inline-block";
-        scopeModePill.className = "badge warn";
-        scopeModePill.textContent = STATE.scopeMode;
-      }
-
-      // Read data (safe arrays)
-      STATE.data.tasks     = readLocalArray(KEY_TASKS);
-      STATE.data.questions = readLocalArray(KEY_QUESTIONS);
-      STATE.data.answers   = readLocalArray(KEY_ANSWERS);
-
-      // Employees visible to viewer (scoping applied here for ADMIN; SYSTEM_ADMIN gets all EMPLOYEE)
-      STATE.employeesAll = employeesVisibleToViewer(STATE.auth, STATE.orgById, STATE.orgNodes);
-
-      // Packages
-      STATE.packages = readActiveNonEmptyPackages();
-
-      // Precompute blocks per package
-      STATE.blocksByPkgId.clear();
-      for(const p of STATE.packages){
-        STATE.blocksByPkgId.set(packageId(p), blocksFromPackage(p));
-      }
-
-      fillPackages(STATE.packages);
-
-      if(STATE.packages.length === 0){
-        hideGuard();
-        showGuard("Inget att visa: inga aktiva paket med scope + block.");
+      if (!cloned) {
+        workingBlocks = null;
+        originalBlocksJson = null;
+        lockEditor("Kunde inte klona blocks[] (korrupt struktur).");
         return;
       }
 
-      hideGuard();
+      workingBlocks = cloned;
+      originalBlocksJson = JSON.stringify(cloned);
+      markDirty(false);
+
+      unlockEditor();
+      renderBlocks();
     }
 
-    function employeesInPackageScope(pkgScope){
-      const role = STATE.viewerRole;
-      const orgNodes = STATE.orgNodes;
-      const orgById  = STATE.orgById;
+    function discardChanges() {
+      if (!workingBlocks || originalBlocksJson == null) return;
+      try {
+        workingBlocks = JSON.parse(originalBlocksJson);
+        markDirty(false);
+        clearSaveState();
+        renderBlocks();
+      } catch {
+        lockEditor("Kunde inte återställa osparade ändringar (snapshot korrupt). Ladda om.");
+      }
+    }
 
-      if(STATE.employeesAll.length === 0) return [];
+    function genBlockId() {
+      const r = Math.floor(Math.random() * 1e6);
+      return "b_" + Date.now() + "_" + r;
+    }
 
-      // SYSTEM_ADMIN with org -> subtree; without org -> exact scope match (as per spec)
-      if(role === "SYSTEM_ADMIN"){
-        if(Array.isArray(orgNodes) && orgNodes.length > 0){
-          if(window.HRApp && typeof window.HRApp.isInScope === "function"){
-            return STATE.employeesAll.filter(e => {
-              try { return window.HRApp.isInScope(e.scopeId, pkgScope, orgNodes) === true; } catch { return false; }
-            });
+    function addNewBlock() {
+      if (!workingBlocks || !Array.isArray(workingBlocks)) return;
+      const type = normalizeType(newBlockType.value);
+
+      // SCOPE: skapa minimal blockstruktur. (AO kräver configfält vid relevans.)
+      const block = {
+        id: genBlockId(),
+        type,
+        title: "",
+        text: ""
+      };
+
+      if (type === "task" || type === "both") {
+        block.task = { enabled: true, scale: false, min: 1, max: 5 };
+      }
+      if (type === "question" || type === "both") {
+        block.question = { kind: "text", options: [] };
+      }
+
+      workingBlocks.push(block);
+      markDirty(true);
+      renderBlocks();
+      // scroll to bottom (no innerHTML; safe)
+      setTimeout(() => { window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" }); }, 0);
+    }
+
+    function bumpVersion(val) {
+      const n = Number(val);
+      if (!Number.isFinite(n) || n < 0) return 1;
+      return Math.floor(n) + 1;
+    }
+
+    function saveBlocksFailClosed() {
+      clearSaveState();
+
+      if (!selectedTrainingId) {
+        setSaveStateErr("Ingen utbildning vald.");
+        return;
+      }
+
+      if (!Array.isArray(TRAININGS)) {
+        setSaveStateErr("Trainings är inte laddade.");
+        return;
+      }
+
+      const idx = TRAININGS.findIndex(t => String(t.id) === String(selectedTrainingId));
+      if (idx < 0) {
+        setSaveStateErr("Utbildningen finns inte längre (id mismatch). Inget sparat.");
+        return;
+      }
+
+      const t = TRAININGS[idx];
+      if (t == null || typeof t !== "object") {
+        setSaveStateErr("Utbildningen är korrupt. Inget sparat.");
+        return;
+      }
+
+      if (!Array.isArray(workingBlocks)) {
+        setSaveStateErr("Blocks är korrupt i minnet. Inget sparat.");
+        return;
+      }
+
+      // Light validation: title/text limits + types
+      for (let i = 0; i < workingBlocks.length; i++) {
+        const b = workingBlocks[i];
+        const type = normalizeType(b?.type);
+        b.type = type;
+        b.title = ensureStringMax(b?.title ?? "", 80);
+        b.text = ensureStringMax(b?.text ?? "", 240);
+
+        if (!b.id) b.id = genBlockId();
+
+        // Keep configs in sync for relevant types (fail-soft but safe)
+        if (type === "task" || type === "both") {
+          if (b.task == null || typeof b.task !== "object") b.task = {};
+          b.task.enabled = !!b.task.enabled;
+          b.task.scale = !!b.task.scale;
+          b.task.min = safeNumber(b.task.min, 1);
+          b.task.max = safeNumber(b.task.max, 5);
+        }
+        if (type === "question" || type === "both") {
+          if (b.question == null || typeof b.question !== "object") b.question = {};
+          const k = String(b.question.kind ?? "text").toLowerCase();
+          b.question.kind = (k === "choice") ? "choice" : "text";
+          if (b.question.kind === "choice") {
+            if (!Array.isArray(b.question.options)) b.question.options = [];
+            b.question.options = b.question.options.map(x => String(x ?? "").trim()).filter(x => x.length > 0);
+          } else {
+            // keep options if exists, but irrelevant
           }
-          return STATE.employeesAll.filter(e => isInSubtree(e.scopeId, pkgScope, orgById));
         }
-        // no org -> exact match only (fail-open-ish but still scoped)
-        return STATE.employeesAll.filter(e => normStr(e.scopeId) === normStr(pkgScope));
       }
 
-      // ADMIN path: org exists (already validated)
-      if(window.HRApp && typeof window.HRApp.isInScope === "function"){
-        return STATE.employeesAll.filter(e => {
-          try { return window.HRApp.isInScope(e.scopeId, pkgScope, orgNodes) === true; } catch { return false; }
-        });
+      // Write-back: endast blocks[] + version + updatedAt
+      const next = JSON.parse(JSON.stringify(TRAININGS)); // deep clone to avoid weird refs
+      const t2 = next[idx];
+      if (!t2 || typeof t2 !== "object") {
+        setSaveStateErr("Kunde inte skapa säker kopia av utbildningen. Inget sparat.");
+        return;
       }
-      return STATE.employeesAll.filter(e => isInSubtree(e.scopeId, pkgScope, orgById));
+
+      t2.blocks = JSON.parse(JSON.stringify(workingBlocks));
+      t2.version = bumpVersion(t2.version);
+      t2.updatedAt = Date.now();
+
+      // STORAGE: Only write AO-057_TRAININGS_V1
+      try {
+        localStorage.setItem(KEY_TRAININGS, JSON.stringify(next));
+      } catch (e) {
+        setSaveStateErr("Kunde inte skriva till localStorage (quota eller blockerat). Inget sparat.");
+        return;
+      }
+
+      // Update in-memory from what we saved
+      TRAININGS = next;
+      originalBlocksJson = JSON.stringify(workingBlocks);
+      markDirty(false);
+
+      setSaveStateOk("Sparat. Version bumpad och updatedAt uppdaterad.");
+      // re-render meta (shows version)
+      renderTrainingMeta(findTrainingById(selectedTrainingId));
     }
 
-    function render(){
-      resultEl.innerHTML = "";
-      countPill.textContent = "—";
+    function initFailClosed() {
+      clearSaveState();
+      lockEditor("Initierar…");
 
-      const pkgId = normStr(pkgSel.value);
-      const blockId = normStr(blockSel.value);
-      if(!pkgId){
-        blockSel.disabled = true;
-        blockSel.innerHTML = '<option value="">Välj block</option>';
+      const okAuth = loadAuthFailClosed();
+      if (!okAuth) {
+        // Fail-closed: lås allt
+        addBlockBtn.disabled = true;
+        saveBtn.disabled = true;
+        discardBtn.disabled = true;
         return;
       }
 
-      const pkg = STATE.packages.find(p => packageId(p) === pkgId);
-      if(!pkg){
-        // fail-closed
+      const okTrainings = loadTrainingsFailClosed();
+      if (!okTrainings) {
+        // Fail-closed: lås editor men låt user försöka ladda om
+        lockEditor("Kunde inte ladda utbildningar. Kontrollera AO-057_TRAININGS_V1.");
+        buildFilters(); // safe reset
         return;
       }
 
-      const blocks = STATE.blocksByPkgId.get(pkgId) || [];
-      if(blockSel.disabled){
-        fillBlocks(blocks);
-      }
-
-      if(!blockId){
-        return;
-      }
-
-      const block = blocks.find(b => normStr(b.id) === blockId);
-      if(!block) return;
-
-      const pkgScope = packageScopeId(pkg);
-      if(!pkgScope) return;
-
-      const emps = employeesInPackageScope(pkgScope);
-
-      const q = normStr(filterEl.value);
-      const rows = emps
-        .filter(e => !q || String(e.empNo).includes(q))
-        .map(e => {
-          const done = blockDoneForEmp(block, e, STATE.data);
-          return {
-            empNo: e.empNo,
-            scopeId: e.scopeId,
-            scopeLabel: (STATE.orgNodes.length > 0) ? scopeLabel(e.scopeId, STATE.orgById) : (e.scopeId || "—"),
-            done
-          };
-        });
-
-      // sort: not done first
-      rows.sort((a,b) => (a.done === b.done ? String(a.empNo).localeCompare(String(b.empNo), "sv") : (a.done ? 1 : -1)));
-
-      // If no employees, show mild badge (not crash)
-      renderTable(rows);
+      // Ready
+      buildFilters();
+      unlockEditor();
+      renderBlocks(); // shows "Välj en utbildning"
+      addBlockBtn.disabled = true;
+      markDirty(false);
     }
 
-    pkgSel.addEventListener("change", () => {
-      const pkgId = normStr(pkgSel.value);
-      blockSel.disabled = true;
-      blockSel.innerHTML = '<option value="">Välj block</option>';
-      resultEl.innerHTML = "";
-      countPill.textContent = "—";
-
-      if(!pkgId) return;
-
-      const pkg = STATE.packages.find(p => packageId(p) === pkgId);
-      if(!pkg) return;
-
-      const blocks = STATE.blocksByPkgId.get(pkgId) || [];
-      fillBlocks(blocks);
-      blockSel.disabled = blocks.length === 0;
-
-      // auto-select first block if only one
-      if(blocks.length === 1){
-        blockSel.value = blocks[0].id;
-        render();
+    // Events
+    filterModule.addEventListener("change", () => {
+      // Changing filter discards selection (fail-safe)
+      if (hasDirty && !confirm("Du har osparade ändringar. Byta filter ändå?")) {
+        // revert by re-init filter values based on current selection
+        // simplest fail-closed: reload entire state
+        initFailClosed();
+        return;
       }
+      setSelectedTraining(null);
+      rebuildAreaOptions();
+      rebuildTrainingOptions();
     });
 
-    blockSel.addEventListener("change", render);
-    filterEl.addEventListener("input", render);
+    filterArea.addEventListener("change", () => {
+      if (hasDirty && !confirm("Du har osparade ändringar. Byta filter ändå?")) {
+        initFailClosed();
+        return;
+      }
+      setSelectedTraining(null);
+      rebuildTrainingOptions();
+    });
 
-    // Init
-    init();
+    filterTraining.addEventListener("change", () => {
+      if (hasDirty && !confirm("Du har osparade ändringar. Byta utbildning ändå?")) {
+        // revert selection by resetting to current selected training
+        filterTraining.value = selectedTrainingId ? String(selectedTrainingId) : "";
+        return;
+      }
+      setSelectedTraining(filterTraining.value || null);
+      addBlockBtn.disabled = !(!!selectedTrainingId);
+    });
+
+    reloadBtn.addEventListener("click", () => {
+      if (hasDirty && !confirm("Du har osparade ändringar. Ladda om från storage ändå?")) return;
+      initFailClosed();
+    });
+
+    discardBtn.addEventListener("click", () => {
+      discardChanges();
+    });
+
+    addBlockBtn.addEventListener("click", () => {
+      addNewBlock();
+    });
+
+    saveBtn.addEventListener("click", () => {
+      // Final fail-closed guard: ensure auth still valid
+      const okAuth = loadAuthFailClosed();
+      if (!okAuth) {
+        lockEditor("Auth/behörighet saknas. Inget sparat.");
+        return;
+      }
+      saveBlocksFailClosed();
+    });
+
+    // Bootstrap
+    initFailClosed();
   </script>
-
-  <!-- ============================================================
-  Ändringslogg ≤ 8 rader
-  - Ny vy: Paket → Block (READ ONLY) enligt AO-056-policy (AO-054/AO-055-tolkning)
-  - Bytt till AO-002 HRApp/HR_CONFIG guard + config-before-app
-  - Fail-closed: ADMIN kräver org+scopeId; SYSTEM_ADMIN utan org får mild pill + exakt scope-match
-  - Tolerant match: task via titel+done; question via questionId/titel; both kräver båda
-  - ALL/* räknas som tilldelad till alla inom scope (AO-054 patch)
-  - Stabil block-id fallback (title+kind hash), inga Math.random
-  Testnoteringar
-  - Paket + block valt -> lista medarbetare: Inte klar först
-  - Sök empNo filtrerar
-  Risk/edge cases
-  - Titelmatch är heuristik (ingen ID-koppling lagras mellan paketblock och tasks)
-  ============================================================ -->
 </body>
 </html>
-
