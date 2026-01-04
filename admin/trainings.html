@@ -390,7 +390,10 @@ POLICY (LÅST):
       <!-- 4) AI -->
       <section class="subCard" aria-label="AI">
         <h3>4) AI – skapa block</h3>
-        <div class="tiny">AI fyller <strong>beskrivning</strong>, <strong>mål</strong> (om tomt) och <strong>block</strong>. Du kan alltid redigera efteråt.</div>
+        <div class="tiny">
+          AI fyller <strong>beskrivning</strong>, <strong>mål</strong> (om tomt) och <strong>block</strong>.
+          Denna UI är uppdaterad för din worker: <span class="mono">GET /ping</span> och <span class="mono">POST /ai/training</span>.
+        </div>
 
         <div class="row3" style="margin-top:8px;">
           <label>
@@ -415,9 +418,15 @@ POLICY (LÅST):
         <details>
           <summary>AI-inställning (endpoint)</summary>
           <div class="tiny" style="margin-top:8px;">
-            Default origin: <span class="mono" id="aiDefault">—</span><br/>
-            Override origin via URL: <span class="mono">?ai=https://din-worker.workers.dev</span><br/>
-            (Valfritt) Override path via URL: <span class="mono">?health=/healthz&amp;gen=/v1/ai-generate</span>
+            Origin: <span class="mono" id="aiDefault">—</span><br/>
+            Ping: <span class="mono" id="aiPingPath">—</span><br/>
+            Generate: <span class="mono" id="aiGenPath">—</span><br/>
+            <br/>
+            Override via URL-parametrar (valfritt):<br/>
+            <span class="mono">?ai=https://din-worker.workers.dev</span><br/>
+            <span class="mono">&amp;aiping=/ping</span> (default)<br/>
+            <span class="mono">&amp;aigen=/ai/training</span> (default)<br/>
+            <span class="mono">&amp;aitoken=BEARER_TOKEN</span> (om env.AI_TOKEN används)
           </div>
         </details>
       </section>
@@ -485,7 +494,7 @@ Fokus:
 - Modul först + område med förslag (från sparade)
 - Tydlig “sparat”-status: visar om blocks finns + antal
 - Publish fail-closed (blocks.length > 0) + tydlig hint
-- Behåller AI via Worker (robust endpoint-detektering)
+- Behåller AI via Worker (nu: GET /ping, POST /ai/training)
 - Inga nya storage-keys: AO-057_TRAININGS_V1 (array)
 ============================================================ */
 (function(){
@@ -516,6 +525,10 @@ Fokus:
 
   // --- AI Worker default ---
   const DEFAULT_AI_ORIGIN = "https://hrsystem.andersmenyit.workers.dev";
+
+  // --- Worker endpoints (enligt din “senaste sanning”) ---
+  const DEFAULT_AI_PING_PATH = "/ping";         // GET
+  const DEFAULT_AI_GEN_PATH  = "/ai/training";  // POST
 
   // --- DOM helpers ---
   const $ = (s) => document.querySelector(s);
@@ -551,6 +564,8 @@ Fokus:
   const btnAiGenerate = $("#btnAiGenerate");
   const aiStatus = $("#aiStatus");
   const aiDefault = $("#aiDefault");
+  const aiPingPathEl = $("#aiPingPath");
+  const aiGenPathEl = $("#aiGenPath");
 
   const addKind = $("#addKind");
   const btnAddBlock = $("#btnAddBlock");
@@ -731,14 +746,6 @@ Fokus:
     edit: null,
     snapshot: null,
     dirty: false
-  };
-
-  // --- AI runtime state (INTE storage) ---
-  const AI_STATE = {
-    resolved: false,
-    origin: "",
-    healthPath: "",
-    genPath: ""
   };
 
   function setDirty(on){
@@ -976,7 +983,6 @@ Fokus:
 
         const r = document.createElement("div");
         r.className = "row2";
-
         const l1 = document.createElement("label");
         l1.textContent = "Min (1–10)";
         const i1 = document.createElement("input");
@@ -1005,6 +1011,7 @@ Fokus:
 
         r.appendChild(l1);
         r.appendChild(l2);
+
         sc.appendChild(r);
 
         if(block.taskAnswer !== "scale"){
@@ -1464,161 +1471,45 @@ Fokus:
     renderBlocks();
   });
 
-  // --- AI ---
-  function getAiOrigin(){
+  // --- AI (uppdaterad för din worker) ---
+  function getUrlParam(name){
     try{
       const u = new URL(window.location.href);
-      const p = String(u.searchParams.get("ai") || "").trim();
-      if(p && p.startsWith("https://")) return p.replace(/\/+$/,"");
-    }catch{}
+      return String(u.searchParams.get(name) || "").trim();
+    }catch{ return ""; }
+  }
+
+  function getAiOrigin(){
+    const p = getUrlParam("ai");
+    if(p && p.startsWith("https://")) return p.replace(/\/+$/,"");
     return DEFAULT_AI_ORIGIN;
   }
 
-  function getOverridePath(paramName){
-    try{
-      const u = new URL(window.location.href);
-      const p = String(u.searchParams.get(paramName) || "").trim();
-      if(!p) return "";
-      if(!p.startsWith("/")) return "";
-      if(p.length > 120) return "";
-      return p;
-    }catch{}
-    return "";
+  function getAiPingPath(){
+    const p = getUrlParam("aiping");
+    if(p && p.startsWith("/")) return p;
+    return DEFAULT_AI_PING_PATH;
   }
 
-  function joinUrl(origin, path){
-    const o = String(origin||"").replace(/\/+$/,"");
-    const p = String(path||"");
-    return o + (p.startsWith("/") ? p : ("/" + p));
+  function getAiGenPath(){
+    const p = getUrlParam("aigen");
+    if(p && p.startsWith("/")) return p;
+    return DEFAULT_AI_GEN_PATH;
   }
 
-  async function fetchWithTimeout(url, opts, ms){
-    const timeoutMs = clampInt(ms, 800, 6000, 2500);
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), timeoutMs);
-    try{
-      const r = await fetch(url, { ...(opts||{}), signal: ctrl.signal, cache:"no-store" });
-      return r;
-    }finally{
-      clearTimeout(t);
-    }
+  function getAiToken(){
+    // URL-param är ok (ingen storage). OBS: syns i URL-historik → använd bara vid behov.
+    const t = getUrlParam("aitoken");
+    return t ? t : "";
   }
 
-  async function resolveAiEndpoints(force){
-    if(AI_STATE.resolved && !force) return { ok:true, origin:AI_STATE.origin, healthPath:AI_STATE.healthPath, genPath:AI_STATE.genPath };
-
+  function aiUrl(path){
     const origin = getAiOrigin();
     aiDefault.textContent = origin;
-
-    const overrideHealth = getOverridePath("health");
-    const overrideGen = getOverridePath("gen");
-
-    // Kandidater (fail-closed, inga gissningar som skriver något)
-    const healthCandidates = [];
-    if(overrideHealth) healthCandidates.push(overrideHealth);
-    healthCandidates.push("/health", "/healthz", "/api/health", "/v1/health", "/_health", "/status", "/api/status");
-
-    const genCandidates = [];
-    if(overrideGen) genCandidates.push(overrideGen);
-    genCandidates.push("/ai-generate", "/api/ai-generate", "/v1/ai-generate", "/ai/generate", "/api/generate", "/v1/generate", "/generate");
-
-    // 1) Hitta health
-    let okHealth = "";
-    let lastHealthErr = "";
-    for(const p of healthCandidates){
-      const url = joinUrl(origin, p);
-      try{
-        const r = await fetchWithTimeout(url, { method:"GET" }, 2200);
-        const txt = await r.text();
-        if(r.ok){
-          okHealth = p;
-          lastHealthErr = "";
-          break;
-        }
-        lastHealthErr = `HTTP ${r.status} @ ${p}: ${String(txt||"").slice(0,80)}`;
-      }catch(e){
-        lastHealthErr = `Nät/timeout @ ${p}`;
-      }
-    }
-
-    // 2) Hitta generate (vi testar med en minimal POST; fail-closed: vi accepterar bara 2xx + JSON som inte säger ok:false)
-    let okGen = "";
-    let lastGenErr = "";
-    const probePayload = { mode:"ping", topic:"ping", language:"sv" };
-    for(const p of genCandidates){
-      const url = joinUrl(origin, p);
-      try{
-        const r = await fetchWithTimeout(url, {
-          method:"POST",
-          headers: { "Content-Type":"application/json" },
-          body: JSON.stringify(probePayload)
-        }, 3200);
-
-        const text = await r.text();
-        if(!r.ok){
-          lastGenErr = `HTTP ${r.status} @ ${p}: ${String(text||"").slice(0,80)}`;
-          continue;
-        }
-
-        // 2xx: försök tolka JSON, men var tolerant
-        let j = null;
-        try{ j = JSON.parse(text); }catch{ j = null; }
-
-        // Om servern explicit säger ok:false -> inte rätt endpoint
-        if(j && typeof j === "object" && j.ok === false){
-          lastGenErr = `ok:false @ ${p}: ${String(j.error||j.message||"Not ok").slice(0,80)}`;
-          continue;
-        }
-
-        okGen = p;
-        lastGenErr = "";
-        break;
-
-      }catch(e){
-        lastGenErr = `Nät/timeout @ ${p}`;
-      }
-    }
-
-    // Sätt state (även om bara health hittas)
-    AI_STATE.resolved = true;
-    AI_STATE.origin = origin;
-    AI_STATE.healthPath = okHealth || (overrideHealth || "/health");
-    AI_STATE.genPath = okGen || (overrideGen || "/ai-generate");
-
-    if(!okHealth && !okGen){
-      return { ok:false, err:`Hittade inga AI-endpoints. Senaste fel: ${lastHealthErr || lastGenErr || "Not found"}` };
-    }
-
-    return { ok:true, origin, healthPath: AI_STATE.healthPath, genPath: AI_STATE.genPath, warn: (!okHealth || !okGen) };
-  }
-
-  async function aiTest(){
-    setMsg("", "");
-    aiStatus.textContent = "Letar rätt endpoint…";
-
-    const resolved = await resolveAiEndpoints(true);
-    if(!resolved.ok){
-      aiStatus.textContent = "Worker kunde inte matchas.";
-      setMsg("err", resolved.err || "Kunde inte hitta worker-endpoints (fail-closed).");
-      return;
-    }
-
-    const url = joinUrl(resolved.origin, resolved.healthPath);
-    aiStatus.textContent = `Testar ${resolved.healthPath}…`;
-
     try{
-      const r = await fetchWithTimeout(url, { method:"GET" }, 2500);
-      const txt = await r.text();
-      if(!r.ok){
-        aiStatus.textContent = `Worker fel: HTTP ${r.status}`;
-        setMsg("err", `Worker svarade med fel på ${resolved.healthPath} (HTTP ${r.status}).`);
-        return;
-      }
-      aiStatus.textContent = `Worker OK (${resolved.healthPath}): ${String(txt||"").slice(0,120)}`;
-      setMsg("ok", "Worker verkar igång.");
+      return new URL(path, origin).toString();
     }catch{
-      aiStatus.textContent = "Worker kunde inte nås.";
-      setMsg("err", "Kunde inte nå worker (nät / url).");
+      return origin + path;
     }
   }
 
@@ -1630,10 +1521,35 @@ Fokus:
 
     const out = {};
     if(typeof pack.description === "string") out.description = pack.description;
+    if(typeof pack.title === "string") out.title = pack.title;
     if(Array.isArray(pack.goals)) out.goals = pack.goals;
     if(Array.isArray(pack.blocks)) out.blocks = pack.blocks;
     if(!out.blocks && Array.isArray(pack.items)) out.blocks = pack.items;
     return out;
+  }
+
+  async function aiTest(){
+    const pingPath = getAiPingPath();
+    const url = aiUrl(pingPath);
+
+    aiPingPathEl.textContent = pingPath;
+    aiGenPathEl.textContent = getAiGenPath();
+
+    aiStatus.textContent = "Testar worker…";
+    try{
+      const r = await fetch(url, { method:"GET", cache:"no-store" });
+      const txt = await r.text();
+      if(!r.ok){
+        aiStatus.textContent = `Worker fel: HTTP ${r.status}`;
+        setMsg("err", `Worker svarade med fel på ${pingPath} (HTTP ${r.status}).`);
+        return;
+      }
+      aiStatus.textContent = `Worker OK: ${txt.slice(0,120)}`;
+      setMsg("ok", "Worker verkar igång.");
+    }catch{
+      aiStatus.textContent = "Worker kunde inte nås.";
+      setMsg("err", "Kunde inte nå worker (nät / url).");
+    }
   }
 
   async function aiGenerate(){
@@ -1652,43 +1568,40 @@ Fokus:
       return;
     }
 
+    const genPath = getAiGenPath();
+    const url = aiUrl(genPath);
+    const token = getAiToken();
+
+    aiPingPathEl.textContent = getAiPingPath();
+    aiGenPathEl.textContent = genPath;
+
     btnAiGenerate.disabled = true;
     btnAiTest.disabled = true;
+    aiStatus.textContent = "Skapar med AI…";
 
-    aiStatus.textContent = "Letar rätt endpoint…";
-    const resolved = await resolveAiEndpoints(false);
-    if(!resolved.ok){
-      aiStatus.textContent = "AI kunde inte köras.";
-      setMsg("err", resolved.err || "Kunde inte hitta AI endpoint.");
-      btnAiGenerate.disabled = false;
-      btnAiTest.disabled = false;
-      return;
-    }
-
-    const url = joinUrl(resolved.origin, resolved.genPath);
-    aiStatus.textContent = `Skapar med AI (${resolved.genPath})…`;
-
+    // Worker väntar: { topic, language, audience, tone }
     const payload = {
-      mode: "training",
-      language: "sv",
       topic,
+      language: "sv",
+      audience: "medarbetare",
+      tone: "kort, konkret, vänligt",
+      // extra metadata (worker ignorerar okända fält): säkert att skicka
       module: t.module,
       area: t.area,
-      blockCount: count,
-      schema: {
-        blocks: {
-          allowedKinds: ["info","task","question","both"],
-          maxText: 240
-        }
-      }
+      blockCount: count
     };
 
     try{
-      const r = await fetchWithTimeout(url, {
+      const headers = { "Content-Type":"application/json" };
+      if(token){
+        headers["Authorization"] = "Bearer " + token;
+      }
+
+      const r = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type":"application/json" },
+        headers,
         body: JSON.stringify(payload)
-      }, 6500);
+      });
 
       const text = await r.text();
       let json = null;
@@ -1696,7 +1609,7 @@ Fokus:
 
       if(!r.ok || (json && json.ok === false)){
         const msg = (json && (json.error || json.message)) ? String(json.error || json.message) : ("HTTP " + r.status);
-        aiStatus.textContent = "AI-fel.";
+        aiStatus.textContent = `AI-fel: HTTP ${r.status}`;
         setMsg("err", "AI/Worker fel: " + msg);
         return;
       }
@@ -1732,11 +1645,7 @@ Fokus:
       renderBlocks();
       debugPre.textContent = JSON.stringify(t, null, 2);
 
-      if(resolved.warn){
-        setMsg("warn", "AI körde, men endpoint-detektering var delvis osäker. Om det strular: använd ?health=...&gen=...");
-      }
-
-    }catch(e){
+    }catch{
       aiStatus.textContent = "AI kunde inte köras.";
       setMsg("err", "Kunde inte nå AI/Worker (nät / endpoint).");
     }finally{
@@ -1753,7 +1662,10 @@ Fokus:
     setMsg("", "");
 
     renderModuleOptions();
+
     aiDefault.textContent = getAiOrigin();
+    aiPingPathEl.textContent = getAiPingPath();
+    aiGenPathEl.textContent = getAiGenPath();
 
     const read = safeParseArray(TRAININGS_KEY);
     if(!read.ok){
@@ -1786,10 +1698,11 @@ Fokus:
 
 <!-- ============================================================
 Ändringslogg (AO-TRAININGS-PATCH-01) ≤ 8 rader
-- AI: robust endpoint-detektering (probar /health, /healthz, /api/health, /v1/health … samt flera generate-paths)
-- URL overrides: ?health=/healthz&gen=/v1/ai-generate (utan storage-keys)
-- Fail-closed: om inget matchar stoppas AI med tydligt fel
-- Annars oförändrat UI/Storage/Policy
+- AI-endpoints uppdaterade till worker “senaste sanning”: GET /ping, POST /ai/training
+- Stöd för URL-override: ?ai=…&aiping=…&aigen=… (+ aiteten vid behov)
+- Testa worker visar nu ping-svar (OK: hrsystem worker alive)
+- AI-generate payload matchar worker (topic/language/audience/tone) + extra metadata ofarligt
+- Inga nya storage-keys, fortsatt XSS-safe rendering (textContent)
 ============================================================ -->
 </body>
 </html>
