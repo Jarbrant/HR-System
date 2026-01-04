@@ -1,19 +1,17 @@
 <!-- ============================================================
-AO-PACKAGES-BLOCKS-DOCUMENT-01 (PATCH v2) | FIL-ID: admin/packages-block.html
+AO-VERIFY-TRAINING-01 (2/4) | FIL-ID: admin/packages-block.html
 Projekt: HR-System
-Syfte: ADMIN – Visa + redigera BLOCK för publicerade utbildningar (AO-057)
-Stöd: kind="document" (titel + lång text, utan svarstyp/options/correct)
-UI: 2 kolumner:
-  (1) Publicerade utbildningar
-  (2) Editor: blocklista (vänster) + blockpanel (höger)
-
-POLICY (LÅST - uppdaterad enligt önskemål i tråden):
-- UI-only • Fail-closed
+Syfte: ADMIN – Visa + redigera BLOCK för publicerade/verifierade utbildningar (AO-057)
+Tillagt (AO-VERIFY-TRAINING-01):
+- Verifiera utbildning: status="verified" + verifiedAt + verifiedBy + updatedAt (endast AO-057)
+- Fail-closed validering (“klart nog”) innan verifiering
+- Tydlig UI-indikator för Verifierad / Publicerad
+POLICY (LÅST):
+- UI-only • Fail-closed • ADMIN-only
 - sessionStorage först (auth) • fallback localStorage via CORE (AO-002)
 - XSS-safe rendering (textContent, inga osäkra innerHTML)
 - Inga nya storage-keys
 - Läser/Skriver endast: AO-057_TRAININGS_V1 (trainings), AO-001_LOGIN_V1 (session via CORE)
-- ADMIN-only
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -210,9 +208,12 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
 <main class="container">
   <div class="row space-between wrap" style="align-items:flex-start;">
     <div>
-      <h1 class="tight">Block (publicerade utbildningar)</h1>
+      <h1 class="tight">Block (publicerade/verifierade utbildningar)</h1>
       <p class="muted2">
-        Välj en publicerad utbildning → redigera block. Stöd för <strong>Dokument</strong>-block (lång text, utan svarstyp/alternativ).
+        Välj en utbildning → redigera block. Stöd för <strong>Dokument</strong>-block (lång text, utan svarstyp/alternativ).
+        <span class="tiny" style="display:block; margin-top:6px;">
+          Verifiera markerar utbildningen som <strong>Verified</strong> när innehållet är “klart nog”.
+        </span>
       </p>
       <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
         <span class="pill" id="whoPill">Inloggad: —</span>
@@ -223,6 +224,7 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
 
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
       <button class="btn secondary" id="btnBackToTrainings" type="button">Till Utbildningar</button>
+      <button class="btn secondary" id="btnVerify" type="button" disabled>Verifiera</button>
       <button class="btn" id="btnSave" type="button" disabled>Spara</button>
     </div>
   </div>
@@ -230,11 +232,11 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
   <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
 
   <div class="grid2" style="margin-top:12px;">
-    <!-- LEFT: published trainings -->
-    <section class="card sideCard" aria-label="Publicerade utbildningar">
+    <!-- LEFT: trainings (published/verified) -->
+    <section class="card sideCard" aria-label="Utbildningar">
       <div class="listHead">
         <div>
-          <div style="font-weight:950;">Publicerade</div>
+          <div style="font-weight:950;">Utbildningar</div>
           <div class="tiny"><span id="countTrainings">—</span></div>
         </div>
         <div style="min-width: 160px;">
@@ -248,7 +250,7 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
         <div class="muted2">Laddar…</div>
       </div>
       <div class="tiny" style="margin-top:10px;">
-        Saknas utbildning här? Den måste vara <strong>publicerad</strong> i trainings.html.
+        Saknas utbildning här? Den måste vara <strong>publicerad</strong> eller <strong>verifierad</strong> i trainings.html.
       </div>
     </section>
 
@@ -412,6 +414,7 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
   const elSel = $("#selPill");
 
   const btnBackToTrainings = $("#btnBackToTrainings");
+  const btnVerify = $("#btnVerify");
   const btnSave = $("#btnSave");
 
   const qTrain = $("#qTrain");
@@ -507,6 +510,19 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
     return "Block";
   }
 
+  function statusLabel(s){
+    const st = String(s || "").trim();
+    if(st === "published") return "Publicerad";
+    if(st === "verified") return "Verifierad";
+    if(st === "draft") return "Utkast";
+    return "Okänd";
+  }
+
+  function isAllowedEditStatus(s){
+    const st = String(s || "").trim();
+    return (st === "published" || st === "verified");
+  }
+
   // Normalisering: stöd för document + fail-closed för okänd kind
   function normalizeBlock(raw){
     const b = (raw && typeof raw === "object") ? raw : {};
@@ -593,10 +609,22 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
     const module = String(t.module || "").trim();
     const area = String(t.area || "").trim();
     const title = String(t.title || "").trim();
-    const status = (String(t.status || "draft") === "published") ? "published" : "draft";
+
+    const st0 = String(t.status || "draft").trim();
+    const status = (st0 === "published" || st0 === "verified" || st0 === "draft") ? st0 : "draft";
+
     const blocksArr = Array.isArray(t.blocks) ? t.blocks : [];
     const blocks = blocksArr.map(normalizeBlock);
-    return { ...t, id, module, area, title, status, blocks };
+
+    const verifiedAt = Number.isFinite(Number(t.verifiedAt)) ? Number(t.verifiedAt) : undefined;
+    const verifiedBy = (typeof t.verifiedBy === "string") ? String(t.verifiedBy) : undefined;
+
+    // Behåll övriga fält oförändrat (policy: ingen sid-effekt utanför AO-057; men normaliserar basfält)
+    const out = { ...t, id, module, area, title, status, blocks };
+    if(verifiedAt !== undefined) out.verifiedAt = verifiedAt;
+    if(verifiedBy !== undefined) out.verifiedBy = verifiedBy;
+
+    return out;
   }
 
   // --- AUTH (ADMIN) ---
@@ -612,13 +640,14 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
     redirectLogin(); return;
   }
 
-  const empNo = String((session.auth && session.auth.empNo) || "").trim();
+  // Tolerant empNo (fail-closed: visar — om saknas)
+  const empNo = String(auth.empNo || (session.auth && session.auth.empNo) || "").trim();
   elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ADMIN`;
 
   // --- STATE ---
   const STATE = {
     allTrainings: [],
-    published: [],
+    visible: [],               // published + verified
     selectedTrainingId: "",
     selectedBlockIndex: -1,
     editTraining: null,
@@ -630,6 +659,9 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
     elState.textContent = STATE.dirty ? "Status: Osparade ändringar" : "Status: OK";
     elState.className = "pill " + (STATE.dirty ? "warn" : "ok");
     btnSave.disabled = !STATE.dirty;
+
+    // Verifiera: endast när training vald, inte dirty, och fail-closed validering OK och status != verified
+    updateVerifyButton();
   }
 
   function setSelectionPill(){
@@ -640,8 +672,13 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
       return;
     }
     const blocks = Array.isArray(t.blocks) ? t.blocks.length : 0;
-    elSel.textContent = `Val: ${t.module || "—"} • ${t.area || "—"} • ${t.title || "—"} • ${blocks} block`;
-    elSel.className = "pill " + (blocks > 0 ? "ok" : "warn");
+    const st = String(t.status || "draft");
+    const stLabel = statusLabel(st);
+    const isV = (st === "verified");
+    const pillKind = isV ? "ok" : (blocks > 0 ? "ok" : "warn");
+
+    elSel.textContent = `Val: ${t.module || "—"} • ${t.area || "—"} • ${t.title || "—"} • ${blocks} block • ${stLabel}`;
+    elSel.className = "pill " + pillKind;
   }
 
   function trainingMatches(t, q){
@@ -652,7 +689,7 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
 
   function renderTrainings(){
     const q = String(qTrain.value || "").trim();
-    const filtered = STATE.published.filter(t => trainingMatches(t, q));
+    const filtered = STATE.visible.filter(t => trainingMatches(t, q));
     countTrainings.textContent = `${filtered.length} st`;
 
     clear(trainingRows);
@@ -660,7 +697,7 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
     if(filtered.length === 0){
       const d = document.createElement("div");
       d.className = "muted2";
-      d.textContent = "Inga publicerade utbildningar (eller inget matchar sök).";
+      d.textContent = "Inga utbildningar (eller inget matchar sök).";
       trainingRows.appendChild(d);
       return;
     }
@@ -686,8 +723,19 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
 
       const right = document.createElement("div");
       const p = document.createElement("span");
-      p.className = "pill ok";
-      p.textContent = "Publicerad";
+      const st = String(t.status || "draft").trim();
+
+      if(st === "verified"){
+        p.className = "pill ok";
+        p.textContent = "Verifierad";
+      }else if(st === "published"){
+        p.className = "pill ok";
+        p.textContent = "Publicerad";
+      }else{
+        p.className = "pill warn";
+        p.textContent = "Utkast";
+      }
+
       right.appendChild(p);
 
       top.appendChild(left);
@@ -696,7 +744,14 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
       const meta = document.createElement("div");
       meta.className = "tiny";
       meta.style.marginTop = "6px";
-      meta.textContent = `${(Array.isArray(t.blocks)?t.blocks.length:0)} block • id: ${t.id}`;
+
+      const vb = (typeof t.verifiedBy === "string" && t.verifiedBy.trim()) ? t.verifiedBy.trim() : "";
+      const va = Number.isFinite(Number(t.verifiedAt)) ? Number(t.verifiedAt) : 0;
+      const vtxt = (st === "verified" && (vb || va))
+        ? ` • verified${vb ? " by " + vb : ""}${va ? " @ " + new Date(va).toLocaleString("sv-SE") : ""}`
+        : "";
+
+      meta.textContent = `${(Array.isArray(t.blocks)?t.blocks.length:0)} block • id: ${t.id}${vtxt}`;
 
       row.appendChild(top);
       row.appendChild(meta);
@@ -727,6 +782,8 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
     btnDeleteBlock.disabled = !ok;
     btnMoveUp.disabled = !(ok && i > 0);
     btnMoveDown.disabled = !(ok && i < blocks.length - 1);
+
+    updateVerifyButton();
   }
 
   function hideEditor(){
@@ -861,6 +918,8 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
 
     blocks[i] = normalizeBlock(cur);
     debugPre.textContent = JSON.stringify(blocks[i], null, 2);
+
+    updateVerifyButton();
   }
 
   function markDirty(){
@@ -883,6 +942,7 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
       btnMoveUp.disabled = true;
       btnMoveDown.disabled = true;
       btnDeleteBlock.disabled = true;
+      updateVerifyButton();
       return;
     }
 
@@ -946,9 +1006,9 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
   }
 
   function selectTraining(id){
-    const found = STATE.published.find(x => String(x.id) === String(id));
+    const found = STATE.visible.find(x => String(x.id) === String(id));
     if(!found){
-      setMsg("err", "Kunde inte hitta publicerad utbildning (fail-closed).");
+      setMsg("err", "Kunde inte hitta utbildning (fail-closed).");
       return;
     }
     STATE.selectedTrainingId = String(found.id);
@@ -961,6 +1021,111 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
 
     renderTrainings();
     renderBlocks();
+  }
+
+  // ===========================
+  // AO-VERIFY-TRAINING-01: Fail-closed readiness check
+  // ===========================
+  function validateTrainingReady(t){
+    const out = { ok:false, reasons:[] };
+
+    if(!t || typeof t !== "object"){
+      out.reasons.push("Saknar utbildning (korrupt state).");
+      return out;
+    }
+
+    const st = String(t.status || "").trim();
+    if(!isAllowedEditStatus(st)){
+      out.reasons.push("Utbildningen måste vara publicerad eller verifierad för att verifieras här.");
+    }
+
+    const module = String(t.module || "").trim();
+    const area = String(t.area || "").trim();
+    const title = String(t.title || "").trim();
+
+    if(!module) out.reasons.push("Modul saknas.");
+    if(!area) out.reasons.push("Område saknas.");
+    if(!title) out.reasons.push("Titel saknas.");
+
+    const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+    if(blocks.length === 0){
+      out.reasons.push("Minst 1 block krävs.");
+      out.ok = (out.reasons.length === 0);
+      return out;
+    }
+
+    // Block rules (fail-closed minimal “klart nog”)
+    // - alla block måste ha titel
+    // - alla block måste ha text (document/info/task/question/both)
+    // - question+choice måste ha minst 2 alternativ
+    // - task+scale måste ha giltig min/max
+    for(let i=0;i<blocks.length;i++){
+      const b = normalizeBlock(blocks[i]);
+      const k = String(b.kind || "").trim();
+      const bt = String(b.title || "").trim();
+      const tx = String(b.text || "").trim();
+
+      if(!bt) out.reasons.push(`Block #${i+1}: Titel saknas.`);
+      if(!tx) out.reasons.push(`Block #${i+1}: Text saknas.`);
+
+      if(k === "question"){
+        const qa = String(b.questionAnswer || "text");
+        if(qa === "choice"){
+          const opts = Array.isArray(b.options) ? b.options : [];
+          if(opts.length < 2) out.reasons.push(`Block #${i+1}: Fråga med val kräver minst 2 alternativ.`);
+        }
+      }
+
+      if(k === "task" || k === "both"){
+        const ta = String(b.taskAnswer || "checkbox");
+        if(ta === "scale"){
+          const mn = clampInt(b.scaleMin, 1, 10, 1);
+          const mx = clampInt(b.scaleMax, 1, 10, 5);
+          if(mx < mn) out.reasons.push(`Block #${i+1}: Skala max kan inte vara mindre än min.`);
+        }
+      }
+
+      // okänd kind hanteras redan i normalizeBlock → info + "Okänd blocktyp"
+      if(String(b.text || "") === "Okänd blocktyp"){
+        out.reasons.push(`Block #${i+1}: Okänd blocktyp (fail-closed).`);
+      }
+    }
+
+    out.ok = (out.reasons.length === 0);
+    return out;
+  }
+
+  function updateVerifyButton(){
+    const t = STATE.editTraining;
+    if(!t){
+      btnVerify.disabled = true;
+      btnVerify.title = "Välj en utbildning först.";
+      return;
+    }
+
+    // Om osparade ändringar: fail-closed (kräv spara först)
+    if(STATE.dirty){
+      btnVerify.disabled = true;
+      btnVerify.title = "Spara först (osparade ändringar).";
+      return;
+    }
+
+    const st = String(t.status || "").trim();
+    if(st === "verified"){
+      btnVerify.disabled = true;
+      btnVerify.title = "Utbildningen är redan verifierad.";
+      return;
+    }
+
+    const chk = validateTrainingReady(t);
+    if(!chk.ok){
+      btnVerify.disabled = true;
+      btnVerify.title = "Kan inte verifiera: " + chk.reasons.join(" ");
+      return;
+    }
+
+    btnVerify.disabled = false;
+    btnVerify.title = "Verifiera: markerar utbildningen som Verified.";
   }
 
   // editor events
@@ -1035,8 +1200,8 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
     if(idx < 0){ setMsg("err","Kunde inte spara: utbildningen finns inte (fail-closed)."); return; }
 
     const original = normalizeTraining(nextAll[idx]);
-    if(String(original.status) !== "published"){
-      setMsg("err","Kunde inte spara: utbildningen är inte publicerad längre (fail-closed).");
+    if(!isAllowedEditStatus(original.status)){
+      setMsg("err","Kunde inte spara: utbildningen är inte publicerad/verifierad längre (fail-closed).");
       return;
     }
 
@@ -1053,11 +1218,11 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
     if(!res.ok){ setMsg("err", res.err || "Kunde inte spara."); return; }
 
     STATE.allTrainings = nextAll.map(normalizeTraining);
-    STATE.published = STATE.allTrainings.filter(x => String(x.status) === "published");
+    STATE.visible = STATE.allTrainings.filter(x => isAllowedEditStatus(x.status));
 
-    const keep = STATE.published.find(x => String(x.id) === String(t.id));
+    const keep = STATE.visible.find(x => String(x.id) === String(t.id));
     if(!keep){
-      setMsg("warn","Sparat, men utbildningen syns inte längre som publicerad.");
+      setMsg("warn","Sparat, men utbildningen syns inte längre här (status ändrad).");
       STATE.editTraining = null;
       STATE.selectedTrainingId = "";
       STATE.selectedBlockIndex = -1;
@@ -1077,6 +1242,85 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
 
   btnSave.addEventListener("click", () => { setMsg("", ""); if(!STATE.dirty) return; saveEdits(); });
 
+  // AO-VERIFY-TRAINING-01: Verify action (writes only AO-057)
+  function verifyTraining(){
+    const t = STATE.editTraining;
+    if(!t){ setMsg("err","Fail-closed: ingen vald utbildning."); return; }
+
+    // Fail-closed: kräver inga osparade ändringar
+    if(STATE.dirty){
+      setMsg("warn","Spara först (osparade ändringar).");
+      return;
+    }
+
+    // Säkerställ att editorstate är “synkat” (utan att markera dirty)
+    applyEditorToState();
+
+    const chk = validateTrainingReady(t);
+    if(!chk.ok){
+      setMsg("err", "Kan inte verifiera: " + chk.reasons.join(" "));
+      return;
+    }
+
+    const nextAll = STATE.allTrainings.slice();
+    const idx = nextAll.findIndex(x => String(x.id) === String(t.id));
+    if(idx < 0){ setMsg("err","Fail-closed: utbildningen finns inte i storage."); return; }
+
+    const original = normalizeTraining(nextAll[idx]);
+    if(!isAllowedEditStatus(original.status)){
+      setMsg("err","Fail-closed: utbildningen är inte publicerad/verifierad längre.");
+      return;
+    }
+
+    // Verifiering (minimal och stabil)
+    const now = Date.now();
+    const by = String(auth.empNo || "").trim();
+
+    nextAll[idx] = {
+      ...nextAll[idx],
+      status: "verified",
+      verifiedAt: now,
+      verifiedBy: by || "",
+      updatedAt: now,
+      version: Number.isFinite(Number(nextAll[idx].version))
+        ? (Number(nextAll[idx].version) + 1)
+        : (Number.isFinite(Number(original.version)) ? (Number(original.version) + 1) : 1)
+    };
+
+    const res = saveArray(TRAININGS_KEY, nextAll);
+    if(!res.ok){ setMsg("err", res.err || "Kunde inte verifiera (save fail)."); return; }
+
+    STATE.allTrainings = nextAll.map(normalizeTraining);
+    STATE.visible = STATE.allTrainings.filter(x => isAllowedEditStatus(x.status));
+
+    const keep = STATE.visible.find(x => String(x.id) === String(t.id));
+    if(!keep){
+      setMsg("warn","Verifierat, men utbildningen syns inte längre här (ovanlig status).");
+      STATE.editTraining = null;
+      STATE.selectedTrainingId = "";
+      STATE.selectedBlockIndex = -1;
+      setDirty(false);
+      renderTrainings();
+      renderBlocks();
+      return;
+    }
+
+    STATE.editTraining = JSON.parse(JSON.stringify(normalizeTraining(keep)));
+    STATE.selectedTrainingId = String(keep.id);
+    STATE.selectedBlockIndex = -1;
+
+    setDirty(false);
+    setSelectionPill();
+    renderTrainings();
+    renderBlocks();
+    setMsg("ok", "Verifierad: status=verified.");
+  }
+
+  btnVerify.addEventListener("click", () => {
+    setMsg("", "");
+    verifyTraining();
+  });
+
   qTrain.addEventListener("input", renderTrainings);
 
   // init
@@ -1088,22 +1332,22 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
     if(!read.ok){
       setMsg("err", read.err || "Kunde inte läsa utbildningar (fail-closed).");
       STATE.allTrainings = [];
-      STATE.published = [];
+      STATE.visible = [];
       renderTrainings();
       renderBlocks();
       return;
     }
 
     STATE.allTrainings = (read.value || []).map(normalizeTraining);
-    STATE.published = STATE.allTrainings.filter(t => String(t.status) === "published");
+    STATE.visible = STATE.allTrainings.filter(t => isAllowedEditStatus(t.status));
 
     renderTrainings();
 
-    if(STATE.published.length){
-      selectTraining(STATE.published[0].id);
-      setMsg("ok","Laddad första publicerade utbildning.");
+    if(STATE.visible.length){
+      selectTraining(STATE.visible[0].id);
+      setMsg("ok","Laddad första utbildning (publicerad/verifierad).");
     }else{
-      setMsg("warn","Inga publicerade utbildningar ännu.");
+      setMsg("warn","Inga publicerade/verifierade utbildningar ännu.");
       renderBlocks();
     }
   }
@@ -1114,19 +1358,20 @@ POLICY (LÅST - uppdaterad enligt önskemål i tråden):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- Återaktiverat redigering + add/move/delete + spara (AO-057_TRAININGS_V1)
-- Lagt till kind="document" i typval + addKind
-- Document: titel + lång text (upp till 2000), ingen svarstyp/options/correct (nollas vid save)
-- Fail-closed: okänd kind normaliseras till info med text "Okänd blocktyp"
-- Visar “all info” igen för task/question/both (som innan)
+- AO-VERIFY-TRAINING-01: Lagt till “Verifiera” (status=verified, verifiedAt, verifiedBy, updatedAt) – skriver endast AO-057
+- Status-stöd utökat: training.status kan vara draft|published|verified (normaliseras fail-closed)
+- Listan visar publicerade + verifierade (så verifierade försvinner inte ur UI)
+- Fail-closed readiness-check för verifiering: kräver modul/område/titel + minst 1 block + titel+text per block
+- Fråga med val kräver minst 2 alternativ; Skala kräver giltig min/max
+- Verifiera kräver att inga osparade ändringar finns (Spara först)
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar
-- Skapa nytt Document-block: lägg till → välj Dokument → skriv lång text → spara → reload: kvar
-- Blandade block: ordning bibehålls, move up/down funkar, delete funkar
-- Document visar aldrig svarstyp/options och sparar aldrig dessa fält
-- Inga console errors
+- Test 1: Välj publicerad utbildning med block → Verifiera → status blir “Verifierad” i listan + verifiedAt/By lagras i AO-057
+- Test 2: Försök verifiera utan block → stoppas (fail-closed) med tydlig orsak
+- Test 3: Försök verifiera med osparade ändringar → stoppas (Spara först)
+- Test 4: Verifierad utbildning ska fortsatt gå att öppna och redigera block, och status kvarstår “verified”
 ============================================================ -->
 </body>
 </html>
