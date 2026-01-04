@@ -1,472 +1,484 @@
 <!-- ============================================================
-AO-056 (PATCH v1.2) | FIL-ID: admin/home.html
-Projekt: HR-System
-Syfte: Admin – startsida (Dashboard) – UI-only v1 (nivå 3 genvägar)
+AO-ADMIN-HOME-REBUILD-01 | FIL-ID: admin/home.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: ADMIN – Start/Dashboard för Utbildningsbiblioteket (read-only)
+Mål: Enkel överblick + genvägar till trainings och packages-block
 
-Bygger på: AO-044 (PATCH v2.0) som senaste sanning (kopplingar orörda)
-
-AO-056 mål:
-- Lägg till genvägar till paketvyer:
-  - AO-054: admin/packages-progress.html (Paketprogress)
-  - AO-055: admin/packages-employees.html (Paket → Medarbetare)
-- Lägg till genväg till utbildningsbibliotek:
-  - AO-056: admin/trainings.html (Utbildningar)
-- INGA borttag av befintliga knappar/länkar
-- INGA ändringar i auth/core/keys/logik — endast UI-länkar
-
-Policy (LÅST):
-- UI-only • Fail-closed (core)
-- Inga nya storage-keys
-- Behåll alla kopplingar (AO-002)
+POLICY (LÅST):
+- UI-only • Fail-closed
+- Auth: sessionStorage först, fallback localStorage (AO-001_LOGIN_V1)
+- ADMIN-only (SYSTEM_ADMIN hanteras ej här)
+- XSS-escape: använd textContent, inga osäkra innerHTML
+- Inga nya storage-keys/datamodell
+- Read-only: får bara läsa AO-057_TRAININGS_V1 + AO-001_LOGIN_V1
+- Fail-closed: saknad/korrupt auth eller roll!=ADMIN => redirect till ../UI/UI-01-SKELETON.html?err=unauth
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Admin</title>
-
+  <title>HR-System – Admin start</title>
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
-
   <style>
-    .btn-logout{ opacity:0.85; }
-    .btn-logout:hover{ opacity:1; }
-    .countline{ display:inline-flex; gap:6px; align-items:center; }
-    .hide{ display:none !important; }
+    /* SCOPE: UI-only. Read-only dashboard. */
+    .wrap { max-width: 1100px; margin: 0 auto; padding: 16px; }
+    .topnav {
+      display:flex; align-items:center; justify-content:space-between; gap:12px;
+      padding:12px 16px; border:1px solid rgba(0,0,0,.08); border-radius:12px;
+      background:#fff; margin:12px auto; max-width:1100px;
+    }
+    .topnav .left, .topnav .right { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .badge { font-size: 12px; padding: 4px 8px; border-radius: 999px; border: 1px solid rgba(0,0,0,.12); }
+    .btn {
+      padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(0,0,0,.12);
+      background: #fff; cursor: pointer; user-select: none; text-decoration:none; display:inline-block;
+    }
+    .btn.primary { background: #0b5fff; color:#fff; border-color:#0b5fff; }
+    .btn:disabled { opacity:.55; cursor:not-allowed; }
 
-    /* Pastellrutor */
-    .bigcard.pastel{
-      border: 1px solid var(--line);
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
-    }
-    .bigcard.pastel:hover{
-      transform: var(--lift);
-      box-shadow: var(--shadow-soft);
-      filter: brightness(1.03) saturate(1.02);
-    }
-    .p-mint{ background: rgba(167,243,208,.45); }
-    .p-rose{ background: rgba(254,202,202,.45); }
-    .p-sky { background: rgba(191,219,254,.45); }
-    .p-lilac{ background: rgba(233,213,255,.45); }
-    .p-amber{ background: rgba(254,243,199,.45); }
-    .p-sand{ background: rgba(245,245,244,1.0); }
+    .grid { display:grid; grid-template-columns: 1fr; gap: 14px; }
+    @media (min-width: 980px) { .grid { grid-template-columns: 1fr 1fr; } }
 
-    /* AO-056: nya pastellfärger (endast design) */
-    .p-teal{ background: rgba(153,246,228,.40); }
-    .p-indigo{ background: rgba(199,210,254,.45); }
+    .card { background:#fff; border:1px solid rgba(0,0,0,.08); border-radius: 12px; padding: 14px; }
+    .card h2 { margin: 0 0 10px 0; font-size: 16px; }
+    .muted { opacity: .75; }
+    .hint { font-size: 12px; opacity: .75; }
+    .error { border-left: 4px solid #b00020; padding: 10px 12px; background: rgba(176,0,32,.06); border-radius: 10px; }
+    .pill { font-size: 12px; padding: 4px 10px; border-radius: 999px; border: 1px solid rgba(0,0,0,.12); display:inline-block; }
+    .row { display:flex; gap:10px; flex-wrap: wrap; align-items:center; }
+    .kpi {
+      display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:10px;
+    }
+    @media (min-width: 980px) { .kpi { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+    .kpiBox { border:1px solid rgba(0,0,0,.10); border-radius: 12px; padding: 12px; background:#fff; }
+    .kpiBox .num { font-size: 22px; font-weight: 800; line-height: 1.1; }
+    .kpiBox .lbl { font-size: 12px; opacity: .8; margin-top: 6px; }
 
-    /* Paneler diskret */
-    .panel{
-      border: 1px solid var(--line);
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
-    }
-    .panel:hover{
-      transform: translateY(-1px);
-      box-shadow: var(--shadow-soft);
-      filter: brightness(1.01);
-    }
-    .panel.answers{ background: rgba(233,213,255,.18); }
-    .panel.reports{ background: rgba(254,243,199,.18); }
-    .panel.quick{ background: rgba(191,219,254,.18); }
-    .panel.docs{ background: rgba(245,245,244,1.0); }
+    table { width:100%; border-collapse: collapse; }
+    th, td { text-align:left; padding: 10px 8px; border-bottom:1px solid rgba(0,0,0,.08); vertical-align: top; }
+    th { font-size: 12px; opacity:.8; }
+    td { font-size: 14px; }
+    .link { color: inherit; text-decoration: underline; }
 
-    .list > li{
-      border-radius: 10px;
-      padding: 8px 10px;
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    .list { display:flex; flex-direction:column; gap:10px; }
+    .item {
+      border:1px solid rgba(0,0,0,.10); border-radius:12px; padding: 12px; background:#fff;
+      display:flex; gap: 12px; justify-content: space-between; flex-wrap: wrap; align-items: center;
     }
-    .list > li:hover{
-      transform: translateY(-1px);
-      box-shadow: 0 8px 22px rgba(17,17,17,.10);
-      filter: brightness(1.02);
-    }
-
-    .warn404{
-      font-size: .9rem;
-      color: var(--muted);
-      margin-top: 8px;
-    }
+    .item .left { min-width: 240px; flex: 1 1 auto; }
+    .item .title { font-weight: 800; }
+    .item .meta { font-size: 12px; opacity: .8; margin-top: 4px; }
+    .item .right { display:flex; gap:8px; align-items:center; flex-wrap: wrap; justify-content: flex-end; }
+    .divider { height:1px; background: rgba(0,0,0,.10); margin: 10px 0; }
   </style>
 </head>
 <body>
 
-<header class="top">
-  <div class="brand">
-    <strong>HR-System</strong>
-    <span class="muted">• Admin</span>
-  </div>
-
-  <nav class="nav" aria-label="Meny">
-    <a href="./home.html" aria-current="page">Hem</a>
-    <a href="./tasks.html">Uppgifter</a>
-    <a href="./questions.html">Frågor</a>
-    <a href="./docs.html">Dokument</a>
-    <a href="./reports.html">Felrapporter</a>
-    <a href="./answers.html">Svar</a>
-
-    <!-- AO-056: nya länkar (ENDAST tillägg, inget tas bort) -->
-    <a href="./packages-progress.html">Paketprogress</a>
-    <a href="./packages-employees.html">Paket → Medarbetare</a>
-    <a href="./trainings.html">Utbildningar</a>
-
-    <a href="./integrations.html">Integrationer</a>
-    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  <nav class="topnav" aria-label="Admin top navigation">
+    <div class="left">
+      <strong>HR-System</strong>
+      <span class="badge" id="authBadge">Auth: ?</span>
+      <span class="badge" id="roleBadge">Roll: ?</span>
+    </div>
+    <div class="right">
+      <a class="btn primary" href="./trainings.html">Utbildningar</a>
+      <a class="btn" href="./packages-block.html">Finjustera block</a>
+      <button class="btn" id="logoutBtn" type="button" style="display:none;">Logga ut</button>
+    </div>
   </nav>
-</header>
 
-<main class="container">
+  <main class="wrap">
+    <div id="fatalBox" class="error" style="display:none;"></div>
 
-  <section class="card">
-
-    <div class="row space-between wrap">
-      <div>
-        <h1 class="tight">Admin</h1>
-        <div class="muted">
-          Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
-        </div>
+    <section class="card" aria-label="Översikt">
+      <h2>Översikt</h2>
+      <p class="hint">Read-only. Visar statistik från utbildningsbiblioteket.</p>
+      <div class="kpi" id="kpiRow">
+        <div class="kpiBox"><div class="num" id="kpiTotal">–</div><div class="lbl">Totalt utbildningar</div></div>
+        <div class="kpiBox"><div class="num" id="kpiPublished">–</div><div class="lbl">Publicerade</div></div>
+        <div class="kpiBox"><div class="num" id="kpiDraft">–</div><div class="lbl">Utkast</div></div>
+        <div class="kpiBox"><div class="num" id="kpiModules">–</div><div class="lbl">Moduler (min 1)</div></div>
       </div>
+      <div id="trainingsLoadError" class="error" style="display:none; margin-top:10px;"></div>
+    </section>
 
-      <div class="row wrap">
-        <a class="btn secondary" href="./tasks.html">Uppgifter</a>
-        <a class="btn secondary" href="./questions.html">Frågor</a>
-        <a class="btn secondary" href="./docs.html">Dokument</a>
-        <a class="btn secondary" href="./reports.html">Felrapporter</a>
-        <a class="btn secondary" href="./answers.html">Svar</a>
-
-        <!-- AO-056: nya knappar (ENDAST tillägg) -->
-        <a class="btn secondary" href="./packages-progress.html">Paketprogress</a>
-        <a class="btn secondary" href="./packages-employees.html">Paket → Medarbetare</a>
-        <a class="btn secondary" href="./trainings.html">Utbildningar</a>
-
-        <button id="btnLogout" class="secondary btn-logout" type="button">Logga ut</button>
-      </div>
-    </div>
-
-    <!-- Snabbrutor (nivå 3) -->
-    <div class="grid-cards" style="margin-top:10px;">
-      <a class="bigcard pastel p-mint" href="./tasks.html" aria-label="Uppgifter">
-        <div class="bigcard-title">Uppgifter</div>
-        <div class="muted">Tilldela & följ upp</div>
-      </a>
-
-      <a class="bigcard pastel p-rose" href="./questions.html" aria-label="Frågor">
-        <div class="bigcard-title">Frågor</div>
-        <div class="muted">Skapa flera, välj grupper, anonymt val</div>
-      </a>
-
-      <a class="bigcard pastel p-sand" href="./docs.html" aria-label="Dokument">
-        <div class="bigcard-title">Dokument</div>
-        <div class="muted" id="docsLine">—</div>
-      </a>
-
-      <a class="bigcard pastel p-amber" href="./reports.html" aria-label="Felrapporter">
-        <div class="bigcard-title">Felrapporter</div>
-        <div class="muted">Öppna → Åtgärdsplan → Status</div>
-      </a>
-
-      <a class="bigcard pastel p-lilac" href="./answers.html" aria-label="Svar">
-        <div class="bigcard-title">Svar</div>
-        <div class="muted">
-          <span id="answers24hLine" class="countline">
-            <span id="answers24hText">—</span>
-            <span class="tag">24h</span>
-          </span>
-          <span id="answersNoneText" class="hide">Inga nya svar senaste 24h</span>
+    <div class="grid" style="margin-top:14px;">
+      <section class="card" aria-label="Modulöversikt">
+        <h2>Modul-översikt</h2>
+        <div class="muted" style="font-size:12px; margin-bottom:8px;">Per modul: antal utbildningar, publicerade, senast uppdaterad.</div>
+        <div style="overflow:auto;">
+          <table aria-label="Modulöversikt tabell">
+            <thead>
+              <tr>
+                <th>Modul</th>
+                <th>Utbildningar</th>
+                <th>Publicerade</th>
+                <th>Senast uppdaterad</th>
+              </tr>
+            </thead>
+            <tbody id="modulesTbody">
+              <tr><td colspan="4" class="muted">Ingen data ännu.</td></tr>
+            </tbody>
+          </table>
         </div>
-      </a>
+      </section>
 
-      <!-- AO-056: NYA snabbrutor (ENDAST tillägg) -->
-      <a class="bigcard pastel p-teal" href="./packages-progress.html" aria-label="Paketprogress">
-        <div class="bigcard-title">Paketprogress</div>
-        <div class="muted">Översikt: status per paket</div>
-      </a>
-
-      <a class="bigcard pastel p-indigo" href="./packages-employees.html" aria-label="Paketstatus per medarbetare">
-        <div class="bigcard-title">Paket → Medarbetare</div>
-        <div class="muted">Drill-down: vem ligger efter</div>
-      </a>
-
-      <!-- AO-056: NY snabbruta (ENDAST tillägg) -->
-      <a class="bigcard pastel p-sky" href="./trainings.html" aria-label="Utbildningar">
-        <div class="bigcard-title">Utbildningar</div>
-        <div class="muted">Skapa & hantera innehåll</div>
-      </a>
-
-      <a class="bigcard pastel p-sky" href="./integrations.html" aria-label="Integrationer">
-        <div class="bigcard-title">Integrationer</div>
-        <div class="muted">Nycklar & status (t.ex. Personalkollen)</div>
-      </a>
+      <section class="card" aria-label="Senast uppdaterade">
+        <h2>Senast uppdaterade</h2>
+        <div class="muted" style="font-size:12px; margin-bottom:8px;">5–10 senaste (updatedAt). Med kvalitetssignaler.</div>
+        <div class="list" id="recentList">
+          <div class="muted">Ingen data ännu.</div>
+        </div>
+      </section>
     </div>
+  </main>
 
-    <div class="warn404">
-      Om någon ruta ger 404: skapa filen som länken pekar på (t.ex. <code>admin/docs.html</code>).
-    </div>
+  <script>
+    // ============================================================
+    // GUARD/STORAGE/XSS: Fail-closed, ADMIN-only, read-only
+    // ============================================================
 
-    <!-- Paneler -->
-    <div class="dashgrid" style="margin-top:14px;">
+    const KEY_AUTH = "AO-001_LOGIN_V1";
+    const KEY_TRAININGS = "AO-057_TRAININGS_V1";
+    const REDIRECT_UNAUTH = "../UI/UI-01-SKELETON.html?err=unauth";
 
-      <section class="panel quick" aria-label="Snabbt">
-        <div class="panel-title">Snabbt</div>
-        <ul class="list">
-          <li><span>Skapa frågor (batch)</span><span class="pill"><a class="link" href="./questions.html">Öppna</a></span></li>
-          <li><span>Tilldela uppgifter</span><span class="pill"><a class="link" href="./tasks.html">Öppna</a></span></li>
-          <li><span>Publicera dokument</span><span class="pill"><a class="link" href="./docs.html">Öppna</a></span></li>
-          <li><span>Se inkomna svar</span><span class="pill"><a class="link" href="./answers.html">Öppna</a></span></li>
-          <li><span>Hantera felrapporter</span><span class="pill"><a class="link" href="./reports.html">Öppna</a></span></li>
+    const el = (id) => document.getElementById(id);
 
-          <!-- AO-056: nya rader (ENDAST tillägg) -->
-          <li><span>Se paketprogress</span><span class="pill"><a class="link" href="./packages-progress.html">Öppna</a></span></li>
-          <li><span>Se paketstatus per medarbetare</span><span class="pill"><a class="link" href="./packages-employees.html">Öppna</a></span></li>
-          <li><span>Skapa & hantera utbildningar</span><span class="pill"><a class="link" href="./trainings.html">Öppna</a></span></li>
-        </ul>
-      </section>
+    const authBadge = el("authBadge");
+    const roleBadge = el("roleBadge");
+    const fatalBox = el("fatalBox");
 
-      <section class="panel docs" aria-label="Senaste dokument">
-        <div class="panel-title">Senaste dokument</div>
-        <ul class="list" id="docsList">
-          <li><span>—</span><span class="pill">—</span></li>
-        </ul>
-        <a class="link" href="./docs.html">Öppna dokument →</a>
-      </section>
+    const kpiTotal = el("kpiTotal");
+    const kpiPublished = el("kpiPublished");
+    const kpiDraft = el("kpiDraft");
+    const kpiModules = el("kpiModules");
 
-      <section class="panel answers" aria-label="Senaste svar">
-        <div class="panel-title">Senaste svar</div>
-        <ul class="list" id="answersList">
-          <li><span>—</span><span class="pill">—</span></li>
-        </ul>
-        <a class="link" href="./answers.html">Öppna svar →</a>
-      </section>
+    const trainingsLoadError = el("trainingsLoadError");
 
-      <section class="panel reports" aria-label="Senaste felrapporter">
-        <div class="panel-title">Senaste felrapporter</div>
-        <ul class="list" id="reportsList">
-          <li><span>—</span><span class="pill">—</span></li>
-        </ul>
-        <a class="link" href="./reports.html">Öppna felrapporter →</a>
-      </section>
+    const modulesTbody = el("modulesTbody");
+    const recentList = el("recentList");
 
-    </div>
+    const logoutBtn = el("logoutBtn");
 
-  </section>
+    function safeText(node, text) { node.textContent = String(text ?? ""); }
 
-</main>
-
-<!-- AO-002 CORE (LÅST): config före app -->
-<script src="../UI/UI-04-CONFIG.js"></script>
-<script src="../UI/UI-03-APP.js"></script>
-
-<script>
-/* ============================================================
-AO-044 (PATCH v2.0) | admin/home.html (inline JS)
-- Byter till HRApp.requireAuth() (core) och tar bort legacy auth-guard
-- Behåller tålig läsning: QA_KEY + ANSWERS/QUESTIONS om de finns
-- Behåller docs-panel + reports + answers
-AO-056: INGA ändringar i denna JS (endast UI-länkar i HTML)
-============================================================ */
-(function(){
-  "use strict";
-
-  // ---- Keys (LÅST enligt header) ----
-  const QA_KEY        = "AO-015_QA_V1";
-  const REPORTS_KEY   = "AO-013_REPORTS_V1";
-  const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
-  const ANSWERS_KEY   = "AO-013_ANSWERS_V1";
-  const DOCS_KEY      = "AO-018_DOCS_V1";
-
-  const $ = (s) => document.querySelector(s);
-
-  function safeParse(key, fallback){
-    try{
-      const v = JSON.parse(localStorage.getItem(key) || "null");
-      return (v === null || v === undefined) ? fallback : v;
-    }catch{
-      return fallback;
-    }
-  }
-
-  function escapeHtml(s){
-    return String(s ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
-  }
-
-  function fmtShort(ts){
-    try{
-      if(!ts) return "—";
-      const d = new Date(ts);
-      if(Number.isNaN(d.getTime())) return "—";
-      return d.toLocaleDateString("sv-SE");
-    }catch{ return "—"; }
-  }
-
-  // ---- CORE GUARD (fail-closed) ----
-  if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-    window.location.replace("../UI/UI-01-SKELETON.html?err=core");
-    return;
-  }
-
-  const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN","SYSTEM_ADMIN"] });
-  if (!session) return;
-
-  const auth = window.HRApp.getAuth(session);
-  if (!auth || !auth.role) {
-    window.location.replace("../UI/UI-01-SKELETON.html?err=unauth");
-    return;
-  }
-
-  const empNo = String((session.auth && session.auth.empNo) || "").trim();
-  $("#whoName").textContent = empNo ? ("Anst.nr " + empNo) : "—";
-  $("#whoRole").textContent = auth.role;
-
-  function doLogout(){
-    if (window.HRApp && typeof window.HRApp.logout === "function") {
-      window.HRApp.logout();
-    } else {
-      try { sessionStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
-      try { localStorage.removeItem("AO-001_LOGIN_V1"); } catch {}
-      window.location.replace("../UI/UI-01-SKELETON.html?err=logout");
-    }
-  }
-  $("#btnLogout").addEventListener("click", doLogout);
-  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
-
-  function collectAnswered(){
-    const out = [];
-    const qa = safeParse(QA_KEY, []);
-    if(Array.isArray(qa) && qa.length){
-      qa.forEach(q => {
-        const hasA = !!(q && q.answer && String(q.answer).trim().length);
-        const answered = (q && (q.status === "answered" || hasA));
-        if(!answered) return;
-        out.push({
-          title: (q && q.title) || "Fråga",
-          empNo: (q && q.empNo) || "",
-          answerAnonymous: q && q.answerAnonymous === true,
-          answeredAt: (q && (q.answeredAt || q.updatedAt)) || 0,
-          updatedAt: (q && q.updatedAt) || 0
-        });
-      });
-      return out;
+    function showFatal(text) {
+      fatalBox.style.display = "block";
+      safeText(fatalBox, text);
     }
 
-    const answers = safeParse(ANSWERS_KEY, []);
-    const questions = safeParse(QUESTIONS_KEY, []);
-    if(Array.isArray(answers) && answers.length){
-      const qMap = new Map();
-      if(Array.isArray(questions)){
-        questions.forEach(q => { if(q && q.id) qMap.set(String(q.id), q); });
+    function showTrainingsError(text) {
+      trainingsLoadError.style.display = "block";
+      safeText(trainingsLoadError, text);
+    }
+
+    function clearTrainingsError() {
+      trainingsLoadError.style.display = "none";
+      safeText(trainingsLoadError, "");
+    }
+
+    function redirectUnauth() {
+      window.location.href = REDIRECT_UNAUTH;
+    }
+
+    function readAuth() {
+      // Auth: sessionStorage först, fallback localStorage
+      const s = sessionStorage.getItem(KEY_AUTH);
+      if (s != null) return { raw: s, source: "sessionStorage" };
+      const l = localStorage.getItem(KEY_AUTH);
+      if (l != null) return { raw: l, source: "localStorage" };
+      return { raw: null, source: null };
+    }
+
+    function parseJson(raw) {
+      if (raw == null) return { ok: false, data: null };
+      try { return { ok: true, data: JSON.parse(raw) }; }
+      catch { return { ok: false, data: null }; }
+    }
+
+    function isAdmin(auth) {
+      const role = String(auth?.role ?? "").toUpperCase().trim();
+      return role === "ADMIN";
+    }
+
+    function requireAdminOrRedirect() {
+      const { raw, source } = readAuth();
+      const p = parseJson(raw);
+
+      if (!p.ok) return redirectUnauth();
+
+      const auth = p.data;
+      safeText(authBadge, "Auth: " + (source || "?"));
+      safeText(roleBadge, "Roll: " + String(auth?.role ?? "?"));
+
+      if (!isAdmin(auth)) return redirectUnauth();
+
+      return auth;
+    }
+
+    function loadTrainingsReadOnly() {
+      // Read-only: AO-057_TRAININGS_V1
+      const raw = localStorage.getItem(KEY_TRAININGS);
+      const p = parseJson(raw);
+      if (!p.ok) return { ok: false, trainings: null, err: "Kunde inte läsa AO-057_TRAININGS_V1 (saknas eller korrupt JSON)." };
+      if (!Array.isArray(p.data)) return { ok: false, trainings: null, err: "AO-057_TRAININGS_V1 har fel format (inte array)." };
+      // minimal shape check
+      for (let i = 0; i < p.data.length; i++) {
+        const t = p.data[i];
+        if (!t || typeof t !== "object") return { ok: false, trainings: null, err: "Utbildningsobjekt korrupt (index " + i + ")." };
+        if (!t.id) return { ok: false, trainings: null, err: "Utbildning saknar id (index " + i + ")." };
+        if (t.blocks != null && !Array.isArray(t.blocks)) return { ok: false, trainings: null, err: "blocks måste vara array (training id " + String(t.id) + ")." };
       }
-      answers.forEach(a => {
-        if(!a) return;
-        const q = qMap.get(String(a.questionId || "")) || {};
-        out.push({
-          title: q.title || a.title || "Svar",
-          empNo: a.empNo || "",
-          answerAnonymous: a.anonymous === true || q.answerAnonymous === true,
-          answeredAt: a.answeredAt || a.createdAt || a.updatedAt || 0,
-          updatedAt: a.updatedAt || 0
-        });
+      return { ok: true, trainings: p.data, err: null };
+    }
+
+    function fmtDateSv(ms) {
+      const n = Number(ms);
+      if (!Number.isFinite(n) || n <= 0) return "–";
+      try {
+        return new Date(n).toLocaleString("sv-SE", { year:"numeric", month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit" });
+      } catch {
+        return "–";
+      }
+    }
+
+    function normStatus(s) {
+      const v = String(s ?? "").toLowerCase().trim();
+      return (v === "published" || v === "draft") ? v : (v || "–");
+    }
+
+    function countBlocks(t) {
+      return Array.isArray(t.blocks) ? t.blocks.length : 0;
+    }
+
+    function uniqModules(trainings) {
+      const set = new Set();
+      trainings.forEach(t => {
+        const m = String(t.module ?? "").trim();
+        if (m) set.add(m);
+      });
+      return Array.from(set);
+    }
+
+    function buildKpis(trainings) {
+      const total = trainings.length;
+      let published = 0;
+      let draft = 0;
+
+      trainings.forEach(t => {
+        const st = normStatus(t.status);
+        if (st === "published") published++;
+        else if (st === "draft") draft++;
+      });
+
+      const modules = uniqModules(trainings).length;
+
+      safeText(kpiTotal, total);
+      safeText(kpiPublished, published);
+      safeText(kpiDraft, draft);
+      safeText(kpiModules, modules);
+    }
+
+    function buildModuleOverview(trainings) {
+      // group by module
+      const map = new Map(); // module -> { total, published, lastUpdated }
+      trainings.forEach(t => {
+        const module = String(t.module ?? "–").trim() || "–";
+        const st = normStatus(t.status);
+        const upd = Number(t.updatedAt ?? 0);
+
+        if (!map.has(module)) map.set(module, { total: 0, published: 0, lastUpdated: 0 });
+        const cur = map.get(module);
+        cur.total += 1;
+        if (st === "published") cur.published += 1;
+        if (Number.isFinite(upd) && upd > cur.lastUpdated) cur.lastUpdated = upd;
+      });
+
+      const rows = Array.from(map.entries())
+        .map(([module, v]) => ({ module, ...v }))
+        .sort((a,b) => a.module.localeCompare(b.module, "sv"));
+
+      modulesTbody.innerHTML = "";
+      if (rows.length === 0) {
+        const tr = document.createElement("tr");
+        const td = document.createElement("td");
+        td.colSpan = 4;
+        td.className = "muted";
+        safeText(td, "Ingen data ännu.");
+        tr.appendChild(td);
+        modulesTbody.appendChild(tr);
+        return;
+      }
+
+      rows.forEach(r => {
+        const tr = document.createElement("tr");
+
+        const tdM = document.createElement("td");
+        safeText(tdM, r.module);
+
+        const tdT = document.createElement("td");
+        safeText(tdT, r.total);
+
+        const tdP = document.createElement("td");
+        safeText(tdP, r.published);
+
+        const tdU = document.createElement("td");
+        safeText(tdU, fmtDateSv(r.lastUpdated));
+
+        tr.appendChild(tdM);
+        tr.appendChild(tdT);
+        tr.appendChild(tdP);
+        tr.appendChild(tdU);
+        modulesTbody.appendChild(tr);
       });
     }
-    return out;
-  }
 
-  const answered = collectAnswered();
-  const now = Date.now();
-  const since = now - (24*60*60*1000);
-  const answered24h = answered.filter(x => (x.answeredAt || x.updatedAt || 0) >= since);
+    function qualitySignals(t) {
+      const pills = [];
 
-  const line = $("#answers24hLine");
-  const none = $("#answersNoneText");
-  const txt  = $("#answers24hText");
+      const goalsCount = Array.isArray(t.goals) ? t.goals.length : 0;
+      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+      const blocksCount = blocks.length;
 
-  if(answered24h.length === 0){
-    line.classList.add("hide");
-    none.classList.remove("hide");
-  }else{
-    line.classList.remove("hide");
-    none.classList.add("hide");
-    txt.textContent = `${answered24h.length} nya svar senaste 24h`;
-  }
+      if (goalsCount === 0) pills.push("saknar goals");
+      if (blocksCount === 0) pills.push("saknar blocks");
 
-  const answersList = $("#answersList");
-  answersList.innerHTML = "";
+      let missingTitle = false;
+      for (let i = 0; i < blocks.length; i++) {
+        const b = blocks[i];
+        const title = String(b?.title ?? "").trim();
+        if (!title) { missingTitle = true; break; }
+      }
+      if (missingTitle) pills.push("block utan titel");
 
-  const sortedAns = answered.slice().sort((a,b) => (b.answeredAt||b.updatedAt||0) - (a.answeredAt||a.updatedAt||0));
-  if(sortedAns.length === 0){
-    answersList.innerHTML = `<li><span>Inga svar ännu</span><span class="pill">OK</span></li>`;
-  }else{
-    sortedAns.slice(0,5).forEach(x => {
-      const who = (x.answerAnonymous === true) ? "Anonym" : (x.empNo ? `Anst.nr ${escapeHtml(x.empNo)}` : "—");
-      const title = escapeHtml(x.title || "Svar");
-      const when = fmtShort(x.answeredAt || x.updatedAt || 0);
-      const li = document.createElement("li");
-      li.innerHTML = `<span>${title} • ${who}</span><span class="pill">${when}</span>`;
-      answersList.appendChild(li);
-    });
-  }
+      return pills;
+    }
 
-  const allReports = safeParse(REPORTS_KEY, []);
-  const reportsList = $("#reportsList");
-  reportsList.innerHTML = "";
+    function buildRecentList(trainings) {
+      const sorted = trainings.slice().sort((a,b) => Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0));
+      const pick = sorted.slice(0, 10);
 
-  if(!Array.isArray(allReports) || allReports.length === 0){
-    reportsList.innerHTML = `<li><span>Inga felrapporter ännu</span><span class="pill">OK</span></li>`;
-  }else{
-    const sortedRep = allReports.slice().sort((a,b) => (b.createdAt||b.ts||0) - (a.createdAt||a.ts||0));
-    sortedRep.slice(0,5).forEach(r => {
-      const title = escapeHtml(r.title || r.subject || "Felrapport");
-      const when = fmtShort(r.createdAt || r.ts || 0);
-      const li = document.createElement("li");
-      li.innerHTML = `<span>${title}</span><span class="pill">${when}</span>`;
-      reportsList.appendChild(li);
-    });
-  }
+      recentList.innerHTML = "";
+      if (pick.length === 0) {
+        const d = document.createElement("div");
+        d.className = "muted";
+        safeText(d, "Ingen data ännu.");
+        recentList.appendChild(d);
+        return;
+      }
 
-  const docsLine = $("#docsLine");
-  const docsList = $("#docsList");
+      pick.forEach(t => {
+        const item = document.createElement("div");
+        item.className = "item";
 
-  const docs = safeParse(DOCS_KEY, []);
-  const arr = Array.isArray(docs) ? docs : [];
+        const left = document.createElement("div");
+        left.className = "left";
 
-  const publishedCount = arr.filter(d => d && d.published === true).length;
-  const totalCount = arr.filter(Boolean).length;
+        const title = document.createElement("div");
+        title.className = "title";
+        safeText(title, String(t.title ?? "(utan titel)"));
+        left.appendChild(title);
 
-  if(totalCount === 0){
-    docsLine.textContent = "Inga dokument ännu";
-  }else{
-    docsLine.textContent = `${publishedCount}/${totalCount} publicerade`;
-  }
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        const mod = String(t.module ?? "–").trim() || "–";
+        const area = String(t.area ?? "–").trim() || "–";
+        const st = normStatus(t.status);
+        const blocksCount = countBlocks(t);
+        safeText(meta, mod + " • " + area + "  ·  " + st + "  ·  block: " + blocksCount + "  ·  " + fmtDateSv(t.updatedAt));
+        left.appendChild(meta);
 
-  docsList.innerHTML = "";
-  if(totalCount === 0){
-    docsList.innerHTML = `<li><span>Inga dokument ännu</span><span class="pill">OK</span></li>`;
-  }else{
-    const sortedDocs = arr.slice().filter(Boolean).sort((a,b) => (b.updatedAt||b.createdAt||0) - (a.updatedAt||a.createdAt||0));
-    sortedDocs.slice(0,5).forEach(d => {
-      const title = escapeHtml(d.title || "Dokument");
-      const ver = "v" + escapeHtml(String(d.version || 1));
-      const when = fmtShort(d.updatedAt || d.createdAt || 0);
-      const pub = (d.published === true) ? "Publicerad" : "Utkast";
-      const li = document.createElement("li");
-      li.innerHTML = `<span>${title} • ${ver} • ${pub}</span><span class="pill">${when}</span>`;
-      docsList.appendChild(li);
-    });
-  }
+        // quality pills
+        const qs = qualitySignals(t);
+        if (qs.length > 0) {
+          const row = document.createElement("div");
+          row.className = "row";
+          row.style.marginTop = "8px";
+          qs.forEach(txt => {
+            const p = document.createElement("span");
+            p.className = "pill";
+            safeText(p, txt);
+            row.appendChild(p);
+          });
+          left.appendChild(row);
+        }
 
-})();
-</script>
+        const right = document.createElement("div");
+        right.className = "right";
 
-<!-- ============================================================
-Ändringslogg (AO-056 PATCH v1.2) ≤ 8 rader
-- Lagt till navlänk till Utbildningar (admin/trainings.html)
-- Lagt till knapp i toppraden till Utbildningar
-- Lagt till snabbruta till Utbildningar (utan borttag av befintliga)
-- Lagt till rad i “Snabbt”-panelen till Utbildningar
-- INGA ändringar i core/auth/scripts/keys/logik
-============================================================ -->
+        const open = document.createElement("a");
+        open.href = "./trainings.html";
+        open.className = "btn";
+        safeText(open, "Öppna i Utbildningar");
+        right.appendChild(open);
+
+        item.appendChild(left);
+        item.appendChild(right);
+
+        recentList.appendChild(item);
+      });
+    }
+
+    function wireLogout(auth) {
+      // Optional: "samma logout-mönster som övriga admin-sidor"
+      // - Om HRApp.logout finns, använd den
+      // - Annars: rensa session/local auth och redirect
+      logoutBtn.style.display = "inline-block";
+
+      logoutBtn.addEventListener("click", () => {
+        try {
+          if (window.HRApp && typeof window.HRApp.logout === "function") {
+            window.HRApp.logout();
+            return;
+          }
+        } catch (_) {}
+
+        // fallback: rensa endast auth-key (ingen ny key)
+        try { sessionStorage.removeItem(KEY_AUTH); } catch (_) {}
+        try { localStorage.removeItem(KEY_AUTH); } catch (_) {}
+
+        window.location.href = "../UI/UI-01-SKELETON.html?err=logout";
+      });
+    }
+
+    // Bootstrap (fail-closed redirect for auth)
+    (function init() {
+      const auth = requireAdminOrRedirect();
+      wireLogout(auth);
+
+      const res = loadTrainingsReadOnly();
+      if (!res.ok) {
+        // fail-soft: show error card but do not crash
+        showTrainingsError(res.err);
+        safeText(kpiTotal, "–");
+        safeText(kpiPublished, "–");
+        safeText(kpiDraft, "–");
+        safeText(kpiModules, "–");
+        buildModuleOverview([]);
+        buildRecentList([]);
+        return;
+      }
+
+      clearTrainingsError();
+
+      const trainings = res.trainings;
+
+      buildKpis(trainings);
+      buildModuleOverview(trainings);
+      buildRecentList(trainings);
+    })();
+  </script>
+
+  <!-- ============================================================
+  Ändringslogg (AO-ADMIN-HOME-REBUILD-01) – max 8 rader
+  1) Ny read-only admin-start för utbildningsbiblioteket (AO-057_TRAININGS_V1).
+  2) Fail-closed ADMIN-guard: sessionStorage→localStorage auth, annars redirect unauth.
+  3) Översiktskort: total/published/draft/moduler.
+  4) Modul-översikt: totals/published/senast updatedAt per modul.
+  5) Senast uppdaterade (max 10) med CTA till trainings.html.
+  6) Kvalitetssignaler (read-only): saknar goals/blocks, block utan titel.
+  7) Inga nya keys, ingen write till AO-057 (read-only), XSS-säker rendering.
+  ============================================================ -->
 </body>
 </html>
