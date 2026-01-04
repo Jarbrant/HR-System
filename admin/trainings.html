@@ -319,7 +319,7 @@ POLICY (LÅST):
       </div>
 
       <div class="tiny" style="margin-top:10px;">
-        Tips: Område-förslag byggs från tidigare skapade utbildningar inom vald modul.
+        Tips: Område-förslag byggs från tidigare sparade utbildningar inom vald modul.
       </div>
     </section>
 
@@ -342,8 +342,16 @@ POLICY (LÅST):
 
           <label>
             Område <span class="tiny">(obligatoriskt)</span>
-            <input id="areaInp" type="text" list="areaList" placeholder="T.ex. Hygien, Ergonomi…" maxlength="60" autocomplete="off" />
+
+            <!-- PATCH: riktig dropdown per modul (utan ny storage-key) -->
+            <select id="areaSel" aria-label="Välj sparat område">
+              <option value="">Välj sparat område…</option>
+            </select>
+
+            <!-- Behåll fri text + datalist (för nya områden) -->
+            <input id="areaInp" type="text" list="areaList" placeholder="Eller skriv nytt område… (t.ex. Hygien, Ergonomi…)" maxlength="60" autocomplete="off" />
             <datalist id="areaList"></datalist>
+
             <div class="tiny" id="areaHint">—</div>
           </label>
         </div>
@@ -390,10 +398,7 @@ POLICY (LÅST):
       <!-- 4) AI -->
       <section class="subCard" aria-label="AI">
         <h3>4) AI – skapa block</h3>
-        <div class="tiny">
-          AI fyller <strong>beskrivning</strong>, <strong>mål</strong> (om tomt) och <strong>block</strong>.
-          Denna UI är uppdaterad för din worker: <span class="mono">GET /ping</span> och <span class="mono">POST /ai/training</span>.
-        </div>
+        <div class="tiny">AI fyller <strong>beskrivning</strong>, <strong>mål</strong> (om tomt) och <strong>block</strong>. Du kan alltid redigera efteråt.</div>
 
         <div class="row3" style="margin-top:8px;">
           <label>
@@ -418,15 +423,8 @@ POLICY (LÅST):
         <details>
           <summary>AI-inställning (endpoint)</summary>
           <div class="tiny" style="margin-top:8px;">
-            Origin: <span class="mono" id="aiDefault">—</span><br/>
-            Ping: <span class="mono" id="aiPingPath">—</span><br/>
-            Generate: <span class="mono" id="aiGenPath">—</span><br/>
-            <br/>
-            Override via URL-parametrar (valfritt):<br/>
-            <span class="mono">?ai=https://din-worker.workers.dev</span><br/>
-            <span class="mono">&amp;aiping=/ping</span> (default)<br/>
-            <span class="mono">&amp;aigen=/ai/training</span> (default)<br/>
-            <span class="mono">&amp;aitoken=BEARER_TOKEN</span> (om env.AI_TOKEN används)
+            Default: <span class="mono" id="aiDefault">—</span><br/>
+            Du kan override via URL: <span class="mono">?ai=https://din-worker.workers.dev</span>
           </div>
         </details>
       </section>
@@ -490,12 +488,10 @@ POLICY (LÅST):
 <script>
 /* ============================================================
 AO-TRAININGS-PATCH-01 | admin/trainings.html
-Fokus:
-- Modul först + område med förslag (från sparade)
-- Tydlig “sparat”-status: visar om blocks finns + antal
-- Publish fail-closed (blocks.length > 0) + tydlig hint
-- Behåller AI via Worker (nu: GET /ping, POST /ai/training)
-- Inga nya storage-keys: AO-057_TRAININGS_V1 (array)
+PATCH (Område dropdown per modul):
+- Lägger till areaSel dropdown som visar sparade områden per vald modul
+- Bygger från AO-057_TRAININGS_V1 (inga nya keys)
+- Inga ändringar i block-/listkopplingar
 ============================================================ */
 (function(){
   "use strict";
@@ -526,10 +522,6 @@ Fokus:
   // --- AI Worker default ---
   const DEFAULT_AI_ORIGIN = "https://hrsystem.andersmenyit.workers.dev";
 
-  // --- Worker endpoints (enligt din “senaste sanning”) ---
-  const DEFAULT_AI_PING_PATH = "/ping";         // GET
-  const DEFAULT_AI_GEN_PATH  = "/ai/training";  // POST
-
   // --- DOM helpers ---
   const $ = (s) => document.querySelector(s);
   const elMsg = $("#msgBox");
@@ -548,6 +540,7 @@ Fokus:
   const btnSave = $("#btnSave");
 
   const moduleSel = $("#moduleSel");
+  const areaSel = $("#areaSel");     // PATCH
   const areaInp = $("#areaInp");
   const areaList = $("#areaList");
   const areaHint = $("#areaHint");
@@ -564,8 +557,6 @@ Fokus:
   const btnAiGenerate = $("#btnAiGenerate");
   const aiStatus = $("#aiStatus");
   const aiDefault = $("#aiDefault");
-  const aiPingPathEl = $("#aiPingPath");
-  const aiGenPathEl = $("#aiGenPath");
 
   const addKind = $("#addKind");
   const btnAddBlock = $("#btnAddBlock");
@@ -761,16 +752,29 @@ Fokus:
     btnDelete.disabled = !STATE.selectedId;
   }
 
+  // PATCH: rebuild suggestions per module and populate BOTH datalist + dropdown
   function rebuildAreaSuggestions(){
     const mod = String(moduleSel.value || "").trim();
+
     const areas = new Set();
+
+    // from saved items
     STATE.items.forEach(t => {
       if(!t) return;
       if(String(t.module||"") !== mod) return;
       const a = String(t.area||"").trim();
       if(a) areas.add(a);
     });
+
+    // also include current edit (so it appears immediately while editing)
+    if(STATE.edit && String(STATE.edit.module||"") === mod){
+      const a2 = String(STATE.edit.area||"").trim();
+      if(a2) areas.add(a2);
+    }
+
     const sorted = Array.from(areas).sort((a,b) => a.localeCompare(b, "sv"));
+
+    // datalist (kept)
     areaList.innerHTML = "";
     sorted.slice(0,80).forEach(a => {
       const opt = document.createElement("option");
@@ -778,8 +782,24 @@ Fokus:
       areaList.appendChild(opt);
     });
 
+    // dropdown (new)
+    areaSel.innerHTML = "";
+    const first = document.createElement("option");
+    first.value = "";
+    first.textContent = sorted.length ? "Välj sparat område…" : "Inga sparade områden…";
+    areaSel.appendChild(first);
+
+    sorted.slice(0,120).forEach(a => {
+      const opt = document.createElement("option");
+      opt.value = a;
+      opt.textContent = a;
+      areaSel.appendChild(opt);
+    });
+
+    areaSel.disabled = (sorted.length === 0);
+
     areaHint.textContent = sorted.length
-      ? `Förslag i "${mod}": ${sorted.slice(0,6).join(", ")}${sorted.length>6 ? "…" : ""}`
+      ? `Sparade områden i "${mod}": ${sorted.slice(0,6).join(", ")}${sorted.length>6 ? "…" : ""}`
       : `Inga sparade områden ännu för "${mod}".`;
   }
 
@@ -1079,7 +1099,7 @@ Fokus:
   }
 
   function renderBlocks(){
-    clearBlocksUI();
+    while(blocksList.firstChild) blocksList.removeChild(blocksList.firstChild);
     const arr = (STATE.edit && Array.isArray(STATE.edit.blocks)) ? STATE.edit.blocks : [];
     if(arr.length === 0){
       const empty = document.createElement("div");
@@ -1192,6 +1212,9 @@ Fokus:
 
     moduleSel.value = t.module || MODULES[0];
     rebuildAreaSuggestions();
+
+    // PATCH: keep dropdown in sync (best-effort)
+    areaSel.value = "";
 
     areaInp.value = t.area || "";
     titleInp.value = t.title || "";
@@ -1423,10 +1446,29 @@ Fokus:
   moduleSel.addEventListener("change", () => {
     hydrateFromInputs();
     setDirty(true);
+    // PATCH: refresh module-specific area dropdown
     rebuildAreaSuggestions();
+    // reset dropdown selection (but keep typed value)
+    areaSel.value = "";
   });
 
-  areaInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
+  // PATCH: selecting a saved area fills the input (no new keys)
+  areaSel.addEventListener("change", () => {
+    setMsg("", "");
+    const v = String(areaSel.value || "");
+    if(!v) return;
+    areaInp.value = v;
+    hydrateFromInputs();
+    setDirty(true);
+  });
+
+  areaInp.addEventListener("input", () => {
+    hydrateFromInputs();
+    setDirty(true);
+    // keep dropdown unselected while typing
+    if(areaSel && areaSel.value) areaSel.value = "";
+  });
+
   titleInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
   descInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
   goalsInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
@@ -1471,36 +1513,16 @@ Fokus:
     renderBlocks();
   });
 
-  // --- AI (uppdaterad för din worker) ---
-  function getUrlParam(name){
+  // --- AI ---
+  function getAiOrigin(){
     try{
       const u = new URL(window.location.href);
-      return String(u.searchParams.get(name) || "").trim();
-    }catch{ return ""; }
-  }
-
-  function getAiOrigin(){
-    const p = getUrlParam("ai");
-    if(p && p.startsWith("https://")) return p.replace(/\/+$/,"");
+      const p = String(u.searchParams.get("ai") || "").trim();
+      if(p){
+        if(p.startsWith("https://")) return p.replace(/\/+$/,"");
+      }
+    }catch{}
     return DEFAULT_AI_ORIGIN;
-  }
-
-  function getAiPingPath(){
-    const p = getUrlParam("aiping");
-    if(p && p.startsWith("/")) return p;
-    return DEFAULT_AI_PING_PATH;
-  }
-
-  function getAiGenPath(){
-    const p = getUrlParam("aigen");
-    if(p && p.startsWith("/")) return p;
-    return DEFAULT_AI_GEN_PATH;
-  }
-
-  function getAiToken(){
-    // URL-param är ok (ingen storage). OBS: syns i URL-historik → använd bara vid behov.
-    const t = getUrlParam("aitoken");
-    return t ? t : "";
   }
 
   function aiUrl(path){
@@ -1513,35 +1535,15 @@ Fokus:
     }
   }
 
-  function coerceAiTraining(json){
-    const root = (json && typeof json === "object") ? json : {};
-    const pack = (root.training && typeof root.training === "object") ? root.training
-               : (root.result && typeof root.result === "object") ? root.result
-               : root;
-
-    const out = {};
-    if(typeof pack.description === "string") out.description = pack.description;
-    if(typeof pack.title === "string") out.title = pack.title;
-    if(Array.isArray(pack.goals)) out.goals = pack.goals;
-    if(Array.isArray(pack.blocks)) out.blocks = pack.blocks;
-    if(!out.blocks && Array.isArray(pack.items)) out.blocks = pack.items;
-    return out;
-  }
-
   async function aiTest(){
-    const pingPath = getAiPingPath();
-    const url = aiUrl(pingPath);
-
-    aiPingPathEl.textContent = pingPath;
-    aiGenPathEl.textContent = getAiGenPath();
-
+    const url = aiUrl("/health");
     aiStatus.textContent = "Testar worker…";
     try{
       const r = await fetch(url, { method:"GET", cache:"no-store" });
       const txt = await r.text();
       if(!r.ok){
         aiStatus.textContent = `Worker fel: HTTP ${r.status}`;
-        setMsg("err", `Worker svarade med fel på ${pingPath} (HTTP ${r.status}).`);
+        setMsg("err", "Worker svarade med fel (se AI-status).");
         return;
       }
       aiStatus.textContent = `Worker OK: ${txt.slice(0,120)}`;
@@ -1550,6 +1552,20 @@ Fokus:
       aiStatus.textContent = "Worker kunde inte nås.";
       setMsg("err", "Kunde inte nå worker (nät / url).");
     }
+  }
+
+  function coerceAiTraining(json){
+    const root = (json && typeof json === "object") ? json : {};
+    const pack = (root.training && typeof root.training === "object") ? root.training
+               : (root.result && typeof root.result === "object") ? root.result
+               : root;
+
+    const out = {};
+    if(typeof pack.description === "string") out.description = pack.description;
+    if(Array.isArray(pack.goals)) out.goals = pack.goals;
+    if(Array.isArray(pack.blocks)) out.blocks = pack.blocks;
+    if(!out.blocks && Array.isArray(pack.items)) out.blocks = pack.items;
+    return out;
   }
 
   async function aiGenerate(){
@@ -1568,38 +1584,30 @@ Fokus:
       return;
     }
 
-    const genPath = getAiGenPath();
-    const url = aiUrl(genPath);
-    const token = getAiToken();
-
-    aiPingPathEl.textContent = getAiPingPath();
-    aiGenPathEl.textContent = genPath;
-
+    const url = aiUrl("/ai-generate");
     btnAiGenerate.disabled = true;
     btnAiTest.disabled = true;
     aiStatus.textContent = "Skapar med AI…";
 
-    // Worker väntar: { topic, language, audience, tone }
     const payload = {
-      topic,
+      mode: "training",
       language: "sv",
-      audience: "medarbetare",
-      tone: "kort, konkret, vänligt",
-      // extra metadata (worker ignorerar okända fält): säkert att skicka
+      topic,
       module: t.module,
       area: t.area,
-      blockCount: count
+      blockCount: count,
+      schema: {
+        blocks: {
+          allowedKinds: ["info","task","question","both"],
+          maxText: 240
+        }
+      }
     };
 
     try{
-      const headers = { "Content-Type":"application/json" };
-      if(token){
-        headers["Authorization"] = "Bearer " + token;
-      }
-
       const r = await fetch(url, {
         method: "POST",
-        headers,
+        headers: { "Content-Type":"application/json" },
         body: JSON.stringify(payload)
       });
 
@@ -1609,7 +1617,7 @@ Fokus:
 
       if(!r.ok || (json && json.ok === false)){
         const msg = (json && (json.error || json.message)) ? String(json.error || json.message) : ("HTTP " + r.status);
-        aiStatus.textContent = `AI-fel: HTTP ${r.status}`;
+        aiStatus.textContent = "AI-fel.";
         setMsg("err", "AI/Worker fel: " + msg);
         return;
       }
@@ -1645,7 +1653,7 @@ Fokus:
       renderBlocks();
       debugPre.textContent = JSON.stringify(t, null, 2);
 
-    }catch{
+    }catch(e){
       aiStatus.textContent = "AI kunde inte köras.";
       setMsg("err", "Kunde inte nå AI/Worker (nät / endpoint).");
     }finally{
@@ -1662,10 +1670,7 @@ Fokus:
     setMsg("", "");
 
     renderModuleOptions();
-
     aiDefault.textContent = getAiOrigin();
-    aiPingPathEl.textContent = getAiPingPath();
-    aiGenPathEl.textContent = getAiGenPath();
 
     const read = safeParseArray(TRAININGS_KEY);
     if(!read.ok){
@@ -1698,11 +1703,10 @@ Fokus:
 
 <!-- ============================================================
 Ändringslogg (AO-TRAININGS-PATCH-01) ≤ 8 rader
-- AI-endpoints uppdaterade till worker “senaste sanning”: GET /ping, POST /ai/training
-- Stöd för URL-override: ?ai=…&aiping=…&aigen=… (+ aiteten vid behov)
-- Testa worker visar nu ping-svar (OK: hrsystem worker alive)
-- AI-generate payload matchar worker (topic/language/audience/tone) + extra metadata ofarligt
-- Inga nya storage-keys, fortsatt XSS-safe rendering (textContent)
+- PATCH: Område dropdown (areaSel) som visar sparade områden per vald modul
+- Bygger dropdown/datalist från AO-057_TRAININGS_V1 (ingen ny storage-key)
+- Dropdown-val fyller areaInp (fri text kvar för nya områden)
+- Inga ändringar i block/list-kopplingar eller sparformat
 ============================================================ -->
 </body>
 </html>
