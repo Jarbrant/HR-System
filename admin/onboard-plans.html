@@ -1,1171 +1,694 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-UI-01 | FIL-ID: admin/onboard-plans.html
-Projekt: HR-System
-Syfte: ADMIN – Skapa/Redigera Onboarding Plans + Tidsaxel (drag/drop light via ↑↓) UI-only
+AO-ONBOARD-PLANS-UI-01 (1/4) | FIL-ID: admin/onboard-plans.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: ADMIN – Onboardingplaner • Read-only översikt av utbildningar (AO-057)
+Version: v1.0 (PROD)
 
 POLICY (LÅST):
 - UI-only • Fail-closed
-- sessionStorage först (auth) • fallback localStorage (auth) via AO-002
-- localStorage för data
-- XSS-escape på all rendering från storage (textContent)
-- Inga känsliga persondata (endast empNo används ej här)
-- Inga nya storage-keys (endast AO-060/061 från AO-1; denna sida skriver endast AO-060)
-- Inga ändringar av befintliga keys/datamodeller utanför AO
-- Hel-filsleverans
+- ADMIN-only (via HRApp.requireAuth({ allowRoles:["ADMIN"] }))
+- Read-only: inga writes till localStorage/sessionStorage (förutom core-auth om den redan gör det)
+- XSS-escape på all rendering från storage (textContent; ingen osäker innerHTML)
+- Inga nya storage-keys
+- Hel fil (ny fil)
 
 Keys (LÅST):
-- Läser: AO-001_LOGIN_V1 (via HRApp), AO-057_TRAININGS_V1, AO-060_PLANS_V1
-- Skriver: AO-060_PLANS_V1
+- Läser: AO-001_LOGIN_V1 (endast via core/auth), AO-057_TRAININGS_V1 (localStorage)
+- Skriver: Inget
+
+Ändringslogg (max 8 rader):
+- NY fil: admin/onboard-plans.html
+- ADMIN-only auth-guard via HRApp.requireAuth + strikt rollcheck via HRApp.getAuth
+- Read-only UI: status-kort + tabell + filter (Alla/Verifierade/Publicerade/Utkast) + sök (titel)
+- Fail-closed hantering för saknad/korrupt AO-057 (ingen crash, tydlig guard-text)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Onboarding Plans (ADMIN)</title>
+  <title>HR-System – Admin • Onboardingplaner (Read-only)</title>
+
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  <script src="../UI/UI-03-APP.js"></script>
+
   <style>
-    :root { --gap: 12px; }
-    body { margin: 0; padding: 16px; }
-    .row { display: flex; gap: var(--gap); align-items: flex-start; }
-    .col { flex: 1; min-width: 320px; }
-    .card { border: 1px solid rgba(0,0,0,0.12); border-radius: 10px; padding: 12px; background: #fff; }
-    .muted { opacity: 0.75; font-size: 12px; }
-    .titlebar { display:flex; align-items:center; justify-content:space-between; gap: 10px; margin-bottom: 10px; }
-    h1 { font-size: 18px; margin: 0; }
-    h2 { font-size: 14px; margin: 0 0 10px 0; }
-    .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
-    .grid3 { display:grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--gap); }
-    label { display:block; font-size: 12px; margin-bottom: 4px; }
-    input[type="text"], input[type="number"], select {
-      width: 100%; padding: 8px; border-radius: 8px; border: 1px solid rgba(0,0,0,0.2);
-      background: #fff;
+    .gridCards{
+      display:grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 10px;
     }
-    input[type="search"] { width: 100%; padding: 8px; border-radius: 8px; border: 1px solid rgba(0,0,0,0.2); }
-    button {
-      padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(0,0,0,0.2);
-      background: #f6f6f6; cursor:pointer;
+    @media (max-width: 920px){
+      .gridCards{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
     }
-    button.primary { background: #111; color: #fff; border-color:#111; }
-    button.danger { background: #fff0f0; }
-    button:disabled { opacity: 0.55; cursor: not-allowed; }
-    .list { display:flex; flex-direction:column; gap: 8px; max-height: 60vh; overflow:auto; padding-right: 4px; }
-    .item { border: 1px solid rgba(0,0,0,0.10); border-radius: 10px; padding: 10px; }
-    .itemRow { display:flex; align-items:center; justify-content:space-between; gap: 10px; }
-    .pill { display:inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid rgba(0,0,0,0.15); }
-    .pill.draft { background:#fff7e6; }
-    .pill.active { background:#eaffea; }
-    .pill.archived { background:#f2f2f2; }
-    .error { border-left: 4px solid #b00020; padding: 10px; background: #fff5f7; border-radius: 8px; }
-    .ok { border-left: 4px solid #0b7a0b; padding: 10px; background: #f4fff4; border-radius: 8px; }
-    .warn { border-left: 4px solid #b36b00; padding: 10px; background: #fff9f0; border-radius: 8px; }
-    .toolbar { display:flex; flex-wrap:wrap; gap: 8px; align-items:center; }
-    .splitHeader { display:flex; align-items:center; justify-content:space-between; gap: 8px; margin-bottom: 8px; }
-    .smallbtn { padding: 6px 8px; font-size: 12px; }
-    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
-    .timelineRow { display:grid; grid-template-columns: 110px 1fr 140px; gap: 10px; align-items:center; }
-    .timelineMeta { font-size: 12px; }
-    .rightActions { display:flex; gap: 6px; justify-content:flex-end; flex-wrap:wrap; }
-    .divider { height: 1px; background: rgba(0,0,0,0.10); margin: 10px 0; }
-    .footerNote { margin-top: 10px; }
+    @media (max-width: 520px){
+      .gridCards{ grid-template-columns: 1fr; }
+    }
+
+    .kcard{
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.92);
+      padding: 12px 12px;
+      box-shadow: var(--shadow-soft);
+    }
+    .kcard .label{ color: var(--muted); font-size: .9rem; }
+    .kcard .value{ font-size: 1.5rem; font-weight: 900; margin-top: 6px; color:#111; }
+    .kcard .hint{ color: var(--muted); font-size: .88rem; margin-top: 6px; }
+
+    .toolbar{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:end;
+      justify-content:space-between;
+      margin-top: 12px;
+    }
+    .filters{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .filters .btn{
+      padding: 8px 12px;
+      border-radius: 999px;
+      font-weight: 800;
+    }
+    .filters .btn.active{
+      outline: 2px solid rgba(16,185,129,.35);
+      background: rgba(167,243,208,.22);
+    }
+    .searchbox{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+    .searchbox input{
+      min-width: 240px;
+    }
+
+    table{
+      width:100%;
+      border-collapse: collapse;
+      background:#fff;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      overflow:hidden;
+      margin-top: 10px;
+    }
+    th, td{
+      padding: 10px 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align:left;
+    }
+    th{
+      background: rgba(17,24,39,.04);
+      font-weight: 900;
+      font-size: .92rem;
+    }
+    tr:last-child td{ border-bottom:none; }
+    tbody tr:hover{ background: rgba(167,243,208,.10); }
+
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      padding: 3px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.85rem;
+      color: var(--muted);
+      white-space:nowrap;
+    }
+    .pill.ok{ background: rgba(167,243,208,.22); color:#065f46; }
+    .pill.warn{ background: rgba(253,230,138,.25); color:#92400e; }
+    .pill.neutral{ background: rgba(226,232,240,.55); color:#111; }
+
+    .lockbox{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px dashed var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      color: var(--muted);
+    }
+    .lockbox strong{ color:#111; }
+    .lockbox ul{ margin:8px 0 0; padding-left: 18px; }
+    .lockbox li{ margin: 3px 0; }
+
+    .muted2{ color: var(--muted); font-size:.92rem; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .rightlinks{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:flex-end;
+    }
   </style>
 </head>
 
 <body>
-  <div class="titlebar">
-    <h1>Onboarding Plans (ADMIN)</h1>
-    <div class="toolbar">
-      <button id="btnNewPlan" class="primary">+ Ny plan</button>
-      <button id="btnSavePlan" class="primary">Spara</button>
-      <button id="btnVerifyPlan">Verifiera plan → Active</button>
-    </div>
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• ADMIN • Onboardingplaner (Read-only)</span>
   </div>
 
-  <div id="statusBox" class="card" aria-live="polite"></div>
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Skapa uppgift</a>
+    <a href="./tasks-list.html">Översikt</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./integrations.html">Integrationer</a>
 
-  <div class="row" style="margin-top:12px;">
-    <!-- LEFT -->
-    <div class="col card" aria-label="Tillgängliga utbildningar">
-      <div class="splitHeader">
-        <h2>Tillgängliga utbildningar</h2>
-        <div class="muted">Endast published + blocks&gt;0</div>
+    <!-- AO-ONBOARD-PLANS-UI-01 kräver dessa länkar -->
+    <a href="./packages-block.html">Paketblock</a>
+    <a href="./packages-progress.html">Paketprogress</a>
+    <a href="./onboard-plans.html" aria-current="page">Onboardingplaner</a>
+
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Onboardingplaner – Översikt (read-only)</h1>
+  <p class="muted">
+    Snabb kontroll av utbildningsdata i <span class="mono">AO-057_TRAININGS_V1</span>.
+    Ingen schemaläggning eller exekvering i denna sida.
+  </p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
       </div>
-
-      <div class="grid3" style="margin-bottom:10px;">
-        <div>
-          <label for="filterModule">Modul</label>
-          <select id="filterModule"></select>
-        </div>
-        <div>
-          <label for="filterArea">Område</label>
-          <select id="filterArea"></select>
-        </div>
-        <div>
-          <label for="searchTitle">Sök titel</label>
-          <input id="searchTitle" type="search" placeholder="Sök…" />
-        </div>
+      <div class="rightlinks">
+        <span class="pill neutral"><strong>Read-only</strong>&nbsp;• inga writes</span>
       </div>
+    </div>
 
-      <div id="trainingsBox" class="list" role="list"></div>
-      <div class="footerNote muted">
-        Fail-closed: om trainings saknas/korrupt blockeras tillägg.
+    <div id="lockBox" class="lockbox" style="display:none;"></div>
+
+    <div class="gridCards" aria-label="Status">
+      <div class="kcard">
+        <div class="label">Totalt i AO-057</div>
+        <div class="value" id="kTotal">0</div>
+        <div class="hint muted2" id="kTotalHint">—</div>
+      </div>
+      <div class="kcard">
+        <div class="label">Verifierade</div>
+        <div class="value" id="kVerified">0</div>
+        <div class="hint muted2">status = verified</div>
+      </div>
+      <div class="kcard">
+        <div class="label">Publicerade</div>
+        <div class="value" id="kPublished">0</div>
+        <div class="hint muted2">status = published</div>
+      </div>
+      <div class="kcard">
+        <div class="label">Utkast / okänd</div>
+        <div class="value" id="kDraft">0</div>
+        <div class="hint muted2">status = draft eller saknas</div>
       </div>
     </div>
 
-    <!-- RIGHT -->
-    <div class="col card" aria-label="Planens tidsaxel">
-      <div class="splitHeader">
-        <h2>Planens tidsaxel</h2>
-        <div class="muted" id="planMeta">—</div>
+    <div class="toolbar" aria-label="Filter och sök">
+      <div class="filters" role="group" aria-label="Filter">
+        <button type="button" class="btn active" id="btnAll">Alla</button>
+        <button type="button" class="btn" id="btnVerified">Verifierade</button>
+        <button type="button" class="btn" id="btnPublished">Publicerade</button>
+        <button type="button" class="btn" id="btnDraft">Utkast</button>
       </div>
 
-      <div class="grid2" style="margin-bottom:10px;">
-        <div>
-          <label for="planTitle">Titel</label>
-          <input id="planTitle" type="text" placeholder="t.ex. Onboarding Bas" />
-        </div>
-        <div>
-          <label for="planStatus">Status</label>
-          <select id="planStatus">
-            <option value="draft">draft</option>
-            <option value="active">active</option>
-            <option value="archived">archived</option>
-          </select>
-        </div>
-      </div>
-
-      <div class="divider"></div>
-
-      <div id="timelineBox" class="list" role="list"></div>
-
-      <div class="footerNote muted">
-        Ordning styrs av <span class="mono">order</span>. Sort: order → dayOffset.
-        (DnD ersatt med ↑/↓ för låg regressionsrisk)
+      <div class="searchbox">
+        <label class="muted2" style="margin:0;">
+          Sök titel
+          <input id="searchTitle" type="text" placeholder="Skriv för att filtrera…" />
+        </label>
       </div>
     </div>
-  </div>
 
-  <div class="row" style="margin-top:12px;">
-    <div class="col card" aria-label="Lista planer">
-      <div class="splitHeader">
-        <h2>Befintliga planer</h2>
-        <div class="muted">Klicka för att redigera</div>
-      </div>
-      <div id="plansList" class="list" role="list"></div>
+    <div class="muted2" id="metaLine" style="margin-top:10px;"></div>
+
+    <div style="margin-top:10px; overflow:auto;">
+      <table aria-label="Utbildningar">
+        <thead>
+          <tr>
+            <th>Modul</th>
+            <th>Område</th>
+            <th>Titel</th>
+            <th>Status</th>
+            <th>UpdatedAt</th>
+          </tr>
+        </thead>
+        <tbody id="tbody">
+          <tr>
+            <td colspan="5" class="muted2">Laddar…</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
-  </div>
+
+    <p id="emptyState" class="muted2" style="margin-top:10px; display:none;"></p>
+  </section>
+</main>
 
 <script>
+/* ============================================================
+AO-ONBOARD-PLANS-UI-01 (1/4) – admin/onboard-plans.html
+ADMIN-only • Read-only • Fail-closed • XSS-safe rendering
+============================================================ */
 (function(){
   "use strict";
 
-  // ============================
-  // AUTH (ADMIN-only)
-  // ============================
-  if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-    // Fail-closed: om core saknas, visa tydligt men försök inte fortsätta.
-    const sb = document.getElementById("statusBox");
-    sb.className = "card error";
-    sb.textContent = "CORE saknas (HRApp). Kan inte köra sidan. (fail-closed)";
-    return;
+  // -----------------------------
+  // Keys (LÅST – READ ONLY)
+  // -----------------------------
+  const TRAININGS_KEY = "AO-057_TRAININGS_V1";
+
+  const $ = (s) => document.querySelector(s);
+
+  function setText(el, v){
+    if(!el) return;
+    el.textContent = String(v ?? "");
   }
 
-  // BUGHUNT-P0: defensiv hantering om requireAuth inte stoppar exekvering.
-  // SCOPE: Vi gissar inte core-kontrakt — vi hanterar endast säkra signaler.
-  let _authResult = null;
-  try {
-    _authResult = window.HRApp.requireAuth({ allowRoles: ["ADMIN"] });
-  } catch (e) {
-    const sb = document.getElementById("statusBox");
-    sb.className = "card error";
-    sb.textContent = "Auth-guard kraschade i CORE. Kan inte fortsätta. (fail-closed)";
-    return;
-  }
-  // Om core returnerar en explicit "false" eller {ok:false} så stoppar vi hårt.
-  if (_authResult === false || (_authResult && typeof _authResult === "object" && _authResult.ok === false)) {
-    const sb = document.getElementById("statusBox");
-    sb.className = "card error";
-    sb.textContent = "Åtkomst nekad (requireAuth). (fail-closed)";
-    return;
-  }
-  // Om getAuth finns kan vi göra en extra roll-check utan att gissa mer än "role"-fält.
-  if (typeof window.HRApp.getAuth === "function") {
-    try {
-      const a = window.HRApp.getAuth();
-      const role = a && typeof a === "object" ? String(a.role || "") : "";
-      if (role && role !== "ADMIN") {
-        const sb = document.getElementById("statusBox");
-        sb.className = "card error";
-        sb.textContent = "Fel roll (" + role + "). ADMIN krävs. (fail-closed)";
-        return;
-      }
-    } catch {
-      const sb = document.getElementById("statusBox");
-      sb.className = "card error";
-      sb.textContent = "Kunde inte verifiera roll via getAuth. (fail-closed)";
+  function showLockBox(lines){
+    const box = $("#lockBox");
+    if(!box) return;
+    if(!lines || !lines.length){
+      box.style.display = "none";
+      box.textContent = "";
       return;
+    }
+    box.style.display = "block";
+    box.textContent = "";
+    const strong = document.createElement("strong");
+    strong.textContent = "Låst (fail-closed):";
+    box.appendChild(strong);
+
+    const ul = document.createElement("ul");
+    (lines || []).forEach(x => {
+      const li = document.createElement("li");
+      li.textContent = String(x ?? "");
+      ul.appendChild(li);
+    });
+    box.appendChild(ul);
+  }
+
+  function safeJsonParse(str){
+    if(typeof str !== "string" || !str) return { ok:true, value:null, corrupt:false };
+    try{
+      return { ok:true, value: JSON.parse(str), corrupt:false };
+    }catch{
+      return { ok:false, value:null, corrupt:true };
     }
   }
 
-  // ============================
-  // KEYS (LÅST)
-  // ============================
-  const TRAININGS_KEY = "AO-057_TRAININGS_V1";
-  const PLANS_KEY = "AO-060_PLANS_V1";
-
-  // ============================
-  // STATE
-  // ============================
-  let trainingsOk = false;
-  let trainings = []; // normalized published trainings with blocks
-  let plansOk = true;
-  let plans = []; // raw normalized for UI (safe subset)
-  let selectedPlanId = "";
-  let currentPlan = null; // UI model (editable copy)
-
-  // ============================
-  // DOM
-  // ============================
-  const statusBox = document.getElementById("statusBox");
-  const filterModule = document.getElementById("filterModule");
-  const filterArea = document.getElementById("filterArea");
-  const searchTitle = document.getElementById("searchTitle");
-  const trainingsBox = document.getElementById("trainingsBox");
-  const plansList = document.getElementById("plansList");
-  const timelineBox = document.getElementById("timelineBox");
-
-  const planTitle = document.getElementById("planTitle");
-  const planStatus = document.getElementById("planStatus");
-  const planMeta = document.getElementById("planMeta");
-
-  const btnNewPlan = document.getElementById("btnNewPlan");
-  const btnSavePlan = document.getElementById("btnSavePlan");
-  const btnVerifyPlan = document.getElementById("btnVerifyPlan");
-
-  // ============================
-  // HELPERS (fail-closed)
-  // ============================
-
-  function setStatus(type, msg) {
-    statusBox.className = "card " + (type || "");
-    statusBox.textContent = String(msg || "");
+  function readLocalRaw(key){
+    try{ return localStorage.getItem(String(key||"")); }catch{ return null; }
   }
 
-  function safeJsonParseFallback(raw) {
-    // BUGHUNT-P0: om HRApp.safeJsonParse saknas, fallbacka defensivt.
-    try {
-      return JSON.parse(raw);
-    } catch {
+  function formatISODateFromTs(ts){
+    const t = Number(ts);
+    if(!Number.isFinite(t) || t <= 0) return "—";
+    const d = new Date(t);
+    if(String(d) === "Invalid Date") return "—";
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const day = String(d.getDate()).padStart(2,"0");
+    return y + "-" + m + "-" + day;
+  }
+
+  // -----------------------------
+  // AUTH GUARD (LÅST)
+  // -----------------------------
+  function redirectLogin(err){
+    try{
+      const base = "../UI/UI-01-SKELETON.html";
+      window.location.replace(err ? (base + "?err=" + encodeURIComponent(String(err))) : base);
+    }catch{
+      window.location.href = "../UI/UI-01-SKELETON.html";
+    }
+  }
+
+  function mustAdmin(){
+    if(!window.HRApp || typeof window.HRApp.requireAuth !== "function" || typeof window.HRApp.getAuth !== "function"){
+      redirectLogin("core");
       return null;
     }
-  }
-
-  function safeParseLocalStorage(key) {
-    try {
-      const raw = localStorage.getItem(String(key || ""));
-      if (raw === null) return { ok: true, missing: true, data: null };
-
-      // BUGHUNT-P0: guard om HRApp.safeJsonParse saknas.
-      let parsed = null;
-      if (window.HRApp && typeof window.HRApp.safeJsonParse === "function") {
-        parsed = window.HRApp.safeJsonParse(raw);
-      } else {
-        parsed = safeJsonParseFallback(raw);
-      }
-
-      if (parsed === null) return { ok: false, error: "CORRUPT_JSON" };
-      return { ok: true, missing: false, data: parsed };
-    } catch {
-      return { ok: false, error: "READ_FAILED" };
+    const session = window.HRApp.requireAuth({ allowRoles:["ADMIN"] });
+    if(!session) return null; // core har redirectat fail-closed
+    const auth = window.HRApp.getAuth(session);
+    if(!auth || auth.isAuthed !== true || String(auth.role||"") !== "ADMIN"){
+      redirectLogin("role");
+      return null;
     }
+    return { session, auth };
   }
 
-  function isPlainObject(v) {
-    return !!v && typeof v === "object" && !Array.isArray(v);
-  }
+  const access = mustAdmin();
+  if(!access) return;
 
-  function normStr(v) {
-    return String(v ?? "").trim();
-  }
+  // Minimal identity line (no personal data beyond empNo)
+  setText($("#whoName"), String(access.auth.empNo || "—"));
+  setText($("#whoRole"), "admin");
 
-  function toInt(v) {
-    const n = (typeof v === "number") ? v : Number(v);
-    if (!Number.isFinite(n)) return null;
-    if (Math.floor(n) !== n) return null;
-    return n;
-  }
-
-  function genId(prefix) {
-    const p = String(prefix || "id_");
-    const t = Date.now().toString(16);
-    const r = Math.random().toString(16).slice(2, 10);
-    return p + t + "_" + r;
-  }
-
-  function pillClass(status) {
-    if (status === "active") return "pill active";
-    if (status === "archived") return "pill archived";
-    return "pill draft";
-  }
-
-  function isValidPlanStatus(s) {
-    return s === "draft" || s === "active" || s === "archived";
-  }
-
-  function sanitizePlansArray(input) {
-    // BUGHUNT-P0: schema-guard även i fallback-save för att undvika dataförgiftning.
-    if (!Array.isArray(input)) return { ok:false, error:"PLANS_NOT_ARRAY" };
-
-    const out = [];
-    for (let i = 0; i < input.length; i++) {
-      const p = input[i];
-      if (!isPlainObject(p)) return { ok:false, error:"PLAN_NOT_OBJECT" };
-
-      const id = normStr(p.id);
-      const title = normStr(p.title);
-      const status = normStr(p.status);
-      const createdAt = (typeof p.createdAt === "number" && Number.isFinite(p.createdAt)) ? p.createdAt : null;
-      const updatedAt = (typeof p.updatedAt === "number" && Number.isFinite(p.updatedAt)) ? p.updatedAt : null;
-
-      if (!id) return { ok:false, error:"PLAN_MISSING_ID" };
-      if (!isValidPlanStatus(status)) return { ok:false, error:"PLAN_BAD_STATUS" };
-      if (createdAt === null || updatedAt === null) return { ok:false, error:"PLAN_BAD_TIMESTAMPS" };
-
-      const itemsIn = Array.isArray(p.items) ? p.items : null;
-      if (itemsIn === null) return { ok:false, error:"PLAN_ITEMS_NOT_ARRAY" };
-
-      const itemsOut = [];
-      for (let j = 0; j < itemsIn.length; j++) {
-        const it = itemsIn[j];
-        if (!isPlainObject(it)) return { ok:false, error:"ITEM_NOT_OBJECT" };
-
-        const trainingId = normStr(it.trainingId);
-        const dayOffset = toInt(it.dayOffset);
-        const order = toInt(it.order);
-        const gateRequired = it.gateRequired;
-
-        if (!trainingId) return { ok:false, error:"ITEM_MISSING_TRAININGID" };
-        if (dayOffset === null || dayOffset < 0) return { ok:false, error:"ITEM_BAD_DAYOFFSET" };
-        if (order === null || order < 1) return { ok:false, error:"ITEM_BAD_ORDER" };
-        if (typeof gateRequired !== "boolean") return { ok:false, error:"ITEM_BAD_GATEREQUIRED" };
-
-        itemsOut.push({
-          trainingId: trainingId,
-          dayOffset: dayOffset,
-          order: order,
-          gateRequired: gateRequired === true
-        });
-      }
-
-      out.push({
-        id: id,
-        title: title,
-        status: status,
-        createdAt: createdAt,
-        updatedAt: updatedAt,
-        items: itemsOut
-      });
-    }
-
-    return { ok:true, data: out };
-  }
-
-  // ============================
-  // LOAD: Trainings (AO-057)
-  // ============================
-  function loadTrainings() {
-    trainingsOk = false;
-    trainings = [];
-
-    const res = safeParseLocalStorage(TRAININGS_KEY);
-    if (!res.ok) {
-      trainingsOk = false;
-      return { ok: false, error: "AO-057 korrupt/oläsbar" };
-    }
-    if (res.missing) {
-      trainingsOk = false;
-      return { ok: false, error: "AO-057 saknas" };
-    }
-    if (!Array.isArray(res.data)) {
-      trainingsOk = false;
-      return { ok: false, error: "AO-057 har fel format (inte array)" };
-    }
-
-    // Filter: published + must have id,module,area,title + blocks length>0
-    const out = [];
-    for (let i = 0; i < res.data.length; i++) {
-      const t = res.data[i];
-      if (!isPlainObject(t)) continue;
-
-      const id = normStr(t.id);
-      const module = normStr(t.module);
-      const area = normStr(t.area);
-      const title = normStr(t.title);
-      const status = normStr(t.status);
-
-      const blocks = t.blocks;
-      const hasBlocks = Array.isArray(blocks) && blocks.length > 0;
-
-      if (!id || !module || !area || !title) continue;
-      if (status !== "published") continue;
-      if (!hasBlocks) continue;
-
-      out.push({ id, module, area, title });
-    }
-
-    trainings = out;
-    trainingsOk = true;
-    return { ok: true };
-  }
-
-  function buildTrainingIndexById() {
-    const map = Object.create(null);
-    for (let i = 0; i < trainings.length; i++) map[trainings[i].id] = trainings[i];
-    return map;
-  }
-
-  // ============================
-  // LOAD: Plans (AO-060) via HRApp.readPlans if available (fail-closed if corrupt)
-  // ============================
-  function loadPlans() {
-    plansOk = true;
-    plans = [];
-
-    if (window.HRApp.readPlans && typeof window.HRApp.readPlans === "function") {
-      const r = window.HRApp.readPlans();
-      if (!r || r.ok !== true) {
-        plansOk = false;
-        return { ok: false, error: "AO-060 korrupt (readPlans fail-closed)" };
-      }
-      plans = Array.isArray(r.data) ? r.data : [];
-      return { ok: true };
-    }
-
-    // Fallback (should not happen if AO-1 is present): strict read.
-    const res = safeParseLocalStorage(PLANS_KEY);
-    if (!res.ok) { plansOk = false; return { ok:false, error:"AO-060 korrupt/oläsbar" }; }
-    if (res.missing) { plans = []; return { ok:true }; }
-    if (!Array.isArray(res.data)) { plansOk = false; return { ok:false, error:"AO-060 fel format (inte array)" }; }
-    plans = res.data;
-    return { ok:true };
-  }
-
-  // ============================
-  // UI: Filters
-  // ============================
-  function populateFilters() {
-    function opt(el, value, text) {
-      const o = document.createElement("option");
-      o.value = value;
-      o.textContent = text;
-      el.appendChild(o);
-    }
-
-    filterModule.innerHTML = "";
-    filterArea.innerHTML = "";
-
-    opt(filterModule, "", "Alla moduler");
-    opt(filterArea, "", "Alla områden");
-
-    const modules = Array.from(new Set(trainings.map(t => t.module))).sort();
-    const areas = Array.from(new Set(trainings.map(t => t.area))).sort();
-
-    for (const m of modules) opt(filterModule, m, m);
-    for (const a of areas) opt(filterArea, a, a);
-  }
-
-  function getTrainingFilterFn() {
-    const m = normStr(filterModule.value);
-    const a = normStr(filterArea.value);
-    const q = normStr(searchTitle.value).toLowerCase();
-
-    return function(t) {
-      if (m && t.module !== m) return false;
-      if (a && t.area !== a) return false;
-      if (q && !t.title.toLowerCase().includes(q)) return false;
-      return true;
-    };
-  }
-
-  // ============================
-  // UI: Render trainings list
-  // ============================
-  function renderTrainingsList() {
-    trainingsBox.innerHTML = "";
-
-    if (!trainingsOk) {
-      const e = document.createElement("div");
-      e.className = "error";
-      e.textContent = "Tillgängliga utbildningar kan inte laddas (fail-closed). Kontrollera AO-057_TRAININGS_V1.";
-      trainingsBox.appendChild(e);
+  function doLogout(){
+    if(window.HRApp && typeof window.HRApp.logout === "function"){
+      window.HRApp.logout();
       return;
     }
-
-    const fn = getTrainingFilterFn();
-    const filtered = trainings.filter(fn);
-
-    if (filtered.length === 0) {
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = "Inga matchande published-utbildningar.";
-      trainingsBox.appendChild(d);
-      return;
-    }
-
-    for (const t of filtered) {
-      const card = document.createElement("div");
-      card.className = "item";
-      card.setAttribute("role", "listitem");
-
-      const top = document.createElement("div");
-      top.className = "itemRow";
-
-      const left = document.createElement("div");
-      const line1 = document.createElement("div");
-      line1.className = "muted";
-      line1.textContent = t.module + " • " + t.area;
-      const line2 = document.createElement("div");
-      line2.textContent = t.title;
-      left.appendChild(line1);
-      left.appendChild(line2);
-
-      const right = document.createElement("div");
-      const btn = document.createElement("button");
-      btn.className = "smallbtn";
-      btn.textContent = "+ Lägg till i plan";
-      btn.disabled = !currentPlan || !trainingsOk || !plansOk;
-
-      btn.addEventListener("click", function(){
-        if (!currentPlan) { setStatus("error", "Ingen plan vald. Skapa eller välj en plan först."); return; }
-        if (!trainingsOk) { setStatus("error", "AO-057 saknas/korrupt. Tillägg blockeras (fail-closed)."); return; }
-        if (!plansOk) { setStatus("error", "AO-060 är korrupt. Ändringar blockeras (fail-closed)."); return; }
-
-        addItemToCurrentPlan(t.id);
-      });
-
-      right.appendChild(btn);
-
-      top.appendChild(left);
-      top.appendChild(right);
-      card.appendChild(top);
-
-      trainingsBox.appendChild(card);
-    }
+    // Read-only fallback: do not clear storage here, only redirect
+    redirectLogin("logout");
   }
 
-  // ============================
-  // UI: Plans list
-  // ============================
-  function attachPlanKeyboardActivation(el, onActivate) {
-    // BUGHUNT-P2: keyboard-åtkomst utan redesign
-    el.tabIndex = 0;
-    el.setAttribute("role", "button");
-    el.addEventListener("keydown", function(ev){
-      const k = ev.key;
-      if (k === "Enter" || k === " ") {
-        ev.preventDefault();
-        onActivate();
-      }
+  const navLogout = $("#navLogout");
+  if(navLogout){
+    navLogout.addEventListener("click", (e) => {
+      e.preventDefault();
+      doLogout();
     });
   }
 
-  function renderPlansList() {
-    plansList.innerHTML = "";
+  // -----------------------------
+  // DATA: TRAININGS (AO-057)
+  // -----------------------------
+  function normalizeTraining(row){
+    if(!row || typeof row !== "object") return null;
+    const module = String(row.module || "").trim();
+    const area = String(row.area || "").trim();
+    const title = String(row.title || "").trim();
+    const status = String(row.status || "").trim(); // verified | published | draft | ""
+    const updatedAt = Number(row.updatedAt);
 
-    if (!plansOk) {
-      const e = document.createElement("div");
-      e.className = "error";
-      e.textContent = "Plans kan inte laddas eftersom AO-060_PLANS_V1 är korrupt (fail-closed).";
-      plansList.appendChild(e);
-      return;
-    }
-
-    if (plans.length === 0) {
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = "Inga planer ännu. Klicka “Ny plan”.";
-      plansList.appendChild(d);
-      return;
-    }
-
-    for (const p of plans) {
-      const card = document.createElement("div");
-      card.className = "item";
-      card.setAttribute("role", "listitem");
-
-      const row = document.createElement("div");
-      row.className = "itemRow";
-
-      const left = document.createElement("div");
-      const t = document.createElement("div");
-      t.textContent = p.title || "(utan titel)";
-      const meta = document.createElement("div");
-      meta.className = "muted";
-      const count = Array.isArray(p.items) ? p.items.length : 0;
-      meta.textContent = "Items: " + count + " • id: " + String(p.id || "");
-      left.appendChild(t);
-      left.appendChild(meta);
-
-      const right = document.createElement("div");
-      const pill = document.createElement("span");
-      pill.className = pillClass(p.status);
-      pill.textContent = String(p.status || "draft");
-      right.appendChild(pill);
-
-      const activate = function(){
-        selectPlanById(String(p.id || ""));
-      };
-
-      card.addEventListener("click", activate);
-      attachPlanKeyboardActivation(card, activate);
-
-      row.appendChild(left);
-      row.appendChild(right);
-      card.appendChild(row);
-
-      plansList.appendChild(card);
-    }
-  }
-
-  // ============================
-  // PLAN: Normalization (UI-lager)
-  // ============================
-  function normalizePlanForUi(plan) {
-    if (!isPlainObject(plan)) return null;
-
-    const id = normStr(plan.id) || genId("p_");
-    const title = normStr(plan.title);
-    const statusRaw = normStr(plan.status) || "draft";
-    const status = (statusRaw === "draft" || statusRaw === "active" || statusRaw === "archived") ? statusRaw : "draft";
-    const createdAt = (typeof plan.createdAt === "number" && Number.isFinite(plan.createdAt)) ? plan.createdAt : Date.now();
-    const updatedAt = (typeof plan.updatedAt === "number" && Number.isFinite(plan.updatedAt)) ? plan.updatedAt : Date.now();
-
-    const itemsIn = Array.isArray(plan.items) ? plan.items : [];
-    const itemsOut = [];
-
-    // Normalize items and collect candidates
-    for (let i = 0; i < itemsIn.length; i++) {
-      const it = itemsIn[i];
-      if (!isPlainObject(it)) continue;
-
-      const trainingId = normStr(it.trainingId);
-      if (!trainingId) continue;
-
-      const dayOffset = toInt(it.dayOffset);
-      const safeDayOffset = (dayOffset === null || dayOffset < 0) ? 0 : dayOffset;
-
-      const order = toInt(it.order);
-      const gateRequired = (typeof it.gateRequired === "boolean") ? it.gateRequired : true;
-
-      itemsOut.push({
-        trainingId,
-        dayOffset: safeDayOffset,
-        order: (order === null || order < 1) ? null : order,
-        gateRequired
-      });
-    }
-
-    // Dedupe trainingId for UI (keep first)
-    // (Behålls oförändrat: ändring kan skapa framtida regressionsrisk)
-    const seen = new Set();
-    const deduped = [];
-    for (const it of itemsOut) {
-      if (seen.has(it.trainingId)) continue;
-      seen.add(it.trainingId);
-      deduped.push(it);
-    }
-
-    // Stable order generation:
-    // sort by provided order (null last), then dayOffset, then existing index
-    const withIdx = deduped.map((it, idx) => ({ it, idx }));
-    withIdx.sort((a, b) => {
-      const ao = a.it.order === null ? 999999 : a.it.order;
-      const bo = b.it.order === null ? 999999 : b.it.order;
-      if (ao !== bo) return ao - bo;
-      if (a.it.dayOffset !== b.it.dayOffset) return a.it.dayOffset - b.it.dayOffset;
-      return a.idx - b.idx;
-    });
-
-    const normalizedItems = withIdx.map((x, i) => ({
-      trainingId: x.it.trainingId,
-      dayOffset: x.it.dayOffset,
-      order: i + 1,
-      gateRequired: x.it.gateRequired
-    }));
-
-    // Active but empty => warn + switch UI to draft (no write until save)
-    let statusUi = status;
-    if (statusUi === "active" && normalizedItems.length === 0) statusUi = "draft";
+    // Minimal viability: title required (else useless in list)
+    if(!title) return null;
 
     return {
-      id,
+      module,
+      area,
       title,
-      status: statusUi,
-      createdAt,
-      updatedAt,
-      items: normalizedItems
+      status,
+      updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : null
     };
   }
 
-  function getPlanById(id) {
-    for (let i = 0; i < plans.length; i++) {
-      if (String(plans[i].id || "") === String(id || "")) return plans[i];
+  function loadTrainings(){
+    const raw = readLocalRaw(TRAININGS_KEY);
+    if(raw === null){
+      return { ok:true, list:[], issues:["Ingen utbildningsdata hittades (AO-057 saknas)."], missing:true };
     }
-    return null;
+    const parsed = safeJsonParse(raw);
+    if(!parsed.ok){
+      return { ok:false, list:[], issues:["Ingen utbildningsdata hittades (AO-057 är korrupt JSON)."], missing:false };
+    }
+    const v = parsed.value;
+    if(v === null || v === undefined){
+      return { ok:true, list:[], issues:["Ingen utbildningsdata hittades (AO-057 är tom)."], missing:true };
+    }
+    if(!Array.isArray(v)){
+      return { ok:false, list:[], issues:["Ingen utbildningsdata hittades (AO-057 har fel typ; förväntar array)."], missing:false };
+    }
+
+    const out = [];
+    for(const row of v){
+      const n = normalizeTraining(row);
+      if(n) out.push(n);
+    }
+
+    // Info om att rader kan ha filtrerats bort (read-only, men viktigt)
+    const dropped = v.length - out.length;
+    const issues = [];
+    if(dropped > 0){
+      issues.push(dropped + " rad(er) ignorerades (saknar titel eller ogiltigt format).");
+    }
+
+    return { ok:true, list:out, issues, missing:false };
   }
 
-  function selectPlanById(id) {
-    if (!plansOk) { setStatus("error", "AO-060 är korrupt. Kan inte välja plan (fail-closed)."); return; }
-    const raw = getPlanById(id);
-    if (!raw) { setStatus("error", "Plan hittades inte."); return; }
+  // -----------------------------
+  // UI STATE
+  // -----------------------------
+  const state = {
+    filter: "all", // all | verified | published | draft
+    search: ""
+  };
 
-    selectedPlanId = String(raw.id || "");
-    currentPlan = normalizePlanForUi(raw);
-    if (!currentPlan) { setStatus("error", "Plan kunde inte normaliseras (fail-closed)."); return; }
-
-    // Warn if we had to downgrade active->draft
-    if (String(raw.status || "") === "active" && currentPlan.items.length === 0) {
-      setStatus("warn", "Plan var 'active' men saknar items. UI har satt status till 'draft'. (Ingen write förrän du sparar)");
-    } else {
-      setStatus("ok", "Plan laddad: " + (currentPlan.title || "(utan titel)"));
-    }
-
-    syncPlanFormFromState();
-    renderTrainingsList();
-    renderTimeline();
+  function setActiveFilterButton(){
+    const map = {
+      all: $("#btnAll"),
+      verified: $("#btnVerified"),
+      published: $("#btnPublished"),
+      draft: $("#btnDraft")
+    };
+    Object.keys(map).forEach(k => {
+      const btn = map[k];
+      if(!btn) return;
+      if(k === state.filter) btn.classList.add("active");
+      else btn.classList.remove("active");
+    });
   }
 
-  function syncPlanFormFromState() {
-    if (!currentPlan) {
-      planTitle.value = "";
-      planStatus.value = "draft";
-      planMeta.textContent = "—";
-      return;
-    }
-    planTitle.value = currentPlan.title || "";
-    planStatus.value = currentPlan.status || "draft";
-    planMeta.textContent = "id: " + currentPlan.id + " • items: " + currentPlan.items.length;
+  function statusBucket(s){
+    const st = String(s||"").trim();
+    if(st === "verified") return "verified";
+    if(st === "published") return "published";
+    if(st === "draft") return "draft";
+    return "draft"; // saknas/okänd => utkast/okänd bucket
   }
 
-  function syncStateFromForm() {
-    if (!currentPlan) return;
-    currentPlan.title = normStr(planTitle.value);
-    currentPlan.status = normStr(planStatus.value) || "draft";
+  function statusPill(st){
+    const s = String(st||"").trim();
+    const span = document.createElement("span");
+    if(s === "verified"){
+      span.className = "pill ok";
+      span.textContent = "verified";
+      return span;
+    }
+    if(s === "published"){
+      span.className = "pill ok";
+      span.textContent = "published";
+      return span;
+    }
+    if(s === "draft"){
+      span.className = "pill neutral";
+      span.textContent = "draft";
+      return span;
+    }
+    span.className = "pill warn";
+    span.textContent = s ? s : "unknown";
+    return span;
   }
 
-  // ============================
-  // Timeline editing
-  // ============================
-  function addItemToCurrentPlan(trainingId) {
-    if (!currentPlan) return;
+  function clearNode(el){
+    while(el && el.firstChild) el.removeChild(el.firstChild);
+  }
 
-    // Duplicate prevention
-    for (let i = 0; i < currentPlan.items.length; i++) {
-      if (currentPlan.items[i].trainingId === trainingId) {
-        setStatus("warn", "Dubblett: training finns redan i plan. (Inget tillagt)");
-        return;
-      }
+  function renderTable(list, issues){
+    const tbody = $("#tbody");
+    const empty = $("#emptyState");
+    const meta = $("#metaLine");
+
+    if(!tbody || !empty || !meta) return;
+
+    clearNode(tbody);
+    empty.style.display = "none";
+    empty.textContent = "";
+
+    // filter + search
+    const q = String(state.search||"").toLowerCase().trim();
+    let out = Array.isArray(list) ? list.slice() : [];
+
+    if(state.filter !== "all"){
+      out = out.filter(t => statusBucket(t.status) === state.filter);
+    }
+    if(q){
+      out = out.filter(t => String(t.title||"").toLowerCase().includes(q));
     }
 
-    // Fail-closed: must exist and be published in trainings list
-    const idx = trainings.findIndex(t => t.id === trainingId);
-    if (idx < 0) {
-      setStatus("error", "Training finns inte i published-listan (fail-closed).");
-      return;
-    }
-
-    const nextOrder = currentPlan.items.length + 1;
-    currentPlan.items.push({
-      trainingId: trainingId,
-      dayOffset: 0,
-      order: nextOrder,
-      gateRequired: true
+    // stable sort: module, area, title
+    out.sort((a,b) => {
+      const am = String(a.module||"");
+      const bm = String(b.module||"");
+      if(am !== bm) return am.localeCompare(bm, "sv");
+      const aa = String(a.area||"");
+      const ba = String(b.area||"");
+      if(aa !== ba) return aa.localeCompare(ba, "sv");
+      return String(a.title||"").localeCompare(String(b.title||""), "sv");
     });
 
-    setStatus("ok", "Tillagd i plan.");
-    syncPlanFormFromState();
-    renderTimeline();
-  }
+    // meta line
+    const parts = [];
+    parts.push("Visar " + out.length + " / " + (Array.isArray(list) ? list.length : 0) + " utbildning(ar).");
+    if(issues && issues.length){
+      parts.push("Info: " + issues.join(" • "));
+    }
+    meta.textContent = parts.join(" ");
 
-  function renumberOrder() {
-    if (!currentPlan) return;
-    // Stable: keep current array order and assign 1..n
-    for (let i = 0; i < currentPlan.items.length; i++) currentPlan.items[i].order = i + 1;
-  }
-
-  function moveItem(index, dir) {
-    if (!currentPlan) return;
-    const i = index;
-    const j = i + dir;
-    if (j < 0 || j >= currentPlan.items.length) return;
-
-    const tmp = currentPlan.items[i];
-    currentPlan.items[i] = currentPlan.items[j];
-    currentPlan.items[j] = tmp;
-
-    renumberOrder();
-    renderTimeline();
-  }
-
-  function removeItem(index) {
-    if (!currentPlan) return;
-    currentPlan.items.splice(index, 1);
-    renumberOrder();
-    renderTimeline();
-  }
-
-  function renderTimeline() {
-    timelineBox.innerHTML = "";
-
-    if (!currentPlan) {
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = "Ingen plan vald. Skapa en ny plan eller välj en befintlig.";
-      timelineBox.appendChild(d);
+    if(out.length === 0){
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = 5;
+      td.className = "muted2";
+      td.textContent = "Inga träffar för valt filter/sök.";
+      tr.appendChild(td);
+      tbody.appendChild(tr);
       return;
     }
 
-    const idxById = buildTrainingIndexById();
+    out.forEach(t => {
+      const tr = document.createElement("tr");
 
-    // Sort items: order then dayOffset (per spec)
-    const itemsSorted = currentPlan.items.slice().sort((a,b) => {
-      const ao = toInt(a.order) ?? 999999;
-      const bo = toInt(b.order) ?? 999999;
-      if (ao !== bo) return ao - bo;
-      const ad = toInt(a.dayOffset) ?? 999999;
-      const bd = toInt(b.dayOffset) ?? 999999;
-      return ad - bd;
+      const tdM = document.createElement("td");
+      tdM.textContent = t.module || "—";
+      tr.appendChild(tdM);
+
+      const tdA = document.createElement("td");
+      tdA.textContent = t.area || "—";
+      tr.appendChild(tdA);
+
+      const tdT = document.createElement("td");
+      tdT.textContent = t.title || "—";
+      tr.appendChild(tdT);
+
+      const tdS = document.createElement("td");
+      tdS.appendChild(statusPill(String(t.status||"").trim()));
+      tr.appendChild(tdS);
+
+      const tdU = document.createElement("td");
+      tdU.textContent = t.updatedAt ? formatISODateFromTs(t.updatedAt) : "—";
+      tr.appendChild(tdU);
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderKpis(list, loadMeta){
+    const total = Array.isArray(list) ? list.length : 0;
+    let verified = 0, published = 0, draft = 0;
+
+    (list || []).forEach(t => {
+      const b = statusBucket(t.status);
+      if(b === "verified") verified++;
+      else if(b === "published") published++;
+      else draft++;
     });
 
-    // Keep as-is (risk-minimering): sidan bygger intern ordning från sort och renumrerar.
-    currentPlan.items = itemsSorted.map(x => ({...x}));
-    renumberOrder();
-    syncPlanFormFromState();
+    setText($("#kTotal"), total);
+    setText($("#kVerified"), verified);
+    setText($("#kPublished"), published);
+    setText($("#kDraft"), draft);
 
-    if (currentPlan.items.length === 0) {
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = "Tidsaxeln är tom. Lägg till utbildningar från vänster.";
-      timelineBox.appendChild(d);
+    // hint under total: whether key missing/corrupt etc
+    const hint = $("#kTotalHint");
+    if(!hint) return;
+
+    if(loadMeta && loadMeta.ok !== true){
+      hint.textContent = "AO-057 korrupt / fel typ";
       return;
     }
+    if(loadMeta && loadMeta.missing){
+      hint.textContent = "AO-057 saknas/tom";
+      return;
+    }
+    hint.textContent = "Källa: AO-057_TRAININGS_V1";
+  }
 
-    for (let i = 0; i < currentPlan.items.length; i++) {
-      const it = currentPlan.items[i];
-      const t = idxById[it.trainingId] || null;
+  // -----------------------------
+  // INIT / RENDER
+  // -----------------------------
+  const lockReasons = [];
+  const res = loadTrainings();
 
-      const card = document.createElement("div");
-      card.className = "item";
-      card.setAttribute("role", "listitem");
-
-      const row = document.createElement("div");
-      row.className = "timelineRow";
-
-      // dayOffset input
-      const left = document.createElement("div");
-      const lab = document.createElement("label");
-      lab.textContent = "Dag (offset)";
-      lab.setAttribute("for", "day_" + i);
-      const inp = document.createElement("input");
-      inp.type = "number";
-      inp.min = "0";
-      inp.step = "1";
-      inp.id = "day_" + i;
-      inp.value = String(it.dayOffset ?? 0);
-      inp.addEventListener("change", function(){
-        const v = toInt(inp.value);
-        if (v === null || v < 0) {
-          inp.value = String(it.dayOffset ?? 0);
-          setStatus("warn", "dayOffset måste vara heltal ≥ 0. (Inget ändrat)");
-          return;
-        }
-        it.dayOffset = v;
-        renderTimeline();
-      });
-      left.appendChild(lab);
-      left.appendChild(inp);
-
-      // meta
-      const mid = document.createElement("div");
-      mid.className = "timelineMeta";
-      const line1 = document.createElement("div");
-      line1.className = "muted";
-      if (t) line1.textContent = t.module + " • " + t.area;
-      else line1.textContent = "Okänd trainingId (fail-closed vid spara)";
-      const line2 = document.createElement("div");
-      line2.textContent = t ? t.title : ("trainingId: " + it.trainingId);
-      const line3 = document.createElement("div");
-      line3.className = "muted";
-      line3.textContent = "order: " + String(it.order);
-
-      // gateRequired (nivå 1: tillåten toggle, default true)
-      const gateWrap = document.createElement("div");
-      gateWrap.style.marginTop = "6px";
-      const gateLabel = document.createElement("label");
-      gateLabel.style.display = "inline-flex";
-      gateLabel.style.alignItems = "center";
-      gateLabel.style.gap = "8px";
-      const gate = document.createElement("input");
-      gate.type = "checkbox";
-      gate.checked = (it.gateRequired === true);
-      gate.addEventListener("change", function(){
-        it.gateRequired = gate.checked === true;
-      });
-      const gateText = document.createElement("span");
-      gateText.textContent = "gateRequired";
-      gateLabel.appendChild(gate);
-      gateLabel.appendChild(gateText);
-      gateWrap.appendChild(gateLabel);
-
-      mid.appendChild(line1);
-      mid.appendChild(line2);
-      mid.appendChild(line3);
-      mid.appendChild(gateWrap);
-
-      // actions
-      const right = document.createElement("div");
-      right.className = "rightActions";
-      const up = document.createElement("button");
-      up.className = "smallbtn";
-      up.textContent = "↑";
-      up.disabled = i === 0;
-      up.addEventListener("click", function(){ moveItem(i, -1); });
-
-      const down = document.createElement("button");
-      down.className = "smallbtn";
-      down.textContent = "↓";
-      down.disabled = i === currentPlan.items.length - 1;
-      down.addEventListener("click", function(){ moveItem(i, +1); });
-
-      const del = document.createElement("button");
-      del.className = "smallbtn danger";
-      del.textContent = "Ta bort";
-      del.addEventListener("click", function(){ removeItem(i); });
-
-      right.appendChild(up);
-      right.appendChild(down);
-      right.appendChild(del);
-
-      row.appendChild(left);
-      row.appendChild(mid);
-      row.appendChild(right);
-
-      card.appendChild(row);
-      timelineBox.appendChild(card);
+  // Fail-closed display only (ADMIN is ok already)
+  if(!res.ok){
+    lockReasons.push(...(res.issues || ["Ingen utbildningsdata hittades."]));
+  }else{
+    // Not a lock: just info
+    if(res.issues && res.issues.length){
+      // show in lockbox as "info" is okay; keep consistent UI
+      // but do not disable; it's still read-only and safe.
+      // We keep it as a visible notice.
+      lockReasons.push(...res.issues);
+    }
+    if(res.missing && res.issues && res.issues.length){
+      lockReasons.push(...res.issues);
     }
   }
 
-  // ============================
-  // VALIDATION (save / verify)
-  // ============================
-  function validateCurrentPlanBeforeSave(setActiveOnVerify) {
-    if (!currentPlan) return { ok:false, error:"Ingen plan vald" };
-    if (!trainingsOk) return { ok:false, error:"AO-057 saknas/korrupt — tillägg/spar blockeras (fail-closed)" };
-    if (!plansOk) return { ok:false, error:"AO-060 korrupt — spar blockeras (fail-closed)" };
+  showLockBox(lockReasons);
 
-    syncStateFromForm();
+  // If data is truly unreadable (res.ok=false), disable controls but do not crash
+  const controlsDisabled = (res.ok !== true);
 
-    const title = normStr(currentPlan.title);
-    if (title.length < 2) return { ok:false, error:"Titel måste vara minst 2 tecken" };
+  const btnAll = $("#btnAll");
+  const btnVerified = $("#btnVerified");
+  const btnPublished = $("#btnPublished");
+  const btnDraft = $("#btnDraft");
+  const searchTitle = $("#searchTitle");
 
-    const st = normStr(currentPlan.status);
-    if (st !== "draft" && st !== "active" && st !== "archived") return { ok:false, error:"Ogiltig status" };
+  if(btnAll) btnAll.disabled = controlsDisabled;
+  if(btnVerified) btnVerified.disabled = controlsDisabled;
+  if(btnPublished) btnPublished.disabled = controlsDisabled;
+  if(btnDraft) btnDraft.disabled = controlsDisabled;
+  if(searchTitle) searchTitle.disabled = controlsDisabled;
 
-    // If verify: we attempt to set active if valid
-    const requireItems = (setActiveOnVerify === true) ? true : (st === "active");
-    if (requireItems && currentPlan.items.length < 1) return { ok:false, error:"Active kräver minst 1 item" };
-
-    const idxById = buildTrainingIndexById();
-
-    // Validate items:
-    const seenTraining = new Set();
-    const seenOrder = new Set();
-
-    for (let i = 0; i < currentPlan.items.length; i++) {
-      const it = currentPlan.items[i];
-      const trainingId = normStr(it.trainingId);
-      if (!trainingId) return { ok:false, error:"Item saknar trainingId" };
-
-      // Must exist & be published (trainings list is already published-filtered)
-      if (!idxById[trainingId]) return { ok:false, error:"Item refererar trainingId som ej är published/ok: " + trainingId };
-
-      if (seenTraining.has(trainingId)) return { ok:false, error:"Dubblett trainingId i plan" };
-      seenTraining.add(trainingId);
-
-      const dayOffset = toInt(it.dayOffset);
-      if (dayOffset === null || dayOffset < 0) return { ok:false, error:"dayOffset måste vara heltal ≥ 0" };
-
-      const order = toInt(it.order);
-      if (order === null || order < 1) return { ok:false, error:"order måste vara heltal ≥ 1" };
-      if (seenOrder.has(order)) return { ok:false, error:"order måste vara unik per plan" };
-      seenOrder.add(order);
-
-      if (typeof it.gateRequired !== "boolean") return { ok:false, error:"gateRequired måste vara boolean" };
+  if(controlsDisabled){
+    renderKpis([], res);
+    renderTable([], []);
+    const empty = $("#emptyState");
+    if(empty){
+      empty.style.display = "block";
+      empty.textContent = "Ingen utbildningsdata hittades (AO-057 saknas eller är korrupt).";
     }
-
-    return { ok:true };
+    return;
   }
 
-  // ============================
-  // SAVE (writes AO-060 only)
-  // ============================
-  function commitPlanToPlansArray(nextPlan) {
-    // Replace by id or append
-    const out = plans.slice();
-    let idx = -1;
-    for (let i = 0; i < out.length; i++) {
-      if (String(out[i].id || "") === String(nextPlan.id || "")) { idx = i; break; }
-    }
-    if (idx >= 0) out[idx] = nextPlan;
-    else out.push(nextPlan);
-    return out;
+  const list = res.list || [];
+  renderKpis(list, res);
+  setActiveFilterButton();
+  renderTable(list, res.issues || []);
+
+  // -----------------------------
+  // EVENTS (guarded)
+  // -----------------------------
+  function setFilter(f){
+    state.filter = f;
+    setActiveFilterButton();
+    renderTable(list, res.issues || []);
   }
 
-  function saveAllPlans(outArray) {
-    // Schema-guard alltid innan write (även om HRApp.savePlans finns)
-    const cleaned = sanitizePlansArray(outArray);
-    if (!cleaned.ok) return { ok:false, error:"SCHEMA_GUARD:" + cleaned.error };
+  if(btnAll) btnAll.addEventListener("click", () => setFilter("all"));
+  if(btnVerified) btnVerified.addEventListener("click", () => setFilter("verified"));
+  if(btnPublished) btnPublished.addEventListener("click", () => setFilter("published"));
+  if(btnDraft) btnDraft.addEventListener("click", () => setFilter("draft"));
 
-    // Use HRApp.savePlans if available (strict schema + fail-closed)
-    if (window.HRApp.savePlans && typeof window.HRApp.savePlans === "function") {
-      const r = window.HRApp.savePlans(cleaned.data);
-      if (!r || r.ok !== true) return { ok:false, error: (r && r.error) ? r.error : "WRITE_FAILED" };
-      return { ok:true };
-    }
-
-    // Fallback strict write
-    try {
-      localStorage.setItem(PLANS_KEY, JSON.stringify(cleaned.data));
-      return { ok:true };
-    } catch {
-      return { ok:false, error:"WRITE_FAILED" };
-    }
+  if(searchTitle){
+    searchTitle.addEventListener("input", () => {
+      state.search = String(searchTitle.value || "");
+      renderTable(list, res.issues || []);
+    });
   }
-
-  function onSaveClicked() {
-    const v = validateCurrentPlanBeforeSave(false);
-    if (!v.ok) { setStatus("error", v.error); return; }
-
-    const now = Date.now();
-    const rawExisting = getPlanById(currentPlan.id);
-    const createdAt = rawExisting && typeof rawExisting.createdAt === "number" ? rawExisting.createdAt : now;
-
-    // Ensure internal items order is consistent
-    currentPlan.items.sort((a,b) => (toInt(a.order) ?? 999999) - (toInt(b.order) ?? 999999));
-    renumberOrder();
-
-    const toSave = {
-      id: String(currentPlan.id),
-      title: String(currentPlan.title),
-      status: String(currentPlan.status),
-      createdAt: Number(createdAt),
-      updatedAt: Number(now),
-      items: currentPlan.items.map(it => ({
-        trainingId: String(it.trainingId),
-        dayOffset: Number(toInt(it.dayOffset) ?? 0),
-        order: Number(toInt(it.order) ?? 1),
-        gateRequired: it.gateRequired === true
-      }))
-    };
-
-    const next = commitPlanToPlansArray(toSave);
-    const wr = saveAllPlans(next);
-    if (!wr.ok) { setStatus("error", "Spara misslyckades (fail-closed): " + wr.error); return; }
-
-    // Reload in-memory plans from storage to reflect canonical normalization
-    const lp = loadPlans();
-    if (!lp.ok) { setStatus("warn", "Sparat, men kunde inte läsa tillbaka plans (AO-060 korrupt?)"); return; }
-
-    setStatus("ok", "Sparat.");
-    renderPlansList();
-    selectPlanById(toSave.id);
-  }
-
-  function onVerifyClicked() {
-    const v = validateCurrentPlanBeforeSave(true);
-    if (!v.ok) { setStatus("error", "Verifiering misslyckades: " + v.error); return; }
-
-    // Only changes status in UI; write happens on Save (explicit)
-    syncStateFromForm();
-    currentPlan.status = "active";
-    planStatus.value = "active";
-    setStatus("ok", "Verifiering OK. Status satt till 'active' i UI. Klicka Spara för att skriva.");
-  }
-
-  // ============================
-  // NEW PLAN
-  // ============================
-  function newPlan() {
-    if (!plansOk) { setStatus("error", "AO-060 är korrupt. Ny plan blockeras (fail-closed)."); return; }
-
-    const now = Date.now();
-    const id = genId("p_");
-    currentPlan = {
-      id: id,
-      title: "",
-      status: "draft",
-      createdAt: now,
-      updatedAt: now,
-      items: []
-    };
-    selectedPlanId = id;
-
-    setStatus("ok", "Ny plan skapad (ej sparad än).");
-    syncPlanFormFromState();
-    renderTimeline();
-    renderTrainingsList();
-  }
-
-  // ============================
-  // EVENTS
-  // ============================
-  btnNewPlan.addEventListener("click", newPlan);
-  btnSavePlan.addEventListener("click", onSaveClicked);
-  btnVerifyPlan.addEventListener("click", onVerifyClicked);
-
-  planTitle.addEventListener("input", function(){ if (currentPlan) { currentPlan.title = normStr(planTitle.value); }});
-  planStatus.addEventListener("change", function(){ if (currentPlan) { currentPlan.status = normStr(planStatus.value); }});
-
-  filterModule.addEventListener("change", renderTrainingsList);
-  filterArea.addEventListener("change", renderTrainingsList);
-  searchTitle.addEventListener("input", renderTrainingsList);
-
-  // ============================
-  // INIT
-  // ============================
-  (function init(){
-    const tRes = loadTrainings();
-    const pRes = loadPlans();
-
-    if (!tRes.ok && !pRes.ok) setStatus("error", (tRes.error || "") + " • " + (pRes.error || ""));
-    else if (!pRes.ok) setStatus("error", pRes.error);
-    else if (!tRes.ok) setStatus("warn", tRes.error + " (Tillägg blockeras)");
-    else setStatus("ok", "Redo.");
-
-    if (trainingsOk) populateFilters();
-    renderTrainingsList();
-    renderPlansList();
-
-    // Auto-select first plan if exists
-    if (plansOk && plans.length > 0) {
-      const firstId = String(plans[0].id || "");
-      if (firstId) selectPlanById(firstId);
-    } else {
-      currentPlan = null;
-      syncPlanFormFromState();
-      renderTimeline();
-    }
-
-    // Disable actions if fail-closed on plans
-    if (!plansOk) {
-      btnNewPlan.disabled = true;
-      btnSavePlan.disabled = true;
-      btnVerifyPlan.disabled = true;
-    }
-  })();
 
 })();
 </script>
+
+<!-- ============================================================
+Testnoteringar (browser):
+1) Öppna /admin/onboard-plans.html som ADMIN -> sida laddar, KPI + lista visas.
+2) Öppna utan session -> core redirect fail-closed.
+3) Öppna som icke-ADMIN -> redirect (?err=role) fail-closed.
+4) Ta bort AO-057_TRAININGS_V1 -> visar "Ingen utbildningsdata hittades", inga crashes.
+5) Sätt AO-057 till trasig JSON -> samma fail-closed.
+6) Verifiera filterknappar + sök filtrerar listan, inga writes sker.
+============================================================ -->
 </body>
 </html>
-
