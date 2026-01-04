@@ -1,7 +1,8 @@
 <!-- ============================================================
-AO-ADMIN-REBUILD-02 (PATCH) | FIL-ID: admin/packages-block.html
+AO-ADMIN-REBUILD-02 (PATCH v1.1) | FIL-ID: admin/packages-block.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN – Schema-tolerant Blockeditor (TRAININGS) för AO-057_TRAININGS_V1
+- Visar ENDAST “färdiga” utbildningar = status: published + blocks.length > 0
 - Läser/redigerar/sparar blocks[] oavsett Schema A (kind/taskAnswer/...) eller Schema B (type/task/question)
 - Preserve format: ändra bara fält vi editerar, lämna resten
 
@@ -97,7 +98,10 @@ POLICY (LÅST):
     <div class="grid">
       <section class="card" aria-label="Välj utbildning">
         <h2>Välj utbildning</h2>
-        <p class="hint">Filtrera: Modul → Område → Utbildning. När du väljer utbildning laddas dess block för redigering.</p>
+        <p class="hint">
+          Visar endast <strong>färdiga</strong> utbildningar: <strong>status=published</strong> och <strong>minst 1 block</strong>.
+          Filtrera: Modul → Område → Utbildning. När du väljer utbildning laddas dess block för redigering.
+        </p>
 
         <div id="msgBox" class="error" style="display:none;"></div>
 
@@ -179,6 +183,7 @@ POLICY (LÅST):
   <script>
     // ============================================================
     // GUARD/STORAGE/XSS: Fail-closed + schema-tolerant + preserve format
+    // + FILTER: endast färdiga utbildningar (published + blocks>0)
     // ============================================================
 
     const KEY_AUTH = "AO-001_LOGIN_V1";
@@ -304,7 +309,6 @@ POLICY (LÅST):
       safeText(roleBadge, "Roll: " + String(AUTH?.role ?? "?"));
 
       if (!isAdminOnly(AUTH)) {
-        // Fail-closed: inga verktyg om fel roll
         showError("Otillräcklig behörighet. Den här sidan är endast för ADMIN.");
         return false;
       }
@@ -348,6 +352,22 @@ POLICY (LÅST):
       return true;
     }
 
+    // ==========================
+    // FILTER: endast färdiga trainings
+    // ==========================
+    function isFinishedTraining(t) {
+      // "färdig" = status: published + minst 1 block
+      if (!t || typeof t !== "object") return false;
+      const status = String(t.status ?? "").trim().toLowerCase();
+      const blocksCount = Array.isArray(t.blocks) ? t.blocks.length : 0;
+      return status === "published" && blocksCount > 0;
+    }
+
+    function getFinishedTrainings() {
+      if (!Array.isArray(TRAININGS)) return [];
+      return TRAININGS.filter(isFinishedTraining);
+    }
+
     function uniqSorted(values) {
       const set = new Set();
       for (const v of values) {
@@ -374,20 +394,23 @@ POLICY (LÅST):
     }
 
     function buildFilters() {
-      // Modul options
-      const modules = uniqSorted(TRAININGS.map(t => t.module));
+      const finished = getFinishedTrainings();
+      const modules = uniqSorted(finished.map(t => t.module));
       setSelectOptions(filterModule, modules.map(m => ({ value: m, label: m })), "Välj modul");
 
-      // Reset downstream
       setSelectOptions(filterArea, [], "Välj område");
       setSelectOptions(filterTraining, [], "Välj utbildning");
+
+      if (modules.length === 0) {
+        showError("Inga färdiga utbildningar hittades (kräver status=published och minst 1 block). Gå till Utbildningar och publicera.");
+      }
     }
 
     function getFilteredTrainings() {
       const m = filterModule.value.trim();
       const a = filterArea.value.trim();
 
-      let arr = TRAININGS.slice();
+      let arr = getFinishedTrainings();
       if (m) arr = arr.filter(t => String(t.module ?? "").trim() === m);
       if (a) arr = arr.filter(t => String(t.area ?? "").trim() === a);
       return arr;
@@ -395,7 +418,8 @@ POLICY (LÅST):
 
     function rebuildAreaOptions() {
       const m = filterModule.value.trim();
-      const arr = TRAININGS.slice().filter(t => !m || String(t.module ?? "").trim() === m);
+      const base = getFinishedTrainings();
+      const arr = base.filter(t => !m || String(t.module ?? "").trim() === m);
       const areas = uniqSorted(arr.map(t => t.area));
       setSelectOptions(filterArea, areas.map(x => ({ value: x, label: x })), "Välj område");
       filterArea.value = "";
@@ -405,10 +429,13 @@ POLICY (LÅST):
       const arr = getFilteredTrainings();
 
       const opts = arr
-        .map(t => ({
-          value: String(t.id),
-          label: String(t.title ?? "(utan titel)") + "  ·  " + String(t.status ?? "")
-        }))
+        .map(t => {
+          const blocksCount = Array.isArray(t.blocks) ? t.blocks.length : 0;
+          return {
+            value: String(t.id),
+            label: String(t.title ?? "(utan titel)") + "  ·  published  ·  " + blocksCount + " block"
+          };
+        })
         .sort((a,b) => a.label.localeCompare(b.label, "sv"));
 
       setSelectOptions(filterTraining, opts, "Välj utbildning");
@@ -417,7 +444,8 @@ POLICY (LÅST):
 
     function findTrainingById(id) {
       if (!id) return null;
-      return TRAININGS.find(t => String(t.id) === String(id)) || null;
+      // Viktigt: välj även om training senare blivit "draft" (men vi listar bara färdiga).
+      return (Array.isArray(TRAININGS) ? TRAININGS : []).find(t => String(t.id) === String(id)) || null;
     }
 
     function renderTrainingMeta(t) {
@@ -499,7 +527,6 @@ POLICY (LÅST):
     }
 
     function getKind(b) {
-      // A) Typdetektion: kind -> type -> info
       if (b && typeof b === "object") {
         if ("kind" in b && b.kind != null && String(b.kind).trim() !== "") return normalizeKindValue(b.kind);
         if ("type" in b && b.type != null && String(b.type).trim() !== "") return normalizeKindValue(b.type);
@@ -508,7 +535,6 @@ POLICY (LÅST):
     }
 
     function isSchemaA(b) {
-      // Schema A: kind/taskAnswer/scaleMin/scaleMax/questionAnswer/options
       if (!b || typeof b !== "object") return false;
       return ("kind" in b) || ("taskAnswer" in b) || ("questionAnswer" in b) || ("options" in b) || ("scaleMin" in b) || ("scaleMax" in b);
     }
@@ -670,7 +696,7 @@ POLICY (LÅST):
         const split = document.createElement("div");
         split.className = "split";
 
-        // B) Render – title/text (finns i båda)
+        // title/text (båda)
         const fTitle = document.createElement("div");
         fTitle.className = "field";
         const lTitle = document.createElement("label");
@@ -708,7 +734,7 @@ POLICY (LÅST):
         split.appendChild(fText);
         body.appendChild(split);
 
-        // C) Render – Task-config (schema-tolerant, preserve format)
+        // Task-config
         if (kind === "task" || kind === "both") {
           const section = document.createElement("div");
           section.style.marginTop = "10px";
@@ -735,9 +761,7 @@ POLICY (LÅST):
 
             sAns.addEventListener("change", () => {
               b.taskAnswer = schemaA_taskAnswerValue(sAns.value);
-              // Preserve format: skapa inte nya fält utöver schema A:s egna
               if (b.taskAnswer === "scale") {
-                // ensure min/max keys exist (schema A keys)
                 if (!hasOwn(b, "scaleMin")) b.scaleMin = 1;
                 if (!hasOwn(b, "scaleMax")) b.scaleMax = 5;
                 b.scaleMin = clampInt(b.scaleMin, 1, 10, 1);
@@ -801,7 +825,6 @@ POLICY (LÅST):
               mm.appendChild(fMax);
               section.appendChild(mm);
 
-              // Labels only if they already exist (preserve format: do not invent new keys)
               if (hasOwn(b, "scaleLabelMin") || hasOwn(b, "scaleLabelMax")) {
                 const labels = document.createElement("div");
                 labels.className = "row";
@@ -837,7 +860,6 @@ POLICY (LÅST):
                 labels.appendChild(fL2);
                 section.appendChild(labels);
               } else if (hasOwn(b, "scaleLabels") && (typeof b.scaleLabels === "object") && b.scaleLabels != null) {
-                // common alt: scaleLabels: { min: "...", max: "..." } — edit only if exists
                 const labels = document.createElement("div");
                 labels.className = "row";
                 labels.style.marginTop = "10px";
@@ -886,7 +908,7 @@ POLICY (LÅST):
               section.appendChild(note);
             }
           } else if (b && typeof b === "object" && hasOwn(b, "task") && b.task && typeof b.task === "object") {
-            // Schema B fallback (behåll stöd)
+            // Schema B fallback
             const checks = document.createElement("div");
             checks.className = "inlineChecks";
 
@@ -970,7 +992,7 @@ POLICY (LÅST):
           body.appendChild(section);
         }
 
-        // D) Render – Question-config (schema-tolerant, preserve format)
+        // Question-config
         if (kind === "question" || kind === "both") {
           const section = document.createElement("div");
           section.style.marginTop = "10px";
@@ -1144,7 +1166,6 @@ POLICY (LÅST):
         return;
       }
 
-      // Fail-closed: blocks måste vara clonable array
       const blocks = Array.isArray(t.blocks) ? t.blocks : [];
       const cloned = cloneBlocks(blocks);
 
@@ -1180,7 +1201,6 @@ POLICY (LÅST):
       return "b_" + Date.now() + "_" + r;
     }
 
-    // E) Add new block: skapa i Schema A
     function addNewBlock() {
       if (!workingBlocks || !Array.isArray(workingBlocks)) return;
 
@@ -1216,7 +1236,6 @@ POLICY (LÅST):
       return Math.floor(n) + 1;
     }
 
-    // F) Save: fail-closed + preserve format
     function saveBlocksFailClosed() {
       clearSaveState();
 
@@ -1247,7 +1266,6 @@ POLICY (LÅST):
         return;
       }
 
-      // Validate/normalize per block without converting schema:
       for (let i = 0; i < workingBlocks.length; i++) {
         const b = workingBlocks[i];
         if (!b || typeof b !== "object") {
@@ -1257,20 +1275,17 @@ POLICY (LÅST):
 
         if (!b.id) b.id = genBlockId();
 
-        // Clamp title/text (always same keys)
         b.title = ensureStringMax(b.title ?? "", 80);
         b.text = ensureStringMax(b.text ?? "", 240);
 
-        const kind = getKind(b); // validates kind/type values (fail-soft -> info)
+        const kind = getKind(b);
 
-        // Preserve format: update whichever key exists (kind or type), otherwise default to kind for safety.
         if (hasOwn(b, "kind") || !hasOwn(b, "type")) {
           b.kind = kind;
         } else if (hasOwn(b, "type")) {
           b.type = kind;
         }
 
-        // Schema A consistency (only if Schema A keys exist)
         if (isSchemaA(b)) {
           if ((kind === "task" || kind === "both") && hasOwn(b, "taskAnswer")) {
             b.taskAnswer = schemaA_taskAnswerValue(b.taskAnswer);
@@ -1299,9 +1314,7 @@ POLICY (LÅST):
           }
         }
 
-        // Schema B consistency (only if keys exist, do not create new)
         if (hasOwn(b, "task") && b.task && typeof b.task === "object") {
-          // Keep as-is but ensure booleans/numbers are sane if user edited
           if (hasOwn(b.task, "enabled")) b.task.enabled = !!b.task.enabled;
           if (hasOwn(b.task, "scale")) b.task.scale = !!b.task.scale;
           if (hasOwn(b.task, "min")) b.task.min = safeNumber(b.task.min, 1);
@@ -1317,8 +1330,7 @@ POLICY (LÅST):
         }
       }
 
-      // Write-back: endast blocks[] + version + updatedAt
-      const next = JSON.parse(JSON.stringify(TRAININGS)); // deep clone
+      const next = JSON.parse(JSON.stringify(TRAININGS));
       const t2 = next[idx];
       if (!t2 || typeof t2 !== "object") {
         setSaveStateErr("Kunde inte skapa säker kopia av utbildningen. Inget sparat.");
@@ -1342,6 +1354,22 @@ POLICY (LÅST):
 
       setSaveStateOk("Sparat. Block bevarade i sitt schema. Version bumpad och updatedAt uppdaterad.");
       renderTrainingMeta(findTrainingById(selectedTrainingId));
+
+      // Efter spar: bygg om filters (färdiga listan kan påverkas om blocks blir 0, men vi tar inte bort publish här)
+      buildFilters();
+      rebuildAreaOptions();
+      rebuildTrainingOptions();
+      // Behåll vald training om den fortfarande matchar "färdig"
+      const cur = findTrainingById(selectedTrainingId);
+      if (cur && isFinishedTraining(cur)) {
+        filterModule.value = String(cur.module ?? "").trim();
+        rebuildAreaOptions();
+        filterArea.value = String(cur.area ?? "").trim();
+        rebuildTrainingOptions();
+        filterTraining.value = String(cur.id);
+      } else {
+        setSelectedTraining(null);
+      }
     }
 
     function initFailClosed() {
@@ -1359,7 +1387,7 @@ POLICY (LÅST):
       const okTrainings = loadTrainingsFailClosed();
       if (!okTrainings) {
         lockEditor("Kunde inte ladda utbildningar. Kontrollera AO-057_TRAININGS_V1.");
-        buildFilters(); // safe reset
+        buildFilters();
         return;
       }
 
@@ -1368,6 +1396,19 @@ POLICY (LÅST):
       renderBlocks();
       addBlockBtn.disabled = true;
       markDirty(false);
+
+      // Auto: om det finns exakt 1 modul/område/training, välj den direkt (snabbare)
+      const finished = getFinishedTrainings();
+      if (finished.length === 1) {
+        const t = finished[0];
+        filterModule.value = String(t.module ?? "").trim();
+        rebuildAreaOptions();
+        filterArea.value = String(t.area ?? "").trim();
+        rebuildTrainingOptions();
+        filterTraining.value = String(t.id);
+        setSelectedTraining(String(t.id));
+        addBlockBtn.disabled = false;
+      }
     }
 
     // Events
