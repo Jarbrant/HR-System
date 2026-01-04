@@ -1,33 +1,25 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-UI-01 (PATCH v1.2) | FIL-ID: admin/onboard-plans.html
+AO-ONBOARD-PLANS-UI-01 (PROD v1.3) | FIL-ID: admin/onboard-plans.html
 Projekt: HR-System
-Syfte: ADMIN – Skapa/Redigera Onboarding Plans + Tidsaxel (drag/drop light via ↑↓) UI-only
+Syfte: ADMIN – Skapa/Redigera Onboarding Plans + Tidsaxel (↑↓) UI-only
 
 POLICY (LÅST):
 - UI-only • Fail-closed
 - sessionStorage först (auth) • fallback localStorage (auth) via AO-002
 - localStorage för data
 - XSS-escape på all rendering från storage (textContent)
-- Inga känsliga persondata (endast empNo används ej här)
+- Inga känsliga persondata
 - Inga nya storage-keys (endast AO-060/061 från AO-1; denna sida skriver endast AO-060)
-- Inga ändringar av befintliga keys/datamodeller utanför AO
 - Hel-filsleverans
 
 Keys (LÅST):
 - Läser: AO-001_LOGIN_V1 (via HRApp), AO-057_TRAININGS_V1, AO-060_PLANS_V1
 - Skriver: AO-060_PLANS_V1
 
-Ändringslogg (PATCH v1.2):
-- FIX: Trainings-filter inkluderar nu status=published OR status=verified (med blocks>0) → “Verifierade moduler” visas.
-- UI-text uppdaterad: “Endast published/verified + blocks>0” (ingen redesign).
-- Validerings-/feltexter justerade så de inte felaktigt säger “published-only” när verified är tillåtet.
+Ändringslogg (v1.3):
+- FIX P0: Laddar CORE korrekt (UI-04-CONFIG.js + UI-03-APP.js) innan inline-script.
+- HARDEN: Stoppar direkt om requireAuth returnerar null (redirect pågår) för att undvika följdfel.
 - Oförändrat: inga nya keys, inga schemaändringar, writes endast AO-060 vid Spara.
-
-Testnoteringar:
-1) ADMIN: i trainings.html verifiera en utbildning (status=verified) med blocks>0 → syns i onboard-plans listan och kan läggas till i plan.
-2) ADMIN: published utbildning med blocks>0 syns fortfarande och funkar.
-3) Om utbildning saknar blocks → syns ej (fail-closed).
-4) Save: plan med verified trainingId sparar till AO-060 utan fel.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -35,6 +27,7 @@ Testnoteringar:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HR-System – Onboarding Plans (ADMIN)</title>
+
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
   <style>
     :root { --gap: 12px; }
@@ -93,6 +86,10 @@ Testnoteringar:
 </head>
 
 <body>
+  <noscript>
+    <div class="card error">JavaScript krävs för att använda denna sida.</div>
+  </noscript>
+
   <div class="titlebar">
     <h1>Onboarding Plans (ADMIN)</h1>
     <div class="toolbar">
@@ -176,6 +173,10 @@ Testnoteringar:
     </div>
   </div>
 
+  <!-- CORE (MÅSTE LADDAS FÖRE SIDANS SCRIPT) -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
+  <script src="../UI/UI-03-APP.js"></script>
+
 <script>
 (function(){
   "use strict";
@@ -204,12 +205,17 @@ Testnoteringar:
     sb.textContent = "Auth-guard kraschade i CORE. Kan inte fortsätta. (fail-closed)";
     return;
   }
+
+  // HARDEN: requireAuth redirectar och returnerar null => stoppa direkt.
+  if (_authResult === null) return;
+
   if (_authResult === false || (_authResult && typeof _authResult === "object" && _authResult.ok === false)) {
     const sb = document.getElementById("statusBox");
     sb.className = "card error";
     sb.textContent = "Åtkomst nekad (requireAuth). (fail-closed)";
     return;
   }
+
   if (typeof window.HRApp.getAuth === "function") {
     try {
       let a = null;
@@ -239,7 +245,7 @@ Testnoteringar:
   // STATE
   // ============================
   let trainingsOk = false;
-  let trainings = []; // normalized allowed trainings (published/verified) with blocks
+  let trainings = []; // allowed trainings (published/verified) with blocks>0
   let plansOk = true;
   let plans = [];
   let selectedPlanId = "";
@@ -276,11 +282,6 @@ Testnoteringar:
     try { return JSON.parse(raw); } catch { return null; }
   }
 
-  function extractParsedValue(parsed){
-    if (parsed && typeof parsed === "object" && parsed.ok === true && "value" in parsed) return parsed.value;
-    return parsed;
-  }
-
   function safeParseLocalStorage(key) {
     try {
       const raw = localStorage.getItem(String(key || ""));
@@ -289,8 +290,6 @@ Testnoteringar:
       let parsed = null;
       if (window.HRApp && typeof window.HRApp.safeJsonParse === "function") {
         parsed = window.HRApp.safeJsonParse(raw);
-        if (parsed && typeof parsed === "object" && parsed.ok === false) return { ok:false, error:"CORRUPT_JSON" };
-        parsed = extractParsedValue(parsed);
       } else {
         parsed = safeJsonParseFallback(raw);
       }
@@ -349,6 +348,7 @@ Testnoteringar:
       const updatedAt = (typeof p.updatedAt === "number" && Number.isFinite(p.updatedAt)) ? p.updatedAt : null;
 
       if (!id) return { ok:false, error:"PLAN_MISSING_ID" };
+      if (!title) return { ok:false, error:"PLAN_MISSING_TITLE" };
       if (!isValidPlanStatus(status)) return { ok:false, error:"PLAN_BAD_STATUS" };
       if (createdAt === null || updatedAt === null) return { ok:false, error:"PLAN_BAD_TIMESTAMPS" };
 
@@ -404,20 +404,10 @@ Testnoteringar:
     trainings = [];
 
     const res = safeParseLocalStorage(TRAININGS_KEY);
-    if (!res.ok) {
-      trainingsOk = false;
-      return { ok: false, error: "AO-057 korrupt/oläsbar" };
-    }
-    if (res.missing) {
-      trainingsOk = false;
-      return { ok: false, error: "AO-057 saknas" };
-    }
-    if (!Array.isArray(res.data)) {
-      trainingsOk = false;
-      return { ok: false, error: "AO-057 har fel format (inte array)" };
-    }
+    if (!res.ok) return { ok: false, error: "AO-057 korrupt/oläsbar" };
+    if (res.missing) return { ok: false, error: "AO-057 saknas" };
+    if (!Array.isArray(res.data)) return { ok: false, error: "AO-057 har fel format (inte array)" };
 
-    // Filter: published OR verified + must have id,module,area,title + blocks length>0
     const out = [];
     for (let i = 0; i < res.data.length; i++) {
       const t = res.data[i];
@@ -564,7 +554,6 @@ Testnoteringar:
         if (!currentPlan) { setStatus("error", "Ingen plan vald. Skapa eller välj en plan först."); return; }
         if (!trainingsOk) { setStatus("error", "AO-057 saknas/korrupt. Tillägg blockeras (fail-closed)."); return; }
         if (!plansOk) { setStatus("error", "AO-060 är korrupt. Ändringar blockeras (fail-closed)."); return; }
-
         addItemToCurrentPlan(t.id);
       });
 
@@ -783,7 +772,6 @@ Testnoteringar:
       }
     }
 
-    // Fail-closed: must exist in allowed trainings (published/verified list)
     const idx = trainings.findIndex(t => t.id === trainingId);
     if (idx < 0) {
       setStatus("error", "Training finns inte i listan (published/verified + blocks>0). (fail-closed)");
@@ -901,8 +889,7 @@ Testnoteringar:
       mid.className = "timelineMeta";
       const line1 = document.createElement("div");
       line1.className = "muted";
-      if (t) line1.textContent = t.module + " • " + t.area;
-      else line1.textContent = "Okänd trainingId (fail-closed vid spara)";
+      line1.textContent = t ? (t.module + " • " + t.area) : "Okänd trainingId (fail-closed vid spara)";
       const line2 = document.createElement("div");
       line2.textContent = t ? t.title : ("trainingId: " + it.trainingId);
       const line3 = document.createElement("div");
@@ -978,13 +965,12 @@ Testnoteringar:
     if (title.length < 2) return { ok:false, error:"Titel måste vara minst 2 tecken" };
 
     const st = normStr(currentPlan.status);
-    if (st !== "draft" && st !== "active" && st !== "archived") return { ok:false, error:"Ogiltig status" };
+    if (!isValidPlanStatus(st)) return { ok:false, error:"Ogiltig status" };
 
     const requireItems = (setActiveOnVerify === true) ? true : (st === "active");
     if (requireItems && currentPlan.items.length < 1) return { ok:false, error:"Active kräver minst 1 item" };
 
     const idxById = buildTrainingIndexById();
-
     const seenTraining = new Set();
     const seenOrder = new Set();
 
@@ -993,7 +979,6 @@ Testnoteringar:
       const trainingId = normStr(it.trainingId);
       if (!trainingId) return { ok:false, error:"Item saknar trainingId" };
 
-      // Must exist & be allowed (published/verified list)
       if (!idxById[trainingId]) return { ok:false, error:"Item refererar trainingId som ej är allowed (published/verified + blocks>0): " + trainingId };
 
       if (seenTraining.has(trainingId)) return { ok:false, error:"Dubblett trainingId i plan" };
