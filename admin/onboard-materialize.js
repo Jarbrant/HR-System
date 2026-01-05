@@ -7,7 +7,7 @@ Syfte: Materialisera onboarding (AO-050_PACKAGES_V1) → TASKS + QUESTIONS
 PATCH v1.1 (2026-01-06):
 - Stödjer paket som lagrar innehåll i pkg.items (utöver pkg.blocks) → fixar blocksScanned=0 när UI visar "Items: N"
 - Robust status-match: "active"/"ACTIVE"/" active " behandlas som active
-- Ingen ny logik utanför scope: inga nya storage-keys, inga kopplingsändringar, inga extra reads
+- Inga nya storage-keys, inga kopplingsändringar
 
 Policy (LÅST):
 - UI-only • Fail-closed
@@ -113,7 +113,7 @@ Policy (LÅST):
     return asStr(x, 40).toLowerCase();
   }
 
-  // PATCH v1.1: stöd både pkg.blocks och pkg.items (UI visar "Items: N")
+  // Stöd både pkg.blocks och pkg.items (UI visar ofta "Items: N")
   function getBlocksFromPackage(pkg) {
     if (pkg && Array.isArray(pkg.blocks)) return pkg.blocks;
     if (pkg && Array.isArray(pkg.items)) return pkg.items;
@@ -160,7 +160,6 @@ Policy (LÅST):
 
     const empNos = Object.keys(asgN.map);
 
-    // PATCH v1.1: robust status-match
     const activePkgs = packages.filter(p => normStatus(p && p.status) === "active");
 
     let blocksScanned = 0;
@@ -190,7 +189,6 @@ Policy (LÅST):
           const kind = normKind(block);
           if (!kind) continue;
 
-          // Skippa info/document (read-only)
           if (kind === "info" || kind === "document") continue;
 
           const blockId = asStr(block && block.id || "", 140) || ("idx_" + String(bi));
@@ -272,7 +270,6 @@ Policy (LÅST):
     };
   }
 
-  // Export global (UI-kontrollerad körning)
   window.HR_ONBOARD_MATERIALIZE = materialize;
 
 })();
