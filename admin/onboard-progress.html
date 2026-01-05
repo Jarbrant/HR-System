@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.4) | FIL-ID: admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.5) | FIL-ID: admin/onboard-progress.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN/SYSTEM_ADMIN – Plan → Progress per medarbetare (read-only v1)
 
@@ -23,11 +23,10 @@ Keys (LÅST – läs endast):
 - AO-020_ROLE_ASSIGNMENTS_V2
 
 Senaste sanning: 2026-01-05
-Ändringslogg (PATCH v1.4):
-- P0: EmpNo-filter förbättrad: tydlig Apply/Clear + exakt/prefix-match (inte “includes”).
-- P0: Employee-lista = UNION (AO-020_ROLE_ASSIGNMENTS_V2 + AO-061 för vald plan) så SYSTEM_ADMIN kan filtrera även om assignments saknas.
-- P0: ADMIN fail-closed behålls: endast empNo som kan scope-valideras får visas (övriga exkluderas).
-- P1: whoName visar empNo (#1234) istället för displayName (minimering).
+Ändringslogg (PATCH v1.5):
+- P0: FIX Done-beräkning: använder AO-053/AO-054-logik (block title + tasks/questions/answers), inte trainingId-mapping.
+- P0: FIX Tasks: stöd för assignedTo=ALL/*/empNo + strikt scopeId-match (fail-closed om scope saknas).
+- P1: Hardening: ORG normalize stödjer label/title; AssignmentsV2 stödjer array/wrapper/map (säkert).
 - Oförändrat: read-only, inga writes, inga nya keys, XSS-safe, fail-closed.
 ============================================================ -->
 <!doctype html>
@@ -315,7 +314,7 @@ Senaste sanning: 2026-01-05
 
 <script>
 /* ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.4) | admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.5) | admin/onboard-progress.html
 Read-only • Fail-closed • XSS-safe rendering
 ============================================================ */
 (function(){
@@ -386,6 +385,14 @@ Read-only • Fail-closed • XSS-safe rendering
 
   function own(obj, k){
     return Object.prototype.hasOwnProperty.call(obj, k);
+  }
+
+  function hasBlockedKeysOneLevel(obj){
+    if(!isPlainObject(obj)) return false;
+    for(const k of Object.keys(obj)){
+      if(SPECIAL_KEYS.has(String(k))) return true;
+    }
+    return false;
   }
 
   function extractArrayFromAny(value){
@@ -467,6 +474,10 @@ Read-only • Fail-closed • XSS-safe rendering
     return v;
   }
 
+  function normKey(s){
+    return String(s ?? "").toLowerCase().replace(/\s+/g," ").trim();
+  }
+
   // ---------------------------
   // Auth / RBAC via HRApp (AO-002)
   // ---------------------------
@@ -521,15 +532,15 @@ Read-only • Fail-closed • XSS-safe rendering
     const arr = Array.isArray(raw) ? raw : [];
     const out = [];
     for(const n of arr){
-      const id = String(n && n.id ? n.id : "").trim();
-      const name = String(n && n.name ? n.name : "").trim();
+      const id = String(n && (n.id || n.scopeId) ? (n.id || n.scopeId) : "").trim();
+      const name = String(n && (n.name || n.label || n.title) ? (n.name || n.label || n.title) : "").trim();
       const type = String(n && n.type ? n.type : "").trim();
       const parentId = (n && (n.parentId === null || n.parentId === undefined))
         ? null
-        : String(n && n.parentId ? n.parentId : "").trim();
+        : String(n && (n.parentId || n.parent) ? (n.parentId || n.parent) : "").trim();
 
-      if(!id || !name) continue;
-      out.push({ id, name, type, parentId });
+      if(!id) continue;
+      out.push({ id, name: name || id, type, parentId: parentId === "" ? null : parentId });
     }
     return out;
   }
@@ -625,65 +636,61 @@ Read-only • Fail-closed • XSS-safe rendering
     return false;
   }
 
-  function hasBlockedKeysOneLevel(obj){
-    if(!isPlainObject(obj)) return false;
-    for(const k of Object.keys(obj)){
-      if(SPECIAL_KEYS.has(String(k))) return true;
-    }
-    return false;
-  }
-
+  // ---------------------------
+  // AssignmentsV2 normalize (PATCH v1.5)
+  // Stöd: array / wrapper / object-map -> map[empNo] = { roleId, scopeId, ... }
+  // ---------------------------
   function normalizeAssignmentsV2(raw){
     const issues = [];
+    const map = Object.create(null);
+
     if(raw === null || raw === undefined){
-      return { ok:false, map: Object.create(null), issues:["Assignments är korrupt (null/undefined)."] };
-    }
-    if(typeof raw !== "object" || Array.isArray(raw)){
-      return { ok:false, map: Object.create(null), issues:["Assignments korrupt (förväntar objekt)."] };
+      return { ok:false, map, issues:["Assignments saknas (null/undefined)."] };
     }
 
-    const out = Object.create(null);
-    let blocked = false;
-    let deepBlocked = false;
-    let nonPlain = false;
+    // array
+    if(Array.isArray(raw)){
+      for(const rec of raw){
+        if(!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
+        if(hasBlockedKeysOneLevel(rec)) { issues.push("Assignments har blockerade special-keys i record (array)."); return { ok:false, map, issues }; }
+        const empNo = String(rec.empNo ?? rec.employeeNo ?? rec.id ?? "").trim();
+        if(!empNo) continue;
+        map[empNo] = rec;
+      }
+      return { ok:true, map, issues: [] };
+    }
+
+    // wrapper
+    if(isPlainObject(raw) && Array.isArray(raw.assignments)){
+      return normalizeAssignmentsV2(raw.assignments);
+    }
+
+    // object-map
+    if(!isPlainObject(raw)){
+      return { ok:false, map, issues:["Assignments korrupt (förväntar objekt/array)."] };
+    }
 
     for(const k of Object.keys(raw)){
       const key = String(k);
       if(SPECIAL_KEYS.has(key)){
-        blocked = true;
-        continue;
+        issues.push("Assignments innehåller blockerade special-keys (__proto__/constructor/prototype) på top-level.");
+        return { ok:false, map, issues };
       }
-
       const val = raw[key];
-
       if(val !== null && val !== undefined){
         if(!isPlainObject(val)){
-          nonPlain = true;
-          continue;
+          issues.push("Assignments innehåller record som inte är plain object (1 nivå hardening).");
+          return { ok:false, map, issues };
         }
         if(hasBlockedKeysOneLevel(val)){
-          deepBlocked = true;
-          continue;
+          issues.push("Assignments innehåller blockerade special-keys i record-nivå (1 nivå hardening).");
+          return { ok:false, map, issues };
         }
       }
-
-      out[key] = val;
+      map[key] = val;
     }
 
-    if(blocked){
-      issues.push("Assignments innehåller blockerade special-keys (__proto__/constructor/prototype) på top-level.");
-      return { ok:false, map: out, issues };
-    }
-    if(deepBlocked){
-      issues.push("Assignments innehåller blockerade special-keys i record-nivå (1 nivå hardening).");
-      return { ok:false, map: out, issues };
-    }
-    if(nonPlain){
-      issues.push("Assignments innehåller record som inte är plain object (1 nivå hardening).");
-      return { ok:false, map: out, issues };
-    }
-
-    return { ok:true, map: out, issues: [] };
+    return { ok:true, map, issues: [] };
   }
 
   // ---------------------------
@@ -707,10 +714,9 @@ Read-only • Fail-closed • XSS-safe rendering
   const questionsRead = readLocalArrayFlexible(QUESTIONS_KEY, { missingAsEmpty:true });
   const answersRead = readLocalArrayFlexible(ANSWERS_KEY, { missingAsEmpty:true });
 
-  const doneDataOk = tasksRead.ok && questionsRead.ok && answersRead.ok;
-  if(!tasksRead.ok) addWarn("AO-014_TASKS_V1 är korrupt → Done fail-closed.");
-  if(!questionsRead.ok) addWarn("AO-012_QUESTIONS_V1 är korrupt → Done fail-closed.");
-  if(!answersRead.ok) addWarn("AO-013_ANSWERS_V1 är korrupt → Done fail-closed.");
+  if(!tasksRead.ok) addWarn("AO-014_TASKS_V1 är korrupt → Done fail-closed för tasks.");
+  if(!questionsRead.ok) addWarn("AO-012_QUESTIONS_V1 är korrupt → Done fail-closed för questions.");
+  if(!answersRead.ok) addWarn("AO-013_ANSWERS_V1 är korrupt → Done fail-closed för answers.");
 
   const orgAny = readLocalAny(ORG_KEY);
   const orgNodes = normalizeOrgNodes(orgAny.ok ? orgAny.value : []);
@@ -735,8 +741,8 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   if(role === "SYSTEM_ADMIN"){
-    if(!orgIntegrity.ok) addWarn("Org är saknas/korrupt. SYSTEM_ADMIN kan fortfarande se progress (utan scope-beroende).");
-    if(!asgV2.ok) addWarn("AssignmentsV2 är saknas/korrupt. Employee-lista från assignments saknas, men plan-assignments kan fortfarande visas.");
+    if(!orgIntegrity.ok) addWarn("Org saknas/korrupt. SYSTEM_ADMIN kan fortfarande se progress (utan subtree-scope).");
+    if(!asgV2.ok) addWarn("AssignmentsV2 saknas/korrupt. Employee-scope saknas → tasks kan ej räknas säkert.");
   }
 
   function renderWarnPills(){
@@ -809,7 +815,7 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   // ---------------------------
-  // Build indexes: trainings, questions, answers, tasks
+  // Index: trainings
   // ---------------------------
   const trainingsById = new Map();
   (Array.isArray(trainingsRead.value) ? trainingsRead.value : []).forEach(t => {
@@ -820,159 +826,6 @@ Read-only • Fail-closed • XSS-safe rendering
   const tasks = Array.isArray(tasksRead.value) ? tasksRead.value : [];
   const questions = Array.isArray(questionsRead.value) ? questionsRead.value : [];
   const answers = Array.isArray(answersRead.value) ? answersRead.value : [];
-
-  // ---------------------------
-  // Mapping sanity-check (P1)
-  // ---------------------------
-  function detectDoneMappingAbility(){
-    if(!doneDataOk) return { ok:false, reason:"fail-closed" };
-
-    let hasTaskTrainingId = false;
-    let hasTaskEmpNo = false;
-    let hasTaskStatus = false;
-
-    for(const t of tasks){
-      if(!t || typeof t !== "object") continue;
-      if(String(t.trainingId||"").trim()) hasTaskTrainingId = true;
-      if(String(t.empNo||"").trim()) hasTaskEmpNo = true;
-      if(String(t.status||"").trim()) hasTaskStatus = true;
-      if(hasTaskTrainingId && hasTaskEmpNo && hasTaskStatus) break;
-    }
-
-    let hasQuestionTrainingId = false;
-    let hasQuestionId = false;
-
-    for(const q of questions){
-      if(!q || typeof q !== "object") continue;
-      if(String(q.trainingId||"").trim()) hasQuestionTrainingId = true;
-      if(String(q.id||"").trim()) hasQuestionId = true;
-      if(hasQuestionTrainingId && hasQuestionId) break;
-    }
-
-    let hasAnswerQuestionId = false;
-    let hasAnswerEmpNo = false;
-
-    for(const a of answers){
-      if(!a || typeof a !== "object") continue;
-      if(String(a.questionId||"").trim()) hasAnswerQuestionId = true;
-      if(String(a.empNo||"").trim()) hasAnswerEmpNo = true;
-      if(hasAnswerQuestionId && hasAnswerEmpNo) break;
-    }
-
-    const taskMappable = hasTaskTrainingId && hasTaskEmpNo && hasTaskStatus;
-    const questionMappable = hasQuestionTrainingId && hasQuestionId && hasAnswerQuestionId && hasAnswerEmpNo;
-
-    return {
-      ok: taskMappable || questionMappable,
-      taskMappable,
-      questionMappable
-    };
-  }
-
-  const mappingAbility = detectDoneMappingAbility();
-  if(doneDataOk && !mappingAbility.ok){
-    addWarn("Datamodell mismatch: Done kan inte beräknas (saknar förväntade fält i tasks/questions/answers).");
-    renderWarnPills();
-  }
-
-  function taskIsDoneForTraining(empNo, trainingId){
-    if(!doneDataOk) return { ok:false, done:false, reason:"fail-closed" };
-    const e = String(empNo||"").trim();
-    const tid = String(trainingId||"").trim();
-    if(!e || !tid) return { ok:false, done:false, reason:"missing" };
-
-    const doneStatuses = new Set(["done","closed","completed","complete"]);
-    let hasAnyMapped = false;
-
-    for(const t of tasks){
-      if(!t || typeof t !== "object") continue;
-      if(String(t.empNo||"").trim() !== e) continue;
-      if(String(t.trainingId||"").trim() !== tid) continue;
-      hasAnyMapped = true;
-      const st = String(t.status||"").toLowerCase().trim();
-      if(doneStatuses.has(st)) return { ok:true, done:true, reason:"task" };
-    }
-
-    if(!hasAnyMapped) return { ok:false, done:false, reason:"unknown-mapping" };
-    return { ok:true, done:false, reason:"task" };
-  }
-
-  function questionIsDoneForTraining(empNo, trainingId){
-    if(!doneDataOk) return { ok:false, done:false, reason:"fail-closed" };
-    const e = String(empNo||"").trim();
-    const tid = String(trainingId||"").trim();
-    if(!e || !tid) return { ok:false, done:false, reason:"missing" };
-
-    const qIds = [];
-    for(const q of questions){
-      if(!q || typeof q !== "object") continue;
-      if(String(q.trainingId||"").trim() !== tid) continue;
-      const qid = String(q.id||"").trim();
-      if(qid) qIds.push(qid);
-    }
-
-    if(qIds.length === 0) return { ok:false, done:false, reason:"unknown-mapping" };
-
-    const qSet = new Set(qIds);
-    for(const a of answers){
-      if(!a || typeof a !== "object") continue;
-      if(String(a.empNo||"").trim() !== e) continue;
-      const qid = String(a.questionId||"").trim();
-      if(!qid) continue;
-      if(qSet.has(qid)) return { ok:true, done:true, reason:"question" };
-    }
-
-    return { ok:true, done:false, reason:"question" };
-  }
-
-  function trainingDoneStatus(empNo, training){
-    if(!training || typeof training !== "object") return { done:false, reason:"missing training" };
-
-    const blocks = Array.isArray(training.blocks) ? training.blocks : null;
-    if(!blocks || blocks.length === 0){
-      return { done:false, reason:"no blocks" };
-    }
-
-    let unknownMapping = false;
-
-    for(let i=0;i<blocks.length;i++){
-      const b = blocks[i];
-      const tp = String(b && b.type ? b.type : "").toLowerCase().trim();
-
-      if(tp === "info") continue;
-
-      if(tp === "task"){
-        const r = taskIsDoneForTraining(empNo, String(training.id||""));
-        if(r.reason === "unknown-mapping") unknownMapping = true;
-        if(r.ok !== true || r.done !== true) return { done:false, reason:"task", note: unknownMapping ? "Oklar mapping" : "" };
-        continue;
-      }
-
-      if(tp === "question"){
-        const r = questionIsDoneForTraining(empNo, String(training.id||""));
-        if(r.reason === "unknown-mapping") unknownMapping = true;
-        if(r.ok !== true || r.done !== true) return { done:false, reason:"question", note: unknownMapping ? "Oklar mapping" : "" };
-        continue;
-      }
-
-      if(tp === "both"){
-        const rt = taskIsDoneForTraining(empNo, String(training.id||""));
-        const rq = questionIsDoneForTraining(empNo, String(training.id||""));
-        if(rt.reason === "unknown-mapping" || rq.reason === "unknown-mapping") unknownMapping = true;
-        if(rt.ok !== true || rt.done !== true) return { done:false, reason:"both", note: unknownMapping ? "Oklar mapping" : "" };
-        if(rq.ok !== true || rq.done !== true) return { done:false, reason:"both", note: unknownMapping ? "Oklar mapping" : "" };
-        continue;
-      }
-
-      return { done:false, reason:"unknown", note:"Unknown block type" };
-    }
-
-    if(!doneDataOk){
-      return { done:false, reason:"fail-closed", note:"Kan inte läsa tasks/answers" };
-    }
-
-    return { done:true, reason:"ok" };
-  }
 
   // ---------------------------
   // Plan + assignments normalization (read-only)
@@ -1042,6 +895,127 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   // ---------------------------
+  // Done-beräkning (PATCH v1.5) – samma logik som AO-053/AO-054
+  // ---------------------------
+  function normalizeBlockType(tp){
+    const t = String(tp ?? "").toLowerCase().trim();
+    if(t === "info" || t === "information") return "info";
+    if(t === "task" || t === "uppgift") return "task";
+    if(t === "question" || t === "fråga" || t === "fragA") return "question";
+    if(t === "both") return "both";
+    return "unknown";
+  }
+
+  function getTaskTitle(t){
+    return String(t?.title ?? t?.name ?? t?.text ?? "");
+  }
+
+  function isTaskDone(t){
+    const s = String(t?.status ?? t?.state ?? "").toLowerCase().trim();
+    if(t?.done === true) return true;
+    if(t?.isDone === true) return true;
+    if(s === "done" || s === "klar" || s === "completed" || s === "complete") return true;
+    return false;
+  }
+
+  function taskDoneForEmp(blockTitle, empNo, scopeId){
+    // Fail-closed: tasks kräver scopeId
+    const me = String(empNo||"").trim();
+    const sc = String(scopeId||"").trim();
+    const bt = normKey(blockTitle);
+    if(!me || !sc || !bt) return false;
+
+    for(const t of tasks){
+      if(!t || typeof t !== "object") continue;
+
+      const tScope = String(t?.scopeId ?? "").trim();
+      if(!tScope || tScope !== sc) continue;
+
+      const assigned = t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
+      const assignedStr = (typeof assigned === "string" || typeof assigned === "number") ? String(assigned).trim() : "";
+      if(!assignedStr) continue;
+
+      const isAll = (assignedStr === "ALL" || assignedStr === "*");
+      if(!isAll && assignedStr !== me) continue;
+
+      const tt = normKey(getTaskTitle(t));
+      if(tt && tt === bt){
+        return isTaskDone(t);
+      }
+    }
+    return false;
+  }
+
+  function getQuestionId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? ""); }
+  function getQuestionTitle(q){ return String(q?.title ?? q?.name ?? q?.text ?? ""); }
+
+  function answerMatchesQuestion(ans, qId, qTitle){
+    if(!ans || typeof ans !== "object") return false;
+    const aQid = String(ans.questionId ?? ans.qid ?? ans.question_id ?? "");
+    if(qId && aQid && aQid === qId) return true;
+
+    const aTitle = String(ans.questionTitle ?? ans.title ?? ans.questionText ?? "");
+    if(qTitle && aTitle && normKey(aTitle) === normKey(qTitle)) return true;
+
+    return false;
+  }
+
+  function answersForEmpNo(empNo){
+    const me = String(empNo||"").trim();
+    if(!me) return [];
+    return answers.filter(a => String(a?.empNo ?? a?.employeeNo ?? a?.byEmpNo ?? a?.respondentEmpNo ?? "").trim() === me);
+  }
+
+  function questionDoneForEmp(blockTitle, empNo){
+    const me = String(empNo||"").trim();
+    const title = String(blockTitle||"").trim();
+    if(!me || !title) return false;
+
+    let qId = "";
+    const foundQ = questions.find(q => normKey(getQuestionTitle(q)) === normKey(title));
+    if(foundQ) qId = getQuestionId(foundQ);
+
+    const myAns = answersForEmpNo(me);
+    return myAns.some(a => answerMatchesQuestion(a, qId, title));
+  }
+
+  function trainingDoneStatus(empNo, empScopeId, training){
+    if(!training || typeof training !== "object") return { done:false, reason:"missing training" };
+
+    const blocks = Array.isArray(training.blocks) ? training.blocks : null;
+    if(!blocks || blocks.length === 0){
+      return { done:false, reason:"no blocks" };
+    }
+
+    for(const b of blocks){
+      const tp = normalizeBlockType(b?.type ?? b?.kind);
+      const title = String(b?.title ?? "").trim();
+
+      if(tp === "info") continue;
+
+      if(tp === "task"){
+        if(!taskDoneForEmp(title, empNo, empScopeId)) return { done:false, reason:"task" };
+        continue;
+      }
+
+      if(tp === "question"){
+        if(!questionDoneForEmp(title, empNo)) return { done:false, reason:"question" };
+        continue;
+      }
+
+      if(tp === "both"){
+        if(!taskDoneForEmp(title, empNo, empScopeId)) return { done:false, reason:"both" };
+        if(!questionDoneForEmp(title, empNo)) return { done:false, reason:"both" };
+        continue;
+      }
+
+      return { done:false, reason:"unknown" }; // fail-closed
+    }
+
+    return { done:true, reason:"ok" };
+  }
+
+  // ---------------------------
   // UI helpers
   // ---------------------------
   function clearNode(el){
@@ -1076,8 +1050,6 @@ Read-only • Fail-closed • XSS-safe rendering
     const e = String(empNo||"").trim();
     if(!e || !asgV2.ok) return { empNo:e, name:"", scopeId:"" };
     const rec = asgV2.map[e] || null;
-
-    // NOTE: AO-020_ROLE_ASSIGNMENTS_V2 enligt låst modell saknar name -> lämna tomt
     const scopeId = String(rec && (rec.scopeId || rec.scope || rec.nodeId || rec.orgId) ? (rec.scopeId || rec.scope || rec.nodeId || rec.orgId) : "").trim();
     return { empNo:e, name:"", scopeId };
   }
@@ -1119,7 +1091,6 @@ Read-only • Fail-closed • XSS-safe rendering
     for(const empNo of allEmpNos){
       const meta = findEmployeeMeta(empNo);
 
-      // kan inte scope-validera utan scopeId => exkludera (fail-closed)
       if(!meta.scopeId){
         excludedMissingScope++;
         continue;
@@ -1159,7 +1130,7 @@ Read-only • Fail-closed • XSS-safe rendering
       });
   }
 
-  function computeItemStatus(empNo, assignment, item, nowTs){
+  function computeItemStatus(empNo, empScopeId, assignment, item, nowTs){
     const trainingId = String(item.trainingId||"").trim();
     const training = trainingsById.get(trainingId) || null;
 
@@ -1207,38 +1178,41 @@ Read-only • Fail-closed • XSS-safe rendering
       return { status:"locked", label:"Locked", done:false, doneReason:"time", availableTs, note:"Inte tillgänglig ännu." };
     }
 
-    const doneInfo = trainingDoneStatus(empNo, training);
+    // Ready/Done enligt block-logik
+    const doneInfo = trainingDoneStatus(empNo, empScopeId, training);
     if(doneInfo.done === true){
       return { status:"done", label:"Done", done:true, doneReason: doneInfo.reason, availableTs, note:"" };
     }
 
-    if(doneInfo.reason === "unknown" || doneInfo.reason === "fail-closed" || doneInfo.reason === "task" || doneInfo.reason === "question" || doneInfo.reason === "both"){
-      const why = doneInfo.note || "Kan inte avgöra Done (datamodell/mapping).";
-      return { status:"ready", label:"Ready", done:false, doneReason:"unknown", availableTs, note: why };
+    // Om scope saknas för tasks -> done blir fail-closed för task/both men frågor kan ändå ge done.
+    if((doneInfo.reason === "task" || doneInfo.reason === "both") && !String(empScopeId||"").trim()){
+      return { status:"ready", label:"Ready", done:false, doneReason:"scope-missing", availableTs, note:"Saknar scopeId → tasks kan ej räknas säkert (fail-closed)." };
     }
 
-    return { status:"ready", label:"Ready", done:false, doneReason:"ready", availableTs, note: doneInfo.note || "" };
+    if(!tasksRead.ok || !questionsRead.ok || !answersRead.ok){
+      return { status:"ready", label:"Ready", done:false, doneReason:"fail-closed", availableTs, note:"Kan inte läsa tasks/questions/answers säkert." };
+    }
+
+    return { status:"ready", label:"Ready", done:false, doneReason:"ready", availableTs, note:"" };
   }
 
-  function computeSummaryForEmployee(plan, assignment){
+  function computeSummaryForEmployee(plan, assignment, empScopeId){
     const nowTs = Date.now();
     const items = normalizePlanItemsForDisplay(plan);
 
     let done = 0, ready = 0, locked = 0;
-    let hasUnknownDone = false;
     const details = [];
 
     for(const it of items){
-      const st = computeItemStatus(assignment ? assignment.empNo : "", assignment, it, nowTs);
+      const st = computeItemStatus(assignment ? assignment.empNo : "", empScopeId, assignment, it, nowTs);
       if(st.status === "done") done++;
       else if(st.status === "ready") ready++;
       else locked++;
 
-      if(st.status === "ready" && st.doneReason === "unknown") hasUnknownDone = true;
       details.push({ item: it, status: st });
     }
 
-    return { total: items.length, done, ready, locked, hasUnknownDone, details };
+    return { total: items.length, done, ready, locked, details };
   }
 
   function clearDetails(){
@@ -1256,7 +1230,6 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   function getActiveEmpFilter(){
-    // Aktivt filter = digits
     return normalizeDigits(($("#empFilter") && $("#empFilter").value) ? $("#empFilter").value : "");
   }
 
@@ -1264,7 +1237,6 @@ Read-only • Fail-closed • XSS-safe rendering
     const e = String(empNo||"").trim();
     const f = String(filterDigits||"").trim();
     if(!f) return true;
-    // exakt eller prefix
     return e === f || e.startsWith(f);
   }
 
@@ -1352,7 +1324,7 @@ Read-only • Fail-closed • XSS-safe rendering
       .map(empNo => {
         const meta = findEmployeeMeta(empNo);
         const assignment = byEmp.get(String(empNo||"").trim()) || null;
-        const summary = computeSummaryForEmployee(plan, assignment ? assignment : null);
+        const summary = computeSummaryForEmployee(plan, assignment ? assignment : null, meta.scopeId || "");
         return { empNo: String(empNo||"").trim(), assignment, meta, summary };
       });
 
@@ -1411,14 +1383,6 @@ Read-only • Fail-closed • XSS-safe rendering
       tr.appendChild(tdBtn);
       tbody.appendChild(tr);
     });
-
-    if(!doneDataOk){
-      addWarn("Done är fail-closed (kan inte läsa tasks/questions/answers).");
-      renderWarnPills();
-    }else if(!mappingAbility.ok){
-      addWarn("Done: okänd (datamodell mismatch).");
-      renderWarnPills();
-    }
   }
 
   function renderDetails(plan, assignment, meta, summary){
@@ -1452,13 +1416,11 @@ Read-only • Fail-closed • XSS-safe rendering
     kpi.appendChild(pillReady);
     kpi.appendChild(pillLocked);
 
-    if(!doneDataOk || !mappingAbility.ok || summary.hasUnknownDone){
+    if(!String(meta?.scopeId || "").trim()){
       const p = document.createElement("span");
       p.className = "pill warn";
-      p.textContent = "Done: okänd";
-      p.title = !doneDataOk
-        ? "tasks/questions/answers är korrupta → Done fail-closed."
-        : "Datamodell/mapping saknas → Done kan inte beräknas säkert.";
+      p.textContent = "Obs: scope saknas";
+      p.title = "Saknar scopeId för empNo → tasks/both kan ej räknas säkert (fail-closed).";
       kpi.appendChild(p);
     }
 
@@ -1467,11 +1429,7 @@ Read-only • Fail-closed • XSS-safe rendering
     const note = document.createElement("div");
     note.className = "muted2";
     note.style.marginBottom = "10px";
-    note.textContent = (!doneDataOk)
-      ? "Obs: tasks/questions/answers är korrupta → Done är fail-closed (0 Done)."
-      : (!mappingAbility.ok
-        ? "Obs: Datamodell mismatch → Done kan inte beräknas säkert. Ready visar bara tidsgrind."
-        : "Status: Locked före available-datum. Ready efter available-datum. Done enligt blocks (fail-closed vid oklar mapping).");
+    note.textContent = "Status: Locked före available-datum. Ready efter available-datum. Done enligt blocks (task=scope+title+assignedTo, question=question/svar).";
     body.appendChild(note);
 
     const itemsWrap = document.createElement("div");
@@ -1525,7 +1483,7 @@ Read-only • Fail-closed • XSS-safe rendering
       dr.style.marginTop = "4px";
       dr.textContent = st.note
         ? ("Obs: " + String(st.note))
-        : ("Done reason: " + String(st.doneReason || "—"));
+        : ("Reason: " + String(st.doneReason || "—"));
       c4.appendChild(dr);
 
       row.appendChild(c4);
@@ -1549,7 +1507,6 @@ Read-only • Fail-closed • XSS-safe rendering
 
   const planSel = $("#planSelect");
   if(planSel) planSel.addEventListener("change", () => {
-    // när plan byts, rensa detaljer och rendera
     clearDetails();
     onChange();
   });
@@ -1575,7 +1532,6 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   if(empFilterEl){
-    // Enter = Apply
     empFilterEl.addEventListener("keydown", (e) => {
       if(e.key === "Enter"){
         e.preventDefault();
@@ -1595,5 +1551,16 @@ Read-only • Fail-closed • XSS-safe rendering
 })();
 </script>
 
+<!-- ============================================================
+Testnoteringar (exakta klicksteg)
+1) Logga in som SYSTEM_ADMIN eller ADMIN.
+2) Gå till /admin/onboard-progress.html.
+3) Välj en aktiv plan.
+4) För en empNo med plan-tilldelning: Klicka “Visa detaljer” -> se items D+X och status.
+5) Skapa/ha en task med title som matchar blocktitel + scopeId + assignedTo=empNo eller ALL/* + status=done -> Done ska öka.
+6) Skapa/ha svar på fråga som matchar blocktitel (questionId eller title-match) -> Done ska öka.
+Risk/edge cases
+- Om emp scopeId saknas (AssignmentsV2 saknas) kan tasks inte räknas säkert (fail-closed), men frågor kan fortfarande ge Done.
+============================================================ -->
 </body>
 </html>
