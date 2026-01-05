@@ -1,145 +1,156 @@
-<!-- ============================================================
-FIL 2/2: admin/onboard-materialize.js  (PROD HEL FIL)
-AO-ONBOARD-MATERIALIZE-02 (PROD)
+/* ============================================================
+FIL: admin/onboard-materialize.js  (PROD HEL FIL)
+AO-ONBOARD-MATERIALIZE-02 (PATCH v1.1)
 Projekt: HR-System
 Syfte: Materialisera onboarding (AO-050_PACKAGES_V1) → TASKS + QUESTIONS
-Policy:
+
+PATCH v1.1 (2026-01-06):
+- Stödjer paket som lagrar innehåll i pkg.items (utöver pkg.blocks) → fixar blocksScanned=0 när UI visar "Items: N"
+- Robust status-match: "active"/"ACTIVE"/" active " behandlas som active
+- Ingen ny logik utanför scope: inga nya storage-keys, inga kopplingsändringar, inga extra reads
+
+Policy (LÅST):
 - UI-only • Fail-closed
 - Inga nya storage-keys
 - Läser: AO-050_PACKAGES_V1, AO-020_ROLE_ASSIGNMENTS_V2, AO-014_TASKS_V1, AO-012_QUESTIONS_V1
 - Skriver: AO-014_TASKS_V1, AO-012_QUESTIONS_V1
 - Idempotent via _origin
-============================================================ -->
-<script>
-(function(){
+============================================================ */
+
+(function () {
   "use strict";
 
-  const PACKAGES_KEY   = "AO-050_PACKAGES_V1";
-  const TASKS_KEY      = "AO-014_TASKS_V1";
-  const QUESTIONS_KEY  = "AO-012_QUESTIONS_V1";
-  const ASG_KEY        = "AO-020_ROLE_ASSIGNMENTS_V2";
+  const PACKAGES_KEY = "AO-050_PACKAGES_V1";
+  const TASKS_KEY = "AO-014_TASKS_V1";
+  const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
+  const ASG_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
 
   const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
   const MAX_BLOCKS_SCAN = 50000;
 
-  function safeParse(raw){
-    try{
-      if(raw == null) return { ok:true, value:null };
-      return { ok:true, value: JSON.parse(raw) };
-    }catch{
-      return { ok:false, value:null };
+  function safeParse(raw) {
+    try {
+      if (raw == null) return { ok: true, value: null };
+      return { ok: true, value: JSON.parse(raw) };
+    } catch {
+      return { ok: false, value: null };
     }
   }
 
-  function readJson(key){
+  function readJson(key) {
     let raw = null;
-    try{ raw = localStorage.getItem(key); }catch{ raw = null; }
+    try { raw = localStorage.getItem(key); } catch { raw = null; }
     const p = safeParse(raw);
-    if(!p.ok) return { ok:false, err: `${key} är korrupt JSON.` };
-    return { ok:true, value: p.value };
+    if (!p.ok) return { ok: false, err: `${key} är korrupt JSON.` };
+    return { ok: true, value: p.value };
   }
 
-  function writeJson(key, value){
-    try{
+  function writeJson(key, value) {
+    try {
       localStorage.setItem(key, JSON.stringify(value));
-      return { ok:true };
-    }catch{
-      return { ok:false, err: "Kunde inte spara (localStorage fullt/blockerat)." };
+      return { ok: true };
+    } catch {
+      return { ok: false, err: "Kunde inte spara (localStorage fullt/blockerat)." };
     }
   }
 
-  function isObj(x){ return !!x && typeof x === "object" && !Array.isArray(x); }
+  function isObj(x) { return !!x && typeof x === "object" && !Array.isArray(x); }
 
-  function normalizeAssignments(raw){
-    if(raw == null) return { ok:false, map: Object.create(null), err: `${ASG_KEY} saknas (null).` };
-    if(!isObj(raw)) return { ok:false, map: Object.create(null), err: `${ASG_KEY} måste vara ett objekt.` };
+  function normalizeAssignments(raw) {
+    if (raw == null) return { ok: false, map: Object.create(null), err: `${ASG_KEY} saknas (null).` };
+    if (!isObj(raw)) return { ok: false, map: Object.create(null), err: `${ASG_KEY} måste vara ett objekt.` };
 
     const out = Object.create(null);
-    for(const k of Object.keys(raw)){
+    for (const k of Object.keys(raw)) {
       const key = String(k);
-      if(SPECIAL_KEYS.has(key)){
-        return { ok:false, map: Object.create(null), err: `${ASG_KEY} innehåller blockerad special-key (${key}).` };
+      if (SPECIAL_KEYS.has(key)) {
+        return { ok: false, map: Object.create(null), err: `${ASG_KEY} innehåller blockerad special-key (${key}).` };
       }
       out[key] = raw[key];
     }
-    return { ok:true, map: out };
+    return { ok: true, map: out };
   }
 
-  function asStr(x, max){
+  function asStr(x, max) {
     const s = String(x ?? "").trim();
-    if(!s) return "";
+    if (!s) return "";
     return (max && s.length > max) ? s.slice(0, max) : s;
   }
 
-  function normKind(block){
-    const k = asStr(block?.type || block?.kind || "", 20).toLowerCase();
-    if(k === "task" || k === "question" || k === "both" || k === "info" || k === "document") return k;
+  function normKind(block) {
+    const k = asStr(block && (block.type || block.kind) || "", 20).toLowerCase();
+    if (k === "task" || k === "question" || k === "both" || k === "info" || k === "document") return k;
     return "";
   }
 
-  function genId(prefix){
-    return prefix + "_" + Date.now().toString(16) + "_" + Math.random().toString(16).slice(2,8);
+  function genId(prefix) {
+    return prefix + "_" + Date.now().toString(16) + "_" + Math.random().toString(16).slice(2, 8);
   }
 
-  function originKey(pkgId, blockId, empNo){
-    // Stabil dedupe. blockId kan saknas i vissa legacy -> fallback via title-index (men försök alltid med id först)
+  function originKey(pkgId, blockId, empNo) {
     const p = asStr(pkgId, 120) || "pkg";
     const b = asStr(blockId, 120) || "blk";
     const e = asStr(empNo, 20) || "emp";
     return `${p}:${b}:${e}`;
   }
 
-  function ensureArrayShape(key, raw){
-    if(raw == null) return { ok:true, arr: [] };
-    if(!Array.isArray(raw)) return { ok:false, arr: [], err: `${key} måste vara en array.` };
-    return { ok:true, arr: raw };
+  function ensureArrayShape(key, raw) {
+    if (raw == null) return { ok: true, arr: [] };
+    if (!Array.isArray(raw)) return { ok: false, arr: [], err: `${key} måste vara en array.` };
+    return { ok: true, arr: raw };
   }
 
-  function buildOriginSet(arr){
+  function buildOriginSet(arr) {
     const set = new Set();
-    for(const x of arr){
-      const o = asStr(x?._origin || "", 300);
-      if(o) set.add(o);
+    for (const x of arr) {
+      const o = asStr(x && x._origin || "", 300);
+      if (o) set.add(o);
     }
     return set;
   }
 
-  function materialize(opts){
-    const dryRun = !!(opts && opts.dryRun);
+  function normStatus(x) {
+    return asStr(x, 40).toLowerCase();
+  }
 
+  // PATCH v1.1: stöd både pkg.blocks och pkg.items (UI visar "Items: N")
+  function getBlocksFromPackage(pkg) {
+    if (pkg && Array.isArray(pkg.blocks)) return pkg.blocks;
+    if (pkg && Array.isArray(pkg.items)) return pkg.items;
+    return [];
+  }
+
+  function materialize(opts) {
+    const dryRun = !!(opts && opts.dryRun);
     const reasons = [];
 
     const pPackages = readJson(PACKAGES_KEY);
-    if(!pPackages.ok) reasons.push(pPackages.err);
+    if (!pPackages.ok) reasons.push(pPackages.err);
 
     const pAsg = readJson(ASG_KEY);
-    if(!pAsg.ok) reasons.push(pAsg.err);
+    if (!pAsg.ok) reasons.push(pAsg.err);
 
     const pTasks = readJson(TASKS_KEY);
-    if(!pTasks.ok) reasons.push(pTasks.err);
+    if (!pTasks.ok) reasons.push(pTasks.err);
 
     const pQuestions = readJson(QUESTIONS_KEY);
-    if(!pQuestions.ok) reasons.push(pQuestions.err);
+    if (!pQuestions.ok) reasons.push(pQuestions.err);
 
-    if(reasons.length){
-      return { ok:false, dryRun, reasons };
-    }
+    if (reasons.length) return { ok: false, dryRun, reasons };
 
     const packages = pPackages.value ?? [];
-    if(!Array.isArray(packages)){
-      return { ok:false, dryRun, reasons:[`${PACKAGES_KEY} måste vara en array.`] };
+    if (!Array.isArray(packages)) {
+      return { ok: false, dryRun, reasons: [`${PACKAGES_KEY} måste vara en array.`] };
     }
 
     const asgN = normalizeAssignments(pAsg.value ?? {});
-    if(!asgN.ok){
-      return { ok:false, dryRun, reasons:[asgN.err] };
-    }
+    if (!asgN.ok) return { ok: false, dryRun, reasons: [asgN.err] };
 
     const tN = ensureArrayShape(TASKS_KEY, pTasks.value);
-    if(!tN.ok) return { ok:false, dryRun, reasons:[tN.err] };
+    if (!tN.ok) return { ok: false, dryRun, reasons: [tN.err] };
 
     const qN = ensureArrayShape(QUESTIONS_KEY, pQuestions.value);
-    if(!qN.ok) return { ok:false, dryRun, reasons:[qN.err] };
+    if (!qN.ok) return { ok: false, dryRun, reasons: [qN.err] };
 
     const tasks = tN.arr.slice();
     const questions = qN.arr.slice();
@@ -148,46 +159,48 @@ Policy:
     const questionOrigins = buildOriginSet(questions);
 
     const empNos = Object.keys(asgN.map);
-    const activePkgs = packages.filter(p => String(p?.status || "").trim() === "active");
+
+    // PATCH v1.1: robust status-match
+    const activePkgs = packages.filter(p => normStatus(p && p.status) === "active");
 
     let blocksScanned = 0;
     let tasksAdded = 0;
     let questionsAdded = 0;
 
-    for(const pkg of activePkgs){
-      const pkgId = asStr(pkg?.id || "", 140);
-      const blocks = Array.isArray(pkg?.blocks) ? pkg.blocks : [];
-      if(!blocks.length) continue;
+    for (const pkg of activePkgs) {
+      const pkgId = asStr(pkg && pkg.id || "", 140);
+      const blocks = getBlocksFromPackage(pkg);
+      if (!blocks.length) continue;
 
-      for(const empNoRaw of empNos){
+      for (const empNoRaw of empNos) {
         const empNo = asStr(empNoRaw, 20);
-        if(!empNo) continue;
+        if (!empNo) continue;
 
         const rec = asgN.map[empNoRaw];
-        const scopeId = asStr(rec?.scopeId || "", 140);
-        if(!scopeId) continue;
+        const scopeId = asStr(rec && rec.scopeId || "", 140);
+        if (!scopeId) continue;
 
-        for(let bi=0; bi<blocks.length; bi++){
-          if(blocksScanned >= MAX_BLOCKS_SCAN){
-            return { ok:false, dryRun, reasons:[`Stop: för många block att scanna (${MAX_BLOCKS_SCAN}).`] };
+        for (let bi = 0; bi < blocks.length; bi++) {
+          if (blocksScanned >= MAX_BLOCKS_SCAN) {
+            return { ok: false, dryRun, reasons: [`Stop: för många block att scanna (${MAX_BLOCKS_SCAN}).`] };
           }
           blocksScanned++;
 
           const block = blocks[bi] || {};
           const kind = normKind(block);
-          if(!kind) continue;
+          if (!kind) continue;
 
-          // Skippa info/document (read-only / ej görbara i TASKS/QUESTIONS)
-          if(kind === "info" || kind === "document") continue;
+          // Skippa info/document (read-only)
+          if (kind === "info" || kind === "document") continue;
 
-          const blockId = asStr(block?.id || "", 140) || ("idx_" + String(bi));
+          const blockId = asStr(block && block.id || "", 140) || ("idx_" + String(bi));
           const origin = originKey(pkgId, blockId, empNo);
 
-          const title = asStr(block?.title || "Block", 80) || "Block";
-          const text = asStr(block?.text || block?.description || "", 2000);
+          const title = asStr(block && block.title || "Block", 80) || "Block";
+          const text = asStr(block && (block.text || block.description) || "", 2000);
 
-          if(kind === "task" || kind === "both"){
-            if(!taskOrigins.has(origin)){
+          if (kind === "task" || kind === "both") {
+            if (!taskOrigins.has(origin)) {
               tasksAdded++;
               taskOrigins.add(origin);
               tasks.push({
@@ -205,8 +218,8 @@ Policy:
             }
           }
 
-          if(kind === "question" || kind === "both"){
-            if(!questionOrigins.has(origin)){
+          if (kind === "question" || kind === "both") {
+            if (!questionOrigins.has(origin)) {
               questionsAdded++;
               questionOrigins.add(origin);
               questions.push({
@@ -224,11 +237,10 @@ Policy:
       }
     }
 
-    // Fail-closed: om dryRun -> inga writes
-    if(dryRun){
+    if (dryRun) {
       return {
-        ok:true,
-        dryRun:true,
+        ok: true,
+        dryRun: true,
         activePackages: activePkgs.length,
         assignmentsEmpCount: empNos.length,
         blocksScanned,
@@ -240,19 +252,16 @@ Policy:
     }
 
     const w1 = writeJson(TASKS_KEY, tasks);
-    if(!w1.ok){
-      return { ok:false, dryRun:false, reasons:[`Skrivfel TASKS: ${w1.err}`] };
-    }
+    if (!w1.ok) return { ok: false, dryRun: false, reasons: [`Skrivfel TASKS: ${w1.err}`] };
 
     const w2 = writeJson(QUESTIONS_KEY, questions);
-    if(!w2.ok){
-      // fail-closed-ish: vi kan inte rulla tillbaka TASKS säkert utan ny key, så vi STOPPAR och rapporterar
-      return { ok:false, dryRun:false, reasons:[`Skrivfel QUESTIONS: ${w2.err}. OBS: TASKS kan ha uppdaterats.`] };
+    if (!w2.ok) {
+      return { ok: false, dryRun: false, reasons: [`Skrivfel QUESTIONS: ${w2.err}. OBS: TASKS kan ha uppdaterats.`] };
     }
 
     return {
-      ok:true,
-      dryRun:false,
+      ok: true,
+      dryRun: false,
       activePackages: activePkgs.length,
       assignmentsEmpCount: empNos.length,
       blocksScanned,
@@ -267,4 +276,3 @@ Policy:
   window.HR_ONBOARD_MATERIALIZE = materialize;
 
 })();
-</script>
