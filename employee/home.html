@@ -500,7 +500,7 @@
     "use strict";
 
     /* ============================================================
-      EMPLOYEE/HOME (PATCH v1.0) | FIL-ID: employee/home.html
+      AO-EMP-HOME-ONBOARD-01 (2/5) | FIL-ID: employee/home.html
       Syfte: Employee – Dagskalender + Post-its + onboarding/paket (read-only)
       POLICY (LÅST):
       - UI-only • Fail-closed (requireAuth)
@@ -566,6 +566,7 @@
     }
 
     function escapeHtml(input){
+      // Fallback används endast för strängar som kan hamna i attribut/HTML i legacy-delar.
       if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(input);
       const s = String(input ?? "");
       return s
@@ -629,7 +630,6 @@
         return null;
       }
 
-      // If moved to org-tree: accept that scope might live under different fieldnames in assignments.
       if (!String(auth.scopeId || "").trim()) {
         const empNo = String(auth.empNo || "").trim();
         const role  = String(auth.role || "").trim();
@@ -644,7 +644,6 @@
             return null;
           }
         } else {
-          // Fail-closed, but with actionable debug (no new keys).
           const lines = [];
           lines.push("Fail-closed: saknar scopeId i session.");
           lines.push("(Access/Assignments måste vara korrekt.)");
@@ -762,7 +761,6 @@
           if (r && aRole !== r) continue;
           debug.matchedRole = true;
         } else {
-          // Role not present in assignment, treat as match (tree move scenario).
           debug.matchedRole = true;
         }
 
@@ -780,10 +778,7 @@
       const sid = String(scopeId || "").trim();
       if (!sessionObj || typeof sessionObj !== "object" || !sid) return null;
 
-      // mutate current session object (existing behavior)
       const out = sessionObj;
-
-      // Keep compatibility with both "auth.scopeId" and root "scopeId"
       if (out.auth && typeof out.auth === "object") out.auth.scopeId = sid;
       out.scopeId = sid;
 
@@ -841,29 +836,34 @@
     function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
 
     /* ===========================
-       Date
+       Date (lokal midnatt = source of truth)
     ============================ */
     const WEEKDAYS = ["Söndag","Måndag","Tisdag","Onsdag","Torsdag","Fredag","Lördag"];
     const MONTHS   = ["januari","februari","mars","april","maj","juni","juli","augusti","september","oktober","november","december"];
     const DAY_MS   = 86400000;
 
+    function localMidnight(dateObj){
+      const d = new Date(dateObj);
+      d.setHours(0,0,0,0);
+      return d;
+    }
+
+    function localMidnightTs(dateObj){
+      return localMidnight(dateObj).getTime();
+    }
+
     function toISODate(d){
-      const y = d.getFullYear();
-      const m = String(d.getMonth()+1).padStart(2,"0");
-      const day = String(d.getDate()).padStart(2,"0");
+      const x = localMidnight(d);
+      const y = x.getFullYear();
+      const m = String(x.getMonth()+1).padStart(2,"0");
+      const day = String(x.getDate()).padStart(2,"0");
       return `${y}-${m}-${day}`;
     }
+
     function fmtBig(d){ return WEEKDAYS[d.getDay()]; }
     function fmtSmall(d){ return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`; }
 
-    function middayDate(d){
-      const x = new Date(d);
-      x.setHours(12,0,0,0);
-      return x;
-    }
-
-    let selectedDate = new Date();
-    selectedDate.setHours(12,0,0,0);
+    let selectedDate = localMidnight(new Date());
 
     /* ===========================
        Task normalization + filtering
@@ -1127,6 +1127,7 @@
        Onboarding (READ ONLY)
        - expand plan items -> training.blocks via AO-057
        - NO NEW KEYS, NO WRITES
+       - startDateTs tolkas som lokal midnatt (match AO-061: 00:00 lokal tid)
     ============================ */
     function readOnboardPlans(){
       const data = readLocalObjectOrArray(KEY_ONBOARD_PLANS_V1);
@@ -1158,31 +1159,42 @@
       return [];
     }
 
-    function parseDateToMiddayTs(x){
+    function localMidnightFromTs(ts){
+      const n = Number(ts);
+      if(!Number.isFinite(n) || n <= 0) return null;
+      const d = new Date(n);
+      if(!Number.isFinite(d.getTime())) return null;
+      return localMidnight(d).getTime();
+    }
+
+    function parseDateToLocalMidnightTs(x){
       if (x == null) return null;
 
       if (typeof x === "number") {
-        const n = Math.trunc(x);
-        if (!Number.isFinite(n) || n <= 0) return null;
-        return n;
+        return localMidnightFromTs(x);
       }
 
       const s = String(x).trim();
       if (!s) return null;
 
       if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
-        const d = new Date(s + "T12:00:00");
-        const ts = d.getTime();
-        return Number.isFinite(ts) ? ts : null;
+        // ISO date => LOCAL midnight
+        const parts = s.split("-");
+        const y = Number(parts[0]), m = Number(parts[1]), d = Number(parts[2]);
+        if(!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+        const dt = new Date(y, m-1, d, 0,0,0,0);
+        const t = dt.getTime();
+        return (Number.isFinite(t) && t > 0) ? t : null;
       }
 
       const d = new Date(s);
-      const ts = d.getTime();
-      return Number.isFinite(ts) ? ts : null;
+      const t = d.getTime();
+      if(!Number.isFinite(t) || t <= 0) return null;
+      return localMidnightFromTs(t);
     }
 
     function normalizeStartDateTs(x){
-      const ts = parseDateToMiddayTs(x);
+      const ts = parseDateToLocalMidnightTs(x);
       if (ts == null) return null;
       return Math.trunc(ts);
     }
@@ -1211,7 +1223,6 @@
     }
 
     function getItemTrainingId(it){
-      // allow {trainingId} or nested {training:{id}}
       return normStr(it?.trainingId ?? it?.training_id ?? it?.tid ?? it?.training?.id ?? it?.training?.trainingId ?? "");
     }
 
@@ -1220,8 +1231,8 @@
       return Number.isFinite(n) ? Math.trunc(n) : 999999;
     }
 
-    function computeDayNumber(selectedMiddayTs, startDateTs){
-      const diff = Number(selectedMiddayTs) - Number(startDateTs);
+    function computeDayNumber(selectedLocalMidnightTs, startDateLocalMidnightTs){
+      const diff = Number(selectedLocalMidnightTs) - Number(startDateLocalMidnightTs);
       if(!Number.isFinite(diff)) return null;
       return Math.floor(diff / DAY_MS);
     }
@@ -1276,8 +1287,7 @@
         if(id && !trainingsById.has(id)) trainingsById.set(id, t);
       }
 
-      const selectedMid = middayDate(selectedDateObj);
-      const selectedMidTs = selectedMid.getTime();
+      const selectedMidnightTs = localMidnightTs(selectedDateObj);
 
       const combined = [];
 
@@ -1295,7 +1305,7 @@
         const items = getPlanItems(p);
         if(!Array.isArray(items) || items.length === 0) continue;
 
-        const dayN = computeDayNumber(selectedMidTs, startDateTs);
+        const dayN = computeDayNumber(selectedMidnightTs, startDateTs);
         if(dayN == null) continue;
 
         for(const it of items){
@@ -1360,13 +1370,15 @@
 
       const seen = new Set();
       const cards = [];
+      let stepCounter = 0;
 
       for(let idx=0; idx<combined.length; idx++){
         const it = combined[idx];
-
         const dedupeKey = `${it.trainingId}__${it.blockId}`;
         if(seen.has(dedupeKey)) continue;
         seen.add(dedupeKey);
+
+        stepCounter++;
 
         const doneNow = isPackageBlockDone({ kind: it.kind, title: it.title }, tasksVisibleAll, empNo);
 
@@ -1376,7 +1388,7 @@
         if(it.module) parts.push(it.module);
         if(it.area) parts.push(it.area);
         if(it.trainingTitle) parts.push(it.trainingTitle);
-        parts.push(`Steg ${idx + 1}`);
+        parts.push(`Steg ${stepCounter}`);
         parts.push(`Dag +${it.dayOffset}`);
 
         const sub = parts.filter(Boolean).join(" • ");
@@ -1411,7 +1423,7 @@
           isDone: !!doneNow,
           ui,
           _dayOffset: it.dayOffset,
-          _stepNo: idx + 1
+          _stepNo: stepCounter
         });
       }
 
@@ -1473,9 +1485,9 @@
         voiceLine.textContent = VOICE.UNCLEAR;
         dayBadge.textContent = `0 färdig • 0 återstår`;
         boardPill.textContent = "—";
-        doneList.innerHTML = "";
-        todoList.innerHTML = "";
-        notesGrid.innerHTML = "";
+        doneList.textContent = "";
+        todoList.textContent = "";
+        notesGrid.textContent = "";
         showGuard("Fail-closed: saknar scopeId i session. (Access/Assignments måste vara korrekt.)");
         return;
       }
@@ -1508,57 +1520,53 @@
       renderNotesCombined(todo, onboardCards, pkgCards, auth);
     }
 
+    function makeLi(title, meta, rightText, rightClass){
+      const li = document.createElement("li");
+      li.className = "item";
+
+      const left = document.createElement("div");
+
+      const nm = document.createElement("div");
+      nm.className = "name";
+      nm.textContent = String(title || "");
+
+      const mt = document.createElement("div");
+      mt.className = "meta";
+      mt.textContent = String(meta || "");
+
+      left.appendChild(nm);
+      left.appendChild(mt);
+
+      const badge = document.createElement("span");
+      badge.className = "badge" + (rightClass ? (" " + rightClass) : "");
+      badge.textContent = String(rightText || "—");
+
+      li.appendChild(left);
+      li.appendChild(badge);
+      return li;
+    }
+
     function renderCalendarLists(doneArr, todoArr){
-      doneList.innerHTML = "";
-      todoList.innerHTML = "";
+      doneList.textContent = "";
+      todoList.textContent = "";
 
       if(doneArr.length === 0){
-        doneList.innerHTML = `
-          <li class="item">
-            <div>
-              <div class="name">Inget färdigt ännu</div>
-              <div class="meta">Det är okej.</div>
-            </div>
-            <span class="badge done">Färdig</span>
-          </li>`;
+        doneList.appendChild(makeLi("Inget färdigt ännu", "Det är okej.", "Färdig", "done"));
       } else {
         for(const t of doneArr){
-          const title = escapeHtml(getTaskTitle(t));
-          const meta = escapeHtml(getTaskDesc(t));
-          doneList.insertAdjacentHTML("beforeend", `
-            <li class="item">
-              <div>
-                <div class="name">${title}</div>
-                <div class="meta">${meta || "Färdig."}</div>
-              </div>
-              <span class="badge done">Färdig</span>
-            </li>
-          `);
+          const title = getTaskTitle(t);
+          const meta = getTaskDesc(t) || "Färdig.";
+          doneList.appendChild(makeLi(title, meta, "Färdig", "done"));
         }
       }
 
       if(todoArr.length === 0){
-        todoList.innerHTML = `
-          <li class="item">
-            <div>
-              <div class="name">Inget kvar</div>
-              <div class="meta">Det är lugnt.</div>
-            </div>
-            <span class="badge">—</span>
-          </li>`;
+        todoList.appendChild(makeLi("Inget kvar", "Det är lugnt.", "—", ""));
       } else {
         for(const t of todoArr){
-          const title = escapeHtml(getTaskTitle(t));
-          const meta = escapeHtml(getTaskDesc(t));
-          todoList.insertAdjacentHTML("beforeend", `
-            <li class="item">
-              <div>
-                <div class="name">${title}</div>
-                <div class="meta">${meta || "Återstår."}</div>
-              </div>
-              <span class="badge">Återstår</span>
-            </li>
-          `);
+          const title = getTaskTitle(t);
+          const meta = getTaskDesc(t) || "Återstår.";
+          todoList.appendChild(makeLi(title, meta, "Återstår", ""));
         }
       }
     }
@@ -1615,7 +1623,7 @@
     }
 
     function renderNotesCombined(todoTasksForDay, onboardCards, pkgCards, auth){
-      notesGrid.innerHTML = "";
+      notesGrid.textContent = "";
 
       const items = [];
 
@@ -1644,69 +1652,153 @@
       }
 
       if(items.length === 0){
-        notesGrid.innerHTML = `
-          <article class="note" style="background: rgba(217,247,214,.85); --tilt:-1deg;">
-            <div class="t">Inga post-its just nu</div>
-            <div class="s">Om något dyker upp senare syns det här.</div>
-            <div class="row">
-              <div class="mini">—</div>
-              <span class="okPill">Lugnt</span>
-            </div>
-          </article>`;
+        const art = document.createElement("article");
+        art.className = "note";
+        art.style.background = "rgba(217,247,214,.85)";
+        art.style.setProperty("--tilt","-1deg");
+
+        const t = document.createElement("div");
+        t.className = "t";
+        t.textContent = "Inga post-its just nu";
+
+        const s = document.createElement("div");
+        s.className = "s";
+        s.textContent = "Om något dyker upp senare syns det här.";
+
+        const row = document.createElement("div");
+        row.className = "row";
+
+        const mini = document.createElement("div");
+        mini.className = "mini";
+        mini.textContent = "—";
+
+        const ok = document.createElement("span");
+        ok.className = "okPill";
+        ok.textContent = "Lugnt";
+
+        row.appendChild(mini);
+        row.appendChild(ok);
+
+        art.appendChild(t);
+        art.appendChild(s);
+        art.appendChild(row);
+
+        notesGrid.appendChild(art);
         return;
       }
 
       items.forEach((it, idx) => {
-        const title = escapeHtml(it.title || "—");
-        const desc  = escapeHtml(it.desc || "—");
-        const sub   = escapeHtml(it.sub || "");
-        const id    = escapeHtml(it.id);
-        const bg    = pickNoteBg(idx);
-        const tilt  = (idx % 2 === 0) ? "-1.2deg" : "1.1deg";
+        const id = String(it.id || "");
+        const bg = pickNoteBg(idx);
+        const tilt = (idx % 2 === 0) ? "-1.2deg" : "1.1deg";
 
-        const donePill = it.isDone ? `<span class="okPill" aria-label="Klar">Klar</span>` : "";
+        const note = document.createElement("article");
+        note.className = "note";
+        note.dataset.noteId = id;
+        note.dataset.source = String(it.source || "");
+        note.style.background = bg;
+        note.style.setProperty("--tilt", tilt);
 
-        let actionsHtml = "";
+        const t = document.createElement("div");
+        t.className = "t";
+        t.textContent = String(it.title || "—");
+
+        const s = document.createElement("div");
+        s.className = "s";
+        s.textContent = String(it.desc || "—");
+
+        const row = document.createElement("div");
+        row.className = "row";
+
+        const subline = document.createElement("div");
+        subline.className = "mini";
+        subline.textContent = (it.sub ? String(it.sub) : "—");
+
+        const right = document.createElement("div");
+        right.style.display = "flex";
+        right.style.gap = "8px";
+        right.style.alignItems = "center";
+        right.style.flexWrap = "wrap";
+        right.style.justifyContent = "flex-end";
+
+        const donePill = () => {
+          const sp = document.createElement("span");
+          sp.className = "okPill";
+          sp.setAttribute("aria-label","Klar");
+          sp.textContent = "Klar";
+          return sp;
+        };
+
         if(it.source === "task"){
-          actionsHtml = `
-            <button class="doneBtn" type="button" data-action="done-task" data-task-id="${escapeHtml(it.taskId)}">Klar</button>
-          `;
+          const btn = document.createElement("button");
+          btn.className = "doneBtn";
+          btn.type = "button";
+          btn.dataset.action = "done-task";
+          btn.dataset.taskId = String(it.taskId || "");
+          btn.textContent = "Klar";
+          right.appendChild(btn);
         }else if(it.source === "pkg" || it.source === "onboard"){
-          if(it.ui.action === "none"){
-            actionsHtml = donePill || `<span class="pill2">Info</span>`;
-          }else if(it.ui.action === "goQuestions"){
-            actionsHtml = `
-              <a class="linkBtn" href="./questions.html" data-action="go-questions">Svara</a>
-              ${donePill}
-            `;
-          }else if(it.ui.action === "taskDone"){
-            actionsHtml = it.isDone
-              ? donePill
-              : `<button class="doneBtn" type="button" data-action="done-pkg-task" data-card-id="${id}">Klar</button>`;
-          }else if(it.ui.action === "both"){
-            actionsHtml = `
-              ${it.isDone ? donePill : `<button class="doneBtn" type="button" data-action="done-pkg-task" data-card-id="${id}">Klar</button>`}
-              <a class="linkBtn" href="./questions.html" data-action="go-questions">Svara</a>
-            `;
+          const ui = it.ui || { action:"none" };
+
+          if(ui.action === "none"){
+            if(it.isDone) right.appendChild(donePill());
+            else{
+              const inf = document.createElement("span");
+              inf.className = "pill2";
+              inf.textContent = "Info";
+              right.appendChild(inf);
+            }
+          }else if(ui.action === "goQuestions"){
+            const a = document.createElement("a");
+            a.className = "linkBtn";
+            a.href = "./questions.html";
+            a.dataset.action = "go-questions";
+            a.textContent = "Svara";
+            right.appendChild(a);
+            if(it.isDone) right.appendChild(donePill());
+          }else if(ui.action === "taskDone"){
+            if(it.isDone){
+              right.appendChild(donePill());
+            }else{
+              const btn = document.createElement("button");
+              btn.className = "doneBtn";
+              btn.type = "button";
+              btn.dataset.action = "done-pkg-task";
+              btn.dataset.cardId = id;
+              btn.textContent = "Klar";
+              right.appendChild(btn);
+            }
+          }else if(ui.action === "both"){
+            if(it.isDone){
+              right.appendChild(donePill());
+            }else{
+              const btn = document.createElement("button");
+              btn.className = "doneBtn";
+              btn.type = "button";
+              btn.dataset.action = "done-pkg-task";
+              btn.dataset.cardId = id;
+              btn.textContent = "Klar";
+              right.appendChild(btn);
+            }
+            const a = document.createElement("a");
+            a.className = "linkBtn";
+            a.href = "./questions.html";
+            a.dataset.action = "go-questions";
+            a.textContent = "Svara";
+            right.appendChild(a);
           }else{
-            actionsHtml = donePill || "";
+            if(it.isDone) right.appendChild(donePill());
           }
         }
 
-        const subline = sub ? `<div class="mini">${sub}</div>` : `<div class="mini">—</div>`;
+        row.appendChild(subline);
+        row.appendChild(right);
 
-        notesGrid.insertAdjacentHTML("beforeend", `
-          <article class="note" data-note-id="${id}" data-source="${escapeHtml(it.source)}" style="background:${bg}; --tilt:${tilt};">
-            <div class="t">${title}</div>
-            <div class="s">${desc || "—"}</div>
-            <div class="row">
-              ${subline}
-              <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
-                ${actionsHtml}
-              </div>
-            </div>
-          </article>
-        `);
+        note.appendChild(t);
+        note.appendChild(s);
+        note.appendChild(row);
+
+        notesGrid.appendChild(note);
       });
     }
 
@@ -1789,20 +1881,17 @@
     let AUTH = null;
 
     prevDayBtn.addEventListener("click", () => {
-      selectedDate = new Date(selectedDate.getTime() - DAY_MS);
-      selectedDate.setHours(12,0,0,0);
+      selectedDate = localMidnight(new Date(selectedDate.getTime() - DAY_MS));
       if (AUTH) render(AUTH);
     });
 
     nextDayBtn.addEventListener("click", () => {
-      selectedDate = new Date(selectedDate.getTime() + DAY_MS);
-      selectedDate.setHours(12,0,0,0);
+      selectedDate = localMidnight(new Date(selectedDate.getTime() + DAY_MS));
       if (AUTH) render(AUTH);
     });
 
     todayBtn.addEventListener("click", () => {
-      selectedDate = new Date();
-      selectedDate.setHours(12,0,0,0);
+      selectedDate = localMidnight(new Date());
       if (AUTH) render(AUTH);
     });
 
@@ -1875,13 +1964,13 @@
 
   <!-- ============================================================
   Ändringslogg (≤ 8 rader)
-  - FIX: scopeId-repair är nu “tree-aware” (fler fältnamn/shape i AO-020_ROLE_ASSIGNMENTS_V2)
-  - Fail-closed kvar, men guard visar debug (antal assignments, match empNo/roll, scopefält hittat)
-  - Onboarding: startDate kan nu vara timestamp ELLER ISO-datumsträng
-  - Trainings: accepterar array eller objektshape (trainings/items/data)
-  - Inga nya storage-keys • inga writes utöver ev patch av session scopeId
+  - ONBOARD: dag-beräkning använder lokal midnatt (match AO-061 startDateTs 00:00)
+  - ONBOARD: startDate normaliseras till lokal midnatt även om input är ISO/ts
+  - Render: kalenderlistor renderas via DOM (textContent) istället för HTML-injektion
+  - Render: notes byggs med DOM + data-attribut (XSS-säker)
+  - Inga nya storage-keys • inga writes utöver befintlig task-done + ev scopeId-patch i session
   Testnoteringar:
-  - Test: flytta employee i assignments (nytt fält nodeId/unitId) -> scopeId ska resolve:as och sidan laddar
+  - Koppla plan i admin (AO-061), logga in som empNo, byt dag -> onboarding syns från dagOffset<=dag
   ============================================================ -->
 </body>
 </html>
