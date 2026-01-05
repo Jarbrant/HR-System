@@ -518,6 +518,11 @@
     const KEY_TRAININGS_V1 = "AO-057_TRAININGS_V1";
 
     /* ===========================
+       Prototype/poison guard (fail-closed)
+    ============================ */
+    const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+    /* ===========================
        DOM
     ============================ */
     const guardBox  = document.getElementById("guardBox");
@@ -626,9 +631,62 @@
       const raw = readAnyStorage(KEY_ASSIGNMENTS);
       if (!raw) return [];
       const data = safeJsonParse(raw);
+
+      // Format A: [ {empNo, roleId, scopeId, ...}, ... ]
       if (Array.isArray(data)) return data;
+
+      // Format B: { assignments: [...] }
       if (data && typeof data === "object" && Array.isArray(data.assignments)) return data.assignments;
+
+      // Format C (NYTT): map-format { "3001": { roleId, scopeId, ... }, "3002": {...} }
+      // Fail-closed: om object innehåller poison keys -> tomt
+      if (data && typeof data === "object") {
+        for (const k of Object.keys(data)) {
+          if (SPECIAL_KEYS.has(String(k))) return [];
+        }
+
+        // wrapper-varianter (tolerant)
+        const wrapperKeys = ["map","byEmpNo","byEmployee","employees","data","value"];
+        for (const wk of wrapperKeys) {
+          if (data[wk] && typeof data[wk] === "object" && !Array.isArray(data[wk])) {
+            const m = data[wk];
+            for (const k of Object.keys(m)) {
+              if (SPECIAL_KEYS.has(String(k))) return [];
+            }
+            return mapObjectToAssignmentArray(m);
+          }
+        }
+
+        return mapObjectToAssignmentArray(data);
+      }
+
       return [];
+    }
+
+    function mapObjectToAssignmentArray(obj){
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) return [];
+      const out = [];
+
+      for (const empKey of Object.keys(obj)) {
+        const k = String(empKey);
+        if (SPECIAL_KEYS.has(k)) continue;
+
+        const rec = obj[empKey];
+        if (!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
+
+        for (const rk of Object.keys(rec)) {
+          if (SPECIAL_KEYS.has(String(rk))) return [];
+        }
+
+        out.push({
+          empNo: String(empKey || "").trim(),
+          roleId: String(rec.roleId ?? rec.role ?? "").trim(),
+          scopeId: String(rec.scopeId ?? rec.scope ?? "").trim(),
+          updatedAt: rec.updatedAt
+        });
+      }
+
+      return out;
     }
 
     function normalizeEmpNo(x){ return String(x ?? "").trim(); }
@@ -1749,6 +1807,7 @@
   - Dedupe: trainingId+blockId (blockId fallback idx_n inom training om id saknas)
   - Done-logik återanvänder exakt isPackageBlockDone (titelmatch tasks + question/answer)
   - UI: subrad börjar med “Onboarding • {PlanTitel} … • Steg • Dag+”
+  - PATCH: employee/home.html accepterar nu AO-020_ROLE_ASSIGNMENTS_V2 som map-format (empNo -> {roleId, scopeId...}) utöver array/wrapper
   Testnoteringar:
   - Test A: AO-060 active plan + AO-061 assignment startDateTs=nu + item dayOffset=0 => onboardingkort syns idag
   - Test B: dayOffset=3 => syns när du klickar fram datum +3
