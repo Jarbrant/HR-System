@@ -1,12 +1,12 @@
 <!-- ============================================================
-FIL: admin/onboard-materialize.html  (NY/PROD)
-AO-ONBOARD-MATERIALIZE-02 (PATCH v1.1)
+FIL: admin/onboard-materialize.html  (NY)
+AO-ONBOARD-MATERIALIZE-02 (PROD) — PATCH v1.1 (2026-01-06)
 Projekt: HR-System
 Syfte: ADMIN – Materialisera onboarding (AO-050_PACKAGES_V1) → TASKS + QUESTIONS
 
-PATCH v1.1 (2026-01-06):
-- Förbättrad fail-closed diagnostik om onboard-materialize.js inte laddas
-- Ingen ny logik i materialiseringen, inga nya storage-keys, inga kopplingsändringar
+PATCH v1.1:
+- Cache-bustar onboard-materialize.js (v=1.1) för att undvika att gammal/404-cachad fil gör att HR_ONBOARD_MATERIALIZE saknas
+- Tydligare fail-closed vid script-load-fel (utan nya keys / utan kopplingsändringar)
 
 Policy (LÅST):
 - UI-only • Fail-closed • ADMIN-only
@@ -108,7 +108,7 @@ Policy (LÅST):
         Kör materialisering från <strong>AO-050_PACKAGES_V1</strong> (aktiva paket) till
         <strong>AO-014_TASKS_V1</strong> och <strong>AO-012_QUESTIONS_V1</strong> för alla empNo i
         <strong>AO-020_ROLE_ASSIGNMENTS_V2</strong>.
-        <br /><span class="tiny">Idempotent: kan köras flera gånger utan dubletter (dedupe via <code>_origin</code>).</span>
+        <br /><span class="tiny">Idempotent: kan köras flera gånger utan dubletter (dedupe via _origin).</span>
       </p>
       <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
         <span class="pill" id="whoPill">Inloggad: —</span>
@@ -149,7 +149,11 @@ Policy (LÅST):
 <script src="../UI/UI-03-APP.js"></script>
 
 <!-- Materialize engine (PROD) -->
-<script src="./onboard-materialize.js"></script>
+<!-- PATCH v1.1: cache-bust + onerror flag (ingen ny logik i engine) -->
+<script>
+  window.__MAT_ENGINE_LOAD_FAILED = false;
+</script>
+<script src="./onboard-materialize.js?v=1.1" onerror="window.__MAT_ENGINE_LOAD_FAILED=true;"></script>
 
 <script>
 (function(){
@@ -178,8 +182,8 @@ Policy (LÅST):
     try{ localStorage.removeItem(SESSION_KEY); }catch{}
     redirectLogin();
   }
-
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
   $("#btnBack").addEventListener("click", () => { window.location.href = "./packages-block.html"; });
 
   if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") { redirectLogin(); return; }
@@ -232,18 +236,20 @@ Policy (LÅST):
   function runMaterialize(dryRun){
     setMsg("", "");
 
-    // PATCH v1.1: tydligare fel om script inte laddats
+    if (window.__MAT_ENGINE_LOAD_FAILED) {
+      renderResult({ ok:false, reasons:[
+        "Saknar HR_ONBOARD_MATERIALIZE (engine-script kunde inte laddas).",
+        "Kontroll: att filen finns på /admin/onboard-materialize.js (inte 404) och att filen INTE innehåller <script>-taggar.",
+        "Tips: öppna /admin/onboard-materialize.js i browser och se att du får JS-kod, inte en 404-sida."
+      ]});
+      return;
+    }
+
     if(!window.HR_ONBOARD_MATERIALIZE || typeof window.HR_ONBOARD_MATERIALIZE !== "function"){
-      const diag = [
-        "Saknar HR_ONBOARD_MATERIALIZE (script ej laddad).",
-        "",
-        "Checklista:",
-        "1) Filen måste finnas: /admin/onboard-materialize.js",
-        "2) onboard-materialize.js får INTE innehålla <script>-taggar.",
-        "3) Hard refresh (Ctrl+F5) efter commit.",
-        "4) Öppna DevTools → Console/Network och se 404 eller JS error."
-      ].join("\n");
-      renderResult({ ok:false, reasons:[diag] });
+      renderResult({ ok:false, reasons:[
+        "Saknar HR_ONBOARD_MATERIALIZE (script laddad men exporter saknas).",
+        "Vanlig orsak: onboard-materialize.js innehåller syntaxfel eller är en HTML/404 som serveras som JS."
+      ]});
       return;
     }
 
@@ -265,10 +271,10 @@ Policy (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-1) PATCH v1.1: Tydligare feltext/checklista när onboard-materialize.js inte laddats.
-2) Inga nya storage-keys, inga writes utöver materialiseringskörning.
+- PATCH v1.1: cache-bustar onboard-materialize.js (v=1.1) + tydligare fail-closed om engine ej laddas
+- Ingen ny storage-key, ingen write i UI utöver materialize-run
 Testnoteringar:
-- Logga in som ADMIN → Dry-run → Kör → kontrollera employee/tasks.html och employee/questions.html.
+- Logga in som ADMIN → öppna sidan → Dry-run → Kör → kontrollera AO-014_TASKS_V1 + AO-012_QUESTIONS_V1
 ============================================================ -->
 </body>
 </html>
