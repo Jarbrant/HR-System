@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.3) | FIL-ID: admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.4) | FIL-ID: admin/onboard-progress.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN/SYSTEM_ADMIN – Plan → Progress per medarbetare (read-only v1)
 
@@ -23,11 +23,12 @@ Keys (LÅST – läs endast):
 - AO-020_ROLE_ASSIGNMENTS_V2
 
 Senaste sanning: 2026-01-05
-Ändringslogg (PATCH v1.3):
-- P0: Robust inläsning av AO-060_PLANS_V1 och AO-061_PLAN_ASSIGNMENTS_V1 (stöd för array ELLER wrapper-objekt {plans:[...]} / {data:[...]} / {items:[...]} / map->values).
-- P0: Status-normalisering (case-insensitive) + tolerans för "ACTIVE"/"active" och liknande (utan writes).
-- Oförändrat: Default visar ALLA employees (AO-020_ROLE_ASSIGNMENTS_V2) och “Ej tilldelad” fail-closed.
-- Oförändrat: read-only, inga nya keys, XSS-safe, fail-closed.
+Ändringslogg (PATCH v1.4):
+- P0: EmpNo-filter förbättrad: tydlig Apply/Clear + exakt/prefix-match (inte “includes”).
+- P0: Employee-lista = UNION (AO-020_ROLE_ASSIGNMENTS_V2 + AO-061 för vald plan) så SYSTEM_ADMIN kan filtrera även om assignments saknas.
+- P0: ADMIN fail-closed behålls: endast empNo som kan scope-valideras får visas (övriga exkluderas).
+- P1: whoName visar empNo (#1234) istället för displayName (minimering).
+- Oförändrat: read-only, inga writes, inga nya keys, XSS-safe, fail-closed.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -80,6 +81,22 @@ Senaste sanning: 2026-01-05
     }
     @media (max-width: 820px){
       .grid2{ grid-template-columns: 1fr; }
+    }
+
+    .filterRow{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top:8px;
+    }
+    .filterRow .btn{
+      padding: 8px 10px;
+    }
+    .hintTiny{
+      margin-top:6px;
+      font-size:.88rem;
+      color: var(--muted);
     }
 
     table{
@@ -249,7 +266,13 @@ Senaste sanning: 2026-01-05
 
         <label>
           Filter (empNo)
-          <input id="empFilter" type="text" inputmode="numeric" placeholder="t.ex. 1234" />
+          <input id="empFilter" type="text" inputmode="numeric" placeholder="t.ex. 3001" />
+          <div class="filterRow">
+            <button id="btnApplyFilter" type="button" class="secondary">Apply</button>
+            <button id="btnClearFilter" type="button" class="secondary">Clear</button>
+            <span class="pill" title="Matchar exakt eller prefix (t.ex. 30 matchar 3001, 3002)."><strong>Match</strong>: exakt/prefix</span>
+          </div>
+          <div class="hintTiny">Tips: skriv t.ex. <span class="mono">3001</span> (exakt) eller <span class="mono">30</span> (prefix).</div>
         </label>
       </div>
 
@@ -292,7 +315,7 @@ Senaste sanning: 2026-01-05
 
 <script>
 /* ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.3) | admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.4) | admin/onboard-progress.html
 Read-only • Fail-closed • XSS-safe rendering
 ============================================================ */
 (function(){
@@ -373,7 +396,6 @@ Read-only • Fail-closed • XSS-safe rendering
     if(Array.isArray(value)) return { ok:true, arr:value, mode:"array" };
     if(!isPlainObject(value)) return { ok:false, arr:[], mode:"none" };
 
-    // block special keys top-level
     for(const k of Object.keys(value)){
       if(SPECIAL_KEYS.has(String(k))) return { ok:false, arr:[], mode:"blocked" };
     }
@@ -385,20 +407,19 @@ Read-only • Fail-closed • XSS-safe rendering
       }
     }
 
-    // map -> values (only if values look like objects)
     const keys = Object.keys(value).filter(k => !SPECIAL_KEYS.has(String(k)));
     if(keys.length === 0) return { ok:true, arr:[], mode:"empty-map" };
 
-    let looksLikePlanMap = true;
+    let looksLikeMap = true;
     for(const k of keys){
       const v = value[k];
       if(v === null || v === undefined) continue;
       if(typeof v !== "object" || Array.isArray(v)){
-        looksLikePlanMap = false;
+        looksLikeMap = false;
         break;
       }
     }
-    if(looksLikePlanMap){
+    if(looksLikeMap){
       const vals = keys.map(k => value[k]).filter(v => v && typeof v === "object" && !Array.isArray(v));
       return { ok:true, arr:vals, mode:"map-values" };
     }
@@ -421,7 +442,6 @@ Read-only • Fail-closed • XSS-safe rendering
       return { ok:true, value: ex.arr, missing:false, corrupt:false, typeOk:true, mode: ex.mode };
     }
 
-    // if strict type mismatch
     if(missingAsEmpty){
       return { ok:true, value:[], missing:true, corrupt:false, typeOk:true, mode:"type-mismatch->empty" };
     }
@@ -441,7 +461,6 @@ Read-only • Fail-closed • XSS-safe rendering
   function normStatusLoose(s){
     const v = String(s ?? "").trim().toLowerCase();
     if(!v) return "";
-    // tolerate a few common variants (read-only)
     if(v === "active" || v === "aktiv" || v === "enabled" || v === "published") return "active";
     if(v === "draft" || v === "utkast") return "draft";
     if(v === "archived" || v === "arkiverad" || v === "inactive" || v === "disabled") return "archived";
@@ -466,7 +485,7 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   const session = window.HRApp.requireAuth({ allowRoles:["ADMIN","SYSTEM_ADMIN"] });
-  if(!session) return; // HRApp har redirectat fail-closed
+  if(!session) return;
 
   const auth = window.HRApp.getAuth(session);
   if(!auth || auth.isAuthed !== true || !auth.role){
@@ -477,7 +496,9 @@ Read-only • Fail-closed • XSS-safe rendering
   const role = String(auth.role || "");
   const viewerScopeId = String(auth.scopeId || "").trim();
 
-  setText($("#whoName"), (session && session.auth && session.auth.displayName) ? session.auth.displayName : "—");
+  // Minimering: visa empNo (ej displayName)
+  const viewerEmp = String(auth.empNo || "").trim();
+  setText($("#whoName"), viewerEmp ? ("#" + viewerEmp) : "—");
   setText($("#whoRole"), (role || "—").toLowerCase());
 
   function doLogout(){
@@ -558,7 +579,7 @@ Read-only • Fail-closed • XSS-safe rendering
       while(steps < MAX_CHAIN_GUARD){
         const p = idx.parentOf.get(cur);
         if(p === null) break;
-        if(!p || !idx.byId.has(p)) break; // orphan chain => orphan, NOT loop
+        if(!p || !idx.byId.has(p)) break;
         if(seen.has(p)){
           hasLoop = true;
           break;
@@ -612,7 +633,6 @@ Read-only • Fail-closed • XSS-safe rendering
     return false;
   }
 
-  // Hardening: top-level + 1 nivå (plain-object + block special keys)
   function normalizeAssignmentsV2(raw){
     const issues = [];
     if(raw === null || raw === undefined){
@@ -627,7 +647,7 @@ Read-only • Fail-closed • XSS-safe rendering
     let deepBlocked = false;
     let nonPlain = false;
 
-    for(const k of Object.keys(raw)){ // egna keys only
+    for(const k of Object.keys(raw)){
       const key = String(k);
       if(SPECIAL_KEYS.has(key)){
         blocked = true;
@@ -636,7 +656,6 @@ Read-only • Fail-closed • XSS-safe rendering
 
       const val = raw[key];
 
-      // 1 nivå hardening: assignment-record ska vara plain object (eller null)
       if(val !== null && val !== undefined){
         if(!isPlainObject(val)){
           nonPlain = true;
@@ -675,25 +694,15 @@ Read-only • Fail-closed • XSS-safe rendering
     if(text) warnings.push(String(text));
   }
 
-  // Plans (FLEX)
   const plansRead = readLocalArrayFlexible(PLANS_KEY, { missingAsEmpty:true });
-  if(!plansRead.ok){
-    addWarn("AO-060_PLANS_V1 är korrupt eller har fel format (förväntar array eller wrapper).");
-  }
+  if(!plansRead.ok) addWarn("AO-060_PLANS_V1 är korrupt eller har fel format (förväntar array eller wrapper).");
 
-  // Plan assignments (FLEX)
   const paRead = readLocalArrayFlexible(PLAN_ASSIGNMENTS_KEY, { missingAsEmpty:true });
-  if(!paRead.ok){
-    addWarn("AO-061_PLAN_ASSIGNMENTS_V1 är korrupt eller har fel format (förväntar array eller wrapper).");
-  }
+  if(!paRead.ok) addWarn("AO-061_PLAN_ASSIGNMENTS_V1 är korrupt eller har fel format (förväntar array eller wrapper).");
 
-  // Trainings
   const trainingsRead = readLocalArrayFlexible(TRAININGS_KEY, { missingAsEmpty:true });
-  if(!trainingsRead.ok){
-    addWarn("AO-057_TRAININGS_V1 är korrupt eller fel typ (förväntar array).");
-  }
+  if(!trainingsRead.ok) addWarn("AO-057_TRAININGS_V1 är korrupt eller fel typ (förväntar array).");
 
-  // Tasks/questions/answers – if corrupt => Done fail-closed (0 Done)
   const tasksRead = readLocalArrayFlexible(TASKS_KEY, { missingAsEmpty:true });
   const questionsRead = readLocalArrayFlexible(QUESTIONS_KEY, { missingAsEmpty:true });
   const answersRead = readLocalArrayFlexible(ANSWERS_KEY, { missingAsEmpty:true });
@@ -703,7 +712,6 @@ Read-only • Fail-closed • XSS-safe rendering
   if(!questionsRead.ok) addWarn("AO-012_QUESTIONS_V1 är korrupt → Done fail-closed.");
   if(!answersRead.ok) addWarn("AO-013_ANSWERS_V1 är korrupt → Done fail-closed.");
 
-  // Org + assignmentsV2 for scope filtering + employee list
   const orgAny = readLocalAny(ORG_KEY);
   const orgNodes = normalizeOrgNodes(orgAny.ok ? orgAny.value : []);
   const orgIndex = buildOrgIndex(orgNodes);
@@ -726,14 +734,9 @@ Read-only • Fail-closed • XSS-safe rendering
     }
   }
 
-  // SYSTEM_ADMIN: får se allt. Org kan saknas utan att blockera, men varna.
   if(role === "SYSTEM_ADMIN"){
-    if(!orgIntegrity.ok){
-      addWarn("Org är saknas/korrupt. SYSTEM_ADMIN kan fortfarande se progress (utan scope-beroende).");
-    }
-    if(!asgV2.ok){
-      addWarn("AssignmentsV2 är saknas/korrupt. Employee-lista kan saknas i UI.");
-    }
+    if(!orgIntegrity.ok) addWarn("Org är saknas/korrupt. SYSTEM_ADMIN kan fortfarande se progress (utan scope-beroende).");
+    if(!asgV2.ok) addWarn("AssignmentsV2 är saknas/korrupt. Employee-lista från assignments saknas, men plan-assignments kan fortfarande visas.");
   }
 
   function renderWarnPills(){
@@ -787,12 +790,15 @@ Read-only • Fail-closed • XSS-safe rendering
   renderWarnPills();
   showLockBox(lockReasons);
 
-  // If locked, stop rendering interactive content
   if(lockReasons.length){
     const ps = $("#planSelect");
     const ef = $("#empFilter");
+    const ap = $("#btnApplyFilter");
+    const cl = $("#btnClearFilter");
     if(ps) ps.disabled = true;
     if(ef) ef.disabled = true;
+    if(ap) ap.disabled = true;
+    if(cl) cl.disabled = true;
 
     const empty = $("#emptyState");
     if(empty){
@@ -859,8 +865,7 @@ Read-only • Fail-closed • XSS-safe rendering
     return {
       ok: taskMappable || questionMappable,
       taskMappable,
-      questionMappable,
-      details: { hasTaskTrainingId, hasTaskEmpNo, hasTaskStatus, hasQuestionTrainingId, hasQuestionId, hasAnswerQuestionId, hasAnswerEmpNo }
+      questionMappable
     };
   }
 
@@ -870,7 +875,6 @@ Read-only • Fail-closed • XSS-safe rendering
     renderWarnPills();
   }
 
-  // Only explicit, non-guessy mapping:
   function taskIsDoneForTraining(empNo, trainingId){
     if(!doneDataOk) return { ok:false, done:false, reason:"fail-closed" };
     const e = String(empNo||"").trim();
@@ -982,7 +986,6 @@ Read-only • Fail-closed • XSS-safe rendering
     const createdAt = Number(raw.createdAt);
     const updatedAt = Number(raw.updatedAt);
 
-    // items kan heta items (förväntat), men acceptera även planItems/steps (read-only tolerans)
     const itemsRaw =
       Array.isArray(raw.items) ? raw.items :
       (Array.isArray(raw.planItems) ? raw.planItems :
@@ -1073,10 +1076,10 @@ Read-only • Fail-closed • XSS-safe rendering
     const e = String(empNo||"").trim();
     if(!e || !asgV2.ok) return { empNo:e, name:"", scopeId:"" };
     const rec = asgV2.map[e] || null;
-    const name =
-      String((rec && (rec.name || rec.displayName || rec.fullName)) ? (rec.name || rec.displayName || rec.fullName) : "").trim();
+
+    // NOTE: AO-020_ROLE_ASSIGNMENTS_V2 enligt låst modell saknar name -> lämna tomt
     const scopeId = String(rec && (rec.scopeId || rec.scope || rec.nodeId || rec.orgId) ? (rec.scopeId || rec.scope || rec.nodeId || rec.orgId) : "").trim();
-    return { empNo:e, name, scopeId };
+    return { empNo:e, name:"", scopeId };
   }
 
   function planAssignmentsForPlan(planId){
@@ -1084,34 +1087,49 @@ Read-only • Fail-closed • XSS-safe rendering
     return planAssignmentsAll.filter(a => a.planId === pid);
   }
 
-  // all employees from AO-020_ROLE_ASSIGNMENTS_V2 (default view)
-  function listAllEmployees(){
-    if(!asgV2.ok) return { list: [], excludedMissingScope:0, excludedOutOfScope:0, reason:"asgV2" };
+  function listEmployeesUnion(planId){
+    const pid = String(planId||"").trim();
 
-    const allEmpNos = Object.keys(asgV2.map || Object.create(null))
-      .map(x => String(x||"").trim())
-      .filter(Boolean);
-
-    // SYSTEM_ADMIN: show all (even if org missing)
-    if(role === "SYSTEM_ADMIN"){
-      return { list: allEmpNos, excludedMissingScope:0, excludedOutOfScope:0, reason:"ok" };
+    const fromAssignments = [];
+    if(asgV2.ok){
+      fromAssignments.push(...Object.keys(asgV2.map || Object.create(null)).map(x => String(x||"").trim()).filter(Boolean));
     }
 
-    // ADMIN: require scope + org integrity already guarded above
+    const fromPlan = [];
+    if(pid){
+      const aps = planAssignmentsForPlan(pid);
+      for(const a of aps){
+        const e = String(a.empNo||"").trim();
+        if(e) fromPlan.push(e);
+      }
+    }
+
+    const set = new Set([...fromAssignments, ...fromPlan]);
+    const allEmpNos = Array.from(set);
+
+    if(role === "SYSTEM_ADMIN"){
+      return { list: allEmpNos, excludedMissingScope:0, excludedOutOfScope:0, reason:"union" };
+    }
+
+    // ADMIN: fail-closed: kräver att empNo kan scope-valideras via assignmentsV2 + org
     let excludedMissingScope = 0;
     let excludedOutOfScope = 0;
     const out = [];
 
     for(const empNo of allEmpNos){
       const meta = findEmployeeMeta(empNo);
+
+      // kan inte scope-validera utan scopeId => exkludera (fail-closed)
       if(!meta.scopeId){
         excludedMissingScope++;
-        continue; // fail-closed
+        continue;
       }
+
       if(!isInScope(viewerScopeId, meta.scopeId, orgIndex)){
         excludedOutOfScope++;
         continue;
       }
+
       out.push(empNo);
     }
 
@@ -1156,7 +1174,6 @@ Read-only • Fail-closed • XSS-safe rendering
       };
     }
 
-    // no assignment => fail-closed (no startDateTs => no time gating)
     if(!assignment || !isFiniteNumber(Number(assignment.startDateTs)) || Number(assignment.startDateTs) <= 0){
       return {
         status: "locked",
@@ -1224,11 +1241,7 @@ Read-only • Fail-closed • XSS-safe rendering
     return { total: items.length, done, ready, locked, hasUnknownDone, details };
   }
 
-  function renderRows(planId){
-    const tbody = $("#rows");
-    if(!tbody) return;
-    clearNode(tbody);
-
+  function clearDetails(){
     const detailsPanel = $("#detailsPanel");
     const detailsBody = $("#detailsBody");
     const detailsTitle = $("#detailsTitle");
@@ -1239,7 +1252,27 @@ Read-only • Fail-closed • XSS-safe rendering
     if(detailsBody) detailsBody.textContent = "";
     setText(detailsTitle, "Detaljer");
     setText(detailsSub, "");
-    clearNode(detailsKpi);
+    if(detailsKpi) clearNode(detailsKpi);
+  }
+
+  function getActiveEmpFilter(){
+    // Aktivt filter = digits
+    return normalizeDigits(($("#empFilter") && $("#empFilter").value) ? $("#empFilter").value : "");
+  }
+
+  function empMatchesFilter(empNo, filterDigits){
+    const e = String(empNo||"").trim();
+    const f = String(filterDigits||"").trim();
+    if(!f) return true;
+    // exakt eller prefix
+    return e === f || e.startsWith(f);
+  }
+
+  function renderRows(planId){
+    const tbody = $("#rows");
+    if(!tbody) return;
+    clearNode(tbody);
+    clearDetails();
 
     const empty = $("#emptyState");
     if(empty){
@@ -1263,6 +1296,10 @@ Read-only • Fail-closed • XSS-safe rendering
         empty.style.display = "block";
         empty.textContent = plansActive.length ? "Välj en aktiv plan för att se progress." : "Inga aktiva planer hittades i AO-060.";
       }
+      setText($("#planHint"), plansRead.ok
+        ? (plansActive.length ? "Välj en aktiv plan för att se progress." : "Inga aktiva planer hittades i AO-060.")
+        : "Kan inte läsa planer (AO-060 är korrupt eller fel format)."
+      );
       return;
     }
 
@@ -1272,33 +1309,21 @@ Read-only • Fail-closed • XSS-safe rendering
         empty.style.display = "block";
         empty.textContent = "Plan saknar innehåll (items).";
       }
+      setText($("#planHint"), `Plan: ${plan.title} • items: 0`);
       return;
     }
 
-    // Employees (default ALL)
-    const empAllRes = listAllEmployees();
+    // Employees (UNION)
+    const empAllRes = listEmployeesUnion(pid);
     let empNos = empAllRes.list.slice();
 
-    if(!empNos.length){
-      if(role === "SYSTEM_ADMIN" && !asgV2.ok){
-        addWarn("Kan inte lista employees (AO-020_ROLE_ASSIGNMENTS_V2 saknas/korrupt).");
-        renderWarnPills();
-      }
-      if(empty){
-        empty.style.display = "block";
-        empty.textContent = "Inga employees hittades att visa (kräver AO-020_ROLE_ASSIGNMENTS_V2).";
-      }
-      return;
+    // Apply empNo filter (exakt/prefix)
+    const f = getActiveEmpFilter();
+    if(f){
+      empNos = empNos.filter(e => empMatchesFilter(e, f));
     }
 
-    // Apply empNo filter
-    const empFilterEl = $("#empFilter");
-    const empFilter = normalizeDigits(empFilterEl ? (empFilterEl.value || "") : "");
-    if(empFilter){
-      empNos = empNos.filter(e => String(e||"").includes(empFilter));
-    }
-
-    // Assignments for plan (can be empty)
+    // Assignments for plan
     const assignmentsForPlan = planAssignmentsForPlan(pid);
     const byEmp = new Map();
     assignmentsForPlan.forEach(a => {
@@ -1306,17 +1331,17 @@ Read-only • Fail-closed • XSS-safe rendering
       if(e && !byEmp.has(e)) byEmp.set(e, a);
     });
 
-    // Hint
     const assignedCount = empNos.reduce((acc, e) => acc + (byEmp.has(String(e||"").trim()) ? 1 : 0), 0);
     const scopeNote = (role === "ADMIN")
       ? ` • scope-filter: -${empAllRes.excludedMissingScope} (saknar scopeId), -${empAllRes.excludedOutOfScope} (utanför)`
       : "";
-    setText($("#planHint"), `Plan: ${plan.title} • employees: ${empNos.length} • tilldelade: ${assignedCount}${scopeNote}`);
+    const filterNote = f ? ` • filter: ${f}` : "";
+    setText($("#planHint"), `Plan: ${plan.title} • employees: ${empNos.length} • tilldelade: ${assignedCount}${filterNote}${scopeNote}`);
 
     if(empNos.length === 0){
       if(empty){
         empty.style.display = "block";
-        empty.textContent = "Inga employees matchar filtret.";
+        empty.textContent = f ? "Inga employees matchar filtret." : "Inga employees hittades att visa.";
       }
       return;
     }
@@ -1341,13 +1366,6 @@ Read-only • Fail-closed • XSS-safe rendering
       empStrong.textContent = r.empNo;
       empLine.appendChild(empStrong);
 
-      if(r.meta.name){
-        const nm = document.createElement("span");
-        nm.className = "muted2";
-        nm.style.marginLeft = "8px";
-        nm.textContent = "(" + r.meta.name + ")";
-        empLine.appendChild(nm);
-      }
       tdEmp.appendChild(empLine);
       tr.appendChild(tdEmp);
 
@@ -1394,7 +1412,6 @@ Read-only • Fail-closed • XSS-safe rendering
       tbody.appendChild(tr);
     });
 
-    // Done data hints
     if(!doneDataOk){
       addWarn("Done är fail-closed (kan inte läsa tasks/questions/answers).");
       renderWarnPills();
@@ -1531,14 +1548,40 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   const planSel = $("#planSelect");
-  if(planSel) planSel.addEventListener("change", onChange);
+  if(planSel) planSel.addEventListener("change", () => {
+    // när plan byts, rensa detaljer och rendera
+    clearDetails();
+    onChange();
+  });
 
-  let empFilterTimer = null;
+  const btnApply = $("#btnApplyFilter");
+  const btnClear = $("#btnClearFilter");
   const empFilterEl = $("#empFilter");
+
+  if(btnApply){
+    btnApply.addEventListener("click", () => {
+      clearDetails();
+      onChange();
+    });
+  }
+
+  if(btnClear){
+    btnClear.addEventListener("click", () => {
+      if(empFilterEl) empFilterEl.value = "";
+      clearDetails();
+      onChange();
+      try{ empFilterEl && empFilterEl.focus(); }catch{}
+    });
+  }
+
   if(empFilterEl){
-    empFilterEl.addEventListener("input", () => {
-      if(empFilterTimer) window.clearTimeout(empFilterTimer);
-      empFilterTimer = window.setTimeout(onChange, 120);
+    // Enter = Apply
+    empFilterEl.addEventListener("keydown", (e) => {
+      if(e.key === "Enter"){
+        e.preventDefault();
+        clearDetails();
+        onChange();
+      }
     });
   }
 
