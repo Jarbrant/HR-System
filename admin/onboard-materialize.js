@@ -1,21 +1,19 @@
 <!-- ============================================================
-AO-ONBOARD-MATERIALIZE-01 (PROD)
+AO-ONBOARD-MATERIALIZE-02 (PROD)
 Projekt: HR-System
-Syfte: Materialisera onboarding-plan → TASKS + QUESTIONS (employee)
+Syfte: Materialisera onboarding (packages-block) → TASKS + QUESTIONS
 Policy:
 - UI-only • Fail-closed
 - Inga nya storage-keys
-- Inga dubletter
-- Ingen persondata (endast empNo)
+- Källa: AO-050_PACKAGES_V1 (packages-block.html)
 ============================================================ -->
 <script>
 (function(){
   "use strict";
 
-  const PLANS_KEY     = "AO-060_PLANS_V1";
-  const BLOCKS_KEY    = "AO-057_TRAININGS_V1";
+  const PACKAGES_KEY  = "AO-050_PACKAGES_V1";
   const TASKS_KEY     = "AO-014_TASKS_V1";
-  const QUESTIONS_KEY= "AO-012_QUESTIONS_V1";
+  const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
   const ASG_KEY       = "AO-020_ROLE_ASSIGNMENTS_V2";
 
   function read(key, fallback){
@@ -41,63 +39,58 @@ Policy:
   }
 
   function materialize(){
-    const plans   = read(PLANS_KEY, []);
-    const blocks  = read(BLOCKS_KEY, []);
-    const tasks   = read(TASKS_KEY, []);
+    const packages = read(PACKAGES_KEY, []);
+    const tasks = read(TASKS_KEY, []);
     const questions = read(QUESTIONS_KEY, []);
-    const asg     = read(ASG_KEY, {});
+    const assignments = read(ASG_KEY, {});
 
-    if(!Array.isArray(plans) || !Array.isArray(blocks)) return;
+    if(!Array.isArray(packages)) return;
 
-    const activePlans = plans.filter(p => p.status === "active");
+    packages.forEach(pkg => {
+      if(pkg.status !== "active") return;
+      if(!Array.isArray(pkg.blocks)) return;
 
-    activePlans.forEach(plan => {
-      plan.items.forEach(item => {
-        const training = blocks.find(b => b.id === item.trainingId);
-        if(!training || !Array.isArray(training.blocks)) return;
+      Object.keys(assignments).forEach(empNo => {
+        const scopeId = assignments[empNo]?.scopeId;
+        if(!scopeId) return;
 
-        Object.keys(asg).forEach(empNo => {
-          const scopeId = asg[empNo]?.scopeId;
-          if(!scopeId) return;
+        pkg.blocks.forEach(block => {
+          const origin = `${pkg.id}:${block.id}:${empNo}`;
 
-          training.blocks.forEach(block => {
-            const key = `${plan.id}:${training.id}:${block.id}:${empNo}`;
-
-            /* ===== TASK ===== */
-            if(block.type === "task" || block.type === "both"){
-              const exists = tasks.some(t => t._origin === key);
-              if(!exists){
-                tasks.push({
-                  id: genId("task"),
-                  title: block.title || "Uppgift",
-                  text: block.text || "",
-                  empNo,
-                  scopeId,
-                  status: "open",
-                  createdAt: Date.now(),
-                  updatedAt: Date.now(),
-                  updatedBy: "system",
-                  _origin: key
-                });
-              }
+          /* === TASK === */
+          if(block.type === "task" || block.type === "both"){
+            const exists = tasks.some(t => t._origin === origin);
+            if(!exists){
+              tasks.push({
+                id: genId("task"),
+                title: block.title || "Uppgift",
+                text: block.text || "",
+                empNo,
+                scopeId,
+                status: "open",
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+                updatedBy: "system",
+                _origin: origin
+              });
             }
+          }
 
-            /* ===== QUESTION ===== */
-            if(block.type === "question" || block.type === "both"){
-              const existsQ = questions.some(q => q._origin === key);
-              if(!existsQ){
-                questions.push({
-                  id: genId("q"),
-                  title: block.title || "Fråga",
-                  text: block.text || "",
-                  empNo,
-                  scopeId,
-                  createdAt: Date.now(),
-                  _origin: key
-                });
-              }
+          /* === QUESTION === */
+          if(block.type === "question" || block.type === "both"){
+            const existsQ = questions.some(q => q._origin === origin);
+            if(!existsQ){
+              questions.push({
+                id: genId("q"),
+                title: block.title || "Fråga",
+                text: block.text || "",
+                empNo,
+                scopeId,
+                createdAt: Date.now(),
+                _origin: origin
+              });
             }
-          });
+          }
         });
       });
     });
@@ -106,9 +99,6 @@ Policy:
     write(QUESTIONS_KEY, questions);
   }
 
-  /* === EXPOSE SAFE ENTRY === */
   window.HR_ONBOARD_MATERIALIZE = materialize;
-
 })();
 </script>
-
