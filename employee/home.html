@@ -82,6 +82,7 @@
       border-radius:14px;
       margin:14px 0;
       display:none;
+      white-space:pre-wrap;
     }
 
     /* Header card */
@@ -498,6 +499,17 @@
   <script>
     "use strict";
 
+    /* ============================================================
+      EMPLOYEE/HOME (PATCH v1.0) | FIL-ID: employee/home.html
+      Syfte: Employee – Dagskalender + Post-its + onboarding/paket (read-only)
+      POLICY (LÅST):
+      - UI-only • Fail-closed (requireAuth)
+      - Auth via HRApp/core (UI-03-APP.js)
+      - EMPLOYEE-only
+      - XSS: rendera från storage via textContent/escape (ingen osäker innerHTML)
+      - Inga nya storage-keys/datamodell
+      ============================================================ */
+
     /* ===========================
        Keys (LÅST)
     ============================ */
@@ -514,13 +526,8 @@
     const KEY_ONBOARD_PLANS_V1       = "AO-060_PLANS_V1";
     const KEY_ONBOARD_ASSIGNMENTS_V1 = "AO-061_PLAN_ASSIGNMENTS_V1";
 
-    // NEW READ (NO WRITES): needed to expand plan items -> blocks
+    // READ ONLY: expand plan items -> training.blocks
     const KEY_TRAININGS_V1 = "AO-057_TRAININGS_V1";
-
-    /* ===========================
-       Prototype/poison guard (fail-closed)
-    ============================ */
-    const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 
     /* ===========================
        DOM
@@ -549,8 +556,14 @@
     /* ===========================
        Fail-closed guard + XSS
     ============================ */
-    function showGuard(msg){ guardBox.style.display = "block"; guardBox.textContent = String(msg || ""); }
-    function hideGuard(){ guardBox.style.display = "none"; guardBox.textContent = ""; }
+    function showGuard(msg){
+      guardBox.style.display = "block";
+      guardBox.textContent = String(msg || "");
+    }
+    function hideGuard(){
+      guardBox.style.display = "none";
+      guardBox.textContent = "";
+    }
 
     function escapeHtml(input){
       if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(input);
@@ -564,6 +577,14 @@
     }
 
     function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
+
+    function safeCssEscape(v){
+      const s = String(v ?? "");
+      try{
+        if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(s);
+      }catch{}
+      return s.replace(/[^a-zA-Z0-9_\-]/g, "\\$&");
+    }
 
     function readAnyStorage(key){
       try {
@@ -587,7 +608,7 @@
     /* ===========================
        AO-002 AUTH (kopplat)
        - RBAC via requireAuth
-       - scopeId-repair via assignments (PATCH v1.2)
+       - scopeId-repair via assignments (tree-aware)
     ============================ */
     function mustAuthOrStop(){
       if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
@@ -608,125 +629,163 @@
         return null;
       }
 
+      // If moved to org-tree: accept that scope might live under different fieldnames in assignments.
       if (!String(auth.scopeId || "").trim()) {
         const empNo = String(auth.empNo || "").trim();
         const role  = String(auth.role || "").trim();
-        const scopeId = resolveScopeIdFromAssignments(empNo, role);
 
-        if (scopeId) {
-          const patched = patchSessionScope(sess, scopeId);
+        const res = resolveScopeIdFromAssignments(empNo, role);
+        if (res.scopeId) {
+          const patched = patchSessionScope(sess, res.scopeId);
           if (patched) {
             auth = window.HRApp.getAuth(patched) || auth;
           } else {
             showGuard("Fail-closed: kunde inte uppdatera session med scopeId (korrupt session). Logga in igen.");
             return null;
           }
+        } else {
+          // Fail-closed, but with actionable debug (no new keys).
+          const lines = [];
+          lines.push("Fail-closed: saknar scopeId i session.");
+          lines.push("(Access/Assignments måste vara korrekt.)");
+          lines.push("");
+          lines.push("Debug:");
+          lines.push(`- assignments hittade: ${res.debug.totalAssignments}`);
+          lines.push(`- match på empNo: ${res.debug.matchedEmpNo ? "JA" : "NEJ"}`);
+          lines.push(`- match på roll: ${res.debug.matchedRole ? "JA" : "NEJ/ej angivet"}`);
+          lines.push(`- scope-fält hittat i match: ${res.debug.foundScopeField ? "JA" : "NEJ"}`);
+          showGuard(lines.join("\n"));
         }
       }
 
       return { sess, auth };
     }
 
-    function readAssignments(){
+    function readAssignmentsRaw(){
       const raw = readAnyStorage(KEY_ASSIGNMENTS);
-      if (!raw) return [];
-      const data = safeJsonParse(raw);
+      if (!raw) return null;
+      return safeJsonParse(raw);
+    }
 
-      // Format A: [ {empNo, roleId, scopeId, ...}, ... ]
-      if (Array.isArray(data)) return data;
+    function normalizeAssignments(raw){
+      // Accept: array | {assignments:[]} | {items:[]} | {byEmpNo:{...}} | {map:{...}}
+      if (Array.isArray(raw)) return raw;
 
-      // Format B: { assignments: [...] }
-      if (data && typeof data === "object" && Array.isArray(data.assignments)) return data.assignments;
+      if (raw && typeof raw === "object") {
+        if (Array.isArray(raw.assignments)) return raw.assignments;
+        if (Array.isArray(raw.items)) return raw.items;
+        if (Array.isArray(raw.data)) return raw.data;
 
-      // Format C (NYTT): map-format { "3001": { roleId, scopeId, ... }, "3002": {...} }
-      // Fail-closed: om object innehåller poison keys -> tomt
-      if (data && typeof data === "object") {
-        for (const k of Object.keys(data)) {
-          if (SPECIAL_KEYS.has(String(k))) return [];
-        }
-
-        // wrapper-varianter (tolerant)
-        const wrapperKeys = ["map","byEmpNo","byEmployee","employees","data","value"];
-        for (const wk of wrapperKeys) {
-          if (data[wk] && typeof data[wk] === "object" && !Array.isArray(data[wk])) {
-            const m = data[wk];
-            for (const k of Object.keys(m)) {
-              if (SPECIAL_KEYS.has(String(k))) return [];
-            }
-            return mapObjectToAssignmentArray(m);
+        const byEmp = raw.byEmpNo || raw.byEmployee || raw.empNoMap || raw.map || null;
+        if (byEmp && typeof byEmp === "object") {
+          const out = [];
+          for (const [k, v] of Object.entries(byEmp)) {
+            if (v && typeof v === "object") out.push({ empNo: k, ...v });
           }
+          return out;
         }
-
-        return mapObjectToAssignmentArray(data);
       }
 
       return [];
     }
 
-    function mapObjectToAssignmentArray(obj){
-      if (!obj || typeof obj !== "object" || Array.isArray(obj)) return [];
-      const out = [];
-
-      for (const empKey of Object.keys(obj)) {
-        const k = String(empKey);
-        if (SPECIAL_KEYS.has(k)) continue;
-
-        const rec = obj[empKey];
-        if (!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
-
-        for (const rk of Object.keys(rec)) {
-          if (SPECIAL_KEYS.has(String(rk))) return [];
-        }
-
-        out.push({
-          empNo: String(empKey || "").trim(),
-          roleId: String(rec.roleId ?? rec.role ?? "").trim(),
-          scopeId: String(rec.scopeId ?? rec.scope ?? "").trim(),
-          updatedAt: rec.updatedAt
-        });
-      }
-
-      return out;
+    function readAssignments(){
+      const parsed = readAssignmentsRaw();
+      const list = normalizeAssignments(parsed);
+      return Array.isArray(list) ? list : [];
     }
 
     function normalizeEmpNo(x){ return String(x ?? "").trim(); }
     function normalizeRole(x){ return String(x ?? "").trim(); }
 
+    function pickFirstNonEmpty(obj, keys){
+      for (const k of keys) {
+        const v = obj?.[k];
+        if (v == null) continue;
+        const s = String(v).trim();
+        if (s) return s;
+      }
+      return "";
+    }
+
+    function extractScopeFromAssignment(a){
+      // Tree-aware: accept many common field names without changing storage model.
+      return pickFirstNonEmpty(a, [
+        "scopeId","scopeID","scope_id",
+        "scope","scopeKey","scope_key",
+        "orgScopeId","orgScope","orgScopeKey",
+        "nodeId","nodeID","node_id",
+        "orgNodeId","orgNodeID","org_node_id",
+        "unitId","unitID","unit_id",
+        "orgUnitId","orgUnitID","org_unit_id",
+        "teamId","teamID","team_id",
+        "orgId","orgID","org_id",
+        "path","scopePath","orgPath"
+      ]);
+    }
+
+    function extractRoleFromAssignment(a){
+      return pickFirstNonEmpty(a, ["role","roleId","roleID","role_id","roleName"]);
+    }
+
+    function extractEmpFromAssignment(a){
+      return pickFirstNonEmpty(a, ["empNo","employeeNo","employeeID","employeeId","emp","id","userId"]);
+    }
+
     function resolveScopeIdFromAssignments(empNo, role){
       const me = normalizeEmpNo(empNo);
       const r  = normalizeRole(role);
-      if (!me || !r) return "";
+
+      const debug = {
+        totalAssignments: 0,
+        matchedEmpNo: false,
+        matchedRole: false,
+        foundScopeField: false
+      };
+
+      if (!me) return { scopeId:"", debug };
 
       const list = readAssignments();
-      if (!Array.isArray(list) || list.length === 0) return "";
+      debug.totalAssignments = Array.isArray(list) ? list.length : 0;
+      if (!Array.isArray(list) || list.length === 0) return { scopeId:"", debug };
 
       for (const a of list) {
         if (!a || typeof a !== "object") continue;
 
-        const aEmp = normalizeEmpNo(a.empNo ?? a.employeeNo ?? a.id ?? "");
-        if (aEmp !== me) continue;
+        const aEmp = extractEmpFromAssignment(a);
+        if (!aEmp || aEmp !== me) continue;
+        debug.matchedEmpNo = true;
 
-        const aRole = normalizeRole(a.role ?? a.roleId ?? "");
-        if (aRole && aRole !== r) continue;
+        const aRole = extractRoleFromAssignment(a);
+        // If assignment has role, it must match. If assignment has no role, accept.
+        if (aRole) {
+          if (r && aRole !== r) continue;
+          debug.matchedRole = true;
+        } else {
+          // Role not present in assignment, treat as match (tree move scenario).
+          debug.matchedRole = true;
+        }
 
-        const scope = String(a.scopeId ?? a.scope ?? "").trim();
-        if (scope) return scope;
+        const scope = extractScopeFromAssignment(a);
+        if (scope) {
+          debug.foundScopeField = true;
+          return { scopeId: scope, debug };
+        }
       }
 
-      return "";
+      return { scopeId:"", debug };
     }
 
     function patchSessionScope(sessionObj, scopeId){
       const sid = String(scopeId || "").trim();
       if (!sessionObj || typeof sessionObj !== "object" || !sid) return null;
 
+      // mutate current session object (existing behavior)
       const out = sessionObj;
 
-      if (out.auth && typeof out.auth === "object") {
-        out.auth.scopeId = sid;
-      } else {
-        out.scopeId = sid;
-      }
+      // Keep compatibility with both "auth.scopeId" and root "scopeId"
+      if (out.auth && typeof out.auth === "object") out.auth.scopeId = sid;
+      out.scopeId = sid;
 
       writeSessionPreferred(out);
       return out;
@@ -778,13 +837,8 @@
       }
     }
 
-    function normStr(s){
-      return String(s ?? "").trim();
-    }
-
-    function normKey(s){
-      return normStr(s).toLowerCase().replace(/\s+/g," ").trim();
-    }
+    function normStr(s){ return String(s ?? "").trim(); }
+    function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
 
     /* ===========================
        Date
@@ -881,7 +935,7 @@
     }
 
     function hasValidScopeMatch(t, myScopeId){
-      const scope = String(t?.scopeId ?? "").trim();
+      const scope = String(t?.scopeId ?? t?.scope ?? t?.scopeKey ?? t?.nodeId ?? "").trim();
       const mine  = String(myScopeId ?? "").trim();
       if (!scope || !mine) return false;
 
@@ -960,12 +1014,8 @@
     function readQuestions(){ return readLocalArray(KEY_QUESTIONS); }
     function readAnswers(){ return readLocalArray(KEY_ANSWERS); }
 
-    function getQuestionId(q){
-      return String(q?.id ?? q?.questionId ?? q?.qid ?? "");
-    }
-    function getQuestionTitle(q){
-      return String(q?.title ?? q?.name ?? q?.text ?? "");
-    }
+    function getQuestionId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? ""); }
+    function getQuestionTitle(q){ return String(q?.title ?? q?.name ?? q?.text ?? ""); }
 
     function answerEmpNo(ans){
       return String(ans?.empNo ?? ans?.employeeNo ?? ans?.employeeId ?? ans?.userId ?? "").trim();
@@ -1075,7 +1125,7 @@
 
     /* ===========================
        Onboarding (READ ONLY)
-       - FIX: expand plan items (trainingId/dayOffset) -> training.blocks via AO-057
+       - expand plan items -> training.blocks via AO-057
        - NO NEW KEYS, NO WRITES
     ============================ */
     function readOnboardPlans(){
@@ -1084,6 +1134,7 @@
       if(data && typeof data === "object"){
         if(Array.isArray(data.plans)) return data.plans;
         if(Array.isArray(data.items)) return data.items;
+        if(Array.isArray(data.data)) return data.data;
       }
       return [];
     }
@@ -1092,19 +1143,48 @@
       const data = readLocalObjectOrArray(KEY_ONBOARD_ASSIGNMENTS_V1);
       if(Array.isArray(data)) return data;
       if(data && typeof data === "object" && Array.isArray(data.assignments)) return data.assignments;
+      if(data && typeof data === "object" && Array.isArray(data.items)) return data.items;
       return [];
     }
 
     function readTrainings(){
-      return readLocalArray(KEY_TRAININGS_V1);
+      const data = readLocalObjectOrArray(KEY_TRAININGS_V1);
+      if(Array.isArray(data)) return data;
+      if(data && typeof data === "object"){
+        if(Array.isArray(data.trainings)) return data.trainings;
+        if(Array.isArray(data.items)) return data.items;
+        if(Array.isArray(data.data)) return data.data;
+      }
+      return [];
+    }
+
+    function parseDateToMiddayTs(x){
+      if (x == null) return null;
+
+      if (typeof x === "number") {
+        const n = Math.trunc(x);
+        if (!Number.isFinite(n) || n <= 0) return null;
+        return n;
+      }
+
+      const s = String(x).trim();
+      if (!s) return null;
+
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s)) {
+        const d = new Date(s + "T12:00:00");
+        const ts = d.getTime();
+        return Number.isFinite(ts) ? ts : null;
+      }
+
+      const d = new Date(s);
+      const ts = d.getTime();
+      return Number.isFinite(ts) ? ts : null;
     }
 
     function normalizeStartDateTs(x){
-      const n = Number(x);
-      if(!Number.isFinite(n)) return null;
-      const i = Math.trunc(n);
-      if(i <= 0) return null;
-      return i;
+      const ts = parseDateToMiddayTs(x);
+      if (ts == null) return null;
+      return Math.trunc(ts);
     }
 
     function normalizeDayOffset(x){
@@ -1115,17 +1195,14 @@
       return i;
     }
 
-    function getPlanId(p){
-      return normStr(p?.id ?? p?.planId ?? "");
-    }
-
-    function getPlanTitle(p){
-      return normStr(p?.title ?? p?.name ?? "");
-    }
+    function getPlanId(p){ return normStr(p?.id ?? p?.planId ?? ""); }
+    function getPlanTitle(p){ return normStr(p?.title ?? p?.name ?? ""); }
 
     function planIsActive(p){
       const s = String(p?.status ?? "").toLowerCase().trim();
-      return s === "active";
+      if (s === "active") return true;
+      if (p?.isActive === true || p?.active === true) return true;
+      return false;
     }
 
     function getPlanItems(p){
@@ -1134,7 +1211,8 @@
     }
 
     function getItemTrainingId(it){
-      return normStr(it?.trainingId ?? it?.training_id ?? it?.tid ?? "");
+      // allow {trainingId} or nested {training:{id}}
+      return normStr(it?.trainingId ?? it?.training_id ?? it?.tid ?? it?.training?.id ?? it?.training?.trainingId ?? "");
     }
 
     function getItemOrder(it){
@@ -1151,7 +1229,6 @@
     function blockIdFromTrainingBlock(trainingId, b, idx){
       const bid = normStr(b?.id ?? b?.blockId ?? b?.block_id ?? "");
       if(bid) return bid;
-      // stable fallback within training (idx)
       return `idx_${idx}`;
     }
 
@@ -1164,7 +1241,6 @@
     }
 
     function blockKindFromTrainingBlock(b){
-      // training blocks typically use "type" (task/question/info/both)
       return normalizeBlockKind(b?.type ?? b?.kind ?? b?.blockKind ?? b?.block_type ?? "");
     }
 
@@ -1175,7 +1251,6 @@
       const assigns = readOnboardAssignments();
       if(!Array.isArray(assigns) || assigns.length === 0) return [];
 
-      // Build map planId -> earliest startDateTs for me
       const myPlanStart = new Map();
       for(const a of assigns){
         if(!a || typeof a !== "object") continue;
@@ -1230,7 +1305,6 @@
           const dOff = normalizeDayOffset(it.dayOffset ?? it.day_offset ?? it.offsetDays ?? it.offset ?? null);
           if(!trainingId || dOff == null) continue;
 
-          // Ready gate for the TRAINING in plan: time-based only
           if(dayN < dOff) continue;
 
           const tr = trainingsById.get(trainingId) || null;
@@ -1240,7 +1314,7 @@
           const area   = normStr(tr?.area ?? "");
           const trainingTitle = normStr(tr?.title ?? "");
 
-          const blocks = Array.isArray(tr?.blocks) ? tr.blocks : [];
+          const blocks = Array.isArray(tr?.blocks) ? tr.blocks : (Array.isArray(tr?.items) ? tr.items : []);
           if(!blocks.length) continue;
 
           const baseOrder = getItemOrder(it);
@@ -1742,7 +1816,7 @@
         const taskId = btn.getAttribute("data-task-id");
         if(!taskId) return;
 
-        const noteEl = notesGrid.querySelector(`.note[data-source="task"] button[data-task-id="${CSS.escape(String(taskId))}"]`)?.closest?.(".note");
+        const noteEl = notesGrid.querySelector(`.note[data-source="task"] button[data-task-id="${safeCssEscape(String(taskId))}"]`)?.closest?.(".note");
         if(!noteEl) return;
 
         const ok = markTaskDone(taskId, AUTH);
@@ -1800,18 +1874,14 @@
   </script>
 
   <!-- ============================================================
-  Ändringslogg (AO-053 + AO-EMP-HOME-ONBOARD-01) ≤ 8 rader
-  - FIX: Onboarding bygger nu cards genom att expandera AO-060 plan items (trainingId/dayOffset) till training.blocks via AO-057_TRAININGS_V1 (read-only)
-  - Behåller keys: läser AO-060/AO-061/AO-057 (read-only), skriver inga nya keys
-  - Ready: tidsgating per planId med startDateTs (per assignment), per selectedDate (midday) + dayOffset
-  - Dedupe: trainingId+blockId (blockId fallback idx_n inom training om id saknas)
-  - Done-logik återanvänder exakt isPackageBlockDone (titelmatch tasks + question/answer)
-  - UI: subrad börjar med “Onboarding • {PlanTitel} … • Steg • Dag+”
-  - PATCH: employee/home.html accepterar nu AO-020_ROLE_ASSIGNMENTS_V2 som map-format (empNo -> {roleId, scopeId...}) utöver array/wrapper
+  Ändringslogg (≤ 8 rader)
+  - FIX: scopeId-repair är nu “tree-aware” (fler fältnamn/shape i AO-020_ROLE_ASSIGNMENTS_V2)
+  - Fail-closed kvar, men guard visar debug (antal assignments, match empNo/roll, scopefält hittat)
+  - Onboarding: startDate kan nu vara timestamp ELLER ISO-datumsträng
+  - Trainings: accepterar array eller objektshape (trainings/items/data)
+  - Inga nya storage-keys • inga writes utöver ev patch av session scopeId
   Testnoteringar:
-  - Test A: AO-060 active plan + AO-061 assignment startDateTs=nu + item dayOffset=0 => onboardingkort syns idag
-  - Test B: dayOffset=3 => syns när du klickar fram datum +3
-  - Test C: saknar AO-057 eller training.blocks => fail-closed (inga onboardingkort), övrigt oförändrat
+  - Test: flytta employee i assignments (nytt fält nodeId/unitId) -> scopeId ska resolve:as och sidan laddar
   ============================================================ -->
 </body>
 </html>
