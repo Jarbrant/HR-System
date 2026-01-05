@@ -226,6 +226,9 @@ Extra lås (beslut):
 /* ============================================================
 AO-ONBOARD-PLANS-ASSIGN-01 (3/5) – admin/onboard-plan-assignments.html
 UI-only • Fail-closed • XSS-safe
+PATCH v1.1:
+- Tillåt SYSTEM_ADMIN också (allowRoles:["ADMIN","SYSTEM_ADMIN"])
+- Stöd för query params: ?planId=...&empNo=... -> förval i UI
 ============================================================ */
 (function(){
   "use strict";
@@ -368,9 +371,24 @@ UI-only • Fail-closed • XSS-safe
   }
 
   // -----------------------------
+  // Query params (PATCH v1.1)
+  // -----------------------------
+  function getQuery(){
+    try{
+      const u = new URL(window.location.href);
+      const planId = String(u.searchParams.get("planId") || "").trim();
+      const empNo = normalizeEmpNoDigitsOnly(u.searchParams.get("empNo") || "");
+      return { planId, empNo };
+    }catch{
+      return { planId:"", empNo:"" };
+    }
+  }
+  const qp = getQuery();
+
+  // -----------------------------
   // AUTH GUARD (LÅST)
   // -----------------------------
-  function mustAdmin(){
+  function mustAdminOrSysAdmin(){
     if(!window.HRApp || typeof window.HRApp.requireAuth !== "function"){
       const msg = $("#msg");
       if(msg) msg.textContent = "CORE saknas (HRApp). Kan inte köra sidan. (fail-closed)";
@@ -379,7 +397,7 @@ UI-only • Fail-closed • XSS-safe
 
     let session = null;
     try{
-      session = window.HRApp.requireAuth({ allowRoles:["ADMIN"] });
+      session = window.HRApp.requireAuth({ allowRoles:["ADMIN","SYSTEM_ADMIN"] });
     }catch{
       const msg = $("#msg");
       if(msg) msg.textContent = "Auth-guard kraschade i CORE. (fail-closed)";
@@ -389,27 +407,27 @@ UI-only • Fail-closed • XSS-safe
 
     let auth = null;
     try{
-      // Vissa builds accepterar arg; andra ignorerar den. Try/catch skyddar.
       auth = window.HRApp.getAuth ? window.HRApp.getAuth(session) : null;
     }catch{
       try{ auth = window.HRApp.getAuth ? window.HRApp.getAuth() : null; }catch{ auth = null; }
     }
 
-    if(!auth || auth.isAuthed !== true || String(auth.role||"") !== "ADMIN"){
+    const role = String(auth?.role || "").trim();
+    if(!auth || auth.isAuthed !== true || (role !== "ADMIN" && role !== "SYSTEM_ADMIN")){
       const msg = $("#msg");
-      if(msg) msg.textContent = "Åtkomst nekad. ADMIN krävs. (fail-closed)";
+      if(msg) msg.textContent = "Åtkomst nekad. ADMIN/SYSTEM_ADMIN krävs. (fail-closed)";
       return null;
     }
-    return { session, auth };
+    return { session, auth, role };
   }
 
-  const access = mustAdmin();
+  const access = mustAdminOrSysAdmin();
   if(!access) return;
 
   const whoNameEl = $("#whoName");
   const whoRoleEl = $("#whoRole");
   if(whoNameEl) whoNameEl.textContent = String(access.auth.empNo || "—");
-  if(whoRoleEl) whoRoleEl.textContent = "ADMIN";
+  if(whoRoleEl) whoRoleEl.textContent = String(access.role || "—");
 
   const navLogout = $("#navLogout");
   if(navLogout){
@@ -868,6 +886,42 @@ UI-only • Fail-closed • XSS-safe
     $("#planSelect").disabled = plans.filter(p => p.status === "active").length === 0;
   }
 
+  function setDefaultDateIfEmpty(){
+    const el = $("#startDate");
+    if(!el) return;
+    if(el.value) return;
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = String(now.getMonth()+1).padStart(2,"0");
+    const d = String(now.getDate()).padStart(2,"0");
+    el.value = `${y}-${m}-${d}`;
+  }
+
+  function applyQueryPreselectOnce(){
+    // PATCH v1.1: förval från query om möjligt (fail-closed -> endast om option finns)
+    let notes = [];
+    const empSel = $("#empSelect");
+    const planSel = $("#planSelect");
+
+    if(qp.empNo){
+      const can = employees.some(e => e.empNo === qp.empNo);
+      if(can && empSel) empSel.value = qp.empNo;
+      else notes.push(`Query empNo=${qp.empNo} hittades inte i AO-020_ROLE_ASSIGNMENTS_V2.`);
+    }
+
+    if(qp.planId){
+      const can = plans.some(p => p.id === qp.planId && p.status === "active");
+      if(can && planSel) planSel.value = qp.planId;
+      else notes.push(`Query planId=${qp.planId} hittades inte som active i AO-060_PLANS_V1.`);
+    }
+
+    if(notes.length){
+      // Inte "fel" – bara info. Vi lägger som mild notering utan att låsa.
+      const existing = lockReasons.slice();
+      showLockBox(existing.concat(notes));
+    }
+  }
+
   function refreshAndRender(keepFilterState){
     const prevFilterEmp = keepFilterState ? String($("#filterEmp").value||"") : "";
     const prevFilterPlan = keepFilterState ? String($("#filterPlan").value||"") : "";
@@ -902,13 +956,10 @@ UI-only • Fail-closed • XSS-safe
       if(prevFilterPlan && plans.some(p => p.id === prevFilterPlan)) $("#filterPlan").value = prevFilterPlan;
     }
 
-    if(!$("#startDate").value){
-      const now = new Date();
-      const y = now.getFullYear();
-      const m = String(now.getMonth()+1).padStart(2,"0");
-      const d = String(now.getDate()).padStart(2,"0");
-      $("#startDate").value = `${y}-${m}-${d}`;
-    }
+    setDefaultDateIfEmpty();
+
+    // PATCH v1.1: query-preselect efter att selects fyllts
+    applyQueryPreselectOnce();
 
     renderTableWithCurrentFilters();
   }
