@@ -28,6 +28,9 @@ Extra lås (beslut):
   <title>HR-System – Admin • Onboardingplaner (Koppla)</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <!-- CORE (LÅST ordning: CONFIG före APP) -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
   <script src="../UI/UI-03-APP.js"></script>
 
   <style>
@@ -256,9 +259,7 @@ UI-only • Fail-closed • XSS-safe
     box.style.display = "block";
     box.textContent = "";
     const strong = document.createElement("strong");
-    // DEBUG/SCOPE: vissa notiser är info, vissa är lock. Vi blandar inte logik här,
-    // men rubriken ska inte lova att allt är "låst".
-    strong.textContent = "Noteringar (fail-closed om låst):";
+    strong.textContent = "Noteringar:";
     box.appendChild(strong);
     const ul = document.createElement("ul");
     ul.style.margin = "8px 0 0";
@@ -371,8 +372,8 @@ UI-only • Fail-closed • XSS-safe
   // -----------------------------
   function mustAdmin(){
     if(!window.HRApp || typeof window.HRApp.requireAuth !== "function"){
-      // Fail-closed: om core saknas → tillbaka till login
-      window.location.replace("../UI/UI-01-SKELETON.html?err=core");
+      const msg = $("#msg");
+      if(msg) msg.textContent = "CORE saknas (HRApp). Kan inte köra sidan. (fail-closed)";
       return null;
     }
 
@@ -380,21 +381,23 @@ UI-only • Fail-closed • XSS-safe
     try{
       session = window.HRApp.requireAuth({ allowRoles:["ADMIN"] });
     }catch{
-      window.location.replace("../UI/UI-01-SKELETON.html?err=auth");
+      const msg = $("#msg");
+      if(msg) msg.textContent = "Auth-guard kraschade i CORE. (fail-closed)";
       return null;
     }
-    if(!session) return null; // HRApp redirectar (enligt kontrakt)
+    if(session === null) return null; // CORE kan redan ha redirectat
 
     let auth = null;
     try{
+      // Vissa builds accepterar arg; andra ignorerar den. Try/catch skyddar.
       auth = window.HRApp.getAuth ? window.HRApp.getAuth(session) : null;
-      // Om core har annan signatur kan den ignorera argumentet; try/catch skyddar mot kast.
     }catch{
-      auth = null;
+      try{ auth = window.HRApp.getAuth ? window.HRApp.getAuth() : null; }catch{ auth = null; }
     }
 
-    if(!auth || auth.isAuthed !== true || auth.role !== "ADMIN"){
-      window.location.replace("../UI/UI-01-SKELETON.html?err=role");
+    if(!auth || auth.isAuthed !== true || String(auth.role||"") !== "ADMIN"){
+      const msg = $("#msg");
+      if(msg) msg.textContent = "Åtkomst nekad. ADMIN krävs. (fail-closed)";
       return null;
     }
     return { session, auth };
@@ -405,8 +408,8 @@ UI-only • Fail-closed • XSS-safe
 
   const whoNameEl = $("#whoName");
   const whoRoleEl = $("#whoRole");
-  if(whoNameEl) whoNameEl.textContent = String(access.auth.empNo || access.auth.role || "—");
-  if(whoRoleEl) whoRoleEl.textContent = "admin";
+  if(whoNameEl) whoNameEl.textContent = String(access.auth.empNo || "—");
+  if(whoRoleEl) whoRoleEl.textContent = "ADMIN";
 
   const navLogout = $("#navLogout");
   if(navLogout){
@@ -426,43 +429,33 @@ UI-only • Fail-closed • XSS-safe
   // LOAD: EMPLOYEES (AssignmentsV2 object-only + hardening)
   // -----------------------------
   function normalizeAssignmentsV2ObjectOnly(raw){
-    const issues = [];
     if(raw === null || raw === undefined){
-      // Saknad key => tom lista (ok), men vi kan inte välja employee
       return { ok:true, map:Object.create(null), issues:[] };
     }
     if(typeof raw !== "object" || Array.isArray(raw)){
-      return { ok:false, map:Object.create(null), issues:["Assignments korrupt (förväntar objekt)."] };
+      return { ok:false, map:Object.create(null), issues:["AO-020_ROLE_ASSIGNMENTS_V2 korrupt (förväntar objekt)."] };
     }
-    // Extra hardening: plain-object only (minskar proto-risk)
     if(!isPlainObject(raw)){
-      return { ok:false, map:Object.create(null), issues:["Assignments korrupt (ej plain object)."] };
+      return { ok:false, map:Object.create(null), issues:["AO-020_ROLE_ASSIGNMENTS_V2 korrupt (ej plain object)."] };
     }
 
     const out = Object.create(null);
-    for(const k of Object.keys(raw)){
-      const key = String(k);
-      if(SPECIAL_KEYS.has(key)){
-        return {
-          ok:false,
-          map:Object.create(null),
-          issues:["Assignments innehåller blockerade special-keys (__proto__/constructor/prototype)."]
-        };
-      }
-
-      // Extra hardening (shallow): om value är objekt, blockera specialkeys på 1 nivå.
-      const v = raw[key];
-      if(v && typeof v === "object" && !Array.isArray(v)){
-        if(hasBlockedSpecialKeysShallow(v)){
-          return {
-            ok:false,
-            map:Object.create(null),
-            issues:["Assignments innehåller blockerade special-keys i value-objekt (shallow)."]
-          };
+    try{
+      for(const k of Object.keys(raw)){
+        const key = String(k);
+        if(SPECIAL_KEYS.has(key)){
+          return { ok:false, map:Object.create(null), issues:["AO-020_ROLE_ASSIGNMENTS_V2 innehåller blockerade special-keys. (fail-closed)"] };
         }
+        const v = raw[key];
+        if(v && typeof v === "object" && !Array.isArray(v)){
+          if(hasBlockedSpecialKeysShallow(v)){
+            return { ok:false, map:Object.create(null), issues:["AO-020_ROLE_ASSIGNMENTS_V2 value innehåller blockerade special-keys (shallow). (fail-closed)"] };
+          }
+        }
+        out[key] = v;
       }
-
-      out[key] = v;
+    }catch{
+      return { ok:false, map:Object.create(null), issues:["AO-020_ROLE_ASSIGNMENTS_V2 kunde inte läsas säkert. (fail-closed)"] };
     }
     return { ok:true, map:out, issues:[] };
   }
@@ -470,18 +463,17 @@ UI-only • Fail-closed • XSS-safe
   function loadEmployeesFromAssignments(){
     const rawStr = readLocalRaw(EMP_SRC_KEY);
     if(rawStr === null){
-      return { ok:true, list:[], issues:["Inga assignments ännu (AO-020_ROLE_ASSIGNMENTS_V2 saknas)."] };
+      return { ok:true, list:[], issues:["AO-020_ROLE_ASSIGNMENTS_V2 saknas (inga employees att välja)."] };
     }
     const parsed = safeJsonParse(rawStr);
     if(!parsed.ok){
-      return { ok:false, list:[], issues:["Assignments korrupt (JSON-parse misslyckades)."] };
+      return { ok:false, list:[], issues:["AO-020_ROLE_ASSIGNMENTS_V2 korrupt (JSON-parse misslyckades)."] };
     }
     const norm = normalizeAssignmentsV2ObjectOnly(parsed.value);
     if(!norm.ok){
       return { ok:false, list:[], issues:norm.issues.slice() };
     }
 
-    // Alla empNo = keys i objektet
     const keys = Object.keys(norm.map);
     const seen = new Set();
     const out = [];
@@ -495,11 +487,11 @@ UI-only • Fail-closed • XSS-safe
     }
 
     out.sort((a,b) => String(a.empNo).localeCompare(String(b.empNo), "sv"));
-    return { ok:true, list:out, issues: out.length ? [] : ["Assignments finns men inga giltiga empNo-nycklar hittades."] };
+    return { ok:true, list:out, issues: out.length ? [] : ["Inga giltiga empNo-nycklar hittades i AO-020_ROLE_ASSIGNMENTS_V2."] };
   }
 
   // -----------------------------
-  // LOAD: PLANS (AO-060)
+  // LOAD: PLANS (AO-060) — read-only
   // -----------------------------
   function normalizePlan(p){
     if(!p || typeof p !== "object") return null;
@@ -515,32 +507,28 @@ UI-only • Fail-closed • XSS-safe
   function loadPlans(){
     const rawStr = readLocalRaw(PLANS_KEY);
     if(rawStr === null){
-      return { ok:true, list:[], issues:["Inga planer ännu (AO-060_PLANS_V1 saknas)."] };
+      return { ok:true, list:[], issues:["AO-060_PLANS_V1 saknas (inga planer att välja)."] };
     }
     const parsed = safeJsonParse(rawStr);
     if(!parsed.ok){
-      return { ok:false, list:[], issues:["AO-060 korrupt (JSON-parse misslyckades)."] };
+      return { ok:false, list:[], issues:["AO-060_PLANS_V1 korrupt (JSON-parse misslyckades)."] };
     }
     if(parsed.value === null || parsed.value === undefined){
-      return { ok:true, list:[], issues:["Inga planer ännu (AO-060 är tom)."] };
+      return { ok:true, list:[], issues:["AO-060_PLANS_V1 är tom."] };
     }
     if(!Array.isArray(parsed.value)){
-      return { ok:false, list:[], issues:["AO-060 korrupt (förväntar array)."] };
+      return { ok:false, list:[], issues:["AO-060_PLANS_V1 korrupt (förväntar array)."] };
     }
 
     const out = [];
     let dropped = 0;
     for(const row of parsed.value){
       const n = normalizePlan(row);
-      if(n) out.push(n);
-      else dropped++;
+      if(n) out.push(n); else dropped++;
     }
 
     const issues = [];
-    if(dropped > 0){
-      // DEBUG: info-notis (inte lock) för att undvika "tyst tapp"
-      issues.push(`${dropped} plan(er) ignorerades pga ogiltigt format (title/status/items/id).`);
-    }
+    if(dropped > 0) issues.push(`${dropped} plan(er) ignorerades pga ogiltigt format.`);
 
     out.sort((a,b) => (a.title || "").localeCompare((b.title || ""), "sv"));
     return { ok:true, list:out, issues };
@@ -564,12 +552,11 @@ UI-only • Fail-closed • XSS-safe
     const c = Number.isFinite(createdAt) && createdAt > 0 ? createdAt : null;
     const u = Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : null;
 
-    // Normalisering i minnet (skriv inte tillbaka utan explicit save)
     const createdAtNorm = c ?? u ?? Date.now();
     const updatedAtNorm = u ?? c ?? createdAtNorm;
 
     const id = String(row.id || "").trim();
-    const idNorm = id ? id : makePaId(); // generera i minnet vid saknad
+    const idNorm = id ? id : makePaId();
 
     return {
       id: idNorm,
@@ -577,10 +564,7 @@ UI-only • Fail-closed • XSS-safe
       planId,
       startDateTs,
       createdAt: createdAtNorm,
-      updatedAt: updatedAtNorm,
-      _hasId: !!id,
-      _hasCreatedAt: !!c,
-      _hasUpdatedAt: !!u
+      updatedAt: updatedAtNorm
     };
   }
 
@@ -591,28 +575,24 @@ UI-only • Fail-closed • XSS-safe
     }
     const parsed = safeJsonParse(rawStr);
     if(!parsed.ok){
-      return { ok:false, list:[], issues:["AO-061 korrupt (JSON-parse misslyckades)."] };
+      return { ok:false, list:[], issues:["AO-061_PLAN_ASSIGNMENTS_V1 korrupt (JSON-parse misslyckades)."] };
     }
     if(parsed.value === null || parsed.value === undefined){
       return { ok:true, list:[], issues:[] };
     }
     if(!Array.isArray(parsed.value)){
-      return { ok:false, list:[], issues:["AO-061 korrupt (förväntar array)."] };
+      return { ok:false, list:[], issues:["AO-061_PLAN_ASSIGNMENTS_V1 korrupt (förväntar array)."] };
     }
 
     const out = [];
     let dropped = 0;
     for(const r of parsed.value){
       const n = normalizeAssignmentRow(r);
-      if(n) out.push(n);
-      else dropped++;
+      if(n) out.push(n); else dropped++;
     }
 
     const issues = [];
-    if(dropped > 0){
-      // DEBUG: info-notis (inte lock) för att undvika "tyst tapp"
-      issues.push(`${dropped} koppling(ar) ignorerades pga ogiltigt format (empNo/planId/startDateTs).`);
-    }
+    if(dropped > 0) issues.push(`${dropped} koppling(ar) ignorerades pga ogiltigt format.`);
 
     return { ok:true, list:out, issues };
   }
@@ -635,13 +615,6 @@ UI-only • Fail-closed • XSS-safe
     });
   }
 
-  function planStatusLabel(status){
-    const s = String(status || "");
-    if(s === "active") return "active";
-    if(s === "archived") return "archived";
-    return "draft";
-  }
-
   function buildPlanIndex(plans){
     const byId = new Map();
     (plans || []).forEach(p => byId.set(p.id, p));
@@ -656,11 +629,9 @@ UI-only • Fail-closed • XSS-safe
     const fPlan = String(filters.planId || "").trim();
 
     let list = Array.isArray(rows) ? rows.slice() : [];
-
     if(fEmp) list = list.filter(r => r.empNo === fEmp);
     if(fPlan) list = list.filter(r => r.planId === fPlan);
 
-    // Stabil sort: empNo, planTitle, startDateTs
     list.sort((a,b) => {
       const ae = String(a.empNo||"");
       const be = String(b.empNo||"");
@@ -695,30 +666,25 @@ UI-only • Fail-closed • XSS-safe
       const planTitle = plan ? plan.title : ("Okänd plan (" + r.planId + ")");
       const planStatus = plan ? plan.status : "unknown";
 
-      // Employee
       const tdEmp = document.createElement("td");
       tdEmp.textContent = r.empNo;
       tr.appendChild(tdEmp);
 
-      // Plan
       const tdPlan = document.createElement("td");
       tdPlan.textContent = planTitle;
       tr.appendChild(tdPlan);
 
-      // Start
       const tdStart = document.createElement("td");
       tdStart.textContent = formatDateLocal(r.startDateTs);
       tr.appendChild(tdStart);
 
-      // Status
       const tdStatus = document.createElement("td");
       const pill = document.createElement("span");
       pill.className = "pill";
-      pill.textContent = (planStatus === "unknown") ? "unknown" : planStatusLabel(planStatus);
+      pill.textContent = (planStatus === "unknown") ? "unknown" : String(planStatus);
       tdStatus.appendChild(pill);
       tr.appendChild(tdStatus);
 
-      // Action
       const tdAct = document.createElement("td");
       tdAct.style.textAlign = "right";
       const btn = document.createElement("button");
@@ -726,7 +692,6 @@ UI-only • Fail-closed • XSS-safe
       btn.className = "secondary";
       btn.textContent = "Ta bort";
       btn.disabled = !canWrite;
-      // A11Y: tydligare radkontext utan redesign
       btn.setAttribute("aria-label", `Ta bort koppling: empNo ${r.empNo}, plan ${planTitle}`);
       btn.addEventListener("click", () => {
         if(!canWrite) return;
@@ -749,38 +714,22 @@ UI-only • Fail-closed • XSS-safe
   let plans = [];
   let planIndex = new Map();
   let assignments = [];
-  let canWrite = true; // låses om AO-060 eller AO-061 korrupt
+  let canWrite = true;
 
   function recomputeLocks(empRes, planRes, asgRes){
     lockReasons = [];
 
-    // Plans
-    if(!planRes.ok){
-      lockReasons.push(...planRes.issues);
-    }else if(planRes.issues && planRes.issues.length){
-      // Info-notiser (ej lock)
-      lockReasons.push(...planRes.issues);
-    }
+    if(!empRes.ok) lockReasons.push(...empRes.issues);
+    else if(empRes.issues?.length) lockReasons.push(...empRes.issues);
 
-    // Employees
-    if(!empRes.ok){
-      lockReasons.push(...empRes.issues);
-    }else if(empRes.issues && empRes.issues.length){
-      lockReasons.push(...empRes.issues);
-    }
+    if(!planRes.ok) lockReasons.push(...planRes.issues);
+    else if(planRes.issues?.length) lockReasons.push(...planRes.issues);
 
-    // Assignments
-    if(!asgRes.ok){
-      lockReasons.push(...asgRes.issues);
-    }else if(asgRes.issues && asgRes.issues.length){
-      // Info-notiser om droppade rows (ej lock)
-      lockReasons.push(...asgRes.issues);
-    }
+    if(!asgRes.ok) lockReasons.push(...asgRes.issues);
+    else if(asgRes.issues?.length) lockReasons.push(...asgRes.issues);
 
-    // Can write only if AO-061 ok AND plans ok AND employees ok
     canWrite = !!(empRes.ok && planRes.ok && asgRes.ok);
 
-    // Även om ok, måste det finnas minst en employee + minst en active plan för att kunna skapa
     const hasEmp = employees.length > 0;
     const hasActivePlan = plans.some(p => p.status === "active");
     if(!hasEmp) canWrite = false;
@@ -809,19 +758,14 @@ UI-only • Fail-closed • XSS-safe
   }
 
   function upsertAssignment(empNo, planId, startDateTs){
-    // Fail-closed: om vi inte får skriva
     if(!canWrite){
-      setMsg("err", "Skrivning är låst (fail-closed). Åtgärda fel först.");
+      setMsg("err", "Skrivning är låst (fail-closed).");
       return;
     }
 
     const v = validateAssignInput(empNo, planId, startDateTs);
-    if(!v.ok){
-      setMsg("err", v.err);
-      return;
-    }
+    if(!v.ok){ setMsg("err", v.err); return; }
 
-    // Upsert: en per {empNo, planId}
     const now = Date.now();
     const next = assignments.slice();
 
@@ -850,25 +794,21 @@ UI-only • Fail-closed • XSS-safe
       });
     }
 
-    // Skriv endast om payload är array med validerbara rows
     const res = writeLocalFailClosed(ASG_KEY, next);
     if(!res.ok){
       setMsg("err", "Kunde inte spara (localStorage fullt eller blockerat).");
       return;
     }
 
-    // Reload from disk to stay source-of-truth
     const re = loadAssignments();
     if(!re.ok){
-      // Mycket ovanligt efter write, men fail-closed
       canWrite = false;
       showLockBox(["AO-061 blev korrupt efter skrivning (ovanligt). Stoppar vidare writes."]);
       setMsg("err", "Sparat, men kunde inte läsa tillbaka (fail-closed).");
       return;
     }
 
-    setMsg("ok", idx >= 0 ? "Koppling uppdaterad (ersatt)." : "Koppling skapad.");
-    // RENDER: använd samma väg som init för att undvika duplicerad/död render-logik
+    setMsg("ok", idx >= 0 ? "Koppling uppdaterad." : "Koppling skapad.");
     refreshAndRender(true);
   }
 
@@ -889,7 +829,7 @@ UI-only • Fail-closed • XSS-safe
       .filter(r => !(r.empNo === e && r.planId === p))
       .map(r => ({
         id: String(r.id || "").trim() || makePaId(),
-        empNo: String(r.empNo || "").trim(),
+        empNo: normalizeEmpNoDigitsOnly(r.empNo),
         planId: String(r.planId || "").trim(),
         startDateTs: Number(r.startDateTs) || 0,
         createdAt: Number(r.createdAt) || Date.now(),
@@ -916,12 +856,13 @@ UI-only • Fail-closed • XSS-safe
   }
 
   // -----------------------------
-  // RENDER TABLE WITH FILTERS
+  // RENDER WITH FILTERS
   // -----------------------------
   function renderTableWithCurrentFilters(){
     const fEmp = String($("#filterEmp").value || "").trim();
     const fPlan = String($("#filterPlan").value || "").trim();
     renderTable(assignments, planIndex, { empNo:fEmp, planId:fPlan }, canWrite);
+
     $("#btnAssign").disabled = !canWrite;
     $("#empSelect").disabled = employees.length === 0;
     $("#planSelect").disabled = plans.filter(p => p.status === "active").length === 0;
@@ -943,7 +884,6 @@ UI-only • Fail-closed • XSS-safe
 
     recomputeLocks(empRes, planRes, asgRes);
 
-    // Re-render selects
     const empOpts = employees.map(x => ({ value:x.empNo, label:x.empNo }));
     fillSelect($("#empSelect"), empOpts, employees.length ? "(Välj empNo)" : "(Inga employees)");
 
@@ -962,7 +902,6 @@ UI-only • Fail-closed • XSS-safe
       if(prevFilterPlan && plans.some(p => p.id === prevFilterPlan)) $("#filterPlan").value = prevFilterPlan;
     }
 
-    // Default startDate = idag
     if(!$("#startDate").value){
       const now = new Date();
       const y = now.getFullYear();
@@ -977,40 +916,31 @@ UI-only • Fail-closed • XSS-safe
   // -----------------------------
   // EVENTS
   // -----------------------------
-  const btnAssign = $("#btnAssign");
-  if(btnAssign){
-    btnAssign.addEventListener("click", () => {
-      setMsg("", "");
+  $("#btnAssign").addEventListener("click", () => {
+    setMsg("", "");
 
-      const empNo = String($("#empSelect").value || "").trim();
-      const planId = String($("#planSelect").value || "").trim();
-      const iso = String($("#startDate").value || "").trim();
+    const empNo = String($("#empSelect").value || "").trim();
+    const planId = String($("#planSelect").value || "").trim();
+    const iso = String($("#startDate").value || "").trim();
 
-      const ts = isoDateToLocalMidnightTs(iso);
-      if(ts === null){
-        setMsg("err", "Välj ett giltigt startdatum.");
-        return;
-      }
+    const ts = isoDateToLocalMidnightTs(iso);
+    if(ts === null){
+      setMsg("err", "Välj ett giltigt startdatum.");
+      return;
+    }
 
-      upsertAssignment(empNo, planId, ts);
-    });
-  }
+    upsertAssignment(empNo, planId, ts);
+  });
 
-  const filterEmpEl = $("#filterEmp");
-  if(filterEmpEl){
-    filterEmpEl.addEventListener("change", () => {
-      setMsg("", "");
-      renderTableWithCurrentFilters();
-    });
-  }
+  $("#filterEmp").addEventListener("change", () => {
+    setMsg("", "");
+    renderTableWithCurrentFilters();
+  });
 
-  const filterPlanEl = $("#filterPlan");
-  if(filterPlanEl){
-    filterPlanEl.addEventListener("change", () => {
-      setMsg("", "");
-      renderTableWithCurrentFilters();
-    });
-  }
+  $("#filterPlan").addEventListener("change", () => {
+    setMsg("", "");
+    renderTableWithCurrentFilters();
+  });
 
   // -----------------------------
   // INIT
@@ -1022,4 +952,3 @@ UI-only • Fail-closed • XSS-safe
 
 </body>
 </html>
-
