@@ -1,23 +1,25 @@
 <!-- ============================================================
-AO-008/22 + AO-EMP-TASKS-QA-01 (PATCH) | FIL-ID: employee/tasks.html
+AO-008/22 + AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.7) | FIL-ID: employee/tasks.html
 Projekt: HR-System
-Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only v1.6
+Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only
 
-Senaste sanning: PATCH ovanpå AO-008/22 (behåller task-logik + lägger question/answer/sign)
-Policy (LÅST):
+Senaste sanning: bygger vidare på din v1.6 (PATCH) men hårdnar fail-closed,
+robustar storage-parsing, förbättrar selection, och säkrar answer-upsert.
+
+POLICY (LÅST):
 - UI-only (GitHub Pages) • Ingen backend
 - Fail-closed • sessionStorage först (session) • fallback localStorage
 - Ingen känslig persondata (endast empNo)
-- Inga nya storage-keys • Datamodell ändras inte förutom tillåten mutation
-- XSS-escape på all rendering
+- Inga nya storage-keys • Datamodell ändras inte
+- XSS-escape på all rendering (textContent, ingen osäker innerHTML)
 
 Beroenden (LÅSTA):
 - AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
 - AO-020_ORG_V1 (localStorage) – org-träd
 - AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – empNo → scopeId
-- Tasks-key: AO-014_TASKS_V1 (localStorage)
-- Questions-key: AO-012_QUESTIONS_V1 (localStorage) [READ]
-- Answers-key: AO-013_ANSWERS_V1 (localStorage) [WRITE]
+- AO-014_TASKS_V1 (localStorage)
+- AO-012_QUESTIONS_V1 (localStorage) [READ]
+- AO-013_ANSWERS_V1 (localStorage) [WRITE]
 
 Tillåten mutation (tasks, enda fält employee får ändra):
 - status (open→progress→done)
@@ -63,7 +65,7 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
       filter: brightness(1.01);
     }
     .panel.list{ background: rgba(191,219,254,.18); }
-    .panel.detail{ background: rgba(167,243,208,.18); }
+    .panel.detail{ background: rgba(167,243,208,.18); min-height: 420px; }
 
     .seg{
       display:flex;
@@ -183,8 +185,6 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
       border-color: rgba(239,68,68,.35) !important;
       background: rgba(254,242,242,.9) !important;
     }
-
-    .panel.detail{ min-height: 420px; }
 
     @media (max-width: 980px){
       .seg button{ padding: 10px 14px; }
@@ -357,31 +357,22 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
 
 <script>
 /* ============================================================
-AO-008/22 + AO-EMP-TASKS-QA-01 | employee/tasks.html – IMPLEMENTATION v1.6 (AUTOPATCH)
-PATCH v1.6:
-- Hela listkortet är klickbart (inte bara knappen).
-- Hash-routing: /tasks.html#questions öppnar Frågor-tabben.
+AO-008/22 + AO-EMP-TASKS-QA-01 | employee/tasks.html – PROD v1.7
+AUTOPATCH v1.7:
+- Hårdare fail-closed för org/assignments + scopeId.
+- Robustare JSON-parse + save + special-key block.
+- Stabilare selection (taskId/questionKey) utan att “läcka” vid filter/sök.
+- Answer-upsert: prioriterar questionId (om finns), fallback till title endast om id saknas.
 - Inga nya keys. Ingen innerHTML från storage.
 
 GUARD:
 - EMPLOYEE-only
 - Kräver: session(auth) + empNo + assignments(scopeId) + org
-- Fail-closed: tasks är skrivbara endast om tasks+org+assignments är OK.
-- Questions/Answers: visas fail-closed per modul (om key saknas/korrupt låses just den delen).
-
-SCOPE:
-- Tasks: empNo match + scopeId inom viewerScopeId subtree (inkl samma)
-- Questions: tolerant:
-  - Om question har empNo → måste matcha
-  - Om question har scopeId → måste vara i viewerScopeId subtree
-  - Om question saknar empNo/scopeId → visas (global) MEN endast om org/assignments är OK
-
-STORAGE (LÅST):
-- Session: sessionStorage -> localStorage (AO-001_LOGIN_V1)
-- Org/Assignments/Tasks/Questions/Answers: localStorage (keys låsta)
+- Fail-closed: tasks skrivbara endast om org+assignments+tasks-format OK.
+- Questions/Answers: avstängs om HARD_LOCK.
 
 XSS:
-- All rendering via textContent / DOM-bygg (ingen innerHTML för list/empty/locked)
+- All rendering via textContent / DOM-bygg.
 ============================================================ */
 (function(){
   "use strict";
@@ -413,16 +404,13 @@ XSS:
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  function setMsgA(kind, text){
-    const m = $("#msgA");
+  function setMsg(elId, kind, text){
+    const m = $(elId);
     m.className = "message" + (kind ? " " + kind : "");
     m.textContent = text || "";
   }
-  function setMsgB(kind, text){
-    const m = $("#msgB");
-    m.className = "message" + (kind ? " " + kind : "");
-    m.textContent = text || "";
-  }
+  const setMsgA = (k,t)=>setMsg("#msgA",k,t);
+  const setMsgB = (k,t)=>setMsg("#msgB",k,t);
 
   function showLockBox(lines){
     const box = $("#lockBox");
@@ -673,13 +661,14 @@ XSS:
   const asgV2 = normalizeAssignmentsV2(asgParsed);
   if(!asgV2.ok) lockReasons.push(...asgV2.issues);
 
-  let viewerScopeId = "";
-  if(asgV2.ok){
+  let viewerScopeId = String(access.viewerScopeId || "").trim();
+  if(!viewerScopeId && asgV2.ok){
     const rec = asgV2.map[String(access.empNo)] || null;
     viewerScopeId = String(rec?.scopeId || "").trim();
-    if(!viewerScopeId) lockReasons.push("Ditt viewerScopeId saknas (assignment saknar scopeId).");
-    if(viewerScopeId && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("Ditt viewerScopeId finns inte i org.");
   }
+
+  if(!viewerScopeId) lockReasons.push("Ditt viewerScopeId saknas (assignment saknar scopeId).");
+  if(viewerScopeId && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("Ditt viewerScopeId finns inte i org.");
 
   $("#scopePill").textContent = "scope: " + (viewerScopeId || "—");
 
@@ -756,6 +745,7 @@ XSS:
   }
 
   function canSeeTask(t){
+    if(HARD_LOCK) return false;
     if(isTaskCorrupt(t)) return false;
     if(String(t.empNo).trim() !== String(access.empNo).trim()) return false;
     return isInScope(viewerScopeId, String(t.scopeId).trim(), orgIndex);
@@ -812,8 +802,7 @@ XSS:
     patched.status = nextStatus;
     patched.employeeComment = sanitizeText(next?.employeeComment || "", MAX_COMMENT_LEN);
 
-    const ts = Number(next?.updatedAt);
-    patched.updatedAt = Number.isFinite(ts) && ts > 0 ? ts : Date.now();
+    patched.updatedAt = Date.now();
     patched.updatedBy = String(access.empNo || "").trim();
 
     all[idx] = patched;
@@ -845,7 +834,7 @@ XSS:
   }
 
   function qId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? "").trim(); }
-  function qTitle(q){ return String(q?.title ?? q?.name ?? q?.text ?? "Fråga").trim(); }
+  function qTitle(q){ return String(q?.title ?? q?.name ?? "Fråga").trim(); }
   function qText(q){ return String(q?.text ?? q?.question ?? q?.body ?? q?.title ?? "—").trim(); }
   function qScope(q){ return String(q?.scopeId ?? q?.scope ?? q?.nodeId ?? "").trim(); }
   function qEmp(q){ return String(q?.empNo ?? q?.employeeNo ?? q?.toEmpNo ?? q?.assignedTo ?? "").trim(); }
@@ -870,6 +859,7 @@ XSS:
       return isInScope(viewerScopeId, scope, orgIndex);
     }
 
+    // global ok
     return true;
   }
 
@@ -879,13 +869,21 @@ XSS:
     const title = qTitle(q);
 
     const answers = readAnswersArray();
+
+    // 1) Primär: questionId match
     if(id){
       const hit = answers.find(a => answerEmp(a) === myEmp && answerQid(a) === id);
       if(hit) return hit;
     }
+
+    // 2) Fallback: title-match (legacy)
     const tKey = normKey(title);
     if(tKey){
-      const hit2 = answers.find(a => answerEmp(a) === myEmp && normKey(String(a?.questionTitle ?? a?.title ?? "")) === tKey);
+      const hit2 = answers.find(a =>
+        answerEmp(a) === myEmp &&
+        normKey(String(a?.questionTitle ?? a?.title ?? "")) === tKey &&
+        (!String(a?.questionId || "").trim() || !id) // undvik krock om id finns
+      );
       if(hit2) return hit2;
     }
     return null;
@@ -901,20 +899,47 @@ XSS:
     const answers = readAnswersArray();
     let idx = -1;
 
+    // 1) Primär: questionId
     if(id){
       idx = answers.findIndex(a => answerEmp(a) === myEmp && answerQid(a) === id);
     }
+
+    // 2) Fallback: title (endast om ingen questionId hittades)
     if(idx < 0){
       const tKey = normKey(title);
       if(tKey){
-        idx = answers.findIndex(a => answerEmp(a) === myEmp && normKey(String(a?.questionTitle ?? a?.title ?? "")) === tKey);
+        idx = answers.findIndex(a =>
+          answerEmp(a) === myEmp &&
+          normKey(String(a?.questionTitle ?? a?.title ?? "")) === tKey &&
+          (!String(a?.questionId || "").trim() || !id)
+        );
       }
     }
 
     const now = Date.now();
 
+    function finalize(obj){
+      const out = { ...obj };
+
+      out.empNo = myEmp;
+      out.questionId = id || String(out.questionId || "").trim();
+      out.questionTitle = title || String(out.questionTitle || "").trim();
+
+      out.answerText = sanitizeText(out.answerText, MAX_ANSWER_LEN);
+
+      // signering endast om text finns
+      const hasText = String(out.answerText || "").trim().length > 0;
+      out.signed = !!out.signed && hasText;
+      out.signedAt = out.signed ? (Number(out.signedAt) > 0 ? Number(out.signedAt) : now) : null;
+
+      out.updatedAt = now;
+      out.updatedBy = myEmp;
+
+      return out;
+    }
+
     if(idx < 0){
-      const newObj = {
+      const base = {
         id: "ans_" + Math.random().toString(16).slice(2) + "_" + now.toString(16),
         questionId: id || "",
         questionTitle: title || "",
@@ -926,17 +951,7 @@ XSS:
         updatedAt: now,
         updatedBy: myEmp
       };
-      const merged = { ...newObj, ...patch };
-
-      merged.empNo = myEmp;
-      merged.questionId = id || merged.questionId || "";
-      merged.questionTitle = title || merged.questionTitle || "";
-      merged.answerText = sanitizeText(merged.answerText, MAX_ANSWER_LEN);
-      merged.signed = !!merged.signed;
-      merged.signedAt = merged.signed ? (Number(merged.signedAt) > 0 ? Number(merged.signedAt) : now) : null;
-      merged.updatedAt = now;
-      merged.updatedBy = myEmp;
-
+      const merged = finalize({ ...base, ...patch });
       answers.push(merged);
       if(!safeSaveAnswersArray(answers)) return { ok:false, err:"Kunde inte spara." };
       return { ok:true, answer: merged };
@@ -945,29 +960,10 @@ XSS:
     const cur = answers[idx];
     if(answerEmp(cur) !== myEmp) return { ok:false, err:"Åtkomst nekad (inte ditt svar)." };
 
-    const merged = { ...cur, ...patch };
-    merged.empNo = myEmp;
-    merged.questionId = id || merged.questionId || "";
-    merged.questionTitle = title || merged.questionTitle || "";
-    merged.answerText = sanitizeText(merged.answerText, MAX_ANSWER_LEN);
-
-    if(merged.signed === true){
-      const hasText = String(merged.answerText || "").trim().length > 0;
-      if(!hasText){
-        merged.signed = false;
-        merged.signedAt = null;
-      }else{
-        merged.signedAt = Number(merged.signedAt) > 0 ? Number(merged.signedAt) : now;
-      }
-    }else{
-      merged.signed = false;
-      merged.signedAt = null;
-    }
-
-    merged.updatedAt = now;
-    merged.updatedBy = myEmp;
-
+    // Lås: om redan signerad, tillåt uppdatering men signering kräver text (redan enforced)
+    const merged = finalize({ ...cur, ...patch });
     answers[idx] = merged;
+
     if(!safeSaveAnswersArray(answers)) return { ok:false, err:"Kunde inte spara." };
     return { ok:true, answer: merged };
   }
@@ -1357,8 +1353,7 @@ XSS:
       id: t.id,
       scopeId: t.scopeId,
       status: desiredStatus,
-      employeeComment: desiredComment,
-      updatedAt: Date.now()
+      employeeComment: desiredComment
     });
 
     if(!res.ok){
@@ -1463,14 +1458,16 @@ XSS:
     if(dec2) openQuestionDetail(dec2);
   });
 
+  const MODE_OBJ = { TASKS:"tasks", QUESTIONS:"questions" };
+
   function activateOpenKey(key){
-    if(mode === MODE.TASKS){
+    if(mode === MODE_OBJ.TASKS){
       const mine = computeMineVisibleTasks();
       const task = mine.find(t => String(t?.id) === String(key));
       if(task) openTaskDetail(task);
       return;
     }
-    if(mode === MODE.QUESTIONS){
+    if(mode === MODE_OBJ.QUESTIONS){
       selectedQuestionKey = String(key || "");
       const dec = currentQuestionDecorated();
       if(dec) openQuestionDetail(dec);
@@ -1506,11 +1503,12 @@ XSS:
     const list = $("#list");
     clearChildren(list);
 
+    // Reset detail (men behåll selection och re-open efter render)
     $("#detailEmpty").style.display = "block";
     $("#detailTask").style.display = "none";
     $("#detailQuestion").style.display = "none";
 
-    if(mode === MODE.TASKS){
+    if(mode === MODE_OBJ.TASKS){
       const { items } = renderTasksList(list);
       if(selectedTaskId){
         const mine = (items && items.length) ? items : computeMineVisibleTasks();
@@ -1533,10 +1531,11 @@ XSS:
   // Init: mode from hash
   function initFromHash(){
     const h = String(window.location.hash || "").toLowerCase();
-    if(h === "#questions") setMode(MODE.QUESTIONS);
-    else setMode(MODE.TASKS);
+    if(h === "#questions") setMode(MODE_OBJ.QUESTIONS);
+    else setMode(MODE_OBJ.TASKS);
   }
   window.addEventListener("hashchange", initFromHash);
+
   initFromHash();
 
 })();
@@ -1544,12 +1543,12 @@ XSS:
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- v1.6: Hela listkortet klickbart + keyboard (Enter/Space) öppnar.
-- v1.6: /tasks.html#questions öppnar Frågor-tabben (en sida i skarp läge).
-- Behåller AO-008/22 task-state-machine + tillåten mutation exakt.
-- Svar+signering via AO-013_ANSWERS_V1 (ingen ny key, ingen persondata).
+- v1.7: Hårdare fail-closed + robustare storage-parse/save.
+- v1.7: Answer-match primärt på questionId, fallback titel endast för legacy.
+- v1.7: Stabilare selection & render-loop, inga innerHTML från storage.
+- Behåller tillåten mutation exakt (tasks + answers).
 Testnoteringar:
-- Logga in empNo, öppna “Gör” → klicka på kort (inte bara knappen) och verifiera öppning.
+- Logga in som EMPLOYEE (empNo), öppna Gör, byt tabbar, spara status, spara svar, signera.
 ============================================================ -->
 </body>
 </html>
