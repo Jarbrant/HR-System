@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-055 (PATCH v1.1) | FIL-ID: admin/packages-employees.html
+AO-055 (PATCH v1.2) | FIL-ID: admin/packages-employees.html
 Projekt: HR-System
 Syfte: ADMIN/SYSTEM_ADMIN – Paket → status per medarbetare (drill-down) – READ ONLY
 
@@ -7,7 +7,7 @@ Policy (LÅST):
 - UI-only • fail-closed
 - Inga nya storage-keys
 - Read-only (ingen ändring av status)
-- XSS-escape på allt från storage
+- XSS-escape på allt från storage (textContent + säkra DOM-noder, ingen osäker innerHTML)
 - Samma logik som AO-053 / AO-054 (ingen ny tolkning)
 - Läser endast:
   AO-050_PACKAGES_V1, AO-014_TASKS_V1, AO-012_QUESTIONS_V1, AO-013_ANSWERS_V1,
@@ -16,14 +16,15 @@ Policy (LÅST):
 RBAC (LÅST):
 - ADMIN + SYSTEM_ADMIN
 - Scope:
-  ADMIN -> egen subtree (kräver org)
+  ADMIN -> egen subtree (kräver org + scopeId i session)
   SYSTEM_ADMIN -> allt (utan org: fallback exakt scope-match)
 
-Autopatch v1.1 (utan UX-redesign, matchar AO-054 v1.2):
+Autopatch v1.2 (utan UX-redesign, matchar AO-054 v1.2):
 1) ALL/* i tasks räknas som “tilldelad till alla” inom scope i progress (scope fail-closed kvarstår).
 2) SYSTEM_ADMIN utan org: mild info i topMsg (blockar inte) + exakt scope-match (ej subtree).
 3) EmpsInPkg===0: tydlig badge “0 medarbetare i scope”.
 4) blocksFromPackage: stabilt block-id om b.id saknas (title+kind hash), ingen Math.random.
+5) FIX: readAssignments stödjer både array och object-map (empNo -> {roleId, scopeId}).
 
 Not:
 - Ingen navigation till employee
@@ -106,6 +107,19 @@ Not:
       border-radius:14px;
       margin:14px 0;
       display:none;
+      line-height:1.35;
+    }
+    .guard .title{
+      font-weight:950;
+      margin:0 0 6px 0;
+      font-size:13px;
+    }
+    .guard ul{ margin:8px 0 0 18px; padding:0; }
+    .guard li{ margin:4px 0; }
+    .guard .mono{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace;
+      font-size: 12px;
+      color: rgba(127,29,29,.85);
     }
 
     .header{
@@ -260,6 +274,9 @@ Not:
       <a href="./packages.html">Paket</a>
       <a href="./packages-progress.html">Paketprogress</a>
       <a href="./packages-employees.html" aria-current="page">Paket → Medarbetare</a>
+      <a href="../system/dashboard.html">System</a>
+      <a href="../system/org.html">Org</a>
+      <a href="../system/assignments.html">Access</a>
       <div class="spacer"></div>
       <span class="pill" id="whoPill">—</span>
       <a href="#" id="logoutLink">Logga ut</a>
@@ -350,19 +367,25 @@ Not:
     const pkgStatus   = document.getElementById("pkgStatus");
     const tbody       = document.getElementById("tbody");
 
-    function showGuard(msg){ guardBox.style.display = "block"; guardBox.textContent = String(msg || ""); }
-    function hideGuard(){ guardBox.style.display = "none"; guardBox.textContent = ""; }
+    function showGuardRich(title, lines){
+      guardBox.style.display = "block";
+      guardBox.textContent = "";
+      const t = document.createElement("div");
+      t.className = "title";
+      t.textContent = String(title || "Fail-closed");
+      guardBox.appendChild(t);
 
-    function escapeHtml(input){
-      if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(input);
-      const s = String(input ?? "");
-      return s
-        .replaceAll("&","&amp;")
-        .replaceAll("<","&lt;")
-        .replaceAll(">","&gt;")
-        .replaceAll('"',"&quot;")
-        .replaceAll("'","&#039;");
+      if(Array.isArray(lines) && lines.length){
+        const ul = document.createElement("ul");
+        for(const s of lines){
+          const li = document.createElement("li");
+          li.textContent = String(s || "");
+          ul.appendChild(li);
+        }
+        guardBox.appendChild(ul);
+      }
     }
+    function hideGuard(){ guardBox.style.display = "none"; guardBox.textContent = ""; }
 
     function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
 
@@ -405,11 +428,11 @@ Not:
     ============================ */
     function mustAuthOrStop(){
       if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-        showGuard("Systemfel: HRApp saknas. (UI-03-APP.js)");
+        showGuardRich("Systemfel", ["HRApp saknas. (UI-03-APP.js)"]);
         return null;
       }
       if (!window.HR_CONFIG || !window.HR_CONFIG.ROLES) {
-        showGuard("Systemfel: HR_CONFIG saknas. (UI-04-CONFIG.js)");
+        showGuardRich("Systemfel", ["HR_CONFIG saknas. (UI-04-CONFIG.js)"]);
         return null;
       }
       const allow = [ window.HR_CONFIG.ROLES.ADMIN, window.HR_CONFIG.ROLES.SYSTEM_ADMIN ];
@@ -418,7 +441,7 @@ Not:
 
       const auth = window.HRApp.getAuth(sess);
       if (!auth || auth.isAuthed !== true) {
-        showGuard("Fail-closed: saknar giltig session. Logga in igen.");
+        showGuardRich("Fail-closed", ["Saknar giltig session. Logga in igen."]);
         return null;
       }
       return { sess, auth };
@@ -474,18 +497,41 @@ Not:
 
     /* ===========================
        ASSIGNMENTS -> employees list
+       FIX: stöd för både array och object-map (empNo -> {roleId, scopeId})
     ============================ */
     function readAssignments(){
       const raw = readAnyStorage(KEY_ASSIGNMENTS);
       if(!raw) return [];
+
       const data = safeJsonParse(raw);
+      if(!data) return [];
+
+      // 1) Array-form
       if(Array.isArray(data)) return data;
+
+      // 2) Wrapper {assignments:[...]}
       if(data && typeof data === "object" && Array.isArray(data.assignments)) return data.assignments;
+
+      // 3) Map-form { "10001": {roleId:"EMPLOYEE", scopeId:"..."}, ... }
+      if(data && typeof data === "object"){
+        const out = [];
+        for(const k of Object.keys(data)){
+          const v = data[k];
+          if(!v || typeof v !== "object") continue;
+          out.push({
+            empNo: String(k),
+            roleId: v.roleId ?? v.role ?? v.roleCode ?? "",
+            scopeId: v.scopeId ?? v.scope ?? ""
+          });
+        }
+        return out;
+      }
+
       return [];
     }
 
     function pickEmpNo(a){ return normStr(a?.empNo ?? a?.employeeNo ?? a?.id ?? ""); }
-    function pickRole(a){ return normStr(a?.role ?? a?.roleId ?? ""); }
+    function pickRole(a){ return normStr(a?.role ?? a?.roleId ?? a?.roleCode ?? ""); }
     function pickScope(a){ return normStr(a?.scopeId ?? a?.scope ?? ""); }
 
     function uniqueByEmpNo(list){
@@ -579,7 +625,7 @@ Not:
     }
 
     function taskDoneForEmp(blockTitle, empNo, scopeId, tasks){
-      // AUTOPATCH v1.1: ALL/* räknas som tilldelad till alla inom scope (scope fail-closed kvarstår)
+      // AUTOPATCH: ALL/* räknas som tilldelad till alla inom scope (scope fail-closed kvarstår)
       const me = normStr(empNo);
       const sc = normStr(scopeId);
       const bt = normKey(blockTitle);
@@ -641,7 +687,6 @@ Not:
 
     /* ===========================
        Packages read (active only)
-       - "Tomt paket -> visas ej"
     ============================ */
     function readActiveNonEmptyPackages(){
       const arr = readLocalArray(KEY_PACKAGES);
@@ -673,7 +718,6 @@ Not:
 
     /* ===========================
        Compute per employee table for one package
-       - Sorting: worst -> best
     ============================ */
     function computeForPackage(pkg, auth, orgNodes, orgById, employeesAll, data){
       const viewerRole = normStr(auth.role);
@@ -747,7 +791,7 @@ Not:
     }
 
     /* ===========================
-       UI render
+       UI render (XSS-safe)
     ============================ */
     function clear(el){ while(el.firstChild) el.removeChild(el.firstChild); }
 
@@ -764,9 +808,16 @@ Not:
         const name = packageName(p);
         const opt = document.createElement("option");
         opt.value = id;
-        opt.textContent = name;
+        opt.textContent = name + (id ? ` (${id})` : "");
         pkgSelect.appendChild(opt);
       }
+    }
+
+    function badgeEl(text, cls){
+      const s = document.createElement("span");
+      s.className = "badge" + (cls ? (" " + cls) : "");
+      s.textContent = String(text || "");
+      return s;
     }
 
     function renderTable(rows, filterQ){
@@ -791,7 +842,16 @@ Not:
         const tr = document.createElement("tr");
 
         const tdEmp = document.createElement("td");
-        tdEmp.innerHTML = `<strong>${escapeHtml(r.empNo)}</strong> <div class="mono">scopeId: ${escapeHtml(r.scopeId)}</div>`;
+        const strong = document.createElement("strong");
+        strong.textContent = r.empNo;
+
+        const sub = document.createElement("div");
+        sub.className = "mono";
+        sub.textContent = "scopeId: " + (r.scopeId || "—");
+
+        tdEmp.appendChild(strong);
+        tdEmp.appendChild(document.createTextNode(" "));
+        tdEmp.appendChild(sub);
 
         const tdScope = document.createElement("td");
         tdScope.textContent = r.scopeLabel || "—";
@@ -803,17 +863,28 @@ Not:
         tdTotal.textContent = String(r.total);
 
         const tdStatus = document.createElement("td");
-        tdStatus.innerHTML = `<span class="badge ${escapeHtml(r.statusCls)}">${escapeHtml(r.statusTxt)}</span>`;
+        tdStatus.appendChild(badgeEl(r.statusTxt, r.statusCls));
 
         const tdPct = document.createElement("td");
-        tdPct.innerHTML = `
-          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-            <div class="barWrap" aria-label="Progress">
-              <div class="bar" style="width:${Math.max(0, Math.min(100, r.percent))}%;"></div>
-            </div>
-            <span class="badge">${r.percent}%</span>
-          </div>
-        `;
+        const wrap = document.createElement("div");
+        wrap.style.display = "flex";
+        wrap.style.gap = "10px";
+        wrap.style.alignItems = "center";
+        wrap.style.flexWrap = "wrap";
+
+        const barWrap = document.createElement("div");
+        barWrap.className = "barWrap";
+        barWrap.setAttribute("aria-label", "Progress");
+
+        const bar = document.createElement("div");
+        bar.className = "bar";
+        bar.style.width = String(Math.max(0, Math.min(100, r.percent))) + "%";
+        barWrap.appendChild(bar);
+
+        wrap.appendChild(barWrap);
+        wrap.appendChild(badgeEl(String(r.percent) + "%", ""));
+
+        tdPct.appendChild(wrap);
 
         tr.appendChild(tdEmp);
         tr.appendChild(tdScope);
@@ -829,18 +900,13 @@ Not:
     function renderPackageHeader(pkg, meta){
       pkgTitle.textContent = packageName(pkg);
 
-      pkgMeta.innerHTML = "";
-      const m1 = document.createElement("span");
-      m1.className = "badge";
-      m1.textContent = `Scope: ${meta.pkgScopeLabel}`;
-
-      const m2 = document.createElement("span");
-      m2.className = "badge";
-      m2.textContent = `Block: ${meta.totalBlocks}`;
-
-      const m3 = document.createElement("span");
-      m3.className = (meta.empCount === 0) ? "badge bad" : "badge";
-      m3.textContent = (meta.empCount === 0) ? "0 medarbetare i scope" : `Medarbetare: ${meta.empCount}`;
+      pkgMeta.textContent = "";
+      const m1 = badgeEl(`Scope: ${meta.pkgScopeLabel}`, "");
+      const m2 = badgeEl(`Block: ${meta.totalBlocks}`, "");
+      const m3 = badgeEl(
+        (meta.empCount === 0) ? "0 medarbetare i scope" : `Medarbetare: ${meta.empCount}`,
+        (meta.empCount === 0) ? "bad" : ""
+      );
 
       pkgMeta.appendChild(m1);
       pkgMeta.appendChild(m2);
@@ -872,6 +938,7 @@ Not:
       STATE.auth = res.auth;
       STATE.viewerRole = normStr(STATE.auth.role);
 
+      // visa inte empNo i guard/debug (men pill kan visa som tidigare)
       const empNo = normStr(STATE.auth.empNo) || "—";
       const role  = normStr(STATE.auth.role)  || "—";
       whoPill.textContent = `${empNo} • ${role}`;
@@ -880,16 +947,28 @@ Not:
       STATE.orgNodes = readOrg();
       STATE.orgById  = buildOrgIndex(STATE.orgNodes);
 
-      // ADMIN requires org + scopeId
+      const viewerScope = normStr(STATE.auth.scopeId);
+      const orgCount = Array.isArray(STATE.orgNodes) ? STATE.orgNodes.length : 0;
+
+      // ADMIN requires org + scopeId (fail-closed) – men nu med tydlig förklaring/next step
       if(STATE.viewerRole !== "SYSTEM_ADMIN"){
-        const viewerScope = normStr(STATE.auth.scopeId);
-        if(!viewerScope || !Array.isArray(STATE.orgNodes) || STATE.orgNodes.length === 0){
-          showGuard("Fail-closed: ADMIN kräver org + scopeId för subtree. (Behöver AO-020_ORG_V1 + scopeId i session.)");
+        if(!viewerScope || orgCount === 0){
+          const missing = [];
+          if(!viewerScope) missing.push("scopeId i session (AO-001_LOGIN_V1)");
+          if(orgCount === 0) missing.push("ORG-data (AO-020_ORG_V1)");
+          showGuardRich("Fail-closed: ADMIN saknar förutsättningar för subtree", [
+            "Sidan måste veta vilken del av organisationen (scope) du är ADMIN för.",
+            "Saknas: " + missing.join(" + "),
+            "Åtgärd 1: Logga in som SYSTEM_ADMIN och skapa org i System → Org.",
+            "Åtgärd 2: Sätt assignments i System → Access (empNo → roleId + scopeId).",
+            "Åtgärd 3: Logga in som ADMIN igen (så att scopeId hamnar i session).",
+            `Detekterat: role=ADMIN, scopeId=${viewerScope || "—"}, orgNodes=${String(orgCount)}`
+          ]);
           return false;
         }
       } else {
         // SYSTEM_ADMIN utan org: mild info (blockar inte)
-        if(!Array.isArray(STATE.orgNodes) || STATE.orgNodes.length === 0){
+        if(orgCount === 0){
           setTopMsg("Info: ORG saknas. SYSTEM_ADMIN visar endast exakt scope-match (ej subtree).");
         }
       }
@@ -903,8 +982,7 @@ Not:
       STATE.employeesAll = employeesVisibleToViewer(STATE.auth, STATE.orgById, STATE.orgNodes);
 
       // packages active + non-empty
-      STATE.packages = readActiveNonEmptyPackages();
-      STATE.packages = STATE.packages.filter(p => !!packageScopeId(p)); // saknad data -> visa inget
+      STATE.packages = readActiveNonEmptyPackages().filter(p => !!packageScopeId(p));
 
       fillPackageSelect(STATE.packages);
 
@@ -998,17 +1076,17 @@ Not:
   </script>
 
   <!-- ============================================================
-  Ändringslogg (AO-055 PATCH v1.1) ≤ 8 rader
-  - Task ALL/* räknas som tilldelad till alla inom scope i progress (scope fail-closed kvarstår)
-  - SYSTEM_ADMIN utan org: mild info i topMsg + exakt scope-match (ej subtree)
-  - Tydlig badge vid 0 medarbetare i scope
-  - Stabilt block-id om b.id saknas (title+kind hash), ingen Math.random
+  Ändringslogg (AO-055 PATCH v1.2) ≤ 8 rader
+  - FIX: readAssignments stödjer object-map (empNo -> {roleId, scopeId}) + array + wrapper
+  - ADMIN fail-closed kvarstår men guard förklarar exakt vad som saknas + nästa steg (Org/Access)
+  - Lagt snabblänkar i nav: System / Org / Access
+  - XSS-hårdning: tabell renderas med DOM + textContent (ingen osäker innerHTML)
+  - Paketdropdown visar även id
   Testnoteringar
-  - Task med assignedTo="ALL" + scopeId=pkgScope ska kunna göra block klart per emp i scope
-  - SYSTEM_ADMIN utan AO-020_ORG_V1: vy fungerar, info visas, subtree ej beräknas
+  - ADMIN utan scopeId eller utan AO-020_ORG_V1 ska få tydlig guard med åtgärdssteg
+  - Assignments som object-map ska ge emp-lista och tabelldata
   Risk/edge cases
-  - Titelmatch för task är heuristik (ingen exekvering/ingen ID-koppling lagras)
+  - Om HRApp.getAuth inte sätter scopeId för ADMIN förrän Access/assignments är gjort, är guard korrekt (fail-closed)
   ============================================================ -->
 </body>
 </html>
-
