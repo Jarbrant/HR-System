@@ -1,5 +1,8 @@
+<!-- =====================================================================
+FIL 1/2: admin/onboard-progress.html
+===================================================================== -->
 <!-- ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.5) | FIL-ID: admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.6) | FIL-ID: admin/onboard-progress.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN/SYSTEM_ADMIN – Plan → Progress per medarbetare (read-only v1)
 
@@ -23,10 +26,9 @@ Keys (LÅST – läs endast):
 - AO-020_ROLE_ASSIGNMENTS_V2
 
 Senaste sanning: 2026-01-05
-Ändringslogg (PATCH v1.5):
-- P0: FIX Done-beräkning: använder AO-053/AO-054-logik (block title + tasks/questions/answers), inte trainingId-mapping.
-- P0: FIX Tasks: stöd för assignedTo=ALL/*/empNo + strikt scopeId-match (fail-closed om scope saknas).
-- P1: Hardening: ORG normalize stödjer label/title; AssignmentsV2 stödjer array/wrapper/map (säkert).
+Ändringslogg (PATCH v1.6):
+- P0: UI-länk till Tilldelning (onboard-assignments.html) per empNo (utan writes).
+- P1: FIX normalizeBlockType: stöd för "fraga" (utan å/ä/ö) + hårdare normalisering.
 - Oförändrat: read-only, inga writes, inga nya keys, XSS-safe, fail-closed.
 ============================================================ -->
 <!doctype html>
@@ -221,6 +223,7 @@ Senaste sanning: 2026-01-05
     <a href="./home.html">Hem</a>
     <a href="./onboard-plans.html">Onboarding Plans</a>
     <a href="./onboard-progress.html" aria-current="page">Onboarding Progress</a>
+    <a href="./onboard-assignments.html">Tilldelning</a>
     <a href="./tasks.html">Skapa uppgift</a>
     <a href="./tasks-list.html">Översikt</a>
     <a href="./questions.html">Frågor</a>
@@ -254,6 +257,7 @@ Senaste sanning: 2026-01-05
         <span>Välj plan</span>
         <div class="right">
           <span class="pill"><strong>Read-only</strong> • inga writes</span>
+          <a class="secondary" href="./onboard-assignments.html" title="Tilldela/ändra startdatum (writes i AO-061)">Tilldelning</a>
         </div>
       </div>
 
@@ -289,7 +293,7 @@ Senaste sanning: 2026-01-05
               <th>Done</th>
               <th>Ready</th>
               <th>Locked</th>
-              <th></th>
+              <th>Hantera</th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
@@ -314,15 +318,12 @@ Senaste sanning: 2026-01-05
 
 <script>
 /* ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.5) | admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.6) | admin/onboard-progress.html
 Read-only • Fail-closed • XSS-safe rendering
 ============================================================ */
 (function(){
   "use strict";
 
-  // ---------------------------
-  // Keys (LÅST – READ ONLY)
-  // ---------------------------
   const PLANS_KEY = "AO-060_PLANS_V1";
   const PLAN_ASSIGNMENTS_KEY = "AO-061_PLAN_ASSIGNMENTS_V1";
   const TRAININGS_KEY = "AO-057_TRAININGS_V1";
@@ -361,11 +362,7 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   function readLocalRaw(key){
-    try{
-      return localStorage.getItem(String(key||""));
-    }catch{
-      return null;
-    }
+    try{ return localStorage.getItem(String(key||"")); }catch{ return null; }
   }
 
   function readLocalAny(key){
@@ -383,9 +380,7 @@ Read-only • Fail-closed • XSS-safe rendering
     return proto === Object.prototype || proto === null;
   }
 
-  function own(obj, k){
-    return Object.prototype.hasOwnProperty.call(obj, k);
-  }
+  function own(obj, k){ return Object.prototype.hasOwnProperty.call(obj, k); }
 
   function hasBlockedKeysOneLevel(obj){
     if(!isPlainObject(obj)) return false;
@@ -396,10 +391,6 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   function extractArrayFromAny(value){
-    // Accept:
-    // 1) array
-    // 2) wrapper object: {plans:[...]} / {data:[...]} / {items:[...]} / {list:[...]} / {rows:[...]} / {value:[...]}
-    // 3) map object: { "<id>": {...}, "<id2>": {...} }  => Object.values()
     if(Array.isArray(value)) return { ok:true, arr:value, mode:"array" };
     if(!isPlainObject(value)) return { ok:false, arr:[], mode:"none" };
 
@@ -475,12 +466,14 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   function normKey(s){
-    return String(s ?? "").toLowerCase().replace(/\s+/g," ").trim();
+    return String(s ?? "")
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/[\u0300-\u036f]/g, "") /* ta bort diakritiska tecken */
+      .replace(/\s+/g," ")
+      .trim();
   }
 
-  // ---------------------------
-  // Auth / RBAC via HRApp (AO-002)
-  // ---------------------------
   function redirectLogin(err){
     try{
       const base = "../UI/UI-01-SKELETON.html";
@@ -507,7 +500,6 @@ Read-only • Fail-closed • XSS-safe rendering
   const role = String(auth.role || "");
   const viewerScopeId = String(auth.scopeId || "").trim();
 
-  // Minimering: visa empNo (ej displayName)
   const viewerEmp = String(auth.empNo || "").trim();
   setText($("#whoName"), viewerEmp ? ("#" + viewerEmp) : "—");
   setText($("#whoRole"), (role || "—").toLowerCase());
@@ -525,9 +517,6 @@ Read-only • Fail-closed • XSS-safe rendering
     navLogout.addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
   }
 
-  // ---------------------------
-  // Scope/org helpers
-  // ---------------------------
   function normalizeOrgNodes(raw){
     const arr = Array.isArray(raw) ? raw : [];
     const out = [];
@@ -636,10 +625,6 @@ Read-only • Fail-closed • XSS-safe rendering
     return false;
   }
 
-  // ---------------------------
-  // AssignmentsV2 normalize (PATCH v1.5)
-  // Stöd: array / wrapper / object-map -> map[empNo] = { roleId, scopeId, ... }
-  // ---------------------------
   function normalizeAssignmentsV2(raw){
     const issues = [];
     const map = Object.create(null);
@@ -648,7 +633,6 @@ Read-only • Fail-closed • XSS-safe rendering
       return { ok:false, map, issues:["Assignments saknas (null/undefined)."] };
     }
 
-    // array
     if(Array.isArray(raw)){
       for(const rec of raw){
         if(!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
@@ -660,12 +644,10 @@ Read-only • Fail-closed • XSS-safe rendering
       return { ok:true, map, issues: [] };
     }
 
-    // wrapper
     if(isPlainObject(raw) && Array.isArray(raw.assignments)){
       return normalizeAssignmentsV2(raw.assignments);
     }
 
-    // object-map
     if(!isPlainObject(raw)){
       return { ok:false, map, issues:["Assignments korrupt (förväntar objekt/array)."] };
     }
@@ -693,13 +675,8 @@ Read-only • Fail-closed • XSS-safe rendering
     return { ok:true, map, issues: [] };
   }
 
-  // ---------------------------
-  // Read storage (fail-closed)
-  // ---------------------------
   const warnings = [];
-  function addWarn(text){
-    if(text) warnings.push(String(text));
-  }
+  function addWarn(text){ if(text) warnings.push(String(text)); }
 
   const plansRead = readLocalArrayFlexible(PLANS_KEY, { missingAsEmpty:true });
   if(!plansRead.ok) addWarn("AO-060_PLANS_V1 är korrupt eller har fel format (förväntar array eller wrapper).");
@@ -726,11 +703,7 @@ Read-only • Fail-closed • XSS-safe rendering
   const asgRaw = readLocalAny(ASG_V2_KEY);
   const asgV2 = normalizeAssignmentsV2(asgRaw.ok ? asgRaw.value : null);
 
-  // ---------------------------
-  // Fail-closed access guard for ADMIN scope
-  // ---------------------------
   const lockReasons = [];
-
   if(role === "ADMIN"){
     if(!viewerScopeId) lockReasons.push("ADMIN: scopeId saknas i session (fail-closed).");
     if(!orgIntegrity.ok) lockReasons.push(...orgIntegrity.issues);
@@ -814,9 +787,6 @@ Read-only • Fail-closed • XSS-safe rendering
     return;
   }
 
-  // ---------------------------
-  // Index: trainings
-  // ---------------------------
   const trainingsById = new Map();
   (Array.isArray(trainingsRead.value) ? trainingsRead.value : []).forEach(t => {
     const id = String(t && t.id ? t.id : "").trim();
@@ -827,9 +797,6 @@ Read-only • Fail-closed • XSS-safe rendering
   const questions = Array.isArray(questionsRead.value) ? questionsRead.value : [];
   const answers = Array.isArray(answersRead.value) ? answersRead.value : [];
 
-  // ---------------------------
-  // Plan + assignments normalization (read-only)
-  // ---------------------------
   function normalizePlan(raw){
     if(!raw || typeof raw !== "object") return null;
     const id = String(raw.id||"").trim();
@@ -889,26 +856,16 @@ Read-only • Fail-closed • XSS-safe rendering
   const planAssignmentsAllRaw = (paRead.ok ? paRead.value : []);
   const planAssignmentsAll = planAssignmentsAllRaw.map(normalizePlanAssignment).filter(Boolean);
 
-  if(paRead.ok && Array.isArray(planAssignmentsAllRaw) && planAssignmentsAll.length !== planAssignmentsAllRaw.length){
-    addWarn("AO-061: vissa rader ignorerades pga ogiltigt format (read-only).");
-    renderWarnPills();
-  }
-
-  // ---------------------------
-  // Done-beräkning (PATCH v1.5) – samma logik som AO-053/AO-054
-  // ---------------------------
   function normalizeBlockType(tp){
-    const t = String(tp ?? "").toLowerCase().trim();
+    const t = normKey(tp);
     if(t === "info" || t === "information") return "info";
     if(t === "task" || t === "uppgift") return "task";
-    if(t === "question" || t === "fråga" || t === "fragA") return "question";
+    if(t === "question" || t === "fraga" || t === "fråga") return "question";
     if(t === "both") return "both";
     return "unknown";
   }
 
-  function getTaskTitle(t){
-    return String(t?.title ?? t?.name ?? t?.text ?? "");
-  }
+  function getTaskTitle(t){ return String(t?.title ?? t?.name ?? t?.text ?? ""); }
 
   function isTaskDone(t){
     const s = String(t?.status ?? t?.state ?? "").toLowerCase().trim();
@@ -919,7 +876,6 @@ Read-only • Fail-closed • XSS-safe rendering
   }
 
   function taskDoneForEmp(blockTitle, empNo, scopeId){
-    // Fail-closed: tasks kräver scopeId
     const me = String(empNo||"").trim();
     const sc = String(scopeId||"").trim();
     const bt = normKey(blockTitle);
@@ -1009,18 +965,13 @@ Read-only • Fail-closed • XSS-safe rendering
         continue;
       }
 
-      return { done:false, reason:"unknown" }; // fail-closed
+      return { done:false, reason:"unknown" };
     }
 
     return { done:true, reason:"ok" };
   }
 
-  // ---------------------------
-  // UI helpers
-  // ---------------------------
-  function clearNode(el){
-    while(el && el.firstChild) el.removeChild(el.firstChild);
-  }
+  function clearNode(el){ while(el && el.firstChild) el.removeChild(el.firstChild); }
 
   function renderPlanSelect(){
     const sel = $("#planSelect");
@@ -1083,7 +1034,6 @@ Read-only • Fail-closed • XSS-safe rendering
       return { list: allEmpNos, excludedMissingScope:0, excludedOutOfScope:0, reason:"union" };
     }
 
-    // ADMIN: fail-closed: kräver att empNo kan scope-valideras via assignmentsV2 + org
     let excludedMissingScope = 0;
     let excludedOutOfScope = 0;
     const out = [];
@@ -1135,38 +1085,17 @@ Read-only • Fail-closed • XSS-safe rendering
     const training = trainingsById.get(trainingId) || null;
 
     if(!trainingId || !training){
-      return {
-        status: "missing",
-        label: "Missing training",
-        done: false,
-        doneReason: "missing",
-        availableTs: null,
-        note: "TrainingId saknas eller hittas inte i AO-057."
-      };
+      return { status:"missing", label:"Missing training", done:false, doneReason:"missing", availableTs:null, note:"TrainingId saknas eller hittas inte i AO-057." };
     }
 
     if(!assignment || !isFiniteNumber(Number(assignment.startDateTs)) || Number(assignment.startDateTs) <= 0){
-      return {
-        status: "locked",
-        label: "Ej tilldelad",
-        done: false,
-        doneReason: "no-assignment",
-        availableTs: null,
-        note: "Saknar plan-tilldelning (AO-061) för denna medarbetare."
-      };
+      return { status:"locked", label:"Ej tilldelad", done:false, doneReason:"no-assignment", availableTs:null, note:"Saknar plan-tilldelning (AO-061) för denna medarbetare." };
     }
 
     const startTs = Number(assignment.startDateTs);
     const dayOffset = Number(item.dayOffset);
     if(!Number.isFinite(dayOffset) || dayOffset < 0 || Math.floor(dayOffset) !== dayOffset){
-      return {
-        status: "locked",
-        label: "Locked",
-        done: false,
-        doneReason: "invalid offset",
-        availableTs: null,
-        note: "Ogiltig dayOffset (måste vara heltal >= 0)."
-      };
+      return { status:"locked", label:"Locked", done:false, doneReason:"invalid offset", availableTs:null, note:"Ogiltig dayOffset (måste vara heltal >= 0)." };
     }
 
     const availableTs = startTs + (dayOffset * DAY_MS);
@@ -1178,13 +1107,11 @@ Read-only • Fail-closed • XSS-safe rendering
       return { status:"locked", label:"Locked", done:false, doneReason:"time", availableTs, note:"Inte tillgänglig ännu." };
     }
 
-    // Ready/Done enligt block-logik
     const doneInfo = trainingDoneStatus(empNo, empScopeId, training);
     if(doneInfo.done === true){
       return { status:"done", label:"Done", done:true, doneReason: doneInfo.reason, availableTs, note:"" };
     }
 
-    // Om scope saknas för tasks -> done blir fail-closed för task/both men frågor kan ändå ge done.
     if((doneInfo.reason === "task" || doneInfo.reason === "both") && !String(empScopeId||"").trim()){
       return { status:"ready", label:"Ready", done:false, doneReason:"scope-missing", availableTs, note:"Saknar scopeId → tasks kan ej räknas säkert (fail-closed)." };
     }
@@ -1240,6 +1167,17 @@ Read-only • Fail-closed • XSS-safe rendering
     return e === f || e.startsWith(f);
   }
 
+  function buildAssignUrl(planId, empNo){
+    const pid = String(planId||"").trim();
+    const e = String(empNo||"").trim();
+    const base = "./onboard-assignments.html";
+    const q = new URLSearchParams();
+    if(pid) q.set("planId", pid);
+    if(e) q.set("empNo", e);
+    const qs = q.toString();
+    return qs ? (base + "?" + qs) : base;
+  }
+
   function renderRows(planId){
     const tbody = $("#rows");
     if(!tbody) return;
@@ -1285,17 +1223,14 @@ Read-only • Fail-closed • XSS-safe rendering
       return;
     }
 
-    // Employees (UNION)
     const empAllRes = listEmployeesUnion(pid);
     let empNos = empAllRes.list.slice();
 
-    // Apply empNo filter (exakt/prefix)
     const f = getActiveEmpFilter();
     if(f){
       empNos = empNos.filter(e => empMatchesFilter(e, f));
     }
 
-    // Assignments for plan
     const assignmentsForPlan = planAssignmentsForPlan(pid);
     const byEmp = new Map();
     assignmentsForPlan.forEach(a => {
@@ -1337,7 +1272,6 @@ Read-only • Fail-closed • XSS-safe rendering
       empStrong.className = "mono";
       empStrong.textContent = r.empNo;
       empLine.appendChild(empStrong);
-
       tdEmp.appendChild(empLine);
       tr.appendChild(tdEmp);
 
@@ -1362,21 +1296,24 @@ Read-only • Fail-closed • XSS-safe rendering
       tr.appendChild(tdLocked);
 
       const tdBtn = document.createElement("td");
+      tdBtn.style.whiteSpace = "nowrap";
 
-      if(!r.assignment){
-        const na = document.createElement("span");
-        na.className = "badge-na";
-        na.textContent = "Ej tilldelad";
-        na.title = "Saknar AO-061 plan-koppling (startDateTs).";
-        tdBtn.appendChild(na);
-      }else{
+      const aManage = document.createElement("a");
+      aManage.className = "secondary";
+      aManage.href = buildAssignUrl(pid, r.empNo);
+      aManage.textContent = r.assignment ? "Hantera" : "Tilldela";
+      aManage.title = r.assignment
+        ? "Öppna Tilldelning för att ändra startdatum / ta bort (writes i AO-061)."
+        : "Tilldela plan (writes i AO-061).";
+      tdBtn.appendChild(aManage);
+
+      if(r.assignment){
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "secondary";
-        btn.textContent = "Visa detaljer";
-        btn.addEventListener("click", () => {
-          renderDetails(plan, r.assignment, r.meta, r.summary);
-        });
+        btn.style.marginLeft = "8px";
+        btn.textContent = "Detaljer";
+        btn.addEventListener("click", () => renderDetails(plan, r.assignment, r.meta, r.summary));
         tdBtn.appendChild(btn);
       }
 
@@ -1475,15 +1412,12 @@ Read-only • Fail-closed • XSS-safe rendering
 
       badge.textContent = st.label || st.status;
       badge.title = st.note || ("Reason: " + (st.doneReason || ""));
-
       c4.appendChild(badge);
 
       const dr = document.createElement("div");
       dr.className = "muted2";
       dr.style.marginTop = "4px";
-      dr.textContent = st.note
-        ? ("Obs: " + String(st.note))
-        : ("Reason: " + String(st.doneReason || "—"));
+      dr.textContent = st.note ? ("Obs: " + String(st.note)) : ("Reason: " + String(st.doneReason || "—"));
       c4.appendChild(dr);
 
       row.appendChild(c4);
@@ -1495,9 +1429,6 @@ Read-only • Fail-closed • XSS-safe rendering
     try{ panel.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
   }
 
-  // ---------------------------
-  // Init
-  // ---------------------------
   renderPlanSelect();
 
   function onChange(){
@@ -1551,16 +1482,187 @@ Read-only • Fail-closed • XSS-safe rendering
 })();
 </script>
 
-<!-- ============================================================
-Testnoteringar (exakta klicksteg)
-1) Logga in som SYSTEM_ADMIN eller ADMIN.
-2) Gå till /admin/onboard-progress.html.
-3) Välj en aktiv plan.
-4) För en empNo med plan-tilldelning: Klicka “Visa detaljer” -> se items D+X och status.
-5) Skapa/ha en task med title som matchar blocktitel + scopeId + assignedTo=empNo eller ALL/* + status=done -> Done ska öka.
-6) Skapa/ha svar på fråga som matchar blocktitel (questionId eller title-match) -> Done ska öka.
-Risk/edge cases
-- Om emp scopeId saknas (AssignmentsV2 saknas) kan tasks inte räknas säkert (fail-closed), men frågor kan fortfarande ge Done.
-============================================================ -->
 </body>
 </html>
+
+<!-- =====================================================================
+FIL 2/2: admin/onboard-assignments.html (NY)
+===================================================================== -->
+<!-- ============================================================
+AO-ONBOARD-ASSIGNMENTS-01 (MASTER v1.0) | FIL-ID: admin/onboard-assignments.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: ADMIN/SYSTEM_ADMIN – Tilldela onboarding-plan till medarbetare (writes AO-061)
+
+POLICY (LÅST):
+- UI-only • Fail-closed
+- Auth via HRApp (AO-002): sessionStorage först, fallback localStorage
+- XSS: rendera allt via textContent (ingen osäker innerHTML)
+- Writes: endast AO-061_PLAN_ASSIGNMENTS_V1 (tilldelning)
+- SYSTEM_ADMIN får även uppdatera plan.status i AO-060 (valfritt)
+- Inga nya storage-keys/datamodell
+- Hel-filsleverans
+
+Keys (LÅST):
+- Läser: AO-001_LOGIN_V1 (via HRApp/AO-002), AO-060_PLANS_V1, AO-020_ORG_V1, AO-020_ROLE_ASSIGNMENTS_V2
+- Läser/Skriver: AO-061_PLAN_ASSIGNMENTS_V1
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Tilldelning (Onboarding)</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <!-- CORE -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <style>
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding: 4px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.88rem;
+      color: var(--muted);
+      white-space:nowrap;
+    }
+    .pill strong{ color:#111; }
+    .pill.warn{ background: rgba(253,230,138,.25); }
+    .pill.err{ background: rgba(254,202,202,.28); }
+    .pill.ok{ background: rgba(167,243,208,.22); }
+
+    .lockbox{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px dashed var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      color: var(--muted);
+    }
+    .lockbox strong{ color:#111; }
+    .lockbox ul{ margin:8px 0 0; padding-left: 18px; }
+    .lockbox li{ margin: 3px 0; }
+
+    .grid2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      align-items:end;
+    }
+    @media (max-width: 900px){
+      .grid2{ grid-template-columns: 1fr; }
+    }
+
+    table{
+      width:100%;
+      border-collapse: collapse;
+      background:#fff;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      overflow:hidden;
+    }
+    thead th{
+      text-align:left;
+      font-size:.92rem;
+      padding: 10px 10px;
+      border-bottom: 1px solid var(--line);
+      color: #111;
+      background: rgba(255,255,255,.9);
+    }
+    tbody td{
+      padding: 10px 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    tbody tr:hover{ background: rgba(191,219,254,.18); }
+
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .muted2{ color: var(--muted); font-size:.92rem; }
+
+    .rowActions{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+    }
+
+    .toast{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.92);
+    }
+    .toast.ok{ border-color: rgba(16,185,129,.35); }
+    .toast.err{ border-color: rgba(239,68,68,.35); }
+  </style>
+</head>
+
+<body>
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin • Tilldelning (Onboarding)</span>
+  </div>
+
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./onboard-plans.html">Onboarding Plans</a>
+    <a href="./onboard-progress.html">Onboarding Progress</a>
+    <a href="./onboard-assignments.html" aria-current="page">Tilldelning</a>
+    <a href="./tasks.html">Skapa uppgift</a>
+    <a href="./tasks-list.html">Översikt</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
+
+<main class="container">
+  <h1 class="tight">Tilldelning – Plan → Medarbetare</h1>
+  <p class="muted">
+    Den här sidan <strong>skriver</strong> endast till <span class="mono">AO-061_PLAN_ASSIGNMENTS_V1</span> (tilldelning).
+    <span id="sysNote" style="display:none;">SYSTEM_ADMIN kan även ändra plan-status (AO-060).</span>
+  </p>
+
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
+      </div>
+      <div class="rowActions">
+        <span class="pill"><strong>Writes</strong> • AO-061</span>
+        <span id="warnPills"></span>
+      </div>
+    </div>
+
+    <div id="lockBox" class="lockbox" style="display:none;"></div>
+
+    <div class="grid2" style="padding: 12px;">
+      <label>
+        Välj plan
+        <select id="planSelect"></select>
+        <div class="muted2" id="planMeta" style="margin-top:6px;"></div>
+      </label>
+
+      <label>
+        Välj medarbetare (empNo)
+        <select id="empSelect"></select>
+        <div class="muted2" id="empMeta" style="margin-top:6px;"></div>
+      </label>
+
+      <label>
+        Startdatum
+        <input id="startDate" type="date" />
+        <div class="rowActions" style="margin-top:8px;">
+          <button type="button" class="secondary" id="btnToday">Start idag</button>
+          <button type="button" class="secondary" id="btnLoadCurrent">Hämta nuvarande</button>
+        </div>
+        <div class="muted2" style="margin-top:6px;">Sparas som <span class="mono">startDateTs</span> (lokal midnatt
