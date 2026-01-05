@@ -1,0 +1,936 @@
+<!-- ============================================================
+AO-PLANS-EXPORT-01 (PROD v1.0) | FIL-ID: admin/plans-export.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: ADMIN/SYSTEM_ADMIN – Exportera Onboarding Plan (AO-060) -> Aktivt Paket (AO-050) så att Paketprogress (AO-054) kan läsa den.
+
+POLICY (LÅST):
+- UI-only • Fail-closed
+- Auth: via HRApp/core (AO-002 under huven)
+- RBAC: ADMIN + SYSTEM_ADMIN
+- Inga nya storage-keys/datamodell
+- XSS: rendera från storage via textContent (ingen osäker innerHTML)
+- Skriv endast till: AO-050_PACKAGES_V1
+- Läs endast: AO-060_PLANS_V1, AO-057_TRAININGS_V1, AO-050_PACKAGES_V1, AO-020_ORG_V1, AO-001_LOGIN_V1
+
+Keys (LÅST):
+- Läser (data): AO-060_PLANS_V1, AO-057_TRAININGS_V1, AO-050_PACKAGES_V1, AO-020_ORG_V1
+- Läser (auth): AO-001_LOGIN_V1 (via HRApp)
+- Skriver: AO-050_PACKAGES_V1
+
+Not:
+- Export är “kopierande”: Plan -> Paket (blocks byggs från training.blocks).
+- Export kräver scopeId (väljs från ORG eller skrivs in om ORG saknas och role=SYSTEM_ADMIN).
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Plans Export (ADMIN)</title>
+
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  <style>
+    :root { --gap: 12px; }
+    body { margin:0; padding:16px; background:#f6f7fb; color:#0f172a; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .card { background:#fff; border:1px solid rgba(15,23,42,.12); border-radius:14px; padding:12px; }
+    .row { display:flex; gap: var(--gap); align-items:flex-start; }
+    .col { flex:1; min-width: 320px; }
+    .muted { opacity:.75; font-size:12px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
+    h1 { margin:0; font-size:18px; }
+    h2 { margin:0 0 10px 0; font-size:14px; }
+    label { display:block; font-size:12px; margin-bottom:4px; }
+    input[type="text"], select, input[type="search"] {
+      width:100%; padding:10px 12px; border-radius:12px; border:1px solid rgba(15,23,42,.18); background:#fff;
+    }
+    button {
+      padding:10px 12px; border-radius:12px; border:1px solid rgba(15,23,42,.22);
+      background:#f6f6f6; cursor:pointer;
+    }
+    button.primary { background:#111; color:#fff; border-color:#111; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    .topbar { display:flex; flex-direction:column; gap:10px; margin-bottom:12px; }
+    .nav { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    .nav a {
+      display:inline-block; padding:6px 8px; border-radius:10px; border:1px solid rgba(15,23,42,.14);
+      text-decoration:none; color:inherit; background:#fafafa; font-size:12px;
+    }
+    .nav a:hover { background:#f2f2f2; }
+    .titlebar { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+    .status { border-left:4px solid transparent; }
+    .status.ok { border-left-color:#0b7a0b; background:#f4fff4; }
+    .status.warn { border-left-color:#b36b00; background:#fff9f0; }
+    .status.error { border-left-color:#b00020; background:#fff5f7; }
+    .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
+    .list { display:flex; flex-direction:column; gap:8px; overflow:auto; max-height: 52vh; padding-right:4px; }
+    .item { border:1px solid rgba(15,23,42,.10); border-radius:12px; padding:10px; background:#fff; }
+    .itemRow { display:flex; gap:10px; align-items:center; justify-content:space-between; }
+    .pill { display:inline-block; font-size:11px; padding:2px 8px; border-radius:999px; border:1px solid rgba(15,23,42,.15); background:#fafafa; }
+    .pill.good { background:#eaffea; }
+    .pill.bad { background:#fff0f0; }
+    .small { font-size:12px; color: rgba(15,23,42,.70); }
+    .divider { height:1px; background: rgba(15,23,42,.10); margin: 10px 0; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+
+    @media (max-width: 980px){
+      .row { flex-direction:column; }
+      .col { min-width:auto; }
+      .grid2 { grid-template-columns: 1fr; }
+      .list { max-height: 38vh; }
+    }
+  </style>
+</head>
+
+<body>
+  <noscript><div class="card status error">JavaScript krävs för att använda denna sida.</div></noscript>
+
+  <div class="topbar">
+    <div class="nav" aria-label="Snabblänkar">
+      <a href="../admin/home.html">Admin • Home</a>
+      <a href="../admin/trainings.html">Admin • Trainings</a>
+      <a href="../admin/packages.html">Admin • Packages</a>
+      <a href="../admin/packages-progress.html">Admin • Paketprogress</a>
+      <a href="../admin/onboard-plans.html">Admin • Onboard Plans</a>
+      <a href="../admin/plans-export.html" aria-current="page">Admin • Plans Export</a>
+      <a href="../system/dashboard.html">System • Dashboard</a>
+    </div>
+
+    <div class="titlebar">
+      <h1>Plans Export → Packages</h1>
+      <div class="actions">
+        <button id="btnRefresh">Uppdatera</button>
+        <button id="btnExport" class="primary">Exportera plan → paket</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="statusBox" class="card status" aria-live="polite"></div>
+
+  <div class="row" style="margin-top:12px;">
+    <div class="col">
+      <div class="card" aria-label="Välj plan">
+        <h2>1) Välj färdig plan</h2>
+        <div class="grid2">
+          <div>
+            <label for="planSelect">Plan (status=active)</label>
+            <select id="planSelect"></select>
+            <div class="muted" id="planHint">—</div>
+          </div>
+          <div>
+            <label for="searchPlan">Sök plan</label>
+            <input id="searchPlan" type="search" placeholder="Sök…" autocomplete="off" />
+            <div class="muted">Filtrerar listan lokalt.</div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="small">
+          Export bygger paketets blocks från <span class="mono">AO-057_TRAININGS_V1</span> (training.blocks).
+          Om en training i planen saknar blocks (eller ej finns) blir export fail-closed.
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px;" aria-label="Planpreview">
+        <h2>Planpreview</h2>
+        <div id="planPreview" class="list" role="list"></div>
+        <div class="muted" style="margin-top:8px;">
+          Preview visar vilka trainings som hittas och hur många blocks som exporteras.
+        </div>
+      </div>
+    </div>
+
+    <div class="col">
+      <div class="card" aria-label="Exportinställningar">
+        <h2>2) Exportinställningar</h2>
+
+        <div class="grid2">
+          <div>
+            <label for="scopeSelect">Scope (från ORG)</label>
+            <select id="scopeSelect"></select>
+            <div class="muted" id="scopeHint">—</div>
+          </div>
+          <div>
+            <label for="scopeManual">ScopeId (manuellt)</label>
+            <input id="scopeManual" type="text" placeholder="t.ex. SCOPE_001" />
+            <div class="muted">Endast om ORG saknas och du är SYSTEM_ADMIN.</div>
+          </div>
+        </div>
+
+        <div style="margin-top:10px;">
+          <label for="packageName">Paketnamn</label>
+          <input id="packageName" type="text" placeholder="t.ex. Onboarding Bas (Plan)" />
+          <div class="muted">Default fylls från planens titel.</div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="small">
+          Export gör en <strong>upsert</strong> i <span class="mono">AO-050_PACKAGES_V1</span>:
+          - id = <span class="mono">pkg_plan_{planId}</span><br/>
+          - isActive = <span class="mono">true</span><br/>
+          - scopeId = vald/inskriven<br/>
+          - blocks = från planens trainings (sammanfogade)
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px;" aria-label="Exportresultat">
+        <h2>Resultat</h2>
+        <div id="resultBox" class="list" role="list"></div>
+        <div class="muted" style="margin-top:8px;">
+          Read-only preview tills du klickar “Exportera”.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CORE (MÅSTE LADDAS FÖRE SIDANS SCRIPT) -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <script>
+  (function(){
+    "use strict";
+
+    /* ============================
+       AUTH (ADMIN + SYSTEM_ADMIN)
+    ============================ */
+    const statusBox = document.getElementById("statusBox");
+    function setStatus(type, msg){
+      statusBox.className = "card status " + (type || "");
+      statusBox.textContent = String(msg || "");
+    }
+
+    if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+      setStatus("error", "CORE saknas (HRApp). Kan inte köra sidan. (fail-closed)");
+      return;
+    }
+
+    let _authResult = null;
+    try {
+      const allow = ["ADMIN","SYSTEM_ADMIN"];
+      _authResult = window.HRApp.requireAuth({ allowRoles: allow });
+    } catch (e) {
+      setStatus("error", "Auth-guard kraschade i CORE. Kan inte fortsätta. (fail-closed)");
+      return;
+    }
+    if (_authResult === null) return;
+    if (_authResult === false || (_authResult && typeof _authResult === "object" && _authResult.ok === false)) {
+      setStatus("error", "Åtkomst nekad (requireAuth). (fail-closed)");
+      return;
+    }
+
+    let AUTH = null;
+    try {
+      try { AUTH = window.HRApp.getAuth(_authResult); } catch { AUTH = window.HRApp.getAuth(); }
+    } catch {
+      setStatus("error", "Kunde inte läsa auth via getAuth. (fail-closed)");
+      return;
+    }
+    const ROLE = (AUTH && typeof AUTH === "object") ? String(AUTH.role || "") : "";
+    const SCOPE = (AUTH && typeof AUTH === "object") ? String(AUTH.scopeId || "") : "";
+
+    if (ROLE !== "ADMIN" && ROLE !== "SYSTEM_ADMIN") {
+      setStatus("error", "Fel roll (" + ROLE + "). ADMIN eller SYSTEM_ADMIN krävs. (fail-closed)");
+      return;
+    }
+
+    /* ============================
+       KEYS (LÅST)
+    ============================ */
+    const KEY_TRAININGS = "AO-057_TRAININGS_V1";
+    const KEY_PLANS     = "AO-060_PLANS_V1";
+    const KEY_PACKAGES  = "AO-050_PACKAGES_V1";
+    const KEY_ORG       = "AO-020_ORG_V1";
+
+    /* ============================
+       DOM
+    ============================ */
+    const btnRefresh   = document.getElementById("btnRefresh");
+    const btnExport    = document.getElementById("btnExport");
+
+    const planSelect   = document.getElementById("planSelect");
+    const planHint     = document.getElementById("planHint");
+    const searchPlan   = document.getElementById("searchPlan");
+    const planPreview  = document.getElementById("planPreview");
+
+    const scopeSelect  = document.getElementById("scopeSelect");
+    const scopeHint    = document.getElementById("scopeHint");
+    const scopeManual  = document.getElementById("scopeManual");
+    const packageName  = document.getElementById("packageName");
+
+    const resultBox    = document.getElementById("resultBox");
+
+    function clearNode(el){ while(el && el.firstChild) el.removeChild(el.firstChild); }
+    function isPlainObject(v){ return !!v && typeof v === "object" && !Array.isArray(v); }
+    function normStr(v){ return String(v ?? "").trim(); }
+    function normKey(v){ return normStr(v).toLowerCase().replace(/\s+/g," ").trim(); }
+
+    function safeJsonParseFallback(raw){ try { return JSON.parse(raw); } catch { return null; } }
+    function safeParseLocal(key){
+      try {
+        const raw = localStorage.getItem(String(key || ""));
+        if (raw === null) return { ok:true, missing:true, data:null };
+        let parsed = null;
+        if (window.HRApp && typeof window.HRApp.safeJsonParse === "function") parsed = window.HRApp.safeJsonParse(raw);
+        else parsed = safeJsonParseFallback(raw);
+        if (parsed === null) return { ok:false, error:"CORRUPT_JSON" };
+        return { ok:true, missing:false, data: parsed };
+      } catch {
+        return { ok:false, error:"READ_FAILED" };
+      }
+    }
+
+    /* ============================
+       Stable id helper (no storage)
+    ============================ */
+    function stableIdFromString(str){
+      const s = String(str ?? "");
+      let h = 2166136261;
+      for(let i=0;i<s.length;i++){
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return "b_" + (h >>> 0).toString(36);
+    }
+
+    /* ============================
+       LOAD: trainings
+       - We only need id + title + blocks[]
+    ============================ */
+    function loadTrainings(){
+      const r = safeParseLocal(KEY_TRAININGS);
+      if(!r.ok) return { ok:false, error:"AO-057 korrupt/oläsbar" };
+      if(r.missing) return { ok:false, error:"AO-057 saknas" };
+      if(!Array.isArray(r.data)) return { ok:false, error:"AO-057 fel format (inte array)" };
+
+      const map = Object.create(null);
+      for(const t of r.data){
+        if(!isPlainObject(t)) continue;
+        const id = normStr(t.id);
+        const title = normStr(t.title) || "—";
+        const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+        if(!id) continue;
+        map[id] = { id, title, blocks };
+      }
+      return { ok:true, data: map };
+    }
+
+    /* ============================
+       LOAD: plans (active only)
+       schema expected from onboard-plans: array of {id,title,status,items[]}
+    ============================ */
+    function loadPlans(){
+      const r = safeParseLocal(KEY_PLANS);
+      if(!r.ok) return { ok:false, error:"AO-060 korrupt/oläsbar" };
+      if(r.missing) return { ok:true, data: [] };
+      if(!Array.isArray(r.data)) return { ok:false, error:"AO-060 fel format (inte array)" };
+
+      const out = [];
+      for(const p of r.data){
+        if(!isPlainObject(p)) continue;
+        const id = normStr(p.id);
+        const title = normStr(p.title);
+        const status = normStr(p.status);
+        const items = Array.isArray(p.items) ? p.items : [];
+        if(!id || !title) continue;
+        if(status !== "active") continue; // "färdig"
+        out.push({ id, title, status, items });
+      }
+      return { ok:true, data: out };
+    }
+
+    /* ============================
+       LOAD: org nodes (optional)
+    ============================ */
+    function loadOrg(){
+      const r = safeParseLocal(KEY_ORG);
+      if(!r.ok) return { ok:false, error:"AO-020_ORG_V1 korrupt/oläsbar" };
+      if(r.missing) return { ok:true, data: [] };
+      if(!Array.isArray(r.data)) return { ok:false, error:"AO-020_ORG_V1 fel format (inte array)" };
+
+      const nodes = [];
+      for(const n of r.data){
+        if(!isPlainObject(n)) continue;
+        const id = normStr(n.id ?? n.scopeId ?? "");
+        if(!id) continue;
+        const label = normStr(n.label ?? n.name ?? n.title ?? id) || id;
+        nodes.push({ id, label });
+      }
+      // stable sort by label
+      nodes.sort((a,b) => normKey(a.label).localeCompare(normKey(b.label)));
+      return { ok:true, data: nodes };
+    }
+
+    /* ============================
+       LOAD: packages (array) for upsert
+    ============================ */
+    function loadPackages(){
+      const r = safeParseLocal(KEY_PACKAGES);
+      if(!r.ok) return { ok:false, error:"AO-050 korrupt/oläsbar" };
+      if(r.missing) return { ok:true, data: [] };
+      if(!Array.isArray(r.data)) return { ok:false, error:"AO-050 fel format (inte array)" };
+      return { ok:true, data: r.data };
+    }
+
+    function writePackages(nextArr){
+      // minimal fail-closed schema guard: must be array of objects
+      if(!Array.isArray(nextArr)) return { ok:false, error:"WRITE_GUARD:not_array" };
+      for(const p of nextArr){
+        if(!isPlainObject(p)) return { ok:false, error:"WRITE_GUARD:non_object" };
+      }
+      try {
+        localStorage.setItem(KEY_PACKAGES, JSON.stringify(nextArr));
+        return { ok:true };
+      } catch {
+        return { ok:false, error:"WRITE_FAILED" };
+      }
+    }
+
+    /* ============================
+       UI builders (safe: textContent)
+    ============================ */
+    function opt(el, value, text){
+      const o = document.createElement("option");
+      o.value = String(value ?? "");
+      o.textContent = String(text ?? "");
+      el.appendChild(o);
+    }
+
+    function renderPlanSelect(plans, filterText){
+      clearNode(planSelect);
+      const q = normKey(filterText || "");
+      const filtered = !q ? plans : plans.filter(p => normKey(p.title).includes(q) || normKey(p.id).includes(q));
+
+      opt(planSelect, "", "Välj plan…");
+      for(const p of filtered){
+        opt(planSelect, p.id, p.title + "  (" + p.id + ")");
+      }
+
+      if(plans.length === 0){
+        planHint.textContent = "Inga aktiva planer i AO-060_PLANS_V1.";
+      } else {
+        planHint.textContent = "Hittade " + String(filtered.length) + " aktiva plan(er).";
+      }
+    }
+
+    function renderScopeSelect(orgNodes){
+      clearNode(scopeSelect);
+      opt(scopeSelect, "", "Välj scope…");
+      for(const n of orgNodes){
+        opt(scopeSelect, n.id, n.label + "  (" + n.id + ")");
+      }
+      if(orgNodes.length === 0){
+        scopeHint.textContent = "ORG saknas eller är tom.";
+      } else {
+        scopeHint.textContent = "ORG laddad: " + String(orgNodes.length) + " scope.";
+      }
+    }
+
+    function pill(text, cls){
+      const s = document.createElement("span");
+      s.className = "pill " + (cls || "");
+      s.textContent = String(text || "");
+      return s;
+    }
+
+    /* ============================
+       Build export preview
+    ============================ */
+    function normalizeKind(kind){
+      const k = String(kind || "").toLowerCase().trim();
+      if(k === "task" || k === "uppgift") return "task";
+      if(k === "question" || k === "fråga") return "question";
+      if(k === "info" || k === "information") return "info";
+      if(k === "both") return "both";
+      return "unknown";
+    }
+
+    function blocksFromTraining(trainingId, tr){
+      const blocks = Array.isArray(tr?.blocks) ? tr.blocks : [];
+      const out = [];
+      for(const b of blocks){
+        if(!isPlainObject(b)) continue;
+        const kind = normalizeKind(b.kind);
+        const title = normStr(b.title) || "—";
+        const idRaw = normStr(b.id);
+        // stable id even if missing; include trainingId to reduce collisions
+        const id = idRaw || stableIdFromString(trainingId + "||" + kind + "||" + normKey(title));
+        if(kind === "unknown") continue; // fail-closed-ish
+        out.push({ id, kind, title });
+      }
+      return out;
+    }
+
+    function buildPackageFromPlan(plan, trainingsById, scopeId, nameOverride){
+      const planId = normStr(plan?.id);
+      const planTitle = normStr(plan?.title);
+      if(!planId || !planTitle) return { ok:false, error:"PLAN_INVALID" };
+
+      const sc = normStr(scopeId);
+      if(!sc) return { ok:false, error:"SCOPE_REQUIRED" };
+
+      const items = Array.isArray(plan.items) ? plan.items : [];
+      if(items.length === 0) return { ok:false, error:"PLAN_EMPTY" };
+
+      // Build blocks from each training in plan (order by (dayOffset, order))
+      const sorted = items.slice().map((it, idx) => ({ it, idx }));
+      sorted.sort((a,b) => {
+        const ad = Number.isFinite(Number(a.it.dayOffset)) ? Number(a.it.dayOffset) : 999999;
+        const bd = Number.isFinite(Number(b.it.dayOffset)) ? Number(b.it.dayOffset) : 999999;
+        if(ad !== bd) return ad - bd;
+        const ao = Number.isFinite(Number(a.it.order)) ? Number(a.it.order) : 999999;
+        const bo = Number.isFinite(Number(b.it.order)) ? Number(b.it.order) : 999999;
+        if(ao !== bo) return ao - bo;
+        return a.idx - b.idx;
+      });
+
+      const blocks = [];
+      const missingTrainings = [];
+
+      for(const x of sorted){
+        const trainingId = normStr(x.it?.trainingId);
+        if(!trainingId) return { ok:false, error:"ITEM_MISSING_TRAININGID" };
+
+        const tr = trainingsById[trainingId] || null;
+        if(!tr){
+          missingTrainings.push(trainingId);
+          continue;
+        }
+
+        const b = blocksFromTraining(trainingId, tr);
+        if(b.length === 0){
+          // fail-closed: training without blocks makes export invalid
+          return { ok:false, error:"TRAINING_HAS_NO_BLOCKS:" + trainingId };
+        }
+
+        // Append; allow duplicates across trainings? We'll dedupe by id.
+        for(const bb of b) blocks.push(bb);
+      }
+
+      if(missingTrainings.length > 0){
+        return { ok:false, error:"MISSING_TRAININGS:" + missingTrainings.join(",") };
+      }
+
+      // Dedupe blocks by id (stable)
+      const seen = new Set();
+      const deduped = [];
+      for(const b of blocks){
+        if(!b || !b.id) continue;
+        if(seen.has(b.id)) continue;
+        seen.add(b.id);
+        deduped.push(b);
+      }
+
+      if(deduped.length === 0) return { ok:false, error:"NO_BLOCKS_AFTER_DEDUPE" };
+
+      const pkgId = "pkg_plan_" + planId;
+
+      const pkgName = normStr(nameOverride) || (planTitle + " (Plan)");
+      if(pkgName.length < 2) return { ok:false, error:"PACKAGE_NAME_TOO_SHORT" };
+
+      // Minimal package shape that AO-054 expects: {id,name,scopeId,isActive,blocks}
+      return {
+        ok:true,
+        data: {
+          id: pkgId,
+          name: pkgName,
+          scopeId: sc,
+          isActive: true,
+          blocks: deduped
+        },
+        meta: {
+          planId,
+          planTitle,
+          scopeId: sc,
+          blocks: deduped.length
+        }
+      };
+    }
+
+    function renderPlanPreview(plan, trainingsById){
+      clearNode(planPreview);
+      if(!plan){
+        const d = document.createElement("div");
+        d.className = "muted";
+        d.textContent = "Välj en plan för att se preview.";
+        planPreview.appendChild(d);
+        return;
+      }
+
+      const items = Array.isArray(plan.items) ? plan.items : [];
+      if(items.length === 0){
+        const d = document.createElement("div");
+        d.className = "item";
+        d.textContent = "Planen har inga items.";
+        planPreview.appendChild(d);
+        return;
+      }
+
+      // stable order
+      const sorted = items.slice().map((it, idx) => ({ it, idx }));
+      sorted.sort((a,b) => {
+        const ad = Number.isFinite(Number(a.it.dayOffset)) ? Number(a.it.dayOffset) : 999999;
+        const bd = Number.isFinite(Number(b.it.dayOffset)) ? Number(b.it.dayOffset) : 999999;
+        if(ad !== bd) return ad - bd;
+        const ao = Number.isFinite(Number(a.it.order)) ? Number(a.it.order) : 999999;
+        const bo = Number.isFinite(Number(b.it.order)) ? Number(b.it.order) : 999999;
+        if(ao !== bo) return ao - bo;
+        return a.idx - b.idx;
+      });
+
+      let okCount = 0;
+      let totalBlocks = 0;
+
+      for(const x of sorted){
+        const trainingId = normStr(x.it?.trainingId);
+        const tr = trainingId ? trainingsById[trainingId] : null;
+
+        const card = document.createElement("div");
+        card.className = "item";
+        card.setAttribute("role","listitem");
+
+        const top = document.createElement("div");
+        top.className = "itemRow";
+
+        const left = document.createElement("div");
+        const t1 = document.createElement("div");
+        t1.className = "muted";
+        t1.textContent = "trainingId: " + (trainingId || "—") + " • dag: " + String(x.it?.dayOffset ?? "—");
+        const t2 = document.createElement("div");
+        t2.textContent = tr ? tr.title : "Saknas i AO-057 (fail-closed vid export)";
+        left.appendChild(t1);
+        left.appendChild(t2);
+
+        const right = document.createElement("div");
+        if(tr){
+          const b = blocksFromTraining(trainingId, tr);
+          totalBlocks += b.length;
+          okCount++;
+          right.appendChild(pill(String(b.length) + " blocks", "good"));
+        } else {
+          right.appendChild(pill("saknas", "bad"));
+        }
+
+        top.appendChild(left);
+        top.appendChild(right);
+        card.appendChild(top);
+
+        planPreview.appendChild(card);
+      }
+
+      const sum = document.createElement("div");
+      sum.className = "item";
+      sum.appendChild(pill("Trainings hittade: " + okCount + " / " + sorted.length, okCount === sorted.length ? "good" : "bad"));
+      sum.appendChild(document.createTextNode(" "));
+      sum.appendChild(pill("Blocks (sum): " + totalBlocks, totalBlocks > 0 ? "good" : "bad"));
+      planPreview.insertBefore(sum, planPreview.firstChild);
+    }
+
+    function renderResult(lines){
+      clearNode(resultBox);
+      if(!lines || lines.length === 0){
+        const d = document.createElement("div");
+        d.className = "muted";
+        d.textContent = "Ingen preview ännu.";
+        resultBox.appendChild(d);
+        return;
+      }
+      for(const line of lines){
+        const el = document.createElement("div");
+        el.className = "item";
+        el.textContent = String(line);
+        resultBox.appendChild(el);
+      }
+    }
+
+    /* ============================
+       Scope rules (fail-closed)
+    ============================ */
+    function canUseManualScope(orgNodes){
+      // Manual scope only allowed if SYSTEM_ADMIN and org is missing/empty
+      if(ROLE !== "SYSTEM_ADMIN") return false;
+      return !Array.isArray(orgNodes) || orgNodes.length === 0;
+    }
+
+    function pickScope(orgNodes){
+      const selected = normStr(scopeSelect.value);
+      const manual = normStr(scopeManual.value);
+
+      if(Array.isArray(orgNodes) && orgNodes.length > 0){
+        // Prefer ORG selection; manual ignored (fail-closed)
+        return selected;
+      }
+
+      // ORG missing/empty
+      if(canUseManualScope(orgNodes)){
+        return manual;
+      }
+
+      // ADMIN without ORG: block
+      return "";
+    }
+
+    /* ============================
+       UPSERT package into AO-050
+    ============================ */
+    function upsertPackage(packagesArr, pkg){
+      const out = Array.isArray(packagesArr) ? packagesArr.slice() : [];
+      const id = normStr(pkg?.id);
+      if(!id) return { ok:false, error:"PKG_MISSING_ID" };
+
+      let idx = -1;
+      for(let i=0;i<out.length;i++){
+        const cur = out[i];
+        if(!isPlainObject(cur)) continue;
+        if(normStr(cur.id) === id) { idx = i; break; }
+      }
+
+      // Preserve unknown extra fields if existing
+      if(idx >= 0){
+        const prev = out[idx];
+        const merged = Object.assign({}, prev, pkg);
+        out[idx] = merged;
+      } else {
+        out.push(pkg);
+      }
+      return { ok:true, data: out, updated: (idx >= 0) };
+    }
+
+    /* ============================
+       STATE
+    ============================ */
+    const STATE = {
+      trainingsById: null,
+      plans: [],
+      orgNodes: [],
+      selectedPlan: null
+    };
+
+    /* ============================
+       INIT / REFRESH
+    ============================ */
+    function refreshAll(){
+      setStatus("ok", "Läser data…");
+      renderResult([]);
+
+      const tr = loadTrainings();
+      if(!tr.ok){
+        STATE.trainingsById = null;
+        setStatus("error", tr.error + " (fail-closed)");
+        renderPlanSelect([], searchPlan.value);
+        renderScopeSelect([]);
+        renderPlanPreview(null, {});
+        btnExport.disabled = true;
+        return;
+      }
+
+      const pl = loadPlans();
+      if(!pl.ok){
+        setStatus("error", pl.error + " (fail-closed)");
+        STATE.plans = [];
+        renderPlanSelect([], searchPlan.value);
+        renderPlanPreview(null, tr.data);
+        btnExport.disabled = true;
+        return;
+      }
+
+      const org = loadOrg();
+      if(!org.ok){
+        // ORG corrupt: fail-closed for ADMIN, but SYSTEM_ADMIN can still manual if org missing; corrupt counts as block.
+        STATE.orgNodes = [];
+        renderScopeSelect([]);
+        if(ROLE === "ADMIN"){
+          setStatus("error", org.error + " (ADMIN kräver ORG för scope-val. fail-closed)");
+          btnExport.disabled = true;
+        } else {
+          setStatus("warn", org.error + " (SYSTEM_ADMIN kan använda manuell scope om ORG saknas)");
+          btnExport.disabled = false;
+        }
+      } else {
+        STATE.orgNodes = org.data;
+        renderScopeSelect(org.data);
+      }
+
+      STATE.trainingsById = tr.data;
+      STATE.plans = pl.data;
+
+      renderPlanSelect(STATE.plans, searchPlan.value);
+
+      // Auto-select first if none
+      if(planSelect.value){
+        // keep
+      } else if(STATE.plans.length > 0){
+        planSelect.value = STATE.plans[0].id;
+      } else {
+        planSelect.value = "";
+      }
+
+      onPlanChanged();
+
+      // scope manual enable/disable
+      scopeManual.disabled = !canUseManualScope(STATE.orgNodes);
+      if(scopeManual.disabled) scopeManual.value = "";
+
+      // default package name from plan
+      if(STATE.selectedPlan){
+        if(!normStr(packageName.value)) packageName.value = STATE.selectedPlan.title + " (Plan)";
+      }
+
+      // export button enabled only if we have trainings + plans
+      btnExport.disabled = !(STATE.trainingsById && Array.isArray(STATE.plans));
+
+      if(STATE.plans.length === 0){
+        setStatus("warn", "Inga aktiva planer att exportera. (AO-060_PLANS_V1)");
+      } else if(!org.ok && ROLE === "SYSTEM_ADMIN"){
+        // already warned
+      } else {
+        setStatus("ok", "Redo.");
+      }
+    }
+
+    function getSelectedPlan(){
+      const id = normStr(planSelect.value);
+      if(!id) return null;
+      const p = STATE.plans.find(x => normStr(x.id) === id);
+      return p || null;
+    }
+
+    function onPlanChanged(){
+      STATE.selectedPlan = getSelectedPlan();
+
+      // default packageName from selected plan (if not edited)
+      if(STATE.selectedPlan){
+        const suggested = STATE.selectedPlan.title + " (Plan)";
+        if(!normStr(packageName.value) || packageName.value.endsWith(" (Plan)")){
+          packageName.value = suggested;
+        }
+      }
+
+      renderPlanPreview(STATE.selectedPlan, STATE.trainingsById || {});
+      buildAndRenderExportPreview();
+    }
+
+    function buildAndRenderExportPreview(){
+      const lines = [];
+
+      const plan = STATE.selectedPlan;
+      if(!plan){
+        renderResult(["Välj en plan för att skapa preview."]);
+        return;
+      }
+
+      const scopeId = pickScope(STATE.orgNodes);
+      if(!scopeId){
+        if(ROLE === "ADMIN"){
+          lines.push("Scope saknas. ADMIN kräver ORG + valt scope. (fail-closed)");
+        } else {
+          lines.push("Scope saknas. Välj scope (ORG) eller skriv scopeId manuellt. (fail-closed)");
+        }
+        renderResult(lines);
+        return;
+      }
+
+      const built = buildPackageFromPlan(plan, STATE.trainingsById || {}, scopeId, packageName.value);
+      if(!built.ok){
+        lines.push("Preview FAIL: " + built.error);
+        renderResult(lines);
+        return;
+      }
+
+      const pkg = built.data;
+      lines.push("Preview OK");
+      lines.push("Plan: " + plan.title + " (" + plan.id + ")");
+      lines.push("Paket-id: " + pkg.id);
+      lines.push("Paketnamn: " + pkg.name);
+      lines.push("ScopeId: " + pkg.scopeId);
+      lines.push("Blocks: " + String(Array.isArray(pkg.blocks) ? pkg.blocks.length : 0));
+      lines.push("isActive: true");
+
+      renderResult(lines);
+    }
+
+    /* ============================
+       EXPORT (write AO-050)
+    ============================ */
+    function exportNow(){
+      const plan = STATE.selectedPlan;
+      if(!plan){
+        setStatus("error", "Ingen plan vald. (fail-closed)");
+        return;
+      }
+
+      const scopeId = pickScope(STATE.orgNodes);
+      if(!scopeId){
+        if(ROLE === "ADMIN"){
+          setStatus("error", "Scope saknas. ADMIN kräver ORG + valt scope. (fail-closed)");
+        } else {
+          setStatus("error", "Scope saknas. Välj scope eller skriv scopeId manuellt. (fail-closed)");
+        }
+        return;
+      }
+
+      const built = buildPackageFromPlan(plan, STATE.trainingsById || {}, scopeId, packageName.value);
+      if(!built.ok){
+        setStatus("error", "Export stoppad: " + built.error + " (fail-closed)");
+        return;
+      }
+
+      const lp = loadPackages();
+      if(!lp.ok){
+        setStatus("error", "Kan inte läsa AO-050_PACKAGES_V1: " + lp.error + " (fail-closed)");
+        return;
+      }
+
+      const up = upsertPackage(lp.data, built.data);
+      if(!up.ok){
+        setStatus("error", "Upsert stoppad: " + up.error + " (fail-closed)");
+        return;
+      }
+
+      const wr = writePackages(up.data);
+      if(!wr.ok){
+        setStatus("error", "Skrivning misslyckades: " + wr.error + " (fail-closed)");
+        return;
+      }
+
+      setStatus("ok", (up.updated ? "Uppdaterade" : "Skapade") + " paket i AO-050. Klart.");
+      buildAndRenderExportPreview();
+    }
+
+    /* ============================
+       EVENTS
+    ============================ */
+    btnRefresh.addEventListener("click", refreshAll);
+    btnExport.addEventListener("click", exportNow);
+
+    planSelect.addEventListener("change", onPlanChanged);
+    searchPlan.addEventListener("input", function(){
+      renderPlanSelect(STATE.plans, searchPlan.value);
+    });
+
+    scopeSelect.addEventListener("change", buildAndRenderExportPreview);
+    scopeManual.addEventListener("input", buildAndRenderExportPreview);
+    packageName.addEventListener("input", buildAndRenderExportPreview);
+
+    /* ============================
+       BOOT
+    ============================ */
+    refreshAll();
+
+  })();
+  </script>
+
+  <!-- ============================================================
+Ändringslogg (AO-PLANS-EXPORT-01 v1.0) ≤ 8 rader
+- Ny sida: exporterar AO-060 (active plans) till AO-050 (paket) med blocks från AO-057
+- Fail-closed: saknad training eller training utan blocks stoppar export
+- Upsert: pkg.id = pkg_plan_{planId} för stabil koppling utan ny datamodell
+- ADMIN kräver ORG+scope-val; SYSTEM_ADMIN kan ange manuell scope om ORG saknas
+Testnoteringar
+- Skapa active plan i onboard-plans + säkra att trainings har blocks -> exportera -> kontrollera i packages-progress
+Risk/edge cases
+- Om din AO-050-schema kräver fler fält än {id,name,scopeId,isActive,blocks} kan andra sidor behöva komplettering
+============================================================ -->
+</body>
+</html>
