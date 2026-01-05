@@ -1,7 +1,7 @@
 <!-- ============================================================
 AO-008/22 + AO-EMP-TASKS-QA-01 (PATCH) | FIL-ID: employee/tasks.html
 Projekt: HR-System
-Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only v1.5
+Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only v1.6
 
 Senaste sanning: PATCH ovanpå AO-008/22 (behåller task-logik + lägger question/answer/sign)
 Policy (LÅST):
@@ -96,11 +96,16 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
       align-items:flex-start;
       flex-wrap:wrap;
       margin-top:10px;
+      cursor:pointer;
     }
     .item:hover{
       transform: var(--lift);
       box-shadow: var(--shadow-soft);
       filter: brightness(1.02);
+    }
+    .item:focus{
+      outline: 2px solid rgba(59,130,246,.55);
+      outline-offset: 2px;
     }
 
     .item-title{ font-weight: 950; margin:0; }
@@ -179,10 +184,8 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
       background: rgba(254,242,242,.9) !important;
     }
 
-    /* Desktop: undvik att detalj “hoppar” */
     .panel.detail{ min-height: 420px; }
 
-    /* Mobil: gör knapparna lättare att träffa */
     @media (max-width: 980px){
       .seg button{ padding: 10px 14px; }
     }
@@ -200,7 +203,7 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
   <nav class="nav" aria-label="Meny">
     <a href="./home.html">Hem</a>
     <a href="./tasks.html" aria-current="page">Gör</a>
-    <a href="./questions.html">Frågor</a>
+    <a href="./tasks.html#questions">Frågor</a>
     <a href="./schedule.html">Schema</a>
     <a href="./docs.html">Dokument</a>
     <a href="./report.html">Rapportera fel</a>
@@ -244,12 +247,7 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
         <div class="row" style="gap:10px; margin-top:10px;">
           <label style="flex:1; min-width: 220px;">
             Visa
-            <select id="filter">
-              <option value="open" selected>Ej klara</option>
-              <option value="progress">Pågår</option>
-              <option value="done">Klara</option>
-              <option value="all">Alla</option>
-            </select>
+            <select id="filter"></select>
           </label>
 
           <label style="flex:1; min-width: 220px;">
@@ -359,7 +357,12 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
 
 <script>
 /* ============================================================
-AO-008/22 + AO-EMP-TASKS-QA-01 | employee/tasks.html – IMPLEMENTATION v1.5 (AUTOPATCH)
+AO-008/22 + AO-EMP-TASKS-QA-01 | employee/tasks.html – IMPLEMENTATION v1.6 (AUTOPATCH)
+PATCH v1.6:
+- Hela listkortet är klickbart (inte bara knappen).
+- Hash-routing: /tasks.html#questions öppnar Frågor-tabben.
+- Inga nya keys. Ingen innerHTML från storage.
+
 GUARD:
 - EMPLOYEE-only
 - Kräver: session(auth) + empNo + assignments(scopeId) + org
@@ -379,32 +382,25 @@ STORAGE (LÅST):
 
 XSS:
 - All rendering via textContent / DOM-bygg (ingen innerHTML för list/empty/locked)
-
 ============================================================ */
 (function(){
   "use strict";
 
-  // --- LOCKED KEYS ---
   const SESSION_KEY = "AO-001_LOGIN_V1";
   const ORG_KEY     = "AO-020_ORG_V1";
   const ASG_V2_KEY  = "AO-020_ROLE_ASSIGNMENTS_V2";
   const TASKS_KEY   = "AO-014_TASKS_V1";
-
   const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
   const ANSWERS_KEY   = "AO-013_ANSWERS_V1";
 
   const MAX_CHAIN_GUARD = 200;
   const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
-
   const ALLOWED_STATUS = new Set(["open","progress","done"]);
   const MAX_COMMENT_LEN = 500;
   const MAX_ANSWER_LEN  = 4000;
 
   const $  = (s) => document.querySelector(s);
 
-  // ----------------------------
-  // Nav/logout
-  // ----------------------------
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
   function doLogout(){
@@ -443,18 +439,9 @@ XSS:
     box.appendChild(document.createTextNode("\n" + lines.join("\n")));
   }
 
-  // ----------------------------
-  // Session/auth (HRApp first)
-  // ----------------------------
   function readRawSession(){
-    try{
-      const s1 = sessionStorage.getItem(SESSION_KEY);
-      if (s1) return s1;
-    }catch{}
-    try{
-      const s2 = localStorage.getItem(SESSION_KEY);
-      if (s2) return s2;
-    }catch{}
+    try{ const s1 = sessionStorage.getItem(SESSION_KEY); if (s1) return s1; }catch{}
+    try{ const s2 = localStorage.getItem(SESSION_KEY); if (s2) return s2; }catch{}
     return null;
   }
 
@@ -465,14 +452,10 @@ XSS:
     }catch{ return fallback; }
   }
 
-  function normalizeRole(role){
-    return String(role || "").trim().toLowerCase();
-  }
+  function normalizeRole(role){ return String(role || "").trim().toLowerCase(); }
 
   function pickEmpNoFromAuth(auth){
-    const candidates = [
-      auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier
-    ];
+    const candidates = [auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier];
     for(const c of candidates){
       const s = String(c || "").trim();
       if(!s) continue;
@@ -531,9 +514,6 @@ XSS:
   $("#whoName").textContent = access.displayName || "—";
   $("#whoEmpNo").textContent = access.empNo || "—";
 
-  // ----------------------------
-  // Storage helpers (local)
-  // ----------------------------
   function hasLocalKey(key){
     try{ return localStorage.getItem(key) !== null; }catch{ return false; }
   }
@@ -554,9 +534,6 @@ XSS:
     }
   }
 
-  // ----------------------------
-  // Assignments hardening (fail-closed)
-  // ----------------------------
   function normalizeAssignmentsV2(raw){
     if(!hasLocalKey(ASG_V2_KEY)){
       return { ok:false, map: Object.create(null), issues: ["Assignments saknas (key finns inte)."] };
@@ -587,9 +564,6 @@ XSS:
     return { ok:true, map: out, issues: [] };
   }
 
-  // ----------------------------
-  // Org helpers + integrity (fail-closed)
-  // ----------------------------
   function normalizeOrgNodes(raw){
     const arr = Array.isArray(raw) ? raw : [];
     const out = [];
@@ -686,9 +660,6 @@ XSS:
     return false;
   }
 
-  // ----------------------------
-  // Load deps (org + assignments are required)
-  // ----------------------------
   const lockReasons = [];
 
   if(!hasLocalKey(ORG_KEY)) lockReasons.push("Org saknas (key finns inte).");
@@ -715,9 +686,6 @@ XSS:
   const HARD_LOCK = lockReasons.length > 0;
   showLockBox(lockReasons);
 
-  // ----------------------------
-  // Utilities (status/comment/answer)
-  // ----------------------------
   function normalizeStatus(s){
     const v = String(s || "").trim().toLowerCase();
     return ALLOWED_STATUS.has(v) ? v : "";
@@ -753,10 +721,10 @@ XSS:
     d.textContent = text;
     return d;
   }
+  function clearChildren(el){
+    while(el && el.firstChild) el.removeChild(el.firstChild);
+  }
 
-  // ----------------------------
-  // TASKS module (AO-008/22 behavior preserved)
-  // ----------------------------
   function tasksExistsAndValid(){
     if(!hasLocalKey(TASKS_KEY)) return { ok:false, reason:"Tasks saknas (key finns inte)." };
     const raw = safeParseLocal(TASKS_KEY, null);
@@ -855,9 +823,6 @@ XSS:
     return { ok:true };
   }
 
-  // ----------------------------
-  // QUESTIONS/ANSWERS module
-  // ----------------------------
   function readQuestionsArray(){
     if(!hasLocalKey(QUESTIONS_KEY)) return { ok:false, arr:[], reason:"Questions saknas (key finns inte)." };
     const raw = safeParseLocal(QUESTIONS_KEY, null);
@@ -866,7 +831,6 @@ XSS:
   }
 
   function readAnswersArray(){
-    // Answers får saknas => behandla som tom (men skrivning kan misslyckas om storage blockad)
     const raw = safeParseLocal(ANSWERS_KEY, []);
     return Array.isArray(raw) ? raw : [];
   }
@@ -880,34 +844,17 @@ XSS:
     return true;
   }
 
-  function qId(q){
-    return String(q?.id ?? q?.questionId ?? q?.qid ?? "").trim();
-  }
-  function qTitle(q){
-    return String(q?.title ?? q?.name ?? q?.text ?? "Fråga").trim();
-  }
-  function qText(q){
-    return String(q?.text ?? q?.question ?? q?.body ?? q?.title ?? "—").trim();
-  }
-  function qScope(q){
-    return String(q?.scopeId ?? q?.scope ?? q?.nodeId ?? "").trim();
-  }
-  function qEmp(q){
-    return String(q?.empNo ?? q?.employeeNo ?? q?.toEmpNo ?? q?.assignedTo ?? "").trim();
-  }
+  function qId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? "").trim(); }
+  function qTitle(q){ return String(q?.title ?? q?.name ?? q?.text ?? "Fråga").trim(); }
+  function qText(q){ return String(q?.text ?? q?.question ?? q?.body ?? q?.title ?? "—").trim(); }
+  function qScope(q){ return String(q?.scopeId ?? q?.scope ?? q?.nodeId ?? "").trim(); }
+  function qEmp(q){ return String(q?.empNo ?? q?.employeeNo ?? q?.toEmpNo ?? q?.assignedTo ?? "").trim(); }
 
-  function answerEmp(a){
-    return String(a?.empNo ?? a?.employeeNo ?? "").trim();
-  }
-  function answerQid(a){
-    return String(a?.questionId ?? a?.qid ?? "").trim();
-  }
-  function normKey(s){
-    return String(s ?? "").toLowerCase().replace(/\s+/g," ").trim();
-  }
+  function answerEmp(a){ return String(a?.empNo ?? a?.employeeNo ?? "").trim(); }
+  function answerQid(a){ return String(a?.questionId ?? a?.qid ?? "").trim(); }
+  function normKey(s){ return String(s ?? "").toLowerCase().replace(/\s+/g," ").trim(); }
 
   function canSeeQuestion(q){
-    // Fail-closed baseline: org+assignments must be OK to show questions list (för att undvika “lös” global läcka i korrupt läge)
     if(HARD_LOCK) return false;
 
     const id = qId(q);
@@ -923,7 +870,6 @@ XSS:
       return isInScope(viewerScopeId, scope, orgIndex);
     }
 
-    // Inget scope => global inom “giltigt läge”
     return true;
   }
 
@@ -933,12 +879,10 @@ XSS:
     const title = qTitle(q);
 
     const answers = readAnswersArray();
-    // först: match på questionId
     if(id){
       const hit = answers.find(a => answerEmp(a) === myEmp && answerQid(a) === id);
       if(hit) return hit;
     }
-    // fallback: match på title om lagrat så
     const tKey = normKey(title);
     if(tKey){
       const hit2 = answers.find(a => answerEmp(a) === myEmp && normKey(String(a?.questionTitle ?? a?.title ?? "")) === tKey);
@@ -968,8 +912,8 @@ XSS:
     }
 
     const now = Date.now();
+
     if(idx < 0){
-      // create
       const newObj = {
         id: "ans_" + Math.random().toString(16).slice(2) + "_" + now.toString(16),
         questionId: id || "",
@@ -984,7 +928,6 @@ XSS:
       };
       const merged = { ...newObj, ...patch };
 
-      // hard guards
       merged.empNo = myEmp;
       merged.questionId = id || merged.questionId || "";
       merged.questionTitle = title || merged.questionTitle || "";
@@ -999,7 +942,6 @@ XSS:
       return { ok:true, answer: merged };
     }
 
-    // update
     const cur = answers[idx];
     if(answerEmp(cur) !== myEmp) return { ok:false, err:"Åtkomst nekad (inte ditt svar)." };
 
@@ -1009,7 +951,6 @@ XSS:
     merged.questionTitle = title || merged.questionTitle || "";
     merged.answerText = sanitizeText(merged.answerText, MAX_ANSWER_LEN);
 
-    // sign rules: signera bara om det finns text
     if(merged.signed === true){
       const hasText = String(merged.answerText || "").trim().length > 0;
       if(!hasText){
@@ -1031,41 +972,17 @@ XSS:
     return { ok:true, answer: merged };
   }
 
-  // ----------------------------
-  // UI STATE
-  // ----------------------------
   const MODE = { TASKS:"tasks", QUESTIONS:"questions" };
   let mode = MODE.TASKS;
 
   let selectedTaskId = null;
-  let selectedQuestionKey = null; // questionId else titleKey
+  let selectedQuestionKey = null;
 
-  function setMode(next){
-    mode = next;
-    $("#tabTasks").setAttribute("aria-pressed", String(mode === MODE.TASKS));
-    $("#tabQuestions").setAttribute("aria-pressed", String(mode === MODE.QUESTIONS));
-
-    // filter default per mode
-    $("#filter").innerHTML = "";
-    if(mode === MODE.TASKS){
-      $("#filter").appendChild(new Option("Ej klara", "open", true, true));
-      $("#filter").appendChild(new Option("Pågår", "progress"));
-      $("#filter").appendChild(new Option("Klara", "done"));
-      $("#filter").appendChild(new Option("Alla", "all"));
-      $("#tipLine").textContent = "Tips: Klicka på en uppgift för att uppdatera status/kommentar.";
-    }else{
-      $("#filter").appendChild(new Option("Ej svarade", "open", true, true));
-      $("#filter").appendChild(new Option("Svarade", "done"));
-      $("#filter").appendChild(new Option("Alla", "all"));
-      $("#tipLine").textContent = "Tips: Klicka på en fråga för att svara och signera.";
-    }
-
-    closeDetail();
-    render();
+  function setKpis(a,b,c){
+    $("#kpiA").textContent = a;
+    $("#kpiB").textContent = b;
+    $("#kpiC").textContent = c;
   }
-
-  $("#tabTasks").addEventListener("click", () => setMode(MODE.TASKS));
-  $("#tabQuestions").addEventListener("click", () => setMode(MODE.QUESTIONS));
 
   function closeDetail(){
     selectedTaskId = null;
@@ -1082,18 +999,50 @@ XSS:
   $("#btnCloseDetailA").addEventListener("click", closeDetail);
   $("#btnCloseDetailB").addEventListener("click", closeDetail);
 
-  function setKpis(a,b,c){
-    $("#kpiA").textContent = a;
-    $("#kpiB").textContent = b;
-    $("#kpiC").textContent = c;
+  function setHashForMode(m){
+    const want = (m === MODE.QUESTIONS) ? "#questions" : "";
+    const cur = String(window.location.hash || "");
+    if(cur !== want){
+      try{ history.replaceState(null, "", window.location.pathname + window.location.search + want); }catch{}
+    }
   }
 
-  // ----------------------------
-  // LIST RENDER (DOM only)
-  // ----------------------------
-  function makeItemCardBase(titleText, pills, lines, openKey){
+  function setMode(next){
+    mode = next;
+    $("#tabTasks").setAttribute("aria-pressed", String(mode === MODE.TASKS));
+    $("#tabQuestions").setAttribute("aria-pressed", String(mode === MODE.QUESTIONS));
+    setHashForMode(mode);
+
+    const filterEl = $("#filter");
+    clearChildren(filterEl);
+
+    if(mode === MODE.TASKS){
+      filterEl.appendChild(new Option("Ej klara", "open", true, true));
+      filterEl.appendChild(new Option("Pågår", "progress"));
+      filterEl.appendChild(new Option("Klara", "done"));
+      filterEl.appendChild(new Option("Alla", "all"));
+      $("#tipLine").textContent = "Tips: Klicka på en uppgift för att uppdatera status/kommentar.";
+    }else{
+      filterEl.appendChild(new Option("Ej svarade", "open", true, true));
+      filterEl.appendChild(new Option("Svarade", "done"));
+      filterEl.appendChild(new Option("Alla", "all"));
+      $("#tipLine").textContent = "Tips: Klicka på en fråga för att svara och signera.";
+    }
+
+    closeDetail();
+    render();
+  }
+
+  $("#tabTasks").addEventListener("click", () => setMode(MODE.TASKS));
+  $("#tabQuestions").addEventListener("click", () => setMode(MODE.QUESTIONS));
+
+  function makeItemCardBase(titleText, pillsArr, linesArr, openKey){
     const el = document.createElement("div");
     el.className = "item";
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    el.dataset.open = String(openKey || "");
+    el.setAttribute("aria-label", "Öppna");
 
     const left = document.createElement("div");
     left.style.minWidth = "260px";
@@ -1106,10 +1055,10 @@ XSS:
 
     const meta1 = document.createElement("div");
     meta1.className = "meta";
-    (pills || []).forEach(p => meta1.appendChild(pill(p)));
+    (pillsArr || []).forEach(p => meta1.appendChild(pill(p)));
     left.appendChild(meta1);
 
-    (lines || []).forEach(({label, value}) => {
+    (linesArr || []).forEach(({label, value}) => {
       const div = document.createElement("div");
       div.className = "meta";
       const s = document.createElement("span");
@@ -1175,7 +1124,7 @@ XSS:
     }
 
     if(items.length === 0){
-      listEl.appendChild(emptyBox("Inga uppgifter att visa."));
+      listEl.appendChild(emptyBox("Inga uppgifter att visa.\n\nOBS: Den här sidan läser endast AO-014_TASKS_V1.\nOm dina onboarding-block inte publiceras dit kommer listan bli tom."));
       return { items: mine };
     }
 
@@ -1186,7 +1135,6 @@ XSS:
 
       const lines = [{ label:"Text:", value: String(x?.text || "—") }];
       if(x?.adminNote) lines.push({ label:"Admin:", value: String(x.adminNote) });
-
       if(x?.employeeComment){
         lines.push({ label:"Din kommentar:", value: sanitizeText(String(x.employeeComment), MAX_COMMENT_LEN) });
       }
@@ -1222,7 +1170,6 @@ XSS:
 
     const allVisible = qRes.arr.filter(canSeeQuestion);
 
-    // compute answered state
     const decorated = allVisible.map(qq => {
       const ans = findMyAnswerForQuestion(qq);
       const answered = !!(ans && String(ans.answerText || "").trim());
@@ -1239,7 +1186,6 @@ XSS:
 
     if(filter === "open") items = items.filter(x => !x.answered);
     if(filter === "done") items = items.filter(x => x.answered);
-    // progress används inte här
 
     if(q){
       items = items.filter(x => {
@@ -1248,18 +1194,16 @@ XSS:
       });
     }
 
-    // sort: osvarade först, sen signerade sist (för att se osignerade svar)
     items.sort((a,b)=>{
       const ao = Number(!!a.answered), bo = Number(!!b.answered);
       if(ao !== bo) return ao - bo;
       const as = Number(!!a.signed), bs = Number(!!b.signed);
       if(as !== bs) return as - bs;
-      const at = qTitle(a.q).localeCompare(qTitle(b.q), "sv");
-      return at;
+      return qTitle(a.q).localeCompare(qTitle(b.q), "sv");
     });
 
     if(items.length === 0){
-      listEl.appendChild(emptyBox("Inga frågor att visa."));
+      listEl.appendChild(emptyBox("Inga frågor att visa.\n\nOBS: Den här sidan läser endast AO-012_QUESTIONS_V1."));
       return { items: decorated };
     }
 
@@ -1290,9 +1234,6 @@ XSS:
     return { items: decorated };
   }
 
-  // ----------------------------
-  // DETAIL RENDER
-  // ----------------------------
   function openTaskDetail(task){
     selectedTaskId = String(task?.id || "");
     selectedQuestionKey = null;
@@ -1328,9 +1269,7 @@ XSS:
     $("#btnSaveTask").disabled = (!writable);
     $("#dComment").disabled = (!writable);
 
-    for(const opt of $("#dStatus").options){
-      opt.disabled = false;
-    }
+    for(const opt of $("#dStatus").options) opt.disabled = false;
     if(st === "open"){
       const oDone = Array.from($("#dStatus").options).find(o => o.value === "done");
       if(oDone) oDone.disabled = true;
@@ -1339,6 +1278,21 @@ XSS:
       const oOpen = Array.from($("#dStatus").options).find(o => o.value === "open");
       if(oOpen) oOpen.disabled = true;
     }
+  }
+
+  function currentQuestionDecorated(){
+    const qRes = readQuestionsArray();
+    if(!qRes.ok) return null;
+
+    const allVisible = qRes.arr.filter(canSeeQuestion).map(qq => {
+      const ans = findMyAnswerForQuestion(qq);
+      const answered = !!(ans && String(ans.answerText || "").trim());
+      const signed = !!(ans && ans.signed === true);
+      const key = (qId(qq) ? ("id:" + qId(qq)) : ("t:" + normKey(qTitle(qq))));
+      return { q: qq, key, answered, signed, ans };
+    });
+
+    return allVisible.find(x => String(x.key) === String(selectedQuestionKey || "")) || null;
   }
 
   function openQuestionDetail(decorated){
@@ -1366,39 +1320,24 @@ XSS:
     $("#qStatePill").textContent = answered ? (signed ? "Svarad + signerad" : "Svarad (osignerad)") : "Ej svarad";
     $("#qAnswer").value = String(ans?.answerText || "");
 
-    // sign UI
     $("#qSign").checked = signed;
     $("#qSignedPill").textContent = signed && ans?.signedAt ? ("Signatur: " + new Date(Number(ans.signedAt)).toLocaleString("sv-SE")) : "Signatur: —";
 
     const hasText = String($("#qAnswer").value || "").trim().length > 0;
-
-    // if empty answer, discourage sign
     $("#signWrap").classList.toggle("danger", !hasText);
 
     const writable = !HARD_LOCK;
     $("#qAnswer").disabled = !writable;
     $("#btnSaveAnswer").disabled = !writable;
-    $("#btnSign").disabled = !writable;
-
-    // sign button: only enable when answer has text
     $("#btnSign").disabled = !writable || !hasText;
   }
 
-  // ----------------------------
-  // Events: Save Task
-  // ----------------------------
   $("#btnSaveTask").addEventListener("click", () => {
     setMsgA("", "");
 
     const tOk = tasksExistsAndValid();
-    if(!tOk.ok){
-      setMsgA("err", tOk.reason);
-      return;
-    }
-    if(HARD_LOCK){
-      setMsgA("err", "Skrivning är låst (fail-closed).");
-      return;
-    }
+    if(!tOk.ok){ setMsgA("err", tOk.reason); return; }
+    if(HARD_LOCK){ setMsgA("err", "Skrivning är låst (fail-closed)."); return; }
 
     const mine = computeMineVisibleTasks();
     const t = mine.find(x => String(x?.id) === String(selectedTaskId || ""));
@@ -1410,10 +1349,7 @@ XSS:
     }
 
     const desiredStatus = normalizeStatus($("#dStatus").value || (t.status||"open"));
-    if(!desiredStatus){
-      setMsgA("err", "Ogiltig status (okänt värde).");
-      return;
-    }
+    if(!desiredStatus){ setMsgA("err", "Ogiltig status (okänt värde)."); return; }
 
     const desiredComment = sanitizeText($("#dComment").value || "", MAX_COMMENT_LEN);
 
@@ -1441,29 +1377,10 @@ XSS:
     if(again) openTaskDetail(again);
   });
 
-  // ----------------------------
-  // Events: Save Answer / Sign
-  // ----------------------------
-  function currentQuestionDecorated(){
-    const qRes = readQuestionsArray();
-    if(!qRes.ok) return null;
-
-    const allVisible = qRes.arr.filter(canSeeQuestion).map(qq => {
-      const ans = findMyAnswerForQuestion(qq);
-      const answered = !!(ans && String(ans.answerText || "").trim());
-      const signed = !!(ans && ans.signed === true);
-      const key = (qId(qq) ? ("id:" + qId(qq)) : ("t:" + normKey(qTitle(qq))));
-      return { q: qq, key, answered, signed, ans };
-    });
-
-    return allVisible.find(x => String(x.key) === String(selectedQuestionKey || "")) || null;
-  }
-
   $("#qAnswer").addEventListener("input", () => {
     const hasText = String($("#qAnswer").value || "").trim().length > 0;
     $("#signWrap").classList.toggle("danger", !hasText);
     $("#btnSign").disabled = HARD_LOCK || !hasText;
-    // om man raderar text: avmarkera sign visuellt (utan att skriva direkt)
     if(!hasText){
       $("#qSign").checked = false;
       $("#qSignedPill").textContent = "Signatur: —";
@@ -1472,10 +1389,7 @@ XSS:
 
   $("#btnSaveAnswer").addEventListener("click", () => {
     setMsgB("", "");
-    if(HARD_LOCK){
-      setMsgB("err", "Låst (fail-closed).");
-      return;
-    }
+    if(HARD_LOCK){ setMsgB("err", "Låst (fail-closed)."); return; }
 
     const dec = currentQuestionDecorated();
     if(!dec){
@@ -1488,7 +1402,6 @@ XSS:
     const text = sanitizeText($("#qAnswer").value || "", MAX_ANSWER_LEN);
     const wantSigned = !!$("#qSign").checked;
 
-    // signera bara om text finns
     const patch = {
       answerText: text,
       signed: (wantSigned && String(text).trim().length > 0),
@@ -1515,10 +1428,7 @@ XSS:
 
   $("#btnSign").addEventListener("click", () => {
     setMsgB("", "");
-    if(HARD_LOCK){
-      setMsgB("err", "Låst (fail-closed).");
-      return;
-    }
+    if(HARD_LOCK){ setMsgB("err", "Låst (fail-closed)."); return; }
 
     const dec = currentQuestionDecorated();
     if(!dec){
@@ -1537,12 +1447,7 @@ XSS:
 
     $("#qSign").checked = true;
 
-    const res = upsertMyAnswer(dec.q, {
-      answerText: text,
-      signed: true,
-      signedAt: Date.now()
-    });
-
+    const res = upsertMyAnswer(dec.q, { answerText: text, signed: true, signedAt: Date.now() });
     if(!res.ok){
       setMsgB("err", res.err || "Kunde inte signera.");
       render();
@@ -1558,77 +1463,93 @@ XSS:
     if(dec2) openQuestionDetail(dec2);
   });
 
-  // ----------------------------
-  // List click delegation
-  // ----------------------------
-  $("#list").addEventListener("click", (e) => {
-    const btn = e.target && e.target.closest ? e.target.closest("button[data-open]") : null;
-    if(!btn) return;
-    const key = btn.getAttribute("data-open") || btn.dataset.open || "";
-
+  function activateOpenKey(key){
     if(mode === MODE.TASKS){
       const mine = computeMineVisibleTasks();
       const task = mine.find(t => String(t?.id) === String(key));
       if(task) openTaskDetail(task);
       return;
     }
-
     if(mode === MODE.QUESTIONS){
       selectedQuestionKey = String(key || "");
       const dec = currentQuestionDecorated();
       if(dec) openQuestionDetail(dec);
       return;
     }
+  }
+
+  // Hela kortet klickbart + knapp funkar också
+  $("#list").addEventListener("click", (e) => {
+    const node = e.target && e.target.closest ? e.target.closest("[data-open]") : null;
+    if(!node) return;
+    const key = node.getAttribute("data-open") || node.dataset.open || "";
+    if(!key) return;
+    activateOpenKey(key);
   });
 
-  // ----------------------------
-  // Main render
-  // ----------------------------
+  // Keyboard open on focused card
+  $("#list").addEventListener("keydown", (e) => {
+    const isEnter = (e.key === "Enter");
+    const isSpace = (e.key === " " || e.key === "Spacebar");
+    if(!isEnter && !isSpace) return;
+
+    const node = e.target && e.target.closest ? e.target.closest(".item[data-open]") : null;
+    if(!node) return;
+
+    e.preventDefault();
+    const key = node.getAttribute("data-open") || node.dataset.open || "";
+    if(!key) return;
+    activateOpenKey(key);
+  });
+
   function render(){
-    $("#list").textContent = "";
+    const list = $("#list");
+    clearChildren(list);
+
     $("#detailEmpty").style.display = "block";
     $("#detailTask").style.display = "none";
     $("#detailQuestion").style.display = "none";
 
     if(mode === MODE.TASKS){
-      const { items } = renderTasksList($("#list"));
-      // re-open if selected
+      const { items } = renderTasksList(list);
       if(selectedTaskId){
         const mine = (items && items.length) ? items : computeMineVisibleTasks();
         const t = mine.find(x => String(x?.id) === String(selectedTaskId));
-        if(t) openTaskDetail(t);
-        else selectedTaskId = null;
+        if(t) openTaskDetail(t); else selectedTaskId = null;
       }
       return;
     }
 
-    // Questions
-    const { items } = renderQuestionsList($("#list"));
+    const { items } = renderQuestionsList(list);
     if(selectedQuestionKey){
       const dec = (items && items.length) ? (items.find(x => String(x.key) === String(selectedQuestionKey)) || null) : currentQuestionDecorated();
-      if(dec) openQuestionDetail(dec);
-      else selectedQuestionKey = null;
+      if(dec) openQuestionDetail(dec); else selectedQuestionKey = null;
     }
   }
 
   $("#filter").addEventListener("change", render);
   $("#search").addEventListener("input", render);
 
-  // Init: default to tasks
-  setMode(MODE.TASKS);
+  // Init: mode from hash
+  function initFromHash(){
+    const h = String(window.location.hash || "").toLowerCase();
+    if(h === "#questions") setMode(MODE.QUESTIONS);
+    else setMode(MODE.TASKS);
+  }
+  window.addEventListener("hashchange", initFromHash);
+  initFromHash();
 
 })();
 </script>
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- Nytt “Gör”-läge: Uppgifter + Frågor i samma sida (tabbar), mobilvänligt (1 kolumn).
+- v1.6: Hela listkortet klickbart + keyboard (Enter/Space) öppnar.
+- v1.6: /tasks.html#questions öppnar Frågor-tabben (en sida i skarp läge).
 - Behåller AO-008/22 task-state-machine + tillåten mutation exakt.
-- Lägger svar+signering via AO-013_ANSWERS_V1 (ingen ny key, ingen persondata).
-- Fail-closed: org/assignments krävs; per-modul lock vid korrupt/saknad questions/tasks.
-- XSS: all rendering via DOM/textContent.
+- Svar+signering via AO-013_ANSWERS_V1 (ingen ny key, ingen persondata).
 Testnoteringar:
-- Logga in empNo, öppna “Gör” → uppgifter kan sparas, frågor kan besvaras + signeras.
+- Logga in empNo, öppna “Gör” → klicka på kort (inte bara knappen) och verifiera öppning.
 ============================================================ -->
 </body>
 </html>
