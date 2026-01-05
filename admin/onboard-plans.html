@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-UI-01 (PROD v1.4) | FIL-ID: admin/onboard-plans.html
+AO-ONBOARD-PLANS-UI-01 (PROD v1.5) | FIL-ID: admin/onboard-plans.html
 Projekt: HR-System
 Syfte: ADMIN – Skapa/Redigera Onboarding Plans + Tidsaxel (↑↓) UI-only
 
@@ -16,12 +16,11 @@ Keys (LÅST):
 - Läser: AO-001_LOGIN_V1 (via HRApp), AO-057_TRAININGS_V1, AO-060_PLANS_V1
 - Skriver: AO-060_PLANS_V1
 
-Ändringslogg (v1.4):
-- UX: “Befintliga planer” flyttad under vänsterkolumnen (perfekt align, samma bredd/vänsterkant).
-- UX: “Befintliga planer”-rutan begränsad till ~halv höjd (så sidan känns luftigare).
-- UX: Toppnavigering (snabblänkar) högst upp.
-- FIX: Auto-sort av tidsaxel (dag lägst först) + renumber vid ändringar (dag/edit/add/move/remove) för stabil ordning.
-- UX: Knappar i tidsaxeln tydligare (kontrast/min-bredd) för att undvika “nästan osynlig” känsla.
+Ändringslogg (v1.5):
+- FIX (1): ↑/↓ är nu konsekvent: flyttar endast inom samma dagOffset (day-grupp) och påverkar ordning deterministiskt.
+- FIX (1): Auto-sort respekterar dayOffset (alltid) + manuell ordning inom dayOffset (order).
+- UX (2): Tydliga varningar vid dedupe av dubletter i plan (trainingId) och om inga published/verified trainings finns.
+- UX (2): Varning om plan innehåller trainingId som inte är allowed (published/verified + blocks>0) – utan write.
 
 Oförändrat:
 - Inga nya keys, inga schemaändringar, writes endast AO-060 vid Spara.
@@ -237,7 +236,7 @@ Oförändrat:
 
       <div class="footerNote muted">
         Auto-sort: dag (lägst först) → order. <span class="mono">order</span> renumreras automatiskt.
-        (DnD ersatt med ↑/↓ för låg regressionsrisk)
+        (↑/↓ flyttar endast inom samma dagOffset, deterministiskt)
       </div>
     </div>
   </div>
@@ -318,6 +317,16 @@ Oförändrat:
   let plansOk = true;
   let plans = [];
   let currentPlan = null;
+
+  // UI-only warnings (no writes)
+  let _lastWarnSig = "";
+  function warnOnce(signature, msg){
+    const sig = String(signature || "");
+    if (!sig) return;
+    if (_lastWarnSig === sig) return;
+    _lastWarnSig = sig;
+    setStatus("warn", msg);
+  }
 
   // ============================
   // DOM
@@ -460,6 +469,61 @@ Oförändrat:
   }
 
   // ============================
+  // ORDER MODEL (v1.5)
+  // - Sortera alltid på dayOffset ASC
+  // - Inom samma dayOffset: respektera "order" som manuell ordning
+  // - Renumber order 1..n enligt den sorterade ordningen
+  // ============================
+  function normalizeItemFields(it){
+    const trainingId = normStr(it && it.trainingId);
+    const dayOffset = toInt(it && it.dayOffset);
+    const order = toInt(it && it.order);
+    const gateRequired = (it && typeof it.gateRequired === "boolean") ? it.gateRequired : true;
+
+    if (!trainingId) return null;
+    return {
+      trainingId,
+      dayOffset: (dayOffset === null || dayOffset < 0) ? 0 : dayOffset,
+      order: (order === null || order < 1) ? null : order,
+      gateRequired: gateRequired === true
+    };
+  }
+
+  function sortAndRenumberItems(items){
+    const inArr = Array.isArray(items) ? items : [];
+    const normalized = [];
+    for (let i = 0; i < inArr.length; i++){
+      const n = normalizeItemFields(inArr[i]);
+      if (n) normalized.push(n);
+    }
+
+    const withIdx = normalized.map((it, idx) => ({ it, idx }));
+    withIdx.sort((a, b) => {
+      const ad = toInt(a.it.dayOffset) ?? 0;
+      const bd = toInt(b.it.dayOffset) ?? 0;
+      if (ad !== bd) return ad - bd;
+
+      // within day: manual order is primary, null last; stable fallback idx
+      const ao = a.it.order;
+      const bo = b.it.order;
+
+      if (ao === null && bo === null) return a.idx - b.idx;
+      if (ao === null) return 1;
+      if (bo === null) return -1;
+      if (ao !== bo) return ao - bo;
+
+      return a.idx - b.idx;
+    });
+
+    return withIdx.map((x, i) => ({
+      trainingId: String(x.it.trainingId),
+      dayOffset: Number(toInt(x.it.dayOffset) ?? 0),
+      order: i + 1,
+      gateRequired: x.it.gateRequired === true
+    }));
+  }
+
+  // ============================
   // LOAD: Trainings (AO-057)
   // ============================
   function isAllowedTrainingStatusForPlans(status){
@@ -550,8 +614,8 @@ Oförändrat:
     opt(filterModule, "", "Alla moduler");
     opt(filterArea, "", "Alla områden");
 
-    const modules = Array.from(new Set(trainings.map(t => t.module))).sort();
-    const areas = Array.from(new Set(trainings.map(t => t.area))).sort();
+    const modules = Array.from(new Set(trainings.map(t => normStr(t.module)))).filter(Boolean).sort();
+    const areas = Array.from(new Set(trainings.map(t => normStr(t.area)))).filter(Boolean).sort();
 
     for (const m of modules) opt(filterModule, m, m);
     for (const a of areas) opt(filterArea, a, a);
@@ -581,6 +645,14 @@ Oförändrat:
       e.className = "error";
       e.textContent = "Tillgängliga utbildningar kan inte laddas (fail-closed). Kontrollera AO-057_TRAININGS_V1.";
       trainingsBox.appendChild(e);
+      return;
+    }
+
+    if (trainingsOk && trainings.length === 0) {
+      const w = document.createElement("div");
+      w.className = "warn";
+      w.textContent = "Det finns inga published/verified-utbildningar med blocks>0 ännu. (Inget att lägga till i plan)";
+      trainingsBox.appendChild(w);
       return;
     }
 
@@ -712,7 +784,7 @@ Oförändrat:
   // PLAN: Normalization (UI-lager)
   // ============================
   function normalizePlanForUi(plan) {
-    if (!isPlainObject(plan)) return null;
+    if (!isPlainObject(plan)) return { ok:false, plan:null, meta:null };
 
     const id = normStr(plan.id) || genId("p_");
     const title = normStr(plan.title);
@@ -726,65 +798,41 @@ Oförändrat:
 
     for (let i = 0; i < itemsIn.length; i++) {
       const it = itemsIn[i];
-      if (!isPlainObject(it)) continue;
-
-      const trainingId = normStr(it.trainingId);
-      if (!trainingId) continue;
-
-      const dayOffset = toInt(it.dayOffset);
-      const safeDayOffset = (dayOffset === null || dayOffset < 0) ? 0 : dayOffset;
-
-      const order = toInt(it.order);
-      const gateRequired = (typeof it.gateRequired === "boolean") ? it.gateRequired : true;
-
-      itemsOut.push({
-        trainingId,
-        dayOffset: safeDayOffset,
-        order: (order === null || order < 1) ? null : order,
-        gateRequired
-      });
+      const n = normalizeItemFields(it);
+      if (!n) continue;
+      itemsOut.push(n);
     }
 
-    // dedupe by trainingId
+    // dedupe by trainingId (UI-safe)
     const seen = new Set();
     const deduped = [];
+    let dedupeDropped = 0;
     for (const it of itemsOut) {
-      if (seen.has(it.trainingId)) continue;
+      if (seen.has(it.trainingId)) { dedupeDropped++; continue; }
       seen.add(it.trainingId);
       deduped.push(it);
     }
 
-    // Auto-sort: dayOffset asc, then order (null last), stable
-    const withIdx = deduped.map((it, idx) => ({ it, idx }));
-    withIdx.sort((a, b) => {
-      const ad = toInt(a.it.dayOffset) ?? 999999;
-      const bd = toInt(b.it.dayOffset) ?? 999999;
-      if (ad !== bd) return ad - bd;
-
-      const ao = a.it.order === null ? 999999 : a.it.order;
-      const bo = b.it.order === null ? 999999 : b.it.order;
-      if (ao !== bo) return ao - bo;
-
-      return a.idx - b.idx;
-    });
-
-    const normalizedItems = withIdx.map((x, i) => ({
-      trainingId: x.it.trainingId,
-      dayOffset: x.it.dayOffset,
-      order: i + 1,
-      gateRequired: x.it.gateRequired
-    }));
+    // sort + renumber in v1.5 model
+    const normalizedItems = sortAndRenumberItems(deduped);
 
     let statusUi = status;
     if (statusUi === "active" && normalizedItems.length === 0) statusUi = "draft";
 
     return {
-      id,
-      title,
-      status: statusUi,
-      createdAt,
-      updatedAt,
-      items: normalizedItems
+      ok: true,
+      plan: {
+        id,
+        title,
+        status: statusUi,
+        createdAt,
+        updatedAt,
+        items: normalizedItems
+      },
+      meta: {
+        dedupeDropped,
+        activeEmptyDowngraded: (String(plan.status || "") === "active" && normalizedItems.length === 0)
+      }
     };
   }
 
@@ -815,29 +863,7 @@ Oförändrat:
 
   function autoSortAndRenumber() {
     if (!currentPlan) return;
-
-    const items = Array.isArray(currentPlan.items) ? currentPlan.items.slice() : [];
-    const withIdx = items.map((it, idx) => ({ it, idx }));
-
-    withIdx.sort((a, b) => {
-      const ad = toInt(a.it.dayOffset) ?? 999999;
-      const bd = toInt(b.it.dayOffset) ?? 999999;
-      if (ad !== bd) return ad - bd;
-
-      const ao = toInt(a.it.order) ?? 999999;
-      const bo = toInt(b.it.order) ?? 999999;
-      if (ao !== bo) return ao - bo;
-
-      return a.idx - b.idx;
-    });
-
-    currentPlan.items = withIdx.map((x, i) => ({
-      trainingId: String(x.it.trainingId || ""),
-      dayOffset: Number(toInt(x.it.dayOffset) ?? 0),
-      order: i + 1,
-      gateRequired: x.it.gateRequired === true
-    }));
-
+    currentPlan.items = sortAndRenumberItems(currentPlan.items);
     syncPlanFormFromState();
   }
 
@@ -846,13 +872,42 @@ Oförändrat:
     const raw = getPlanById(id);
     if (!raw) { setStatus("error", "Plan hittades inte."); return; }
 
-    currentPlan = normalizePlanForUi(raw);
-    if (!currentPlan) { setStatus("error", "Plan kunde inte normaliseras (fail-closed)."); return; }
+    const norm = normalizePlanForUi(raw);
+    if (!norm.ok || !norm.plan) { setStatus("error", "Plan kunde inte normaliseras (fail-closed)."); return; }
 
-    if (String(raw.status || "") === "active" && currentPlan.items.length === 0) {
-      setStatus("warn", "Plan var 'active' men saknar items. UI har satt status till 'draft'. (Ingen write förrän du sparar)");
-    } else {
+    currentPlan = norm.plan;
+
+    // warnings (UI-only, no writes)
+    if (norm.meta && norm.meta.dedupeDropped > 0) {
+      warnOnce(
+        "dedupe:" + String(currentPlan.id) + ":" + String(norm.meta.dedupeDropped),
+        "Plan innehöll dubletter (trainingId). UI har ignorerat " + String(norm.meta.dedupeDropped) + " st. (Ingen write förrän du sparar)"
+      );
+    }
+
+    if (norm.meta && norm.meta.activeEmptyDowngraded) {
+      warnOnce(
+        "activeEmpty:" + String(currentPlan.id),
+        "Plan var 'active' men saknar items. UI har satt status till 'draft'. (Ingen write förrän du sparar)"
+      );
+    } else if (!(norm.meta && norm.meta.dedupeDropped > 0)) {
       setStatus("ok", "Plan laddad: " + (currentPlan.title || "(utan titel)"));
+    }
+
+    // warn if plan references trainingId not allowed (when trainingsOk)
+    if (trainingsOk) {
+      const idxById = buildTrainingIndexById();
+      let unknown = 0;
+      for (let i = 0; i < currentPlan.items.length; i++) {
+        const tid = String(currentPlan.items[i].trainingId || "");
+        if (!idxById[tid]) unknown++;
+      }
+      if (unknown > 0) {
+        warnOnce(
+          "unknownTraining:" + String(currentPlan.id) + ":" + String(unknown),
+          "Varning: Planen innehåller " + String(unknown) + " item(s) som inte är allowed (inte published/verified eller blocks=0). Spara blockeras tills det är fixat."
+        );
+      }
     }
 
     syncPlanFormFromState();
@@ -894,17 +949,35 @@ Oförändrat:
     renderTrainingsList();
   }
 
+  // v1.5: ↑/↓ flyttar endast inom samma dayOffset (grupp)
   function moveItem(index, dir) {
     if (!currentPlan) return;
+
+    autoSortAndRenumber();
+
     const i = index;
     const j = i + dir;
     if (j < 0 || j >= currentPlan.items.length) return;
 
-    const tmp = currentPlan.items[i];
-    currentPlan.items[i] = currentPlan.items[j];
-    currentPlan.items[j] = tmp;
+    const dayI = toInt(currentPlan.items[i].dayOffset) ?? 0;
+    const dayJ = toInt(currentPlan.items[j].dayOffset) ?? 0;
 
-    autoSortAndRenumber(); // efter swap, låt autosort sätta “rätt” ordning men behåll stabilt
+    // endast inom samma dayOffset
+    if (dayI !== dayJ) return;
+
+    // swap elements
+    const a = currentPlan.items[i];
+    const b = currentPlan.items[j];
+
+    // swap order values so that sorting respects the move
+    const tmpOrder = a.order;
+    a.order = b.order;
+    b.order = tmpOrder;
+
+    currentPlan.items[i] = b;
+    currentPlan.items[j] = a;
+
+    autoSortAndRenumber();
     renderTimeline();
   }
 
@@ -927,7 +1000,7 @@ Oförändrat:
       return;
     }
 
-    // auto-sort alltid innan render (enkelhet)
+    // auto-sort alltid innan render (deterministiskt)
     autoSortAndRenumber();
 
     const idxById = buildTrainingIndexById();
@@ -955,6 +1028,7 @@ Oförändrat:
       const lab = document.createElement("label");
       lab.textContent = "Dag (offset)";
       lab.setAttribute("for", "day_" + i);
+
       const inp = document.createElement("input");
       inp.type = "number";
       inp.min = "0";
@@ -969,9 +1043,11 @@ Oförändrat:
           return;
         }
         it.dayOffset = v;
-        // Auto-sort direkt efter ändring
+        // efter ändring: sort + renumber deterministiskt
+        autoSortAndRenumber();
         renderTimeline();
       });
+
       left.appendChild(lab);
       left.appendChild(inp);
 
@@ -1015,18 +1091,23 @@ Oförändrat:
       const right = document.createElement("div");
       right.className = "rightActions";
 
+      // v1.5: enable ↑/↓ only within same dayOffset group
+      const day = toInt(it.dayOffset) ?? 0;
+      const prevSameDay = (i > 0) && ((toInt(currentPlan.items[i-1].dayOffset) ?? 0) === day);
+      const nextSameDay = (i < currentPlan.items.length - 1) && ((toInt(currentPlan.items[i+1].dayOffset) ?? 0) === day);
+
       const up = document.createElement("button");
       up.className = "smallbtn";
       up.textContent = "↑";
-      up.disabled = i === 0;
-      up.title = "Flytta upp";
+      up.disabled = !prevSameDay;
+      up.title = "Flytta upp (endast inom samma dag)";
       up.addEventListener("click", function(){ moveItem(i, -1); });
 
       const down = document.createElement("button");
       down.className = "smallbtn";
       down.textContent = "↓";
-      down.disabled = i === currentPlan.items.length - 1;
-      down.title = "Flytta ner";
+      down.disabled = !nextSameDay;
+      down.title = "Flytta ner (endast inom samma dag)";
       down.addEventListener("click", function(){ moveItem(i, +1); });
 
       const del = document.createElement("button");
@@ -1067,7 +1148,7 @@ Oförändrat:
     const requireItems = (setActiveOnVerify === true) ? true : (st === "active");
     if (requireItems && currentPlan.items.length < 1) return { ok:false, error:"Active kräver minst 1 item" };
 
-    // se till att auto-sort/renumber är konsekvent innan validering
+    // auto-sort/renumber konsekvent innan validering
     autoSortAndRenumber();
 
     const idxById = buildTrainingIndexById();
@@ -1210,7 +1291,6 @@ Oförändrat:
   planStatus.addEventListener("change", function(){
     if (!currentPlan) return;
     currentPlan.status = normStr(planStatus.value);
-    // auto-sort/renumber påverkar inte status men håll meta uppdaterad
     syncPlanFormFromState();
   });
 
@@ -1228,6 +1308,7 @@ Oförändrat:
     if (!tRes.ok && !pRes.ok) setStatus("error", (tRes.error || "") + " • " + (pRes.error || ""));
     else if (!pRes.ok) setStatus("error", pRes.error);
     else if (!tRes.ok) setStatus("warn", tRes.error + " (Tillägg blockeras)");
+    else if (trainingsOk && trainings.length === 0) setStatus("warn", "AO-057 OK, men inga published/verified trainings med blocks>0 finns ännu.");
     else setStatus("ok", "Redo.");
 
     if (trainingsOk) populateFilters();
