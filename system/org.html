@@ -1,19 +1,15 @@
 <!-- ============================================================
-AO-ORG-ACTIONS-LEFT-01 (PROD) | FIL-ID: system/org.html
+AO-004 (MASTER SYS • UX-MODAL v1.3) | FIL-ID: system/org.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
-Syfte: Flytta actions (Redigera/Ta bort) från högersidan till vänsterpanel + modaler.
-Bas: AO-004 (MASTER SYS • UX-MODAL v1.2) — samma datastruktur och guards.
+Syfte: Org Builder = enda sanna källan för scope-trädet (subtree)
 
 SCOPE (DENNA VERSION):
-- VÄNSTER:
-  - Lägg till “Välj nod” (dropdown) för att hantera Redigera/Ta bort från vänster.
-  - Håll “Skapa / redigera bolag” + “Skapa enhet” knappar.
-- MODALER:
-  - Bolagsprofil: VIEW -> EDIT-flöde
-    * När bolag finns: visa knapp “Redigera”
-    * I EDIT: visa “Spara” (disabled tills ändring gjorts + validering OK)
-- HÖGER:
-  - Org-träd-lista blir read-only (inga Redigera/Ta bort knappar där)
+- Flyttar actions från höger list-rader till modaler (Bolag/Enhet):
+  - Höger lista: inga "Redigera/Ta bort"-knappar per rad (endast klick för att öppna)
+  - Modal: View-mode → knapp "Redigera" → Edit-mode → "Spara" endast vid ändring (dirty-guard)
+  - Modal: "Ta bort" finns i modal (fail-closed med samma delete-guards)
+- Root UI-label: root visas som bolagsnamn om bolag finns (utan att ändra root-noden i storage)
+- Strukturnamn: stöds som tidigare via `structureName` på bolagsnoden (ingen ny key)
 
 Policy (LÅST):
 - SYSTEM_ADMIN-only: org-trädet är systemets styrstruktur (ren förvaltning)
@@ -25,24 +21,7 @@ Policy (LÅST):
   - Läs/Skriv: AO-020_ORG_V1 (localStorage) — org-träd (nodes)
   - Endast läs: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) — assignments (empNo -> { roleId, scopeId })
 - Hel-filsleverans
-- XSS-escape på allt från storage (textContent/escape vid innerHTML)
-
-Not:
-- Bolagsprofil lagras som extra fält på Bolag-noden i AO-020_ORG_V1 (ingen ny key).
-  Övriga sidor som läser org-trädet ska ignorera okända fält (bakåtkompatibelt).
-
-Kontrakt:
-- Exakt 1 root-nod (ROOT_ID). Alla andra noder ligger under root.
-- Obegränsat djup (parentId kan peka på valfri nod).
-- Scope = nod + alla dess barn (subtree).
-- Delete-guards (fail-closed):
-  - stoppa om noden har barn, eller
-  - noden är scope i assignments, eller
-  - noden ligger under en scope (ancestor-scope),
-  - vid korrupt/oklar data → blockera delete (fail-closed)
-- Loop-skydd: vid loop/korruption → varning + lås kritiska actions
-MASTER FIX:
-- Bootstrap: om org saknas första gången skapas root automatiskt (ingen “repair krävs” för att komma igång)
+- XSS-escape på allt från storage
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -98,10 +77,16 @@ MASTER FIX:
       align-items:flex-start;
       flex-wrap:wrap;
       margin-top:10px;
+      cursor:pointer;
     }
     .item:hover{
       box-shadow: var(--shadow-soft);
       filter: brightness(1.02);
+    }
+    .item:focus{
+      outline: none;
+      box-shadow: var(--shadow-soft);
+      border-color: rgba(0,0,0,.22);
     }
     .item-title{ font-weight: 950; margin:0; }
     .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
@@ -184,23 +169,6 @@ MASTER FIX:
       margin-top:10px;
     }
 
-    .nodeBox{
-      margin-top:12px;
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      padding: 12px;
-      background:#fff;
-    }
-    .nodeBox .title{ font-weight: 900; margin:0 0 6px; }
-    .nodeBox .mutedline{ color: var(--muted); font-size:.95rem; margin:0; }
-    .nodeActions{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-      margin-top:10px;
-    }
-
     /* Modal */
     .modalOverlay{
       position:fixed;
@@ -270,6 +238,12 @@ MASTER FIX:
 
     .req{ color: rgba(17,17,17,.75); font-size:12px; margin-top:6px; }
     .modalMsg{ margin: 10px 0 0; }
+
+    .dangerBtn{
+      border:1px solid rgba(153,27,27,.28);
+      background: rgba(254,226,226,.75);
+    }
+    .dangerBtn:hover{ box-shadow: var(--shadow-soft); }
   </style>
 </head>
 
@@ -305,7 +279,7 @@ MASTER FIX:
 
     <div class="layout">
 
-      <!-- VÄNSTER: Actions (ACTIONS FLYTTADE HIT) -->
+      <!-- VÄNSTER -->
       <section class="panel create" aria-label="Skapa bolag och struktur">
         <div class="panel-title">Bolag & struktur</div>
 
@@ -347,39 +321,12 @@ MASTER FIX:
 
         <p id="msg" class="message" aria-live="polite"></p>
 
-        <!-- NYTT: Välj nod & actions (från höger) -->
-        <div class="nodeBox" aria-label="Hantera nod">
-          <p class="title">Hantera nod</p>
-          <p class="mutedline">Välj en nod för att redigera eller ta bort. (Actions finns inte längre i listan.)</p>
-
-          <div class="row2" style="margin-top:10px;">
-            <label>
-              Välj nod
-              <select id="nodePicker">
-                <option value="">— Välj —</option>
-              </select>
-            </label>
-
-            <label>
-              Info
-              <input id="nodeInfo" type="text" disabled value="—" />
-            </label>
-          </div>
-
-          <div class="nodeActions">
-            <button id="btnEditSelected" type="button" class="secondary" disabled>Redigera</button>
-            <button id="btnDeleteSelected" type="button" class="secondary" disabled>Ta bort</button>
-          </div>
-
-          <p class="smallnote" id="nodeHint">Tips: “Ta bort” stoppas om noden har barn eller ligger inom aktiv scope.</p>
-        </div>
-
         <div class="smallnote">
           Lagring: <code>AO-020_ORG_V1</code> (org-träd). Assignments läses (read-only) från <code>AO-020_ROLE_ASSIGNMENTS_V2</code>.
         </div>
       </section>
 
-      <!-- HÖGER: read-only lista -->
+      <!-- HÖGER -->
       <section class="panel list" aria-label="Org-träd">
         <div class="panel-title">Org-träd</div>
 
@@ -402,7 +349,7 @@ MASTER FIX:
         <div id="list" role="tree" aria-label="Org-träd"></div>
 
         <div class="smallnote">
-          Listan är read-only. Redigera/Ta bort görs i vänster panel via “Hantera nod”.
+          Tips: Klicka på en nod för att öppna. Åtgärder (redigera/ta bort) görs i modalerna till vänster (fail-closed).
         </div>
       </section>
 
@@ -416,7 +363,7 @@ MASTER FIX:
     <div class="modalHeader">
       <div>
         <p id="companyTitle" class="title">Bolagsprofil</p>
-        <p id="companyDesc" class="sub">Fyll i grunduppgifter för bolaget samt ett Strukturnamn.</p>
+        <p id="companyDesc" class="sub">Visa eller redigera grunduppgifter för bolaget samt Strukturnamn.</p>
       </div>
       <button type="button" class="iconBtn" id="btnCloseCompany" aria-label="Stäng">Stäng</button>
     </div>
@@ -465,7 +412,7 @@ MASTER FIX:
         <div class="row2">
           <label>
             Strukturnamn *
-            <input id="cStructureName" type="text" placeholder="t.ex. Jarbrant Strukturen" />
+            <input id="cStructureName" type="text" placeholder="t.ex. Cateringcare" />
           </label>
           <label>
             (Auto) Bolagsnod-ID
@@ -473,7 +420,7 @@ MASTER FIX:
           </label>
         </div>
         <p class="hint" style="margin:8px 0 0;">
-          Strukturnamn = namnet som beskriver hur verksamheten är uppdelad (t.ex. Bolag → Enhet → Team).
+          Strukturnamn = namnet på strukturen/instansen (t.ex. Cateringcare). Visas i UI och används som tydlig “trädrubrik”.
         </p>
       </div>
 
@@ -481,21 +428,21 @@ MASTER FIX:
     </div>
 
     <div class="modalFooter">
-      <!-- VIEW/EDIT footer buttons injected via JS -->
-      <button type="button" class="secondary" id="btnCompanyCancel">Avbryt</button>
-      <button type="button" class="secondary" id="btnCompanyEdit">Redigera</button>
-      <button type="button" id="btnCompanySave">Spara</button>
+      <button type="button" class="secondary" id="btnCancelCompany">Stäng</button>
+      <button type="button" class="secondary" id="btnEditCompany" style="display:none;">Redigera</button>
+      <button type="button" class="secondary dangerBtn" id="btnDeleteCompany" style="display:none;">Ta bort</button>
+      <button type="button" id="btnSaveCompany" style="display:none;" disabled>Spara</button>
     </div>
   </div>
 </div>
 
-<!-- MODAL: Skapa/Redigera Enhet -->
+<!-- MODAL: Enhet -->
 <div id="unitOverlay" class="modalOverlay" aria-hidden="true">
   <div class="modal" role="dialog" aria-modal="true" aria-labelledby="unitTitle" aria-describedby="unitDesc">
     <div class="modalHeader">
       <div>
         <p id="unitTitle" class="title">Enhet</p>
-        <p id="unitDesc" class="sub">Skapa eller redigera en enhet under bolaget.</p>
+        <p id="unitDesc" class="sub">Visa eller redigera en enhet under bolaget.</p>
       </div>
       <button type="button" class="iconBtn" id="btnCloseUnit" aria-label="Stäng">Stäng</button>
     </div>
@@ -532,8 +479,10 @@ MASTER FIX:
     </div>
 
     <div class="modalFooter">
-      <button type="button" class="secondary" id="btnCancelUnit">Avbryt</button>
-      <button type="button" id="btnSaveUnit">Spara</button>
+      <button type="button" class="secondary" id="btnCancelUnit">Stäng</button>
+      <button type="button" class="secondary" id="btnEditUnit" style="display:none;">Redigera</button>
+      <button type="button" class="secondary dangerBtn" id="btnDeleteUnit" style="display:none;">Ta bort</button>
+      <button type="button" id="btnSaveUnit" style="display:none;" disabled>Spara</button>
     </div>
   </div>
 </div>
@@ -963,14 +912,12 @@ MASTER FIX:
     if(t.toLowerCase() === "bolag") return node;
     return { ...node, type: "Bolag" };
   }
-
-  // STRICT: bolag = type Bolag. Ingen fallback till första root-barn.
-  function getBolagStrict(nodes){
-    return nodes.find(n => n.parentId === ROOT_ID && isBolagNode(n)) || null;
-  }
-
-  function countBolag(nodes){
-    return nodes.filter(n => n.parentId === ROOT_ID && isBolagNode(n)).length;
+  function getBolag(nodes){
+    const childBolag = nodes.find(n => n.parentId === ROOT_ID && isBolagNode(n));
+    if(childBolag) return childBolag;
+    // fallback för äldre data: första root-barn
+    const anyChild = nodes.find(n => n.parentId === ROOT_ID && n.id !== ROOT_ID);
+    return anyChild || null;
   }
 
   function validateEmail(s){
@@ -1033,36 +980,26 @@ MASTER FIX:
     }
   }
 
-  // ---------------------------
-  // Company modal (VIEW->EDIT + dirty-save)
-  // ---------------------------
-  const btnCompanyCancel = $("#btnCompanyCancel");
-  const btnCompanyEdit   = $("#btnCompanyEdit");
-  const btnCompanySave   = $("#btnCompanySave");
-
-  let companyMode = "view"; // view|edit
-  let companyExistingId = null; // null => create
-  let companySnapshot = null; // baseline for dirty check
-
-  function companyInputs(){
-    return [
-      $("#cName"),
-      $("#cOrgNo"),
-      $("#cEmail"),
-      $("#cContact"),
-      $("#cPhone"),
-      $("#cInvoiceEmail"),
-      $("#cStructureName")
-    ];
+  function setDisabledForInputs(selectors, disabled){
+    for(const sel of selectors){
+      const el = $(sel);
+      if(el) el.disabled = !!disabled;
+    }
   }
 
-  function setCompanyInputsDisabled(disabled){
-    companyInputs().forEach(inp => { if(inp) inp.disabled = !!disabled; });
-    // cNodeId alltid disabled
-    $("#cNodeId").disabled = true;
+  function shallowEq(a,b){
+    return String(a ?? "") === String(b ?? "");
   }
 
-  function readCompanyDraft(){
+  // ---------------------------
+  // Company modal (view/edit + dirty-guard)
+  // ---------------------------
+  let companyEditingMode = "view"; // view|edit|create
+  let companyExistingId = null;
+  let companyOriginal = null;
+  let companyDeleteBlocked = { blocked:true, reason:"" };
+
+  function readCompanyForm(){
     return {
       name: String($("#cName").value || "").trim(),
       orgNo: String($("#cOrgNo").value || "").trim(),
@@ -1074,64 +1011,68 @@ MASTER FIX:
     };
   }
 
-  function sameCompany(a, b){
-    const A = a || {};
-    const B = b || {};
-    const keys = ["name","orgNo","email","contact","phone","invoiceEmail","structureName"];
-    return keys.every(k => String(A[k]||"") === String(B[k]||""));
+  function computeCompanyDirty(){
+    if(companyEditingMode === "create") return true;
+    if(!companyOriginal) return false;
+    const cur = readCompanyForm();
+    return !(
+      shallowEq(cur.name, companyOriginal.name) &&
+      shallowEq(cur.orgNo, companyOriginal.orgNo) &&
+      shallowEq(cur.email, companyOriginal.email) &&
+      shallowEq(cur.contact, companyOriginal.contact) &&
+      shallowEq(cur.phone, companyOriginal.phone) &&
+      shallowEq(cur.invoiceEmail, companyOriginal.invoiceEmail) &&
+      shallowEq(cur.structureName, companyOriginal.structureName)
+    );
   }
 
-  function validateCompanyDraft(d){
-    const nameV = validateRequiredText(d.name, 80);
-    if(!nameV.ok) return { ok:false, msg:"Bolagsnamn krävs (max 80 tecken)." };
+  function syncCompanyButtons(){
+    const btnEdit = $("#btnEditCompany");
+    const btnSave = $("#btnSaveCompany");
+    const btnDel  = $("#btnDeleteCompany");
 
-    if(!validateOrgNo(d.orgNo)) return { ok:false, msg:"Organisationsnummer måste vara 10 siffror (med eller utan bindestreck)." };
-
-    if(!validateEmail(d.email)) return { ok:false, msg:"E-post är obligatorisk och måste vara giltig." };
-
-    if(d.invoiceEmail && !validateEmail(d.invoiceEmail)) return { ok:false, msg:"Faktura-e-post måste vara giltig (eller lämnas tom)." };
-
-    const sn = validateRequiredText(d.structureName, 80);
-    if(!sn.ok) return { ok:false, msg:"Strukturnamn krävs (max 80 tecken)." };
-
-    return { ok:true, msg:"" };
-  }
-
-  function updateCompanyFooter(){
-    const isCreate = !companyExistingId;
-    const draft = readCompanyDraft();
-    const valid = validateCompanyDraft(draft);
-    const dirty = companySnapshot ? !sameCompany(companySnapshot, draft) : false;
-
-    if(isCreate){
-      // Create: always edit mode behavior
-      companyMode = "edit";
-      setCompanyInputsDisabled(false);
-      btnCompanyEdit.style.display = "none";
-      btnCompanyCancel.style.display = "";
-      btnCompanySave.style.display = "";
-      btnCompanySave.disabled = !valid.ok; // create requires valid, dirty irrelevant
+    if(companyEditingMode === "create"){
+      if(btnEdit) btnEdit.style.display = "none";
+      if(btnDel) btnDel.style.display = "none";
+      if(btnSave){ btnSave.style.display = "inline-block"; btnSave.disabled = false; }
       return;
     }
 
-    if(companyMode === "view"){
-      setCompanyInputsDisabled(true);
-      btnCompanyEdit.style.display = "";
-      btnCompanyCancel.style.display = "none";
-      btnCompanySave.style.display = "none";
-      btnCompanySave.disabled = true;
+    // existing
+    if(btnEdit) btnEdit.style.display = "inline-block";
+    if(btnSave) btnSave.style.display = "inline-block";
+    if(btnDel)  btnDel.style.display = "inline-block";
+
+    if(companyEditingMode === "view"){
+      if(btnSave) btnSave.disabled = true;
+      if(btnEdit) btnEdit.disabled = false;
+      if(btnDel)  btnDel.disabled  = !!companyDeleteBlocked.blocked;
       return;
     }
 
-    // edit mode
-    setCompanyInputsDisabled(false);
-    btnCompanyEdit.style.display = "none";
-    btnCompanyCancel.style.display = "";
-    btnCompanySave.style.display = "";
-    btnCompanySave.disabled = !(dirty && valid.ok);
+    // edit
+    if(btnEdit) btnEdit.disabled = true;
+    if(btnDel)  btnDel.disabled  = true; // lås delete under edit för att undvika otydlighet
+    if(btnSave) btnSave.disabled = !computeCompanyDirty();
+  }
+
+  function setCompanyMode(mode){
+    companyEditingMode = mode;
+
+    const isEditable = (mode === "edit" || mode === "create");
+    setDisabledForInputs(
+      ["#cName","#cOrgNo","#cEmail","#cContact","#cPhone","#cInvoiceEmail","#cStructureName"],
+      !isEditable
+    );
+
+    syncCompanyButtons();
   }
 
   function clearCompanyForm(){
+    companyExistingId = null;
+    companyOriginal = null;
+    companyDeleteBlocked = { blocked:true, reason:"" };
+
     $("#cName").value = "";
     $("#cOrgNo").value = "";
     $("#cEmail").value = "";
@@ -1141,100 +1082,68 @@ MASTER FIX:
     $("#cStructureName").value = "";
     $("#cNodeId").value = "";
     setModalMsg("#companyMsg", "", "");
-    companyMode = "view";
-    companyExistingId = null;
-    companySnapshot = null;
-    updateCompanyFooter();
   }
 
-  function fillCompanyFormFromNode(node){
-    $("#cName").value = String(node?.name || "");
-    $("#cOrgNo").value = String(node?.companyOrgNo || "");
-    $("#cEmail").value = String(node?.companyEmail || "");
-    $("#cContact").value = String(node?.companyContact || "");
-    $("#cPhone").value = String(node?.companyPhone || "");
-    $("#cInvoiceEmail").value = String(node?.companyInvoiceEmail || "");
-    $("#cStructureName").value = String(node?.structureName || "");
-    $("#cNodeId").value = String(node?.id || "—");
-
-    companyExistingId = String(node?.id || "") || null;
-    companySnapshot = readCompanyDraft();
-  }
-
-  function openCompanyModal(nodes, bolagNode){
+  function openCompanyModal(nodes, bolagNode, guards){
     clearCompanyForm();
 
     const node = bolagNode ? ensureBolagType(bolagNode) : null;
 
+    const children = buildChildrenMap(nodes || []);
+    const kids = node ? (children.get(node.id) || []).length : 0;
+
+    // delete blocked rules (fail-closed):
+    // - root aldrig
+    // - block om har barn
+    // - block om within scope guards
+    // - block om global deleteLocked
     if(node){
-      fillCompanyFormFromNode(node);
-      companyMode = "view"; // existing opens in view
-      setModalMsg("#companyMsg","", "Bolagsprofil finns. Tryck Redigera för att ändra.");
+      companyExistingId = node.id;
+
+      $("#cName").value = node.name || "";
+      $("#cOrgNo").value = node.companyOrgNo || "";
+      $("#cEmail").value = node.companyEmail || "";
+      $("#cContact").value = node.companyContact || "";
+      $("#cPhone").value = node.companyPhone || "";
+      $("#cInvoiceEmail").value = node.companyInvoiceEmail || "";
+      $("#cStructureName").value = node.structureName || "";
+      $("#cNodeId").value = node.id || "";
+
+      companyOriginal = readCompanyForm();
+
+      const blocked =
+        !!guards?.deleteLocked ||
+        kids > 0 ||
+        !!guards?.blocked?.has?.(node.id) ||
+        node.id === ROOT_ID;
+
+      companyDeleteBlocked = blocked
+        ? { blocked:true, reason: (guards?.deleteLocked ? "Delete låst globalt." : (kids>0 ? "Har barn." : "Scope-skydd.")) }
+        : { blocked:false, reason:"" };
+
+      setCompanyMode("view");
+      setModalMsg("#companyMsg","", "Klicka Redigera för att ändra. Spara aktiveras endast om du ändrar något.");
     }else{
       $("#cNodeId").value = "skapas vid Spara";
-      companyMode = "edit"; // create
-      setModalMsg("#companyMsg","", "Skapa bolagsprofil. Fyll i obligatoriska fält och spara.");
+      // default Strukturnamn för ny (kan ändras)
+      $("#cStructureName").value = "Cateringcare";
+      companyOriginal = readCompanyForm();
+      setCompanyMode("create");
+      setModalMsg("#companyMsg","", "Skapa nytt bolag. Spara för att skapa.");
     }
 
-    updateCompanyFooter();
     openOverlay(companyOverlay);
   }
 
-  function closeCompanyModal(){
-    closeOverlay(companyOverlay);
-  }
-
-  function onCompanyInput(){
-    // live validate + dirty for save
-    if(companyExistingId && companyMode !== "edit") return;
-    const draft = readCompanyDraft();
-    const valid = validateCompanyDraft(draft);
-
-    if(!valid.ok){
-      setModalMsg("#companyMsg","err", valid.msg);
-    }else{
-      // only clear error if we previously showed one
-      setModalMsg("#companyMsg","", "");
-    }
-    updateCompanyFooter();
-  }
-
-  companyInputs().forEach(inp => {
-    if(!inp) return;
-    inp.addEventListener("input", onCompanyInput);
-    inp.addEventListener("change", onCompanyInput);
-  });
-
-  btnCompanyEdit.addEventListener("click", () => {
-    if(!companyExistingId) return; // create uses edit already
-    companyMode = "edit";
-    setModalMsg("#companyMsg","", "Redigeringsläge: Spara aktiveras först när du ändrat något och allt är giltigt.");
-    updateCompanyFooter();
-    try{ $("#cName").focus(); }catch{}
-  });
-
-  btnCompanyCancel.addEventListener("click", () => {
-    if(!companyExistingId){
-      // create: cancel = close
-      closeCompanyModal();
-      return;
-    }
-    // edit: revert to snapshot and back to view
-    if(companySnapshot){
-      $("#cName").value = companySnapshot.name || "";
-      $("#cOrgNo").value = companySnapshot.orgNo || "";
-      $("#cEmail").value = companySnapshot.email || "";
-      $("#cContact").value = companySnapshot.contact || "";
-      $("#cPhone").value = companySnapshot.phone || "";
-      $("#cInvoiceEmail").value = companySnapshot.invoiceEmail || "";
-      $("#cStructureName").value = companySnapshot.structureName || "";
-    }
-    companyMode = "view";
-    setModalMsg("#companyMsg","", "Ändringar återställda.");
-    updateCompanyFooter();
-  });
+  function closeCompanyModal(){ closeOverlay(companyOverlay); }
 
   function saveCompany(){
+    // Fail-closed: kräver edit/create-läge
+    if(companyEditingMode !== "edit" && companyEditingMode !== "create"){
+      setModalMsg("#companyMsg","err","Du måste klicka Redigera först.");
+      return;
+    }
+
     bootstrapRootIfMissing();
 
     const raw = safeParseLocal(ORG_KEY, []);
@@ -1244,37 +1153,31 @@ MASTER FIX:
       return;
     }
 
-    // Extra fail-closed: exakt 1 bolag
-    const bolagCount = countBolag(v.nodes);
-    if(companyExistingId && bolagCount > 1){
-      setModalMsg("#companyMsg","err","Sparande stoppas (fail-closed): flera bolag hittades i data. Reparera/manuellt åtgärda först.");
-      return;
-    }
-
-    const draft = readCompanyDraft();
-    const valid = validateCompanyDraft(draft);
-    if(!valid.ok){
-      setModalMsg("#companyMsg","err", valid.msg);
-      updateCompanyFooter();
-      return;
-    }
-
     const nodes = v.nodes.slice();
+
+    const nameV = validateRequiredText($("#cName").value, 80);
+    if(!nameV.ok){ setModalMsg("#companyMsg","err","Bolagsnamn krävs (max 80 tecken)."); return; }
+
+    const orgNo = String($("#cOrgNo").value || "").trim();
+    if(!validateOrgNo(orgNo)){ setModalMsg("#companyMsg","err","Organisationsnummer måste vara 10 siffror (med eller utan bindestreck)."); return; }
+
+    const email = String($("#cEmail").value || "").trim();
+    if(!validateEmail(email)){ setModalMsg("#companyMsg","err","E-post är obligatorisk och måste vara giltig."); return; }
+
+    const invoiceEmail = String($("#cInvoiceEmail").value || "").trim();
+    if(invoiceEmail && !validateEmail(invoiceEmail)){ setModalMsg("#companyMsg","err","Faktura-e-post måste vara giltig (eller lämnas tom)."); return; }
+
+    const structureNameV = validateRequiredText($("#cStructureName").value, 80);
+    if(!structureNameV.ok){ setModalMsg("#companyMsg","err","Strukturnamn krävs (max 80 tecken)."); return; }
+
+    const contact = String($("#cContact").value || "").trim();
+    const phone = String($("#cPhone").value || "").trim();
     const now = Date.now();
 
-    // Update existing
-    if(companyExistingId){
-      if(companyMode !== "edit"){
-        setModalMsg("#companyMsg","err","Tryck Redigera först.");
-        return;
-      }
-      if(companySnapshot && sameCompany(companySnapshot, draft)){
-        setModalMsg("#companyMsg","", "Inga ändringar att spara.");
-        updateCompanyFooter();
-        return;
-      }
+    const existing = getBolag(nodes);
 
-      const idx = nodes.findIndex(n => n.id === companyExistingId);
+    if(existing){
+      const idx = nodes.findIndex(n => n.id === existing.id);
       if(idx < 0){
         setModalMsg("#companyMsg","err","Kunde inte hitta bolagsnod för uppdatering.");
         return;
@@ -1283,18 +1186,17 @@ MASTER FIX:
       const cur = ensureBolagType(nodes[idx]);
       const next = normalizeNode({
         ...cur,
-        name: draft.name,
+        name: nameV.val,
         type: "Bolag",
         parentId: ROOT_ID,
-        companyOrgNo: draft.orgNo,
-        companyEmail: draft.email,
-        companyContact: draft.contact,
-        companyPhone: draft.phone,
-        companyInvoiceEmail: draft.invoiceEmail,
-        structureName: draft.structureName,
+        companyOrgNo: orgNo,
+        companyEmail: email,
+        companyContact: contact,
+        companyPhone: phone,
+        companyInvoiceEmail: invoiceEmail,
+        structureName: structureNameV.val,
         updatedAt: now
       });
-
       if(!next){
         setModalMsg("#companyMsg","err","Kunde inte spara (ogiltig data).");
         return;
@@ -1303,35 +1205,32 @@ MASTER FIX:
       nodes[idx] = next;
       saveLocal(ORG_KEY, nodes);
 
-      // back to view w/ updated snapshot
-      fillCompanyFormFromNode(next);
-      companyMode = "view";
+      $("#cNodeId").value = next.id;
+      companyExistingId = next.id;
+      companyOriginal = readCompanyForm();
+
+      setCompanyMode("view");
       setModalMsg("#companyMsg","ok","Bolagsprofil uppdaterad.");
       setMsg("ok","Bolagsprofil sparad.");
-      renderAll();
+      renderList();
       return;
     }
 
-    // Create new bolag (fail-closed: tillåt inte skapa om bolag redan finns)
-    if(bolagCount >= 1){
-      setModalMsg("#companyMsg","err","Bolag finns redan. Använd Redigera istället.");
-      return;
-    }
-
+    // Skapa ny bolagsnod som root-barn
     const id = genId("org");
     const newNode = normalizeNode({
       id,
-      name: draft.name,
+      name: nameV.val,
       type: "Bolag",
       parentId: ROOT_ID,
       createdAt: now,
       updatedAt: now,
-      companyOrgNo: draft.orgNo,
-      companyEmail: draft.email,
-      companyContact: draft.contact,
-      companyPhone: draft.phone,
-      companyInvoiceEmail: draft.invoiceEmail,
-      structureName: draft.structureName
+      companyOrgNo: orgNo,
+      companyEmail: email,
+      companyContact: contact,
+      companyPhone: phone,
+      companyInvoiceEmail: invoiceEmail,
+      structureName: structureNameV.val
     });
 
     if(!newNode){
@@ -1342,38 +1241,157 @@ MASTER FIX:
     nodes.push(newNode);
     saveLocal(ORG_KEY, nodes);
 
-    fillCompanyFormFromNode(newNode);
-    companyMode = "view";
+    $("#cNodeId").value = newNode.id;
+
+    companyExistingId = newNode.id;
+    companyOriginal = readCompanyForm();
+    setCompanyMode("view");
+
     setModalMsg("#companyMsg","ok","Bolag skapat och sparat.");
     setMsg("ok","Bolag skapat.");
-    renderAll();
+    renderList();
   }
 
-  $("#btnCompanySave").addEventListener("click", saveCompany);
+  function deleteCompany(){
+    bootstrapRootIfMissing();
+
+    const raw = safeParseLocal(ORG_KEY, []);
+    const v = validateStrict(raw);
+    if(v.criticalLock){
+      setModalMsg("#companyMsg","err","Radering stoppas (fail-closed): kritiskt datafel. Kör Reparera först.");
+      return;
+    }
+
+    const nodes = v.nodes.slice();
+    const assignments = loadAssignmentsV2();
+    const scopeIds = extractScopeIds(assignments);
+    const guards = computeDeleteGuards(nodes, scopeIds);
+
+    const bolag = ensureBolagType(getBolag(nodes));
+    if(!bolag){
+      setModalMsg("#companyMsg","err","Inget bolag att ta bort.");
+      return;
+    }
+
+    const children = buildChildrenMap(nodes);
+    const kids = (children.get(bolag.id) || []).length;
+
+    const deleteBlocked =
+      !!guards.deleteLocked ||
+      bolag.id === ROOT_ID ||
+      kids > 0 ||
+      guards.blocked.has(bolag.id);
+
+    if(deleteBlocked){
+      setModalMsg("#companyMsg","err","Radering stoppas (fail-closed): bolaget har barn eller scope-skydd eller delete är låst.");
+      return;
+    }
+
+    if(!confirm(`Ta bort bolaget "${bolag.name}"?`)) return;
+
+    const next = nodes.filter(x => x.id !== bolag.id);
+    saveLocal(ORG_KEY, next);
+
+    setModalMsg("#companyMsg","ok","Bolag borttaget.");
+    setMsg("ok","Bolag borttaget.");
+    closeCompanyModal();
+    renderList();
+  }
+
+  // Input listeners for dirty-guard
+  ["#cName","#cOrgNo","#cEmail","#cContact","#cPhone","#cInvoiceEmail","#cStructureName"].forEach(sel => {
+    const el = $(sel);
+    if(el){
+      el.addEventListener("input", () => {
+        if(companyEditingMode === "edit"){
+          syncCompanyButtons();
+        }
+      });
+    }
+  });
 
   // ---------------------------
-  // Unit modal (create/edit)
+  // Unit modal (view/edit + dirty-guard)
   // ---------------------------
   let unitEditingId = null;
+  let unitEditingMode = "view"; // view|edit|create
+  let unitOriginal = null;
+  let unitDeleteBlocked = { blocked:true, reason:"" };
+
+  function readUnitForm(){
+    return {
+      name: String($("#uName").value || "").trim(),
+      parentId: String($("#uParent").value || "").trim()
+    };
+  }
+
+  function computeUnitDirty(){
+    if(unitEditingMode === "create") return true;
+    if(!unitOriginal) return false;
+    const cur = readUnitForm();
+    return !(shallowEq(cur.name, unitOriginal.name) && shallowEq(cur.parentId, unitOriginal.parentId));
+  }
+
+  function syncUnitButtons(){
+    const btnEdit = $("#btnEditUnit");
+    const btnSave = $("#btnSaveUnit");
+    const btnDel  = $("#btnDeleteUnit");
+
+    if(unitEditingMode === "create"){
+      if(btnEdit) btnEdit.style.display = "none";
+      if(btnDel)  btnDel.style.display = "none";
+      if(btnSave){ btnSave.style.display = "inline-block"; btnSave.disabled = false; }
+      return;
+    }
+
+    if(btnEdit) btnEdit.style.display = "inline-block";
+    if(btnSave) btnSave.style.display = "inline-block";
+    if(btnDel)  btnDel.style.display = "inline-block";
+
+    if(unitEditingMode === "view"){
+      if(btnSave) btnSave.disabled = true;
+      if(btnEdit) btnEdit.disabled = false;
+      if(btnDel)  btnDel.disabled  = !!unitDeleteBlocked.blocked;
+      return;
+    }
+
+    // edit
+    if(btnEdit) btnEdit.disabled = true;
+    if(btnDel)  btnDel.disabled  = true;
+    if(btnSave) btnSave.disabled = !computeUnitDirty();
+  }
+
+  function setUnitMode(mode){
+    unitEditingMode = mode;
+
+    const isEditable = (mode === "edit" || mode === "create");
+    setDisabledForInputs(["#uName","#uParent"], !isEditable);
+
+    syncUnitButtons();
+  }
 
   function clearUnitForm(){
     unitEditingId = null;
+    unitOriginal = null;
+    unitDeleteBlocked = { blocked:true, reason:"" };
+
     $("#uName").value = "";
     $("#uId").value = "";
     setModalMsg("#unitMsg", "", "");
   }
 
-  function openUnitModal(nodes, bolagNode, nodeToEdit){
+  function openUnitModal(nodes, bolagNode, nodeToEdit, guards){
     clearUnitForm();
 
     const bolag = ensureBolagType(bolagNode);
     if(!bolag){
       setModalMsg("#unitMsg","err","Skapa bolag först.");
       openOverlay(unitOverlay);
+      setUnitMode("view");
       return;
     }
 
-    // parent dropdown: endast bolag (fail-safe, enkelhet)
+    // parent dropdown: endast bolag (fail-safe)
     const sel = $("#uParent");
     sel.innerHTML = "";
     const opt = document.createElement("option");
@@ -1381,13 +1399,34 @@ MASTER FIX:
     opt.textContent = bolag.name + " • Bolag";
     sel.appendChild(opt);
 
+    const children = buildChildrenMap(nodes || []);
+
     if(nodeToEdit){
       unitEditingId = nodeToEdit.id;
       $("#uName").value = String(nodeToEdit.name || "");
       $("#uId").value = String(nodeToEdit.id || "");
-      setModalMsg("#unitMsg","", "Redigerar enhet.");
+      sel.value = bolag.id;
+
+      unitOriginal = readUnitForm();
+
+      const kids = (children.get(nodeToEdit.id) || []).length;
+      const blocked =
+        !!guards?.deleteLocked ||
+        nodeToEdit.id === ROOT_ID ||
+        kids > 0 ||
+        !!guards?.blocked?.has?.(nodeToEdit.id);
+
+      unitDeleteBlocked = blocked
+        ? { blocked:true, reason: (guards?.deleteLocked ? "Delete låst globalt." : (kids>0 ? "Har barn." : "Scope-skydd.")) }
+        : { blocked:false, reason:"" };
+
+      setUnitMode("view");
+      setModalMsg("#unitMsg","", "Klicka Redigera för att ändra. Spara aktiveras endast om du ändrar något.");
     }else{
       $("#uId").value = "skapas vid Spara";
+      unitOriginal = readUnitForm();
+      setUnitMode("create");
+      setModalMsg("#unitMsg","", "Skapa ny enhet. Spara för att skapa.");
     }
 
     openOverlay(unitOverlay);
@@ -1396,6 +1435,12 @@ MASTER FIX:
   function closeUnitModal(){ closeOverlay(unitOverlay); }
 
   function saveUnit(){
+    // Fail-closed: kräver edit/create-läge
+    if(unitEditingMode !== "edit" && unitEditingMode !== "create"){
+      setModalMsg("#unitMsg","err","Du måste klicka Redigera först.");
+      return;
+    }
+
     bootstrapRootIfMissing();
 
     const raw = safeParseLocal(ORG_KEY, []);
@@ -1406,7 +1451,7 @@ MASTER FIX:
     }
 
     const nodes = v.nodes.slice();
-    const bolag = ensureBolagType(getBolagStrict(nodes));
+    const bolag = ensureBolagType(getBolag(nodes));
     if(!bolag){
       setModalMsg("#unitMsg","err","Skapa bolag först.");
       return;
@@ -1426,7 +1471,7 @@ MASTER FIX:
       if(idx < 0){
         setModalMsg("#unitMsg","err","Enheten hittades inte (kan vara borttagen).");
         unitEditingId = null;
-        renderAll();
+        renderList();
         return;
       }
 
@@ -1448,9 +1493,12 @@ MASTER FIX:
       saveLocal(ORG_KEY, nodes);
 
       $("#uId").value = next.id;
+      unitOriginal = readUnitForm();
+
+      setUnitMode("view");
       setModalMsg("#unitMsg","ok","Enhet uppdaterad.");
       setMsg("ok","Enhet uppdaterad.");
-      renderAll();
+      renderList();
       return;
     }
 
@@ -1474,12 +1522,92 @@ MASTER FIX:
     saveLocal(ORG_KEY, nodes);
 
     $("#uId").value = newNode.id;
-    setModalMsg("#unitMsg","ok","Enhet skapad. Du kan skapa fler direkt.");
+
+    unitEditingId = newNode.id;
+    unitOriginal = readUnitForm();
+    setUnitMode("view");
+
+    setModalMsg("#unitMsg","ok","Enhet skapad.");
     setMsg("ok","Enhet skapad.");
-    $("#uName").value = "";
-    try{ $("#uName").focus(); }catch{}
-    renderAll();
+    renderList();
   }
+
+  function deleteUnit(){
+    bootstrapRootIfMissing();
+
+    const raw = safeParseLocal(ORG_KEY, []);
+    const v = validateStrict(raw);
+    if(v.criticalLock){
+      setModalMsg("#unitMsg","err","Radering stoppas (fail-closed): kritiskt datafel. Kör Reparera först.");
+      return;
+    }
+
+    const nodes = v.nodes.slice();
+    const assignments = loadAssignmentsV2();
+    const scopeIds = extractScopeIds(assignments);
+    const guards = computeDeleteGuards(nodes, scopeIds);
+
+    if(!unitEditingId){
+      setModalMsg("#unitMsg","err","Ingen enhet vald för radering.");
+      return;
+    }
+
+    const node = nodes.find(x => x.id === unitEditingId);
+    if(!node){
+      setModalMsg("#unitMsg","err","Enheten hittades inte (kan vara borttagen).");
+      closeUnitModal();
+      renderList();
+      return;
+    }
+
+    if(node.id === ROOT_ID){
+      setModalMsg("#unitMsg","err","Root kan inte tas bort.");
+      return;
+    }
+
+    if(guards.deleteLocked){
+      setModalMsg("#unitMsg","err","Radering stoppas (fail-closed): ogiltiga scopes i assignments. Skapa saknad nod eller rätta assignments.");
+      return;
+    }
+
+    const children = buildChildrenMap(nodes);
+    const kids = (children.get(node.id) || []).length;
+    if(kids > 0){
+      setModalMsg("#unitMsg","err","Noden har barn. Flytta/ta bort barn först.");
+      return;
+    }
+
+    if(guards.blocked.has(node.id)){
+      setModalMsg("#unitMsg","err","Radering stoppas: noden ligger inom en aktiv scope (subtree-skydd). Ändra assignments först.");
+      return;
+    }
+
+    if(!confirm(`Ta bort enhet "${node.name}"?`)) return;
+
+    const next = nodes.filter(x => x.id !== node.id);
+    saveLocal(ORG_KEY, next);
+
+    setModalMsg("#unitMsg","ok","Enhet borttagen.");
+    setMsg("ok","Enhet borttagen.");
+    closeUnitModal();
+    renderList();
+  }
+
+  ["#uName","#uParent"].forEach(sel => {
+    const el = $(sel);
+    if(el){
+      el.addEventListener("input", () => {
+        if(unitEditingMode === "edit"){
+          syncUnitButtons();
+        }
+      });
+      el.addEventListener("change", () => {
+        if(unitEditingMode === "edit"){
+          syncUnitButtons();
+        }
+      });
+    }
+  });
 
   // ---------------------------
   // UI: Health / locks / KPIs
@@ -1496,13 +1624,6 @@ MASTER FIX:
       issues.push(`Assignments pekar på scopeId som saknas i org: ${guards.invalidScopes.join(", ")}. Delete är låst (fail-closed) tills noder skapas eller scopes rättas.`);
     }
 
-    // Bolag-count health
-    const bolagCount = countBolag(v.nodes || []);
-    if(bolagCount > 1){
-      showHealth = true;
-      issues.push("Flera bolag hittades (exakt 1 krävs). Åtgärder kan låsas (fail-closed) tills data korrigeras.");
-    }
-
     if(!showHealth){
       healthBox.style.display = "none";
     }else{
@@ -1513,14 +1634,9 @@ MASTER FIX:
     const btnOpenCompany = $("#btnOpenCompany");
     const btnCreateUnit = $("#btnCreateUnit");
 
-    const critical = !!v?.criticalLock;
-    const hardBolagLock = bolagCount > 1;
-
-    if(critical || hardBolagLock){
+    if(v?.criticalLock){
       lockBox.style.display = "block";
-      $("#lockText").textContent = critical
-        ? "Kritiskt fel i org-data. Skapande/sparande är låst tills du kör Reparera."
-        : "Flera bolag hittades. Åtgärder låses (fail-closed) tills data korrigeras.";
+      $("#lockText").textContent = "Kritiskt fel i org-data. Skapande/sparande är låst tills du kör Reparera.";
       if(btnOpenCompany) btnOpenCompany.disabled = true;
       if(btnCreateUnit) btnCreateUnit.disabled = true;
     }else{
@@ -1532,7 +1648,7 @@ MASTER FIX:
         $("#lockText").textContent = "—";
       }
       if(btnOpenCompany) btnOpenCompany.disabled = false;
-      // btnCreateUnit sätts även av bolags-guard i renderAll()
+      // btnCreateUnit sätts även av bolags-guard i renderList()
     }
   }
 
@@ -1544,7 +1660,7 @@ MASTER FIX:
     if(!confirm("Reparera org-data? (1 root + bryt loopar + återställ orphans till root)")) return;
     repairOrg();
     setMsg("ok", "Reparerat och sparat org-data.");
-    renderAll();
+    renderList();
   });
 
   function updateKpis(nodes){
@@ -1558,221 +1674,38 @@ MASTER FIX:
   }
 
   // ---------------------------
-  // Node picker + actions (vänster)
+  // LIST RENDER
   // ---------------------------
-  let lastComputed = {
-    v: null,
-    nodes: [],
-    guards: null,
-    children: null,
-    byId: null,
-    bolag: null
-  };
-
-  function prettyInfo(n, kids){
-    if(!n) return "—";
-    const t = String(n.type || "—");
-    const id = String(n.id || "—");
-    const k = Number.isFinite(kids) ? kids : 0;
-    return `${t} • Barn ${k} • ${id}`;
-  }
-
-  function populateNodePicker(nodes){
-    const sel = $("#nodePicker");
-    if(!sel) return;
-
-    const current = String(sel.value || "");
-    sel.innerHTML = "";
-    const def = document.createElement("option");
-    def.value = "";
-    def.textContent = "— Välj —";
-    sel.appendChild(def);
-
-    const sorted = nodes.slice()
-      .filter(n => n.id !== ROOT_ID) // root hanteras ej via UI
-      .sort((a,b) => (a.name||"").localeCompare((b.name||""), "sv"));
-
-    for(const n of sorted){
-      const opt = document.createElement("option");
-      opt.value = n.id;
-      opt.textContent = `${n.name} • ${n.type || "—"} • ${n.id}`;
-      sel.appendChild(opt);
-    }
-
-    // restore selection if possible
-    if(current && sorted.some(n => n.id === current)){
-      sel.value = current;
-    }else{
-      sel.value = "";
-      $("#nodeInfo").value = "—";
-      $("#btnEditSelected").disabled = true;
-      $("#btnDeleteSelected").disabled = true;
-    }
-  }
-
-  function updateSelectedNodeUI(){
-    const sel = $("#nodePicker");
-    const id = String(sel.value || "").trim();
-    const btnEdit = $("#btnEditSelected");
-    const btnDel = $("#btnDeleteSelected");
-    const info = $("#nodeInfo");
-    const hint = $("#nodeHint");
-
-    const v = lastComputed.v;
-    const nodes = lastComputed.nodes;
-    const guards = lastComputed.guards;
-    const children = lastComputed.children;
-    const byId = lastComputed.byId;
-    const bolag = lastComputed.bolag;
-
-    const criticalLocked = !!(v && v.criticalLock);
-    const hardBolagLock = countBolag(nodes) > 1;
-
-    if(!id || !byId || !byId.has(id)){
-      if(info) info.value = "—";
-      if(btnEdit) btnEdit.disabled = true;
-      if(btnDel) btnDel.disabled = true;
-      if(hint) hint.textContent = "Tips: “Ta bort” stoppas om noden har barn eller ligger inom aktiv scope.";
-      return;
-    }
-
-    const node = byId.get(id);
-    const kids = (children.get(id) || []).length;
-
-    if(info) info.value = prettyInfo(node, kids);
-
-    const deleteBlocked =
-      criticalLocked ||
-      hardBolagLock ||
-      guards.deleteLocked ||
-      (kids > 0) ||
-      guards.blocked.has(id) ||
-      id === ROOT_ID;
-
-    // Edit rules:
-    // - Bolag => edit via company modal
-    // - Enhet => edit via unit modal
-    // - Other types => disable (för nu)
-    const canEdit =
-      !criticalLocked &&
-      !hardBolagLock &&
-      (isBolagNode(node) || isEnhetNode(node));
-
-    if(btnEdit) btnEdit.disabled = !canEdit;
-
-    // Delete rules:
-    // - follow guards
-    if(btnDel) btnDel.disabled = !!deleteBlocked;
-
-    if(hint){
-      if(criticalLocked) hint.textContent = "Actions låsta: kritiskt datafel. Kör Reparera först.";
-      else if(hardBolagLock) hint.textContent = "Actions låsta: flera bolag hittades. Åtgärda data först.";
-      else if(guards.deleteLocked) hint.textContent = "Radering låst (fail-closed): ogiltiga scopes i assignments.";
-      else if(kids > 0) hint.textContent = "Radering stoppas: noden har barn.";
-      else if(guards.blocked.has(id)) hint.textContent = "Radering stoppas: noden ligger inom en aktiv scope (subtree-skydd).";
-      else hint.textContent = "OK: Du kan redigera/ta bort enligt reglerna.";
-    }
-  }
-
-  $("#nodePicker").addEventListener("change", updateSelectedNodeUI);
-
-  $("#btnEditSelected").addEventListener("click", () => {
-    const id = String($("#nodePicker").value || "").trim();
-    if(!id) return;
-
-    const v = lastComputed.v;
-    if(v && v.criticalLock) return;
-
-    const nodes = lastComputed.nodes;
-    const byId = lastComputed.byId;
-    const bolag = lastComputed.bolag;
-    const hardBolagLock = countBolag(nodes) > 1;
-    if(hardBolagLock) return;
-
-    const node = byId.get(id);
-    if(!node) return;
-
-    if(isBolagNode(node)){
-      openCompanyModal(nodes, ensureBolagType(node));
-      return;
-    }
-    if(isEnhetNode(node)){
-      openUnitModal(nodes, bolag, node);
-      return;
-    }
-
-    setMsg("", "Redigering för denna nodtyp tas i nästa steg. (Bolag/Enhet hanteras via modalerna.)");
-  });
-
-  $("#btnDeleteSelected").addEventListener("click", () => {
-    const id = String($("#nodePicker").value || "").trim();
-    if(!id) return;
-
-    const v = lastComputed.v;
-    const nodes = lastComputed.nodes;
-    const guards = lastComputed.guards;
-    const children = lastComputed.children;
-    const byId = lastComputed.byId;
-
-    const criticalLocked = !!(v && v.criticalLock);
-    const hardBolagLock = countBolag(nodes) > 1;
-
-    if(criticalLocked){
-      setMsg("err", "Radering stoppas (fail-closed): kritiskt datafel. Kör Reparera först.");
-      return;
-    }
-    if(hardBolagLock){
-      setMsg("err", "Radering stoppas (fail-closed): flera bolag hittades. Åtgärda data först.");
-      return;
-    }
-    if(guards.deleteLocked){
-      setMsg("err", "Radering stoppas (fail-closed): ogiltiga scopes i assignments. Skapa saknad nod eller rätta assignments.");
-      return;
-    }
-
-    const node = byId.get(id);
-    if(!node){
-      setMsg("err","Noden hittades inte.");
-      return;
-    }
-
-    if(id === ROOT_ID){
-      setMsg("err", "Root kan inte tas bort.");
-      return;
-    }
-
-    const kids = (children.get(id) || []).length;
-    if(kids > 0){
-      setMsg("err", "Noden har barn. Flytta/ta bort barn först.");
-      return;
-    }
-
-    if(guards.blocked.has(id)){
-      setMsg("err", "Radering stoppas: noden ligger inom en aktiv scope (subtree-skydd). Ändra assignments först.");
-      return;
-    }
-
-    if(!confirm(`Ta bort nod "${node.name}"?`)) return;
-
-    const next = nodes.filter(x => x.id !== id);
-    saveLocal(ORG_KEY, next);
-
-    // reset selection
-    $("#nodePicker").value = "";
-    $("#nodeInfo").value = "—";
-    $("#btnEditSelected").disabled = true;
-    $("#btnDeleteSelected").disabled = true;
-
-    setMsg("ok", "Nod borttagen.");
-    renderAll();
-  });
-
-  // ---------------------------
-  // LIST RENDER (HÖGERDELEN: nu read-only)
-  // ---------------------------
-  function renderListReadOnly(nodes, v, guards){
+  function renderList(){
     const list = $("#list");
     list.innerHTML = "";
+
+    bootstrapRootIfMissing();
+
+    const raw = safeParseLocal(ORG_KEY, []);
+    const v = validateStrict(raw);
+
+    const assignments = loadAssignmentsV2();
+    const scopeIds = extractScopeIds(assignments);
+    const guards = computeDeleteGuards(v.nodes, scopeIds);
+
+    renderHealthAndLocks(v, guards);
+
+    const nodes = v.nodes;
+    updateKpis(nodes);
+
+    // Bolag-guard: Enhet-knapp får ej användas innan bolag finns
+    const bolag = ensureBolagType(getBolag(nodes));
+    const btnCreateUnit = $("#btnCreateUnit");
+    const btnOpenCompany = $("#btnOpenCompany");
+    if(btnCreateUnit){
+      const disable = !!v.criticalLock || !bolag;
+      btnCreateUnit.disabled = disable;
+      btnCreateUnit.title = disable ? (v.criticalLock ? "Åtgärder låsta (kör Reparera)." : "Skapa bolag först.") : "";
+    }
+    if(btnOpenCompany){
+      btnOpenCompany.title = v.criticalLock ? "Åtgärder låsta (kör Reparera)." : "";
+    }
 
     const flat = flattenTree(nodes);
     const q = String($("#search").value || "").trim().toLowerCase();
@@ -1802,92 +1735,109 @@ MASTER FIX:
     }
 
     const criticalLocked = !!v.criticalLock;
-    const hardBolagLock = countBolag(nodes) > 1;
+
+    // Root UI-label: visa bolagsnamn om bolag finns (utan att ändra root i storage)
+    const rootDisplayName = (bolag && String(bolag.name || "").trim())
+      ? String(bolag.name).trim()
+      : "Koncern (Root)";
 
     rows.forEach(r => {
       const isRoot = (r.id === ROOT_ID);
       const kids = childCount(r.id);
 
+      const deleteBlocked =
+        criticalLocked ||
+        guards.deleteLocked ||
+        isRoot ||
+        (kids > 0) ||
+        guards.blocked.has(r.id);
+
       const indentPx = Math.min((r.depth - 1) * 14, 140);
+
+      const shownName = isRoot ? rootDisplayName : (r.name || "—");
 
       const el = document.createElement("div");
       el.className = "item";
       el.setAttribute("role", "treeitem");
       el.setAttribute("aria-level", String(r.depth));
+      el.setAttribute("tabindex", "0");
+      el.setAttribute("data-open", escapeHtml(r.id));
+      el.setAttribute("aria-label", `${shownName} ${r.type || ""} (öppna)`);
 
-      // Read-only row: name + pills only
       el.innerHTML = `
         <div class="treeName">
           <span aria-hidden="true" style="display:inline-block;width:${indentPx}px;"></span>
           <div>
-            <p class="item-title">${escapeHtml(r.name || "—")}</p>
+            <p class="item-title">${escapeHtml(shownName)}</p>
             <div class="meta">
               <span class="pill">ID: ${escapeHtml(r.id)}</span>
               ${r.type ? `<span class="pill">${escapeHtml(r.type)}</span>` : ``}
               <span class="pill">Barn: ${kids}</span>
-              ${isRoot ? `<span class="pill">Root</span>` : ``}
-              ${criticalLocked ? `<span class="pill warnpill">Actions låsta</span>` : ``}
-              ${hardBolagLock ? `<span class="pill warnpill">Flera bolag</span>` : ``}
+              ${criticalLocked ? `<span class="pill warnpill">Actions låsta</span>` : `<span class="pill okpill">OK</span>`}
               ${guards.deleteLocked ? `<span class="pill warnpill">Delete låst</span>` : ``}
               ${(!isRoot && guards.blocked.has(r.id)) ? `<span class="pill warnpill">Scope-skydd</span>` : ``}
+              ${isRoot ? `<span class="pill">Root</span>` : ``}
+              ${deleteBlocked && !isRoot ? `<span class="pill warnpill">Delete spärr</span>` : ``}
             </div>
           </div>
+        </div>
+
+        <div class="row" style="gap:8px;">
+          <span class="muted" style="font-size:.92rem;">Öppna</span>
         </div>
       `;
       list.appendChild(el);
     });
-  }
 
-  // ---------------------------
-  // Main render: compute everything once
-  // ---------------------------
-  function renderAll(){
-    bootstrapRootIfMissing();
+    function openNodeById(id){
+      if(criticalLocked){
+        setMsg("err","Åtgärder stoppas (fail-closed): kritiskt datafel. Kör Reparera först.");
+        return;
+      }
 
-    const raw = safeParseLocal(ORG_KEY, []);
-    const v = validateStrict(raw);
+      const node = nodes.find(x => x.id === id);
+      if(!node){
+        setMsg("err","Noden hittades inte (kan vara borttagen).");
+        renderList();
+        return;
+      }
 
-    const assignments = loadAssignmentsV2();
-    const scopeIds = extractScopeIds(assignments);
-    const guards = computeDeleteGuards(v.nodes, scopeIds);
+      const curBolag = ensureBolagType(getBolag(nodes));
 
-    renderHealthAndLocks(v, guards);
+      if(id === ROOT_ID){
+        // Root öppnar bolagsmodal (om bolag finns), annars skapa bolag
+        openCompanyModal(nodes, curBolag, guards);
+        return;
+      }
 
-    const nodes = v.nodes;
-    updateKpis(nodes);
+      // Bolag öppnar bolagsmodal
+      if(curBolag && node.id === curBolag.id){
+        openCompanyModal(nodes, curBolag, guards);
+        return;
+      }
 
-    // Strict bolag + guard for Create Unit button
-    const bolag = ensureBolagType(getBolagStrict(nodes));
-    const btnCreateUnit = $("#btnCreateUnit");
-    const btnOpenCompany = $("#btnOpenCompany");
+      // Enhet öppnar enhetsmodal
+      if(isEnhetNode(node)){
+        openUnitModal(nodes, curBolag, node, guards);
+        return;
+      }
 
-    const hardBolagLock = countBolag(nodes) > 1;
-
-    if(btnCreateUnit){
-      const disable = !!v.criticalLock || hardBolagLock || !bolag;
-      btnCreateUnit.disabled = disable;
-      btnCreateUnit.title = disable
-        ? (v.criticalLock ? "Åtgärder låsta (kör Reparera)." : (hardBolagLock ? "Flera bolag hittades." : "Skapa bolag först."))
-        : "";
+      setMsg("", "Denna nodtyp hanteras inte här ännu. (Bolag/Enhet hanteras via modalerna.)");
     }
-    if(btnOpenCompany){
-      btnOpenCompany.title = (v.criticalLock || hardBolagLock) ? "Åtgärder låsta (fail-closed)." : "";
-    }
 
-    // Save computed for picker actions
-    lastComputed.v = v;
-    lastComputed.nodes = nodes;
-    lastComputed.guards = guards;
-    lastComputed.children = buildChildrenMap(nodes);
-    lastComputed.byId = buildById(nodes).byId;
-    lastComputed.bolag = bolag;
-
-    // Node picker
-    populateNodePicker(nodes);
-    updateSelectedNodeUI();
-
-    // Right list
-    renderListReadOnly(nodes, v, guards);
+    list.querySelectorAll('[data-open]').forEach(el => {
+      el.addEventListener("click", () => {
+        const id = el.getAttribute("data-open");
+        if(id) openNodeById(id);
+      });
+      el.addEventListener("keydown", (e) => {
+        if(e.key === "Enter" || e.key === " "){
+          e.preventDefault();
+          const id = el.getAttribute("data-open");
+          if(id) openNodeById(id);
+        }
+      });
+    });
   }
 
   // ---------------------------
@@ -1899,14 +1849,12 @@ MASTER FIX:
     const v = validateStrict(raw);
     const nodes = v.nodes || [];
 
-    // fail-closed: om flera bolag => lås
-    if(countBolag(nodes) > 1){
-      setMsg("err","Actions låsta: flera bolag hittades. Åtgärda data först.");
-      return;
-    }
+    const assignments = loadAssignmentsV2();
+    const scopeIds = extractScopeIds(assignments);
+    const guards = computeDeleteGuards(nodes, scopeIds);
 
-    const bolag = ensureBolagType(getBolagStrict(nodes));
-    openCompanyModal(nodes, bolag);
+    const bolag = ensureBolagType(getBolag(nodes));
+    openCompanyModal(nodes, bolag, guards);
   });
 
   $("#btnCreateUnit").addEventListener("click", () => {
@@ -1915,23 +1863,35 @@ MASTER FIX:
     const v = validateStrict(raw);
     const nodes = v.nodes || [];
 
-    if(v.criticalLock){
-      setMsg("err","Actions låsta: kritiskt datafel. Kör Reparera först.");
-      return;
-    }
-    if(countBolag(nodes) > 1){
-      setMsg("err","Actions låsta: flera bolag hittades. Åtgärda data först.");
-      return;
-    }
+    const assignments = loadAssignmentsV2();
+    const scopeIds = extractScopeIds(assignments);
+    const guards = computeDeleteGuards(nodes, scopeIds);
 
-    const bolag = ensureBolagType(getBolagStrict(nodes));
-    openUnitModal(nodes, bolag, null);
+    const bolag = ensureBolagType(getBolag(nodes));
+    openUnitModal(nodes, bolag, null, guards);
   });
 
   $("#btnCloseCompany").addEventListener("click", closeCompanyModal);
+  $("#btnCancelCompany").addEventListener("click", closeCompanyModal);
+  $("#btnSaveCompany").addEventListener("click", saveCompany);
+  $("#btnEditCompany").addEventListener("click", () => {
+    if(companyExistingId){
+      setCompanyMode("edit");
+      setModalMsg("#companyMsg","", "Redigeringsläge. Spara aktiveras när du ändrar något.");
+    }
+  });
+  $("#btnDeleteCompany").addEventListener("click", deleteCompany);
+
   $("#btnCloseUnit").addEventListener("click", closeUnitModal);
   $("#btnCancelUnit").addEventListener("click", closeUnitModal);
   $("#btnSaveUnit").addEventListener("click", saveUnit);
+  $("#btnEditUnit").addEventListener("click", () => {
+    if(unitEditingId){
+      setUnitMode("edit");
+      setModalMsg("#unitMsg","", "Redigeringsläge. Spara aktiveras när du ändrar något.");
+    }
+  });
+  $("#btnDeleteUnit").addEventListener("click", deleteUnit);
 
   // click outside to close
   companyOverlay.addEventListener("click", (e) => {
@@ -1953,12 +1913,12 @@ MASTER FIX:
   });
 
   // Search/filter (höger)
-  $("#search").addEventListener("input", renderAll);
-  $("#filter").addEventListener("change", renderAll);
+  $("#search").addEventListener("input", renderList);
+  $("#filter").addEventListener("change", renderList);
 
   // init
   bootstrapRootIfMissing();
-  renderAll();
+  renderList();
 
 })();
 </script>
