@@ -1,10 +1,15 @@
 <!-- ============================================================
-AO-008/22 + AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.7) | FIL-ID: employee/tasks.html
+AO-008/22 + AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.8) | FIL-ID: employee/tasks.html
 Projekt: HR-System
 Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only
 
-Senaste sanning: bygger vidare på din v1.6 (PATCH) men hårdnar fail-closed,
-robustar storage-parsing, förbättrar selection, och säkrar answer-upsert.
+Senaste sanning: bygger vidare på v1.7 men gör “sista steget” stabilt:
+- Tasks förblir hårt fail-closed (kräver org + assignments + scopeId).
+- Frågor får en SAFE “soft-unlock”:
+  * Om org/assignments/scope saknas/korrupt → visar endast GLOBALA frågor riktade till empNo (scopeId saknas på frågan).
+  * Scoped frågor kräver fortfarande org+scope (fail-closed).
+- Robustare assignment-lookup (matchar även nycklar som innehåller empNo-digits).
+- Läs scopeId även från session-shape (auth.scopeId / data.scopeId) om det finns.
 
 POLICY (LÅST):
 - UI-only (GitHub Pages) • Ingen backend
@@ -357,19 +362,21 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
 
 <script>
 /* ============================================================
-AO-008/22 + AO-EMP-TASKS-QA-01 | employee/tasks.html – PROD v1.7
-AUTOPATCH v1.7:
-- Hårdare fail-closed för org/assignments + scopeId.
-- Robustare JSON-parse + save + special-key block.
-- Stabilare selection (taskId/questionKey) utan att “läcka” vid filter/sök.
-- Answer-upsert: prioriterar questionId (om finns), fallback till title endast om id saknas.
-- Inga nya keys. Ingen innerHTML från storage.
+AO-008/22 + AO-EMP-TASKS-QA-01 | employee/tasks.html – PROD v1.8
+AUTOPATCH v1.8:
+- Soft-unlock för GLOBALA frågor (scopeId saknas på frågan) även om org/assignments saknas.
+- Scoped frågor + tasks är fortfarande HARD fail-closed (kräver org + assignments + viewerScopeId).
+- Robust assignment-lookup (matchar även keys som innehåller empNo-digits).
+- Läs scopeId från session-shape (data.scopeId / auth.scopeId) om det finns.
 
 GUARD:
 - EMPLOYEE-only
-- Kräver: session(auth) + empNo + assignments(scopeId) + org
-- Fail-closed: tasks skrivbara endast om org+assignments+tasks-format OK.
-- Questions/Answers: avstängs om HARD_LOCK.
+- Tasks: kräver session(auth)+empNo + org + assignments + viewerScopeId (HARD_LOCK_TASKS)
+- Questions:
+  * scopeId finns → kräver org+assignments+viewerScopeId (HARD_LOCK_SCOPE)
+  * scopeId saknas → får visas om riktad till empNo (SAFE)
+- Fail-closed: skrivning tasks stoppas vid HARD_LOCK_TASKS
+- Answers: skrivning tillåts endast för synlig fråga (och alltid per empNo)
 
 XSS:
 - All rendering via textContent / DOM-bygg.
@@ -404,8 +411,9 @@ XSS:
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  function setMsg(elId, kind, text){
-    const m = $(elId);
+  function setMsg(sel, kind, text){
+    const m = $(sel);
+    if(!m) return;
     m.className = "message" + (kind ? " " + kind : "");
     m.textContent = text || "";
   }
@@ -414,6 +422,7 @@ XSS:
 
   function showLockBox(lines){
     const box = $("#lockBox");
+    if(!box) return;
     if(!lines || !lines.length){
       box.style.display = "none";
       box.textContent = "";
@@ -443,17 +452,33 @@ XSS:
   function normalizeRole(role){ return String(role || "").trim().toLowerCase(); }
 
   function pickEmpNoFromAuth(auth){
-    const candidates = [auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier];
+    const candidates = [
+      auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier
+    ];
     for(const c of candidates){
       const s = String(c || "").trim();
       if(!s) continue;
       const digits = s.replace(/[^\d]/g, "");
-      if(digits) return digits.slice(0, 10);
+      if(digits) return digits.slice(0, 20); // empNo kan vara kort, men klipp inte för hårt
+    }
+    return "";
+  }
+
+  function getScopeIdFromSessionShape(data){
+    // Stöd flera shapes utan att ändra dem
+    const a = data?.auth || null;
+    const candidates = [
+      data?.scopeId, a?.scopeId, a?.viewerScopeId, data?.viewerScopeId
+    ];
+    for(const c of candidates){
+      const s = String(c || "").trim();
+      if(s) return s;
     }
     return "";
   }
 
   function getAccessCtx(){
+    // Primär: HRApp
     if(window.HRApp && typeof window.HRApp.getCurrentAccess === "function"){
       try{
         const acc = window.HRApp.getCurrentAccess();
@@ -472,6 +497,7 @@ XSS:
       }catch{}
     }
 
+    // Fallback: session JSON
     const raw = readRawSession();
     if(!raw) return null;
 
@@ -490,7 +516,7 @@ XSS:
       role,
       empNo,
       displayName: auth.displayName || "",
-      viewerScopeId: "",
+      viewerScopeId: getScopeIdFromSessionShape(data),
       auth
     };
   }
@@ -648,32 +674,70 @@ XSS:
     return false;
   }
 
+  function digitsOnly(s){ return String(s || "").replace(/[^\d]/g, ""); }
+
+  function findAssignmentForEmpNo(map, empNo){
+    const keyExact = String(empNo || "").trim();
+    if(keyExact && map[keyExact]) return map[keyExact];
+
+    const d = digitsOnly(keyExact);
+    if(d && map[d]) return map[d];
+
+    // Sista försök: hitta key som har samma digits (t.ex. "emp_00123")
+    if(d){
+      const keys = Object.keys(map);
+      for(const k of keys){
+        const kd = digitsOnly(k);
+        if(kd && kd === d) return map[k];
+      }
+    }
+    return null;
+  }
+
   const lockReasons = [];
 
-  if(!hasLocalKey(ORG_KEY)) lockReasons.push("Org saknas (key finns inte).");
   const orgRaw = safeParseLocal(ORG_KEY, null);
   const orgNodes = normalizeOrgNodes(orgRaw);
   const orgIndex = buildOrgIndex(orgNodes);
   const orgIntegrity = validateOrgIntegrity(orgNodes, orgIndex);
+  if(!hasLocalKey(ORG_KEY)) lockReasons.push("Org saknas (key finns inte).");
   if(!orgIntegrity.ok) lockReasons.push(...orgIntegrity.issues);
 
   const asgParsed = safeParseLocal(ASG_V2_KEY, null);
   const asgV2 = normalizeAssignmentsV2(asgParsed);
   if(!asgV2.ok) lockReasons.push(...asgV2.issues);
 
+  // viewerScopeId: session/HRApp först, annars assignments
   let viewerScopeId = String(access.viewerScopeId || "").trim();
   if(!viewerScopeId && asgV2.ok){
-    const rec = asgV2.map[String(access.empNo)] || null;
+    const rec = findAssignmentForEmpNo(asgV2.map, access.empNo);
     viewerScopeId = String(rec?.scopeId || "").trim();
   }
 
-  if(!viewerScopeId) lockReasons.push("Ditt viewerScopeId saknas (assignment saknar scopeId).");
-  if(viewerScopeId && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("Ditt viewerScopeId finns inte i org.");
-
+  // Scope-pill: även om scope saknas ska UI visa det.
   $("#scopePill").textContent = "scope: " + (viewerScopeId || "—");
 
-  const HARD_LOCK = lockReasons.length > 0;
-  showLockBox(lockReasons);
+  // HARD LOCK för scoped logik (tasks + scoped questions)
+  const HAS_SCOPE_CONTEXT = (
+    orgIntegrity.ok &&
+    asgV2.ok &&
+    !!viewerScopeId &&
+    orgIndex.byId.has(viewerScopeId)
+  );
+
+  if(!viewerScopeId) lockReasons.push("Ditt viewerScopeId saknas (assignment saknar scopeId).");
+  if(viewerScopeId && orgIntegrity.ok && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("Ditt viewerScopeId finns inte i org.");
+
+  const HARD_LOCK_TASKS = !HAS_SCOPE_CONTEXT;
+  const HARD_LOCK_SCOPE = !HAS_SCOPE_CONTEXT; // scoped questions använder samma
+
+  // Soft note: om scope-context saknas, frågor kan fortfarande visas om de är GLOBALA och riktade.
+  const softNotes = [];
+  if(!HAS_SCOPE_CONTEXT){
+    softNotes.push("OBS: Org/scope saknas/korrupt → du ser endast GLOBALA frågor riktade till dig. Scoped frågor + uppgifter är låsta.");
+  }
+
+  showLockBox(lockReasons.concat(softNotes));
 
   function normalizeStatus(s){
     const v = String(s || "").trim().toLowerCase();
@@ -745,7 +809,7 @@ XSS:
   }
 
   function canSeeTask(t){
-    if(HARD_LOCK) return false;
+    if(HARD_LOCK_TASKS) return false;
     if(isTaskCorrupt(t)) return false;
     if(String(t.empNo).trim() !== String(access.empNo).trim()) return false;
     return isInScope(viewerScopeId, String(t.scopeId).trim(), orgIndex);
@@ -833,34 +897,61 @@ XSS:
     return true;
   }
 
-  function qId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? "").trim(); }
-  function qTitle(q){ return String(q?.title ?? q?.name ?? "Fråga").trim(); }
-  function qText(q){ return String(q?.text ?? q?.question ?? q?.body ?? q?.title ?? "—").trim(); }
-  function qScope(q){ return String(q?.scopeId ?? q?.scope ?? q?.nodeId ?? "").trim(); }
-  function qEmp(q){ return String(q?.empNo ?? q?.employeeNo ?? q?.toEmpNo ?? q?.assignedTo ?? "").trim(); }
+  // Fråge-modell: läs robust, skriv inte om datamodell.
+  function qId(q){
+    return String(
+      q?.id ?? q?.questionId ?? q?.qid ?? q?.key ?? q?.questionKey ?? ""
+    ).trim();
+  }
+  function qTitle(q){
+    return String(q?.title ?? q?.name ?? q?.questionTitle ?? "Fråga").trim();
+  }
+  function qText(q){
+    return String(q?.text ?? q?.question ?? q?.body ?? q?.prompt ?? q?.title ?? "—").trim();
+  }
+  function qScope(q){
+    return String(q?.scopeId ?? q?.scope ?? q?.nodeId ?? q?.orgNodeId ?? "").trim();
+  }
+  function qEmp(q){
+    return String(q?.empNo ?? q?.employeeNo ?? q?.toEmpNo ?? q?.assignedTo ?? q?.assigneeEmpNo ?? "").trim();
+  }
 
   function answerEmp(a){ return String(a?.empNo ?? a?.employeeNo ?? "").trim(); }
-  function answerQid(a){ return String(a?.questionId ?? a?.qid ?? "").trim(); }
+  function answerQid(a){ return String(a?.questionId ?? a?.qid ?? a?.questionKey ?? "").trim(); }
   function normKey(s){ return String(s ?? "").toLowerCase().replace(/\s+/g," ").trim(); }
 
   function canSeeQuestion(q){
-    if(HARD_LOCK) return false;
-
     const id = qId(q);
     const title = qTitle(q);
     if(!id && !title) return false;
 
+    const myEmp = String(access.empNo).trim();
     const targetEmp = qEmp(q);
-    if(targetEmp && targetEmp !== String(access.empNo).trim()) return false;
 
-    const scope = qScope(q);
-    if(scope){
-      if(!orgIndex.byId.has(scope)) return false;
-      return isInScope(viewerScopeId, scope, orgIndex);
+    // Om frågan är riktad: måste matcha empNo
+    if(targetEmp){
+      // matcha även om target har text/format
+      const td = digitsOnly(targetEmp) || targetEmp.trim();
+      const md = digitsOnly(myEmp) || myEmp.trim();
+      if(td && md && td !== md) return false;
+      if(!td && targetEmp.trim() !== myEmp) return false;
+    }else{
+      // om inte riktad: tillåt endast om vi har scope-context (för att undvika "alla ser allt" i tidigt läge)
+      // men GLOBALA-oriktade frågor kan annars bli otydliga; fail-closed här.
+      if(!HAS_SCOPE_CONTEXT) return false;
     }
 
-    // global ok
-    return true;
+    const scope = qScope(q);
+
+    // GLOBAL fråga: scope saknas → SAFE om den är riktad till empNo
+    if(!scope){
+      return true;
+    }
+
+    // Scoped fråga kräver scope-context
+    if(HARD_LOCK_SCOPE) return false;
+    if(!orgIndex.byId.has(scope)) return false;
+    return isInScope(viewerScopeId, scope, orgIndex);
   }
 
   function findMyAnswerForQuestion(q){
@@ -882,7 +973,7 @@ XSS:
       const hit2 = answers.find(a =>
         answerEmp(a) === myEmp &&
         normKey(String(a?.questionTitle ?? a?.title ?? "")) === tKey &&
-        (!String(a?.questionId || "").trim() || !id) // undvik krock om id finns
+        (!String(a?.questionId || "").trim() || !id)
       );
       if(hit2) return hit2;
     }
@@ -890,7 +981,8 @@ XSS:
   }
 
   function upsertMyAnswer(q, patch){
-    if(HARD_LOCK) return { ok:false, err:"Låst (fail-closed)." };
+    // Svar tillåts endast om frågan är synlig enligt guard
+    if(!canSeeQuestion(q)) return { ok:false, err:"Åtkomst nekad (fråga ej synlig)." };
 
     const myEmp = String(access.empNo).trim();
     const id = qId(q);
@@ -930,7 +1022,14 @@ XSS:
       // signering endast om text finns
       const hasText = String(out.answerText || "").trim().length > 0;
       out.signed = !!out.signed && hasText;
-      out.signedAt = out.signed ? (Number(out.signedAt) > 0 ? Number(out.signedAt) : now) : null;
+
+      // preserve signedAt om redan signerad, annars sätt vid ny sign
+      if(out.signed){
+        const prev = Number(out.signedAt);
+        out.signedAt = (prev > 0) ? prev : now;
+      }else{
+        out.signedAt = null;
+      }
 
       out.updatedAt = now;
       out.updatedBy = myEmp;
@@ -960,7 +1059,6 @@ XSS:
     const cur = answers[idx];
     if(answerEmp(cur) !== myEmp) return { ok:false, err:"Åtkomst nekad (inte ditt svar)." };
 
-    // Lås: om redan signerad, tillåt uppdatering men signering kräver text (redan enforced)
     const merged = finalize({ ...cur, ...patch });
     answers[idx] = merged;
 
@@ -1090,9 +1188,9 @@ XSS:
       return { items: [] };
     }
 
-    if(HARD_LOCK){
+    if(HARD_LOCK_TASKS){
       setKpis("Öppna: 0", "Pågår: 0", "Klara: 0");
-      listEl.appendChild(emptyBox("Listning är avstängd (fail-closed)."));
+      listEl.appendChild(emptyBox("Uppgifter är avstängda (fail-closed).\n\nKrav: org + assignments + scopeId måste vara korrekt."));
       return { items: [] };
     }
 
@@ -1120,7 +1218,7 @@ XSS:
     }
 
     if(items.length === 0){
-      listEl.appendChild(emptyBox("Inga uppgifter att visa.\n\nOBS: Den här sidan läser endast AO-014_TASKS_V1.\nOm dina onboarding-block inte publiceras dit kommer listan bli tom."));
+      listEl.appendChild(emptyBox("Inga uppgifter att visa.\n\nOBS: Den här sidan läser endast AO-014_TASKS_V1."));
       return { items: mine };
     }
 
@@ -1153,11 +1251,6 @@ XSS:
     if(!qRes.ok){
       setKpis("Ej svarade: 0", "Svarade: 0", "Totalt: 0");
       listEl.appendChild(emptyBox(qRes.reason));
-      return { items: [] };
-    }
-    if(HARD_LOCK){
-      setKpis("Ej svarade: 0", "Svarade: 0", "Totalt: 0");
-      listEl.appendChild(emptyBox("Frågor är avstängda (fail-closed) eftersom org/assignments saknas/korrupt."));
       return { items: [] };
     }
 
@@ -1199,7 +1292,10 @@ XSS:
     });
 
     if(items.length === 0){
-      listEl.appendChild(emptyBox("Inga frågor att visa.\n\nOBS: Den här sidan läser endast AO-012_QUESTIONS_V1."));
+      const note = (!HAS_SCOPE_CONTEXT)
+        ? "Inga frågor att visa.\n\nOBS: Scope saknas → endast GLOBALA frågor riktade till dig visas."
+        : "Inga frågor att visa.\n\nOBS: Den här sidan läser endast AO-012_QUESTIONS_V1.";
+      listEl.appendChild(emptyBox(note));
       return { items: decorated };
     }
 
@@ -1259,7 +1355,7 @@ XSS:
     $("#dComment").value = String(task.employeeComment || "");
 
     const isDone = (st === "done");
-    const writable = !HARD_LOCK && tasksExistsAndValid().ok;
+    const writable = !HARD_LOCK_TASKS && tasksExistsAndValid().ok;
 
     $("#dStatus").disabled = (!writable) || isDone;
     $("#btnSaveTask").disabled = (!writable);
@@ -1322,7 +1418,7 @@ XSS:
     const hasText = String($("#qAnswer").value || "").trim().length > 0;
     $("#signWrap").classList.toggle("danger", !hasText);
 
-    const writable = !HARD_LOCK;
+    const writable = canSeeQuestion(qq);
     $("#qAnswer").disabled = !writable;
     $("#btnSaveAnswer").disabled = !writable;
     $("#btnSign").disabled = !writable || !hasText;
@@ -1333,7 +1429,7 @@ XSS:
 
     const tOk = tasksExistsAndValid();
     if(!tOk.ok){ setMsgA("err", tOk.reason); return; }
-    if(HARD_LOCK){ setMsgA("err", "Skrivning är låst (fail-closed)."); return; }
+    if(HARD_LOCK_TASKS){ setMsgA("err", "Skrivning är låst (fail-closed)."); return; }
 
     const mine = computeMineVisibleTasks();
     const t = mine.find(x => String(x?.id) === String(selectedTaskId || ""));
@@ -1375,7 +1471,8 @@ XSS:
   $("#qAnswer").addEventListener("input", () => {
     const hasText = String($("#qAnswer").value || "").trim().length > 0;
     $("#signWrap").classList.toggle("danger", !hasText);
-    $("#btnSign").disabled = HARD_LOCK || !hasText;
+    $("#btnSign").disabled = !hasText;
+
     if(!hasText){
       $("#qSign").checked = false;
       $("#qSignedPill").textContent = "Signatur: —";
@@ -1384,7 +1481,6 @@ XSS:
 
   $("#btnSaveAnswer").addEventListener("click", () => {
     setMsgB("", "");
-    if(HARD_LOCK){ setMsgB("err", "Låst (fail-closed)."); return; }
 
     const dec = currentQuestionDecorated();
     if(!dec){
@@ -1399,8 +1495,8 @@ XSS:
 
     const patch = {
       answerText: text,
-      signed: (wantSigned && String(text).trim().length > 0),
-      signedAt: (wantSigned && String(text).trim().length > 0) ? Date.now() : null
+      signed: (wantSigned && String(text).trim().length > 0)
+      // signedAt hanteras i finalize() (preserve/auto)
     };
 
     const res = upsertMyAnswer(dec.q, patch);
@@ -1423,7 +1519,6 @@ XSS:
 
   $("#btnSign").addEventListener("click", () => {
     setMsgB("", "");
-    if(HARD_LOCK){ setMsgB("err", "Låst (fail-closed)."); return; }
 
     const dec = currentQuestionDecorated();
     if(!dec){
@@ -1458,16 +1553,14 @@ XSS:
     if(dec2) openQuestionDetail(dec2);
   });
 
-  const MODE_OBJ = { TASKS:"tasks", QUESTIONS:"questions" };
-
   function activateOpenKey(key){
-    if(mode === MODE_OBJ.TASKS){
+    if(mode === MODE.TASKS){
       const mine = computeMineVisibleTasks();
       const task = mine.find(t => String(t?.id) === String(key));
       if(task) openTaskDetail(task);
       return;
     }
-    if(mode === MODE_OBJ.QUESTIONS){
+    if(mode === MODE.QUESTIONS){
       selectedQuestionKey = String(key || "");
       const dec = currentQuestionDecorated();
       if(dec) openQuestionDetail(dec);
@@ -1508,7 +1601,7 @@ XSS:
     $("#detailTask").style.display = "none";
     $("#detailQuestion").style.display = "none";
 
-    if(mode === MODE_OBJ.TASKS){
+    if(mode === MODE.TASKS){
       const { items } = renderTasksList(list);
       if(selectedTaskId){
         const mine = (items && items.length) ? items : computeMineVisibleTasks();
@@ -1531,8 +1624,8 @@ XSS:
   // Init: mode from hash
   function initFromHash(){
     const h = String(window.location.hash || "").toLowerCase();
-    if(h === "#questions") setMode(MODE_OBJ.QUESTIONS);
-    else setMode(MODE_OBJ.TASKS);
+    if(h === "#questions") setMode(MODE.QUESTIONS);
+    else setMode(MODE.TASKS);
   }
   window.addEventListener("hashchange", initFromHash);
 
@@ -1543,12 +1636,13 @@ XSS:
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- v1.7: Hårdare fail-closed + robustare storage-parse/save.
-- v1.7: Answer-match primärt på questionId, fallback titel endast för legacy.
-- v1.7: Stabilare selection & render-loop, inga innerHTML från storage.
-- Behåller tillåten mutation exakt (tasks + answers).
+- v1.8: Soft-unlock för GLOBALA frågor riktade till empNo när org/scope saknas.
+- v1.8: Tasks + scoped frågor kvar som HARD fail-closed.
+- v1.8: Robust assignment-lookup (matchar keys som innehåller empNo-digits).
+- v1.8: Läser scopeId från session-shape (data.scopeId / auth.scopeId) om den finns.
 Testnoteringar:
-- Logga in som EMPLOYEE (empNo), öppna Gör, byt tabbar, spara status, spara svar, signera.
+- EMPLOYEE utan org/scope: se global fråga (riktad) → spara svar → checka AO-013_ANSWERS_V1.
+- Med org+assignments+scope: tasks fungerar + scoped frågor syns + signera funkar.
 ============================================================ -->
 </body>
 </html>
