@@ -1,10 +1,16 @@
 <!-- ============================================================
-AO-000 (SYS-NAV FIX) | FIL-ID: system/dashboard.html
+AO-000 (SYS-NAV FIX • UX-PATCH v1.1) | FIL-ID: system/dashboard.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
-Syfte: SYSTEM_ADMIN Dashboard – Systemstart (Org + Assignments) i rätt ordning
-Policy (LÅST):
+Syfte: SYSTEM_ADMIN Dashboard – Systemstart (Bolag/Enhet + Assignments) i rätt ordning
+
+POLICY (LÅST):
 - UI-only • Ingen backend • Inga nya storage-keys/datamodell
 - SYSTEM_ADMIN-only • Fail-closed via HRApp.requireAuth
+- Read-only status får bara läsa befintliga keys (ingen write)
+
+Läser (read-only):
+- AO-020_ORG_V1 (localStorage) — org-träd (nodes)
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) — assignments (empNo -> { roleId, scopeId })
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -13,6 +19,133 @@ Policy (LÅST):
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HR-System – System • Dashboard</title>
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <!-- AO-000: Minimal UI-stöd för bättre användbarhet (ingen ny datamodell) -->
+  <style>
+    /* Wrapper/kolumnlogik följer MASTER DESIGN-SPEC (maxbredd/padding i UI-02-STYLES) */
+    .navBar{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+      width:100%;
+    }
+    .navLeft{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .navRight{
+      margin-left:auto;
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+
+    /* Tile-grid (4/2 kol) */
+    .grid4{
+      display:grid;
+      grid-template-columns:repeat(4, minmax(0,1fr));
+      gap:10px;
+    }
+    @media (max-width: 920px){
+      .grid4{ grid-template-columns:repeat(2, minmax(0,1fr)); }
+    }
+
+    /* Tiles: ingen lift/translate, bara skugga/border (MASTER DESIGN-SPEC) */
+    .tile{
+      border:1px solid rgba(0,0,0,.08);
+      border-radius:12px;
+      background:#fff;
+      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 10px 24px rgba(0,0,0,.06);
+      overflow:hidden;
+      position:relative;
+      min-height:74px;
+    }
+    .tile:hover{
+      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 10px 24px rgba(0,0,0,.08);
+    }
+
+    .tile::before{
+      content:"";
+      position:absolute; left:0; top:0; right:0;
+      height:6px;
+      background: var(--stripe, rgba(0,0,0,.12));
+    }
+
+    .tileBody{
+      padding:12px;
+      padding-top:18px; /* 12px + stripe(6px) */
+    }
+
+    .tileTitle{
+      margin:0;
+      font-weight:900;
+      line-height:1.15;
+    }
+    .tileMeta{
+      margin-top:6px;
+      font-size:12px;
+      color: rgba(17,17,17,.82);
+    }
+    .tileUrl{
+      margin-top:6px;
+      font-size:12px;
+      opacity:.78;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    .actionsRow{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top:10px;
+    }
+
+    /* Topbar-semantik (LÅST): Min sida neutral, Logga ut röd */
+    .btnTop{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      padding:8px 10px;
+      border-radius:10px;
+      border:1px solid rgba(0,0,0,.12);
+      background:#fff;
+      text-decoration:none;
+      color:#111;
+      box-shadow: 0 1px 0 rgba(0,0,0,.03);
+    }
+    .btnTop:hover{
+      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 10px 24px rgba(0,0,0,.08);
+    }
+    .btnMy{ color:#2f2f2f; }
+    .btnLogout{ color:#b42318; border-color: rgba(180,35,24,.22); }
+
+    /* Status pills */
+    .pills{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top:8px;
+    }
+    .pill{
+      display:inline-flex;
+      gap:8px;
+      align-items:center;
+      padding:6px 10px;
+      border-radius:999px;
+      border:1px solid rgba(0,0,0,.12);
+      background:#fff;
+      font-size:12px;
+      color: rgba(17,17,17,.86);
+    }
+    .pillOk{ background: rgba(209,250,229,.9); }
+    .pillWarn{ background: rgba(254,226,226,.9); }
+  </style>
 </head>
 
 <body>
@@ -23,49 +156,110 @@ Policy (LÅST):
   </div>
 
   <nav class="nav" aria-label="Meny">
-    <a href="./dashboard.html" aria-current="page">Systemstart</a>
-    <a href="./org.html">Org</a>
-    <a href="./assignments.html">Assignments</a>
-    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+    <div class="navBar">
+      <div class="navLeft">
+        <a href="./dashboard.html" aria-current="page">Systemstart</a>
+        <a href="./org.html">Org</a>
+        <a href="./assignments.html">Assignments</a>
+      </div>
+
+      <div class="navRight" aria-label="Kontonavigering">
+        <!-- SYSTEM_ADMIN har ingen “operational” sida – Min sida är neutral länk tillbaka till dashboard -->
+        <a class="btnTop btnMy" href="./dashboard.html">Min sida</a>
+        <a class="btnTop btnLogout" href="#" id="navLogout">Logga ut</a>
+      </div>
+    </div>
   </nav>
 </header>
 
 <main class="container">
   <h1 class="tight">Systemstart</h1>
   <p class="muted">
-    SYSTEM_ADMIN = system & struktur. Gör detta först – annars låser Admin/Manager-sidor (scope krävs).
+    SYSTEM_ADMIN sätter upp systemet (org + assignments). Det här behöver vara klart innan admin-/manager-sidor kan användas.
   </p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
-      <div class="muted">
+      <div class="muted" role="status">
         Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
       </div>
     </div>
 
-    <div class="row wrap" style="gap:10px;">
-      <div class="card" style="flex:1 1 340px;">
-        <h2 class="tight" style="margin-top:0;">1) Skapa organisation</h2>
-        <p class="muted">Bygg koncern → bolag → enhet → team. Minst en nod under root.</p>
-        <a class="btn" href="./org.html">Öppna Org Builder</a>
+    <!-- Status (read-only) -->
+    <div class="card" style="margin-bottom:10px;">
+      <h2 class="tight" style="margin-top:0;">Status</h2>
+      <div class="pills" aria-label="Systemstatus">
+        <span class="pill" id="pillOrg">Org: —</span>
+        <span class="pill" id="pillAssign">Assignments: —</span>
+        <span class="pill" id="pillNext">Nästa steg: —</span>
+      </div>
+      <p class="muted" style="margin:10px 0 0;">
+        Vanligt upplägg: Root → <strong>Bolag</strong> → (Enhet) → Team. Scope sätts på <strong>Bolag</strong> eller <strong>Enhet</strong>.
+      </p>
+    </div>
+
+    <!-- Steg -->
+    <div class="grid4" aria-label="Systemstart steg">
+      <div class="tile" style="--stripe: rgba(59,130,246,.75);">
+        <div class="tileBody">
+          <p class="tileTitle">1) Skapa bolag</p>
+          <div class="tileMeta">Skapa minst ett bolag under Root. Det blir din första scope-nod.</div>
+          <div class="actionsRow">
+            <a class="btn" href="./org.html">Öppna Org Builder</a>
+          </div>
+          <div class="tileUrl">./org.html</div>
+        </div>
       </div>
 
-      <div class="card" style="flex:1 1 340px;">
-        <h2 class="tight" style="margin-top:0;">2) Koppla roller & scope</h2>
-        <p class="muted">Koppla empNo → roll + scopeId. Krävs för att Admin/Manager/Employee ska fungera.</p>
-        <a class="btn" href="./assignments.html">Öppna Assignments</a>
+      <div class="tile" style="--stripe: rgba(20,184,166,.75);">
+        <div class="tileBody">
+          <p class="tileTitle">2) (Valfritt) Skapa enhet</p>
+          <div class="tileMeta">Skapa enhet under bolaget om du vill dela upp scope per avdelning (t.ex. kök, servering).</div>
+          <div class="actionsRow">
+            <a class="btn" href="./org.html">Skapa enhet i Org Builder</a>
+          </div>
+          <div class="tileUrl">./org.html</div>
+        </div>
+      </div>
+
+      <div class="tile" style="--stripe: rgba(245,158,11,.75);">
+        <div class="tileBody">
+          <p class="tileTitle">3) Koppla roll + scope</p>
+          <div class="tileMeta">Koppla empNo → roll + scopeId (scopeId = bolag eller enhet). Krävs för att ADMIN/MANAGER/EMPLOYEE ska fungera.</div>
+          <div class="actionsRow">
+            <a class="btn" href="./assignments.html">Öppna Assignments</a>
+          </div>
+          <div class="tileUrl">./assignments.html</div>
+        </div>
+      </div>
+
+      <div class="tile" style="--stripe: rgba(107,114,128,.75);">
+        <div class="tileBody">
+          <p class="tileTitle">Snabb test</p>
+          <div class="tileMeta">När org + assignments är klara: logga in som ADMIN/MANAGER och öppna en admin-sida som kräver scope.</div>
+          <div class="tileMeta">Om något låser: kontrollera att scopeId pekar på befintlig nod.</div>
+        </div>
       </div>
     </div>
 
     <div class="card" style="margin-top:10px;">
       <h2 class="tight" style="margin-top:0;">Checklista (måste vara klar)</h2>
       <ul class="muted" style="margin:0; padding-left:18px;">
-        <li>Org har minst 1 nod under root</li>
+        <li>Org har minst 1 nod under root (t.ex. ett bolag)</li>
         <li>Varje empNo som ska logga in har en assignment (roll + scopeId)</li>
       </ul>
       <p class="muted" style="margin:10px 0 0;">
-        Om någon säger “tasks funkar inte” är det nästan alltid att assignments saknas eller scopeId är fel.
+        Om någon säger “tasks funkar inte” är det nästan alltid att assignments saknas eller att scopeId pekar på fel nod.
       </p>
+    </div>
+
+    <div class="card" style="margin-top:10px;">
+      <h2 class="tight" style="margin-top:0;">Vanliga fel (snabb felsökning)</h2>
+      <ul class="muted" style="margin:0; padding-left:18px;">
+        <li>Admin-sidor säger subtree/scope saknas → assignments saknas eller scopeId saknas/fel</li>
+        <li>Tasks kräver scope → org saknas eller scopeId pekar på ogiltig nod</li>
+        <li>Employee ser inget → saknar assignment eller scopeId pekar på “fel nivå”</li>
+      </ul>
     </div>
   </section>
 </main>
@@ -77,8 +271,41 @@ Policy (LÅST):
 (function(){
   "use strict";
 
+  const ORG_KEY = "AO-020_ORG_V1";
+  const ASSIGN_V2_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
+
   function safeReplace(url){
     try { window.location.replace(url); } catch { window.location.href = url; }
+  }
+
+  function safeParseLocal(key, fallback){
+    try{
+      const raw = localStorage.getItem(key);
+      if(!raw) return fallback;
+      const v = JSON.parse(raw);
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{
+      return fallback;
+    }
+  }
+
+  function countOrgNodes(){
+    const raw = safeParseLocal(ORG_KEY, null);
+    const arr = Array.isArray(raw) ? raw : [];
+    return arr.length;
+  }
+
+  function countAssignments(){
+    const raw = safeParseLocal(ASSIGN_V2_KEY, {});
+    if(!raw || typeof raw !== "object" || Array.isArray(raw)) return 0;
+    return Object.keys(raw).length;
+  }
+
+  function setPill(el, text, kind){
+    if(!el) return;
+    el.textContent = text;
+    el.classList.remove("pillOk","pillWarn");
+    if(kind) el.classList.add(kind);
   }
 
   var HRApp = window.HRApp;
@@ -115,6 +342,39 @@ Policy (LÅST):
       try { HRApp.logout(); } catch { safeReplace("../UI/UI-01-SKELETON.html?err=logout"); }
     });
   }
+
+  // Read-only status
+  var nOrg = countOrgNodes();
+  var nAsg = countAssignments();
+
+  var pillOrg = document.querySelector("#pillOrg");
+  var pillAssign = document.querySelector("#pillAssign");
+  var pillNext = document.querySelector("#pillNext");
+
+  // Org: "OK" om fler än root (root-only brukar vara 1)
+  if(nOrg >= 2){
+    setPill(pillOrg, "Org: OK (" + String(nOrg) + " noder)", "pillOk");
+  }else if(nOrg === 1){
+    setPill(pillOrg, "Org: Tom (bara root)", "pillWarn");
+  }else{
+    setPill(pillOrg, "Org: Saknas", "pillWarn");
+  }
+
+  if(nAsg > 0){
+    setPill(pillAssign, "Assignments: OK (" + String(nAsg) + ")", "pillOk");
+  }else{
+    setPill(pillAssign, "Assignments: Saknas (0)", "pillWarn");
+  }
+
+  // Next step
+  if(nOrg < 2){
+    setPill(pillNext, "Nästa steg: Skapa bolag i Org", "pillWarn");
+  }else if(nAsg === 0){
+    setPill(pillNext, "Nästa steg: Skapa assignments (roll + scope)", "pillWarn");
+  }else{
+    setPill(pillNext, "Nästa steg: Testa ADMIN/MANAGER", "pillOk");
+  }
+
 })();
 </script>
 </body>
