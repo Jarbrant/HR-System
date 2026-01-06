@@ -8,8 +8,9 @@ Tillagt (AO-VERIFY-TRAINING-01):
 - Tydlig UI-indikator för Verifierad / Publicerad
 
 PATCH v1.2 (2026-01-06):
-- FIX: Status-normalisering (case/whitespace) så “Published/VERIFIED/published ” inte låser Verify på första posten
-- Fail-closed bibehållen: endast published/verified får editeras/verifieras här
+- FIX: “Verifiera igen” är tillåtet även om utbildningen redan är verified (uppdaterar verifiedAt/verifiedBy)
+- FIX: Status-normalisering (trim+lowercase) så casing/whitespace inte låser Verify på vissa poster
+- Fail-closed bibehållen: published/verified + titel + blockregler + inga osparade ändringar
 
 POLICY (LÅST):
 - UI-only • Fail-closed • ADMIN-only
@@ -183,8 +184,6 @@ POLICY (LÅST):
     @media (max-width: 1100px){ .row2{ grid-template-columns: 1fr; } }
 
     .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; font-size:.92rem; color: var(--muted); }
-
-    /* Doc textarea: lite högre som standard */
     .docArea{ min-height: 220px; }
   </style>
 </head>
@@ -237,7 +236,6 @@ POLICY (LÅST):
   <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
 
   <div class="grid2" style="margin-top:12px;">
-    <!-- LEFT: trainings (published/verified) -->
     <section class="card sideCard" aria-label="Utbildningar">
       <div class="listHead">
         <div>
@@ -259,10 +257,8 @@ POLICY (LÅST):
       </div>
     </section>
 
-    <!-- RIGHT: editor (block list + panel) -->
     <section class="card" aria-label="Editor">
       <div class="editorSplit">
-        <!-- Block list -->
         <div class="listBox sideCard" style="background:transparent; border:none; box-shadow:none;">
           <div class="listHead" style="border:1px solid var(--line); border-radius: var(--r14) var(--r14) 0 0;">
             <div>
@@ -298,7 +294,6 @@ POLICY (LÅST):
           </div>
         </div>
 
-        <!-- Panel -->
         <div class="panel" aria-label="Blockpanel">
           <div class="row space-between wrap" style="align-items:center;">
             <h2>Blockeditor</h2>
@@ -400,7 +395,6 @@ POLICY (LÅST):
   </div>
 </main>
 
-<!-- AO-002 CORE (LÅST): config före app -->
 <script src="../UI/UI-04-CONFIG.js"></script>
 <script src="../UI/UI-03-APP.js"></script>
 
@@ -515,7 +509,6 @@ POLICY (LÅST):
     return "Block";
   }
 
-  // FIX: status-normalisering (case + whitespace)
   function normStatus(s){
     return String(s || "").trim().toLowerCase();
   }
@@ -533,7 +526,6 @@ POLICY (LÅST):
     return (st === "published" || st === "verified");
   }
 
-  // Normalisering: stöd för document + fail-closed för okänd kind
   function normalizeBlock(raw){
     const b = (raw && typeof raw === "object") ? raw : {};
     const kind0 = String(b.kind || "info").trim();
@@ -552,14 +544,12 @@ POLICY (LÅST):
       ? b.options.slice(0,10).map(x => String(x||"").trim().slice(0,40)).filter(Boolean)
       : [];
 
-    // text: document tillåts längre
     const maxText = (kind === "document") ? 2000 : 240;
     let text = "";
     if(typeof b.text === "string" && b.text) text = b.text;
     else if(typeof b.description === "string" && b.description) text = b.description;
     else text = "";
 
-    // fail-closed: okänd kind → info med text "Okänd blocktyp"
     if(!okKind){
       text = "Okänd blocktyp";
     }
@@ -569,19 +559,16 @@ POLICY (LÅST):
       title: String(b.title || "").slice(0,80),
       text: String(text || "").slice(0, maxText),
 
-      // uppgift
       taskAnswer,
       scaleMin,
       scaleMax,
       scaleMinLabel: String(b.scaleMinLabel || "").slice(0,40),
       scaleMaxLabel: String(b.scaleMaxLabel || "").slice(0,40),
 
-      // fråga
       questionAnswer: (kind === "both") ? "text" : questionAnswer,
       options: (questionAnswer === "choice") ? options : []
     };
 
-    // document: ska inte bära runt på task/question-konfig
     if(kind === "document"){
       out.taskAnswer = "checkbox";
       out.scaleMin = 1;
@@ -592,19 +579,11 @@ POLICY (LÅST):
       out.options = [];
     }
 
-    // info: inga options
-    if(kind === "info"){
+    if(kind === "info" || kind === "task"){
       out.options = [];
       out.questionAnswer = "text";
     }
 
-    // task: ingen options
-    if(kind === "task"){
-      out.options = [];
-      out.questionAnswer = "text";
-    }
-
-    // both: fråga låst till text
     if(kind === "both"){
       out.questionAnswer = "text";
       out.options = [];
@@ -620,7 +599,6 @@ POLICY (LÅST):
     const area = String(t.area || "").trim();
     const title = String(t.title || "").trim();
 
-    // FIX: normalize status (accept case/whitespace)
     const st0 = normStatus(t.status || "draft");
     const status = (st0 === "published" || st0 === "verified" || st0 === "draft") ? st0 : "draft";
 
@@ -653,7 +631,6 @@ POLICY (LÅST):
   const empNo = String(auth.empNo || (session.auth && session.auth.empNo) || "").trim();
   elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ADMIN`;
 
-  // --- STATE ---
   const STATE = {
     allTrainings: [],
     visible: [],
@@ -1024,9 +1001,6 @@ POLICY (LÅST):
     renderBlocks();
   }
 
-  // ===========================
-  // AO-VERIFY-TRAINING-01: Fail-closed readiness check
-  // ===========================
   function validateTrainingReady(t){
     const out = { ok:false, reasons:[] };
 
@@ -1089,22 +1063,21 @@ POLICY (LÅST):
     const t = STATE.editTraining;
     if(!t){
       btnVerify.disabled = true;
+      btnVerify.textContent = "Verifiera";
       btnVerify.title = "Välj en utbildning först.";
       return;
     }
 
     if(STATE.dirty){
       btnVerify.disabled = true;
+      btnVerify.textContent = "Verifiera";
       btnVerify.title = "Spara först (osparade ändringar).";
       return;
     }
 
+    // FIX: Tillåt “Verifiera igen” även om status redan är verified
     const st = normStatus(t.status || "");
-    if(st === "verified"){
-      btnVerify.disabled = true;
-      btnVerify.title = "Utbildningen är redan verifierad.";
-      return;
-    }
+    btnVerify.textContent = (st === "verified") ? "Verifiera igen" : "Verifiera";
 
     const chk = validateTrainingReady(t);
     if(!chk.ok){
@@ -1114,7 +1087,9 @@ POLICY (LÅST):
     }
 
     btnVerify.disabled = false;
-    btnVerify.title = "Verifiera: markerar utbildningen som Verified.";
+    btnVerify.title = (st === "verified")
+      ? "Verifiera igen: uppdaterar verifiedAt/verifiedBy."
+      : "Verifiera: markerar utbildningen som Verified.";
   }
 
   kindSel.addEventListener("change", () => {
@@ -1165,10 +1140,7 @@ POLICY (LÅST):
     if(!(k==="info"||k==="task"||k==="question"||k==="both"||k==="document")){ setMsg("err","Ogiltig blocktyp."); return; }
 
     t.blocks = Array.isArray(t.blocks) ? t.blocks : [];
-
-    const seed = (k === "document")
-      ? { kind:k, title:"", text:"", taskAnswer:"checkbox", questionAnswer:"text", scaleMin:1, scaleMax:5, options:[] }
-      : { kind:k, title:"", text:"", taskAnswer:"checkbox", questionAnswer:"text", scaleMin:1, scaleMax:5, options:[] };
+    const seed = { kind:k, title:"", text:"", taskAnswer:"checkbox", questionAnswer:"text", scaleMin:1, scaleMax:5, options:[] };
 
     t.blocks.push(normalizeBlock(seed));
     STATE.selectedBlockIndex = t.blocks.length - 1;
@@ -1295,13 +1267,10 @@ POLICY (LÅST):
     setSelectionPill();
     renderTrainings();
     renderBlocks();
-    setMsg("ok", "Verifierad: status=verified.");
+    setMsg("ok", "Verifierad: status=verified (uppdaterad).");
   }
 
-  btnVerify.addEventListener("click", () => {
-    setMsg("", "");
-    verifyTraining();
-  });
+  btnVerify.addEventListener("click", () => { setMsg("", ""); verifyTraining(); });
 
   qTrain.addEventListener("input", renderTrainings);
 
@@ -1339,31 +1308,31 @@ POLICY (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- FIX: Status-normalisering (trim+lowercase) i normalizeTraining + kontroller (published/verified) så Verify inte låses av “PUBLISHED”/”published ”.
-- Fail-closed bibehållen: endast published/verified kan editeras/verifieras, krav: titel + minst 1 block + blocktitel+text.
-- Inga nya storage-keys/datamodell; writes endast AO-057_TRAININGS_V1.
+- FIX: “Verifiera igen” tillåts även om utbildningen redan är verified (uppdaterar verifiedAt/verifiedBy).
+- FIX: status-normalisering (trim+lowercase) för published/verified/draft.
+- Fail-closed bibehållen; inga nya storage-keys; writes endast AO-057_TRAININGS_V1.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Öppna admin/packages-block.html → klicka översta utbildningen → “Verifiera” ska bli klickbar om titel+block OK.
-2) Om utbildningen har status “PUBLISHED” eller “published ” i storage → den ska ändå visas som Publicerad och kunna verifieras.
-3) Gör en ändring i ett block → “Verifiera” ska bli disabled tills du klickar “Spara”.
-4) Klicka “Verifiera” → status blir Verifierad och pillen uppdateras.
+1) Öppna sidan → klicka utbildning A (verified) → knappen ska heta “Verifiera igen” och vara klickbar om validering OK.
+2) Klicka utbildning B → knappen ska uppdateras korrekt (Verifiera / Verifiera igen) och inte “låsa fast”.
+3) Ändra i block → “Verifiera” disabled tills “Spara”.
+4) Klicka “Verifiera igen” → verifiedAt/verifiedBy uppdateras + OK-meddelande.
 ============================================================ -->
 
 <!-- ============================================================
 Risk / edge cases
-- Om en utbildning saknar title helt: verifiering blockeras (fail-closed) tills title sätts i trainings.html.
+- Om en utbildning saknar title eller block saknar text/titel: verifiering blockeras (fail-closed).
 - Choice-frågor med <2 alternativ blockar verifiering (avsett).
 ============================================================ -->
 
 <!-- ============================================================
 QA-check (P0/P1/P2)
-P0: Policy: UI-only, inga nya keys, XSS-safe (textContent), inga innerHTML — OK
-P0: Fail-closed: auth via HRApp.requireAuth + allowRoles ADMIN — OK
-P1: Regression: status-normalisering påverkar endast jämförelser/filtrering, ingen ny write-nyckel — OK
-P2: UX: Statuspill och liststatus blir mer robusta vid “fel-casing” — OK
+P0: UI-only, inga nya keys, XSS-safe (textContent), inga innerHTML — OK
+P0: Fail-closed auth via HRApp.requireAuth allowRoles ADMIN — OK
+P1: Regression: ändringen påverkar endast Verify-state + status-normalisering — OK
+P2: UX: knappen visar tydligt “Verifiera igen” när status=verified — OK
 ============================================================ -->
 
 </body>
