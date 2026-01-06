@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.7) | FIL-ID: admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.8) | FIL-ID: admin/onboard-progress.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN/SYSTEM_ADMIN – Plan → Progress per medarbetare (read-only v1)
 
@@ -23,10 +23,15 @@ Keys (LÅST – läs endast):
 - AO-020_ROLE_ASSIGNMENTS_V2
 
 Senaste sanning: 2026-01-05
-Ändringslogg (PATCH v1.7):
-- P0: FIX 404 – Tilldelning länkar nu till onboard-plan-assignments.html (rätt filnamn i repo).
-- P0: FIX “Hantera/Tilldela”-länk per rad använder samma rätta fil.
-- Oförändrat: read-only, inga writes, inga nya keys, XSS-safe, fail-closed.
+Ändringslogg:
+- PATCH v1.7:
+  - P0: FIX 404 – Tilldelning länkar nu till onboard-plan-assignments.html (rätt filnamn i repo).
+  - P0: FIX “Hantera/Tilldela”-länk per rad använder samma rätta fil.
+  - Oförändrat: read-only, inga writes, inga nya keys, XSS-safe, fail-closed.
+- PATCH v1.8 (2026-01-06):
+  - UX: Visar i “Detaljer” vilka blocks som finns i training (info/task/question/both).
+  - UX: För question/both: visar svarsalternativ om de finns i block-data (read-only).
+  - Oförändrat: read-only, inga writes, inga nya keys.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -162,7 +167,7 @@ Senaste sanning: 2026-01-05
       gap: 10px;
       padding: 10px 0;
       border-bottom: 1px solid var(--line);
-      align-items:center;
+      align-items:start;
     }
     .itemRow:last-child{ border-bottom:none; }
     @media (max-width: 820px){
@@ -206,6 +211,46 @@ Senaste sanning: 2026-01-05
       font-size:.88rem;
       white-space:nowrap;
     }
+
+    /* v1.8: content preview in details (read-only) */
+    .blockPreview{
+      margin-top: 8px;
+      border: 1px dashed var(--line);
+      border-radius: var(--r14);
+      padding: 8px 10px;
+      background: rgba(255,255,255,.92);
+    }
+    .blockPreview .bpTitle{
+      font-size: .92rem;
+      color:#111;
+      margin: 0 0 4px 0;
+      font-weight: 600;
+    }
+    .blockPreview .bpLine{
+      font-size: .9rem;
+      color: var(--muted);
+      margin: 2px 0;
+      line-height: 1.35;
+    }
+    .bpList{
+      margin: 6px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      font-size: .9rem;
+    }
+    .bpTag{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,.92);
+      font-size: .82rem;
+      color:#111;
+      margin-right: 6px;
+      white-space: nowrap;
+    }
   </style>
 </head>
 
@@ -220,7 +265,6 @@ Senaste sanning: 2026-01-05
     <a href="./home.html">Hem</a>
     <a href="./onboard-plans.html">Onboarding Plans</a>
     <a href="./onboard-progress.html" aria-current="page">Onboarding Progress</a>
-    <!-- FIX: rätt filnamn -->
     <a href="./onboard-plan-assignments.html">Tilldelning</a>
     <a href="./tasks.html">Skapa uppgift</a>
     <a href="./tasks-list.html">Översikt</a>
@@ -255,7 +299,6 @@ Senaste sanning: 2026-01-05
         <span>Välj plan</span>
         <div class="right">
           <span class="pill"><strong>Read-only</strong> • inga writes</span>
-          <!-- FIX: rätt filnamn -->
           <a class="secondary" href="./onboard-plan-assignments.html" title="Tilldela/ändra startdatum (writes i AO-061)">Tilldelning</a>
         </div>
       </div>
@@ -317,7 +360,7 @@ Senaste sanning: 2026-01-05
 
 <script>
 /* ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.7) | admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.8) | admin/onboard-progress.html
 Read-only • Fail-closed • XSS-safe rendering
 ============================================================ */
 (function(){
@@ -333,7 +376,6 @@ Read-only • Fail-closed • XSS-safe rendering
   const ASG_V2_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
 
   const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
-  const MAX_CHAIN_GUARD = 200;
   const DAY_MS = 24 * 60 * 60 * 1000;
 
   const $ = (s) => document.querySelector(s);
@@ -1166,7 +1208,6 @@ Read-only • Fail-closed • XSS-safe rendering
     return e === f || e.startsWith(f);
   }
 
-  // FIX: rätt filnamn i repo (tidigare onboard-assignments.html -> 404)
   function buildAssignUrl(planId, empNo){
     const pid = String(planId||"").trim();
     const e = String(empNo||"").trim();
@@ -1322,6 +1363,66 @@ Read-only • Fail-closed • XSS-safe rendering
     });
   }
 
+  // v1.8: extract question/options from a training block (best-effort, read-only)
+  function extractOptionsFromBlock(b){
+    // Try common field names without assuming schema changes.
+    const candidates = [
+      b?.options,
+      b?.answers,
+      b?.answerOptions,
+      b?.choices,
+      b?.alternatives,
+      b?.alternativ,
+      b?.items
+    ];
+
+    for(const c of candidates){
+      if(Array.isArray(c)){
+        // string list
+        if(c.every(x => typeof x === "string" || typeof x === "number")){
+          return c.map(x => String(x)).map(s => s.trim()).filter(Boolean).slice(0, 30);
+        }
+        // object list: {text/label/title/value}
+        if(c.every(x => x && typeof x === "object" && !Array.isArray(x))){
+          const out = [];
+          for(const o of c){
+            const t = String(o.text ?? o.label ?? o.title ?? o.value ?? "").trim();
+            if(t) out.push(t);
+            if(out.length >= 30) break;
+          }
+          return out;
+        }
+      }
+    }
+    return [];
+  }
+
+  function getBlockPrompt(b){
+    const p = String(
+      b?.prompt ??
+      b?.question ??
+      b?.text ??
+      b?.body ??
+      b?.description ??
+      ""
+    ).trim();
+    return p;
+  }
+
+  function summarizeTrainingBlocks(training){
+    const blocks = Array.isArray(training?.blocks) ? training.blocks : [];
+    let info = 0, task = 0, question = 0, both = 0, unknown = 0;
+    for(const b of blocks){
+      const tp = normalizeBlockType(b?.type ?? b?.kind);
+      if(tp === "info") info++;
+      else if(tp === "task") task++;
+      else if(tp === "question") question++;
+      else if(tp === "both") both++;
+      else unknown++;
+    }
+    return { total: blocks.length, info, task, question, both, unknown };
+  }
+
   function renderDetails(plan, assignment, meta, summary){
     const panel = $("#detailsPanel");
     const title = $("#detailsTitle");
@@ -1395,6 +1496,111 @@ Read-only • Fail-closed • XSS-safe rendering
       line2.textContent = "trainingId: " + (String(it.trainingId||"").trim() || "—");
       c2.appendChild(line1);
       c2.appendChild(line2);
+
+      // v1.8: preview of blocks/questions/options (read-only)
+      if(training && Array.isArray(training.blocks) && training.blocks.length){
+        const sum = summarizeTrainingBlocks(training);
+        const bp = document.createElement("div");
+        bp.className = "blockPreview";
+
+        const bpTitle = document.createElement("div");
+        bpTitle.className = "bpTitle";
+        bpTitle.textContent = "Innehåll (från blocks)";
+        bp.appendChild(bpTitle);
+
+        const tags = document.createElement("div");
+        const tag1 = document.createElement("span"); tag1.className = "bpTag"; tag1.textContent = "info: " + sum.info;
+        const tag2 = document.createElement("span"); tag2.className = "bpTag"; tag2.textContent = "task: " + sum.task;
+        const tag3 = document.createElement("span"); tag3.className = "bpTag"; tag3.textContent = "question: " + sum.question;
+        const tag4 = document.createElement("span"); tag4.className = "bpTag"; tag4.textContent = "both: " + sum.both;
+        tags.appendChild(tag1); tags.appendChild(tag2); tags.appendChild(tag3); tags.appendChild(tag4);
+        if(sum.unknown){
+          const tagU = document.createElement("span");
+          tagU.className = "bpTag";
+          tagU.textContent = "unknown: " + sum.unknown;
+          tags.appendChild(tagU);
+        }
+        bp.appendChild(tags);
+
+        // List question blocks with options (best-effort)
+        const qBlocks = training.blocks.filter(b => {
+          const tp = normalizeBlockType(b?.type ?? b?.kind);
+          return (tp === "question" || tp === "both");
+        });
+
+        if(qBlocks.length){
+          const l = document.createElement("div");
+          l.className = "bpLine";
+          l.textContent = "Frågor + alternativ (read-only):";
+          bp.appendChild(l);
+
+          const ul = document.createElement("ul");
+          ul.className = "bpList";
+
+          qBlocks.slice(0, 12).forEach((b) => {
+            const li = document.createElement("li");
+            const t = String(b?.title ?? "").trim();
+            const prompt = getBlockPrompt(b);
+            const opts = extractOptionsFromBlock(b);
+
+            const head = [t || "(utan titel)", prompt ? ("– " + prompt) : ""].filter(Boolean).join(" ");
+            li.textContent = head;
+
+            if(opts.length){
+              const subUl = document.createElement("ul");
+              subUl.className = "bpList";
+              opts.slice(0, 10).forEach(o => {
+                const sli = document.createElement("li");
+                sli.textContent = String(o);
+                subUl.appendChild(sli);
+              });
+              if(opts.length > 10){
+                const more = document.createElement("li");
+                more.textContent = "… +" + (opts.length - 10);
+                subUl.appendChild(more);
+              }
+              li.appendChild(subUl);
+            } else {
+              // show explicit note so it's clear why nothing appears
+              const no = document.createElement("div");
+              no.className = "bpLine";
+              no.textContent = "Alternativ: (saknas i block-data)";
+              li.appendChild(no);
+            }
+
+            ul.appendChild(li);
+          });
+
+          if(qBlocks.length > 12){
+            const liMore = document.createElement("li");
+            liMore.textContent = "… +" + (qBlocks.length - 12) + " fler frågor";
+            ul.appendChild(liMore);
+          }
+
+          bp.appendChild(ul);
+        } else {
+          const l = document.createElement("div");
+          l.className = "bpLine";
+          l.textContent = "Inga question/both-blocks hittades i training.blocks.";
+          bp.appendChild(l);
+        }
+
+        c2.appendChild(bp);
+      } else if(training) {
+        const bp = document.createElement("div");
+        bp.className = "blockPreview";
+        const bpTitle = document.createElement("div");
+        bpTitle.className = "bpTitle";
+        bpTitle.textContent = "Innehåll (från blocks)";
+        bp.appendChild(bpTitle);
+
+        const l = document.createElement("div");
+        l.className = "bpLine";
+        l.textContent = "Training saknar blocks eller blocks=0 (därför kan inte frågor/alternativ visas här).";
+        bp.appendChild(l);
+        c2.appendChild(bp);
+      }
+
       row.appendChild(c2);
 
       const c3 = document.createElement("div");
@@ -1427,6 +1633,13 @@ Read-only • Fail-closed • XSS-safe rendering
     body.appendChild(itemsWrap);
 
     try{ panel.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
+  }
+
+  function setPlanHintInitial(){
+    setText($("#planHint"), plansRead.ok
+      ? (plansActive.length ? "Välj en aktiv plan för att se progress." : "Inga aktiva planer hittades i AO-060.")
+      : "Kan inte läsa planer (AO-060 är korrupt eller fel format)."
+    );
   }
 
   renderPlanSelect();
@@ -1472,11 +1685,7 @@ Read-only • Fail-closed • XSS-safe rendering
     });
   }
 
-  setText($("#planHint"), plansRead.ok
-    ? (plansActive.length ? "Välj en aktiv plan för att se progress." : "Inga aktiva planer hittades i AO-060.")
-    : "Kan inte läsa planer (AO-060 är korrupt eller fel format)."
-  );
-
+  setPlanHintInitial();
   renderRows("");
 
 })();
