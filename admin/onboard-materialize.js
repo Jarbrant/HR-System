@@ -1,12 +1,15 @@
 /* ============================================================
 FIL: admin/onboard-materialize.js  (PROD HEL FIL)
-AO-ONBOARD-MATERIALIZE-02 (PATCH v1.2)
+AO-ONBOARD-MATERIALIZE-02 (PATCH v1.3)
 Projekt: HR-System
 Syfte: Materialisera onboarding (AO-050_PACKAGES_V1) → TASKS + QUESTIONS
 
-PATCH v1.2 (2026-01-06):
-- FIX: Aktivt paket matchar både pkg.status==="active" (trim/case) och pkg.isActive===true
-  (tolererar även pkg.active===true / pkg.enabled===true) → eliminerar activePackages:0 när UI använder isActive.
+PATCH v1.3 (2026-01-06):
+- FIX: Stabil idempotens även när:
+  * pkg.id saknas/varierar → använder stabil pkgKey (id || title || name || fallback-hash)
+  * block.id saknas eller ordningen ändras → använder stabil blockKey (id || hash(kind+title+text))
+  => eliminerar "dubbelt" som annars kan uppstå när idx_ ändras eller pkgId är tomt.
+- FIX: Robust assignments-shape: stöd object-map + array + wrapper {assignments:[...]} (fail-closed)
 - Oförändrat: stöd pkg.items utöver pkg.blocks
 - Oförändrat: info/document ignoreras
 - Inga nya storage-keys, inga kopplingsändringar
@@ -58,25 +61,14 @@ Policy (LÅST):
 
   function isObj(x) { return !!x && typeof x === "object" && !Array.isArray(x); }
 
-  function normalizeAssignments(raw) {
-    if (raw == null) return { ok: false, map: Object.create(null), err: `${ASG_KEY} saknas (null).` };
-    if (!isObj(raw)) return { ok: false, map: Object.create(null), err: `${ASG_KEY} måste vara ett objekt.` };
-
-    const out = Object.create(null);
-    for (const k of Object.keys(raw)) {
-      const key = String(k);
-      if (SPECIAL_KEYS.has(key)) {
-        return { ok: false, map: Object.create(null), err: `${ASG_KEY} innehåller blockerad special-key (${key}).` };
-      }
-      out[key] = raw[key];
-    }
-    return { ok: true, map: out };
-  }
-
   function asStr(x, max) {
     const s = String(x ?? "").trim();
     if (!s) return "";
     return (max && s.length > max) ? s.slice(0, max) : s;
+  }
+
+  function normStatus(x) {
+    return asStr(x, 40).toLowerCase();
   }
 
   function normKind(block) {
@@ -85,15 +77,42 @@ Policy (LÅST):
     return "";
   }
 
+  // Lightweight stable hash (FNV-1a 32-bit)
+  function fnv1a32(str) {
+    const s = String(str ?? "");
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return ("00000000" + h.toString(16)).slice(-8);
+  }
+
   function genId(prefix) {
     return prefix + "_" + Date.now().toString(16) + "_" + Math.random().toString(16).slice(2, 8);
   }
 
-  function originKey(pkgId, blockId, empNo) {
-    const p = asStr(pkgId, 120) || "pkg";
-    const b = asStr(blockId, 120) || "blk";
-    const e = asStr(empNo, 20) || "emp";
-    return `${p}:${b}:${e}`;
+  // Stöd både pkg.blocks och pkg.items (UI visar ofta "Items: N")
+  function getBlocksFromPackage(pkg) {
+    if (pkg && Array.isArray(pkg.blocks)) return pkg.blocks;
+    if (pkg && Array.isArray(pkg.items)) return pkg.items;
+    return [];
+  }
+
+  // PATCH v1.2+: robust "active package" match
+  function isActivePackage(pkg) {
+    if (!pkg || typeof pkg !== "object") return false;
+
+    // Primary: status string
+    const st = normStatus(pkg.status);
+    if (st === "active") return true;
+
+    // Secondary: boolean flags used by other UIs
+    if (pkg.isActive === true) return true;
+    if (pkg.active === true) return true;
+    if (pkg.enabled === true) return true;
+
+    return false;
   }
 
   function ensureArrayShape(key, raw) {
@@ -111,31 +130,98 @@ Policy (LÅST):
     return set;
   }
 
-  function normStatus(x) {
-    return asStr(x, 40).toLowerCase();
+  function extractAssignmentsArray(raw) {
+    if (Array.isArray(raw)) return raw;
+    if (isObj(raw) && Array.isArray(raw.assignments)) return raw.assignments;
+    if (isObj(raw) && Array.isArray(raw.items)) return raw.items;
+    if (isObj(raw) && Array.isArray(raw.rows)) return raw.rows;
+    return null;
   }
 
-  // Stöd både pkg.blocks och pkg.items (UI visar ofta "Items: N")
-  function getBlocksFromPackage(pkg) {
-    if (pkg && Array.isArray(pkg.blocks)) return pkg.blocks;
-    if (pkg && Array.isArray(pkg.items)) return pkg.items;
-    return [];
+  function normalizeAssignments(raw) {
+    const empty = Object.create(null);
+
+    if (raw == null) return { ok: false, map: empty, err: `${ASG_KEY} saknas (null).` };
+
+    // Case A: object-map { "3001": {scopeId:...}, ... }
+    if (isObj(raw) && !Array.isArray(raw)) {
+      const out = Object.create(null);
+      for (const k of Object.keys(raw)) {
+        const key = String(k);
+        if (SPECIAL_KEYS.has(key)) {
+          return { ok: false, map: empty, err: `${ASG_KEY} innehåller blockerad special-key (${key}).` };
+        }
+        const rec = raw[key];
+        if (rec != null) {
+          if (!isObj(rec)) return { ok: false, map: empty, err: `${ASG_KEY} record för ${key} är inte objekt.` };
+          for (const rk of Object.keys(rec)) {
+            if (SPECIAL_KEYS.has(String(rk))) {
+              return { ok: false, map: empty, err: `${ASG_KEY} record för ${key} innehåller blockerad special-key (${rk}).` };
+            }
+          }
+        }
+        out[key] = rec;
+      }
+      return { ok: true, map: out };
+    }
+
+    // Case B: array or wrapper-array
+    const arr = extractAssignmentsArray(raw);
+    if (arr) {
+      const out = Object.create(null);
+      for (const rec of arr) {
+        if (!isObj(rec)) continue;
+        for (const rk of Object.keys(rec)) {
+          if (SPECIAL_KEYS.has(String(rk))) {
+            return { ok: false, map: empty, err: `${ASG_KEY} innehåller blockerad special-key i record (${rk}).` };
+          }
+        }
+        const empNo = asStr(rec.empNo ?? rec.employeeNo ?? rec.id ?? "", 40);
+        if (!empNo) continue;
+        out[empNo] = rec;
+      }
+      return { ok: true, map: out };
+    }
+
+    return { ok: false, map: empty, err: `${ASG_KEY} måste vara ett objekt-map eller array/wrapper.` };
   }
 
-  // PATCH v1.2: robust "active package" match
-  function isActivePackage(pkg) {
-    if (!pkg || typeof pkg !== "object") return false;
+  function stablePackageKey(pkg) {
+    const id = asStr(pkg && (pkg.id || pkg.packageId) || "", 160);
+    if (id) return "pkgid:" + id;
 
-    // Primary: status string
-    const st = normStatus(pkg.status);
-    if (st === "active") return true;
+    const title = asStr(pkg && (pkg.title || pkg.name) || "", 160);
+    if (title) return "pkgt:" + fnv1a32(title);
 
-    // Secondary: boolean flags used by other UIs
-    if (pkg.isActive === true) return true;
-    if (pkg.active === true) return true;
-    if (pkg.enabled === true) return true;
+    // fallback: hash a few stable-ish fields
+    const st = normStatus(pkg && pkg.status);
+    const blocksLen = Array.isArray(pkg && pkg.blocks) ? pkg.blocks.length : (Array.isArray(pkg && pkg.items) ? pkg.items.length : 0);
+    return "pkgx:" + fnv1a32(st + "|" + String(blocksLen));
+  }
 
-    return false;
+  function stableBlockKey(block, kind, fallbackIndex) {
+    const bid = asStr(block && block.id || "", 200);
+    if (bid) return "bid:" + bid;
+
+    const title = asStr(block && block.title || "", 200);
+    const text = asStr(block && (block.text || block.description) || "", 800);
+
+    // If both empty, last resort: index (can change, but only used when there's truly nothing else)
+    if (!title && !text) return "idx:" + String(fallbackIndex);
+
+    return "bh:" + fnv1a32(kind + "|" + title + "|" + text);
+  }
+
+  function originKey(pkgKey, blockKey, empNo) {
+    const p = asStr(pkgKey, 200) || "pkg";
+    const b = asStr(blockKey, 200) || "blk";
+    const e = asStr(empNo, 20) || "emp";
+    return `${p}:${b}:${e}`;
+  }
+
+  function extractScopeId(rec) {
+    if (!rec || typeof rec !== "object") return "";
+    return asStr(rec.scopeId || rec.scope || rec.nodeId || rec.orgId || "", 140);
   }
 
   function materialize(opts) {
@@ -178,7 +264,6 @@ Policy (LÅST):
 
     const empNos = Object.keys(asgN.map);
 
-    // PATCH v1.2: use robust active predicate
     const activePkgs = packages.filter(isActivePackage);
 
     let blocksScanned = 0;
@@ -186,7 +271,7 @@ Policy (LÅST):
     let questionsAdded = 0;
 
     for (const pkg of activePkgs) {
-      const pkgId = asStr(pkg && pkg.id || "", 140);
+      const pkgKey = stablePackageKey(pkg);
       const blocks = getBlocksFromPackage(pkg);
       if (!blocks.length) continue;
 
@@ -195,7 +280,7 @@ Policy (LÅST):
         if (!empNo) continue;
 
         const rec = asgN.map[empNoRaw];
-        const scopeId = asStr(rec && rec.scopeId || "", 140);
+        const scopeId = extractScopeId(rec);
         if (!scopeId) continue;
 
         for (let bi = 0; bi < blocks.length; bi++) {
@@ -209,87 +294,3 @@ Policy (LÅST):
           if (!kind) continue;
 
           // read-only content
-          if (kind === "info" || kind === "document") continue;
-
-          const blockId = asStr(block && block.id || "", 140) || ("idx_" + String(bi));
-          const origin = originKey(pkgId, blockId, empNo);
-
-          const title = asStr(block && block.title || "Block", 80) || "Block";
-          const text = asStr(block && (block.text || block.description) || "", 2000);
-
-          if (kind === "task" || kind === "both") {
-            if (!taskOrigins.has(origin)) {
-              tasksAdded++;
-              taskOrigins.add(origin);
-              tasks.push({
-                id: genId("task"),
-                title,
-                text,
-                empNo,
-                scopeId,
-                status: "open",
-                createdAt: Date.now(),
-                updatedAt: Date.now(),
-                updatedBy: "system",
-                _origin: origin
-              });
-            }
-          }
-
-          if (kind === "question" || kind === "both") {
-            if (!questionOrigins.has(origin)) {
-              questionsAdded++;
-              questionOrigins.add(origin);
-              questions.push({
-                id: genId("q"),
-                title,
-                text,
-                empNo,
-                scopeId,
-                createdAt: Date.now(),
-                _origin: origin
-              });
-            }
-          }
-        }
-      }
-    }
-
-    if (dryRun) {
-      return {
-        ok: true,
-        dryRun: true,
-        activePackages: activePkgs.length,
-        assignmentsEmpCount: empNos.length,
-        blocksScanned,
-        tasksAdded,
-        questionsAdded,
-        tasksTotalAfter: tasks.length,
-        questionsTotalAfter: questions.length
-      };
-    }
-
-    const w1 = writeJson(TASKS_KEY, tasks);
-    if (!w1.ok) return { ok: false, dryRun: false, reasons: [`Skrivfel TASKS: ${w1.err}`] };
-
-    const w2 = writeJson(QUESTIONS_KEY, questions);
-    if (!w2.ok) {
-      return { ok: false, dryRun: false, reasons: [`Skrivfel QUESTIONS: ${w2.err}. OBS: TASKS kan ha uppdaterats.`] };
-    }
-
-    return {
-      ok: true,
-      dryRun: false,
-      activePackages: activePkgs.length,
-      assignmentsEmpCount: empNos.length,
-      blocksScanned,
-      tasksAdded,
-      questionsAdded,
-      tasksTotalAfter: tasks.length,
-      questionsTotalAfter: questions.length
-    };
-  }
-
-  window.HR_ONBOARD_MATERIALIZE = materialize;
-
-})();
