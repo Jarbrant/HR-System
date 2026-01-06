@@ -1,12 +1,14 @@
 /* ============================================================
 FIL: admin/onboard-materialize.js  (PROD HEL FIL)
-AO-ONBOARD-MATERIALIZE-02 (PATCH v1.1)
+AO-ONBOARD-MATERIALIZE-02 (PATCH v1.2)
 Projekt: HR-System
 Syfte: Materialisera onboarding (AO-050_PACKAGES_V1) → TASKS + QUESTIONS
 
-PATCH v1.1 (2026-01-06):
-- Stödjer paket som lagrar innehåll i pkg.items (utöver pkg.blocks) → fixar blocksScanned=0 när UI visar "Items: N"
-- Robust status-match: "active"/"ACTIVE"/" active " behandlas som active
+PATCH v1.2 (2026-01-06):
+- FIX: Aktivt paket matchar både pkg.status==="active" (trim/case) och pkg.isActive===true
+  (tolererar även pkg.active===true / pkg.enabled===true) → eliminerar activePackages:0 när UI använder isActive.
+- Oförändrat: stöd pkg.items utöver pkg.blocks
+- Oförändrat: info/document ignoreras
 - Inga nya storage-keys, inga kopplingsändringar
 
 Policy (LÅST):
@@ -120,6 +122,22 @@ Policy (LÅST):
     return [];
   }
 
+  // PATCH v1.2: robust "active package" match
+  function isActivePackage(pkg) {
+    if (!pkg || typeof pkg !== "object") return false;
+
+    // Primary: status string
+    const st = normStatus(pkg.status);
+    if (st === "active") return true;
+
+    // Secondary: boolean flags used by other UIs
+    if (pkg.isActive === true) return true;
+    if (pkg.active === true) return true;
+    if (pkg.enabled === true) return true;
+
+    return false;
+  }
+
   function materialize(opts) {
     const dryRun = !!(opts && opts.dryRun);
     const reasons = [];
@@ -160,7 +178,8 @@ Policy (LÅST):
 
     const empNos = Object.keys(asgN.map);
 
-    const activePkgs = packages.filter(p => normStatus(p && p.status) === "active");
+    // PATCH v1.2: use robust active predicate
+    const activePkgs = packages.filter(isActivePackage);
 
     let blocksScanned = 0;
     let tasksAdded = 0;
@@ -189,6 +208,7 @@ Policy (LÅST):
           const kind = normKind(block);
           if (!kind) continue;
 
+          // read-only content
           if (kind === "info" || kind === "document") continue;
 
           const blockId = asStr(block && block.id || "", 140) || ("idx_" + String(bi));
