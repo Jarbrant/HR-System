@@ -6,6 +6,11 @@ Tillagt (AO-VERIFY-TRAINING-01):
 - Verifiera utbildning: status="verified" + verifiedAt + verifiedBy + updatedAt (endast AO-057)
 - Fail-closed validering (“klart nog”) innan verifiering
 - Tydlig UI-indikator för Verifierad / Publicerad
+
+PATCH v1.2 (2026-01-06):
+- FIX: Status-normalisering (case/whitespace) så “Published/VERIFIED/published ” inte låser Verify på första posten
+- Fail-closed bibehållen: endast published/verified får editeras/verifieras här
+
 POLICY (LÅST):
 - UI-only • Fail-closed • ADMIN-only
 - sessionStorage först (auth) • fallback localStorage via CORE (AO-002)
@@ -510,8 +515,13 @@ POLICY (LÅST):
     return "Block";
   }
 
+  // FIX: status-normalisering (case + whitespace)
+  function normStatus(s){
+    return String(s || "").trim().toLowerCase();
+  }
+
   function statusLabel(s){
-    const st = String(s || "").trim();
+    const st = normStatus(s);
     if(st === "published") return "Publicerad";
     if(st === "verified") return "Verifierad";
     if(st === "draft") return "Utkast";
@@ -519,7 +529,7 @@ POLICY (LÅST):
   }
 
   function isAllowedEditStatus(s){
-    const st = String(s || "").trim();
+    const st = normStatus(s);
     return (st === "published" || st === "verified");
   }
 
@@ -610,7 +620,8 @@ POLICY (LÅST):
     const area = String(t.area || "").trim();
     const title = String(t.title || "").trim();
 
-    const st0 = String(t.status || "draft").trim();
+    // FIX: normalize status (accept case/whitespace)
+    const st0 = normStatus(t.status || "draft");
     const status = (st0 === "published" || st0 === "verified" || st0 === "draft") ? st0 : "draft";
 
     const blocksArr = Array.isArray(t.blocks) ? t.blocks : [];
@@ -668,7 +679,7 @@ POLICY (LÅST):
       return;
     }
     const blocks = Array.isArray(t.blocks) ? t.blocks.length : 0;
-    const st = String(t.status || "draft");
+    const st = normStatus(t.status || "draft");
     const stLabel = statusLabel(st);
     const isV = (st === "verified");
     const pillKind = isV ? "ok" : (blocks > 0 ? "ok" : "warn");
@@ -719,7 +730,7 @@ POLICY (LÅST):
 
       const right = document.createElement("div");
       const p = document.createElement("span");
-      const st = String(t.status || "draft").trim();
+      const st = normStatus(t.status || "draft");
 
       if(st === "verified"){
         p.className = "pill ok";
@@ -1015,7 +1026,6 @@ POLICY (LÅST):
 
   // ===========================
   // AO-VERIFY-TRAINING-01: Fail-closed readiness check
-  // PATCH: mindre hård validering så Verify inte låses av tom module/area
   // ===========================
   function validateTrainingReady(t){
     const out = { ok:false, reasons:[] };
@@ -1025,12 +1035,11 @@ POLICY (LÅST):
       return out;
     }
 
-    const st = String(t.status || "").trim();
+    const st = normStatus(t.status || "");
     if(!isAllowedEditStatus(st)){
       out.reasons.push("Utbildningen måste vara publicerad eller verifierad för att verifieras här.");
     }
 
-    // PATCH: endast titel krävs (module/area kan saknas i data)
     const title = String(t.title || "").trim();
     if(!title) out.reasons.push("Titel saknas.");
 
@@ -1090,7 +1099,7 @@ POLICY (LÅST):
       return;
     }
 
-    const st = String(t.status || "").trim();
+    const st = normStatus(t.status || "");
     if(st === "verified"){
       btnVerify.disabled = true;
       btnVerify.title = "Utbildningen är redan verifierad.";
@@ -1330,31 +1339,31 @@ POLICY (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- PATCH: Verifiera-lås fixat genom att validering inte längre kräver module/area (bara titel + blockregler)
-- Fail-closed bibehållen: måste vara published/verified + minst 1 block + blocktitel+text
-- Inga nya storage-keys/datamodell; writes endast AO-057_TRAININGS_V1
+- FIX: Status-normalisering (trim+lowercase) i normalizeTraining + kontroller (published/verified) så Verify inte låses av “PUBLISHED”/”published ”.
+- Fail-closed bibehållen: endast published/verified kan editeras/verifieras, krav: titel + minst 1 block + blocktitel+text.
+- Inga nya storage-keys/datamodell; writes endast AO-057_TRAININGS_V1.
 ============================================================ -->
 
 <!-- ============================================================
-Testnoteringar
-- Test 1: Öppna publicerad utbildning (även om module/area är tomma) → Verifiera ska bli klickbar om titel+block OK
-- Test 2: Ta bort titel på utbildningen → Verifiera disabled (hover-title visar orsak)
-- Test 3: Block utan text → Verifiera disabled (hover-title visar orsak)
-- Test 4: Osparade ändringar → Verifiera disabled tills Spara
+Testnoteringar (exakta klicksteg)
+1) Öppna admin/packages-block.html → klicka översta utbildningen → “Verifiera” ska bli klickbar om titel+block OK.
+2) Om utbildningen har status “PUBLISHED” eller “published ” i storage → den ska ändå visas som Publicerad och kunna verifieras.
+3) Gör en ändring i ett block → “Verifiera” ska bli disabled tills du klickar “Spara”.
+4) Klicka “Verifiera” → status blir Verifierad och pillen uppdateras.
 ============================================================ -->
 
 <!-- ============================================================
 Risk / edge cases
-- Om trainings saknar title helt: verifiering blockeras (fail-closed) tills title sätts i trainings.html
-- Om någon har choice-frågor med <2 alternativ: verifiering blockeras (avsett)
+- Om en utbildning saknar title helt: verifiering blockeras (fail-closed) tills title sätts i trainings.html.
+- Choice-frågor med <2 alternativ blockar verifiering (avsett).
 ============================================================ -->
 
 <!-- ============================================================
 QA-check (P0/P1/P2)
 P0: Policy: UI-only, inga nya keys, XSS-safe (textContent), inga innerHTML — OK
 P0: Fail-closed: auth via HRApp.requireAuth + allowRoles ADMIN — OK
-P1: Regression: verify-logik skriver endast AO-057 och uppdaterar list/state — OK
-P2: UX: Orsak till disabled syns i title-tooltip (ingen redesign) — OK
+P1: Regression: status-normalisering påverkar endast jämförelser/filtrering, ingen ny write-nyckel — OK
+P2: UX: Statuspill och liststatus blir mer robusta vid “fel-casing” — OK
 ============================================================ -->
 
 </body>
