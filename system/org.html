@@ -1,13 +1,7 @@
 <!-- ============================================================
-AO-004 (MASTER SYS • UX-MODAL v1.1) | FIL-ID: system/org.html
+AO-004 (MASTER SYS) | FIL-ID: system/org.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: Org Builder = enda sanna källan för scope-trädet (subtree)
-
-UPPGIFTER I DENNA PATCH (SCOPE):
-- Vänster del: ersätt inline “Skapa/Redigera nod”-form med tydlig knapp + modal för Bolagsprofil
-- Enhet får inte kunna skapas innan Bolag finns (UI-guard)
-- Rör INTE högra delen (Org-träd-panelen) i markup/struktur
-
 Policy (LÅST):
 - SYSTEM_ADMIN-only: org-trädet är systemets styrstruktur (ren förvaltning)
 - ADMIN/MANAGER får INTE ändra org-strukturen
@@ -23,9 +17,6 @@ LÅSTA REGLER:
 - Hel-filsleverans
 - XSS-escape på allt från storage
 
-Not: Bolagsprofil lagras som extra fält på Bolag-noden i AO-020_ORG_V1 (ingen ny key).
-Övriga sidor som läser org-trädet ska ignorera okända fält (bakåtkompatibelt).
-
 Kontrakt:
 - Exakt 1 root-nod (ROOT_ID). Alla andra noder ligger under root.
 - Obegränsat djup (parentId kan peka på valfri nod).
@@ -38,18 +29,22 @@ Kontrakt:
 - Loop-skydd: vid loop/korruption → varning + lås kritiska actions
 MASTER FIX:
 - Bootstrap: om org saknas första gången skapas root automatiskt (ingen “repair krävs” för att komma igång)
+
+PATCH v2.0 (UX): Modal för Skapa/Redigera + tydliga lägen (SKAPA vs REDIGERA)
+- LÖSER: fastnar i redigera-läge efter skapa
+- GATING: kan inte skapa Enhet innan minst 1 Bolag finns (fail-closed)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – System • Enheter</title>
+  <title>HR-System – System • Org Builder</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
   <style>
-    /* Layout (oförändrad grid) */
+    /* ===== Layout ===== */
     .layout{
       display:grid;
       grid-template-columns: 1fr 1fr;
@@ -60,17 +55,18 @@ MASTER FIX:
       .layout{ grid-template-columns: 1fr; }
     }
 
-    /* MASTER DESIGN-SPEC: ingen lift/translate, endast skugga/border */
+    /* ===== Spec: ingen lift på hover (endast shadow/border) ===== */
     .panel{
       border: 1px solid var(--line);
-      transition: box-shadow .15s ease, filter .15s ease, border-color .15s ease;
+      background:#fff;
+      transition: box-shadow .15s ease, border-color .15s ease, filter .15s ease;
     }
     .panel:hover{
       box-shadow: var(--shadow-soft);
       filter: brightness(1.01);
     }
-    .panel.create{ background: rgba(167,243,208,.18); }
-    .panel.list{ background: rgba(191,219,254,.18); }
+    .panel.create{ background: rgba(167,243,208,.12); }
+    .panel.list{ background: rgba(191,219,254,.12); }
 
     .row2{
       display:grid;
@@ -86,7 +82,7 @@ MASTER FIX:
       border-radius: var(--r14);
       padding: 12px;
       background:#fff;
-      transition: box-shadow .15s ease, filter .15s ease, border-color .15s ease;
+      transition: box-shadow .15s ease, border-color .15s ease, filter .15s ease;
       display:flex;
       gap:10px;
       justify-content:space-between;
@@ -96,7 +92,7 @@ MASTER FIX:
     }
     .item:hover{
       box-shadow: var(--shadow-soft);
-      filter: brightness(1.02);
+      filter: brightness(1.01);
     }
     .item-title{ font-weight: 950; margin:0; }
     .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
@@ -168,105 +164,140 @@ MASTER FIX:
     }
     .locknote strong{ font-weight: 900; }
 
-    /* Vänster: ny “bolagsprofil”-yta */
-    .sectionTitle{
-      font-weight: 950;
-      margin:0;
+    /* ===== Topbar: Logga ut rödtonad (LÅST semantik) ===== */
+    #navLogout{
+      color:#7f1d1d;
+      background: rgba(254,226,226,.65);
+      border: 1px solid rgba(127,29,29,.22);
+      padding: 8px 10px;
+      border-radius: 10px;
+      text-decoration:none;
     }
-    .hint{
-      margin-top:6px;
-      color: var(--muted);
-      font-size:.95rem;
+    #navLogout:hover{
+      box-shadow: var(--shadow-soft);
+      border-color: rgba(127,29,29,.32);
     }
-    .btnRow{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-      margin-top:10px;
+    #navLogout:focus{
+      outline: 3px solid rgba(11,95,255,.18);
+      outline-offset: 2px;
     }
 
-    /* Modal */
-    .modalOverlay{
+    /* ===== Modal ===== */
+    .modal-backdrop{
       position:fixed;
       inset:0;
-      background: rgba(0,0,0,.38);
-      display:none;
-      align-items:center;
-      justify-content:center;
-      padding:16px;
-      z-index:9999;
-    }
-    .modalOverlay.open{ display:flex; }
-
-    .modal{
-      width:min(760px, 100%);
-      background:#fff;
-      border: 1px solid rgba(0,0,0,.12);
-      border-radius: 14px;
-      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 18px 42px rgba(0,0,0,.18);
-      overflow:hidden;
-    }
-    .modalHeader{
-      padding: 14px 14px 10px;
-      border-bottom: 1px solid rgba(0,0,0,.08);
+      background: rgba(17,24,39,.55);
       display:flex;
       align-items:flex-start;
+      justify-content:center;
+      padding: 16px;
+      z-index: 9999;
+    }
+    .modal{
+      width: min(860px, 100%);
+      margin-top: 46px;
+      background:#fff;
+      border: 1px solid rgba(0,0,0,.10);
+      border-radius: 14px;
+      box-shadow: 0 18px 60px rgba(0,0,0,.22);
+      overflow:hidden;
+    }
+    .modal-head{
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(0,0,0,.08);
+      display:flex;
       gap:10px;
+      align-items:flex-start;
       justify-content:space-between;
     }
-    .modalHeader .title{
+    .modal-title{
       margin:0;
       font-weight: 950;
-      line-height:1.15;
+      font-size: 1.05rem;
     }
-    .modalHeader .sub{
-      margin-top:4px;
+    .modal-sub{
+      margin:4px 0 0;
       color: var(--muted);
-      font-size:.95rem;
+      font-size: .92rem;
     }
-    .iconBtn{
-      border:1px solid rgba(0,0,0,.12);
-      background:#fff;
-      border-radius:10px;
-      padding:8px 10px;
-      cursor:pointer;
+    .modal-body{
+      padding: 14px;
     }
-    .iconBtn:hover{
-      box-shadow: var(--shadow-soft);
-    }
-
-    .modalBody{
-      padding:14px;
-      max-height: min(72vh, 720px);
-      overflow:auto;
-    }
-
-    .fieldset{
-      border:1px solid rgba(0,0,0,.08);
-      border-radius: 12px;
-      padding: 12px;
-      margin: 0 0 12px;
-      background: rgba(0,0,0,.01);
-    }
-    .legend{
-      font-weight: 900;
-      margin:0 0 8px;
-    }
-
-    .modalFooter{
+    .modal-actions{
       padding: 12px 14px;
       border-top: 1px solid rgba(0,0,0,.08);
       display:flex;
       gap:10px;
       flex-wrap:wrap;
-      align-items:center;
       justify-content:flex-end;
-      background: rgba(0,0,0,.01);
+      align-items:center;
+      background: rgba(0,0,0,.02);
     }
 
-    .req{ color: rgba(17,17,17,.75); font-size:12px; margin-top:6px; }
-    .modalMsg{ margin: 10px 0 0; }
+    .btn-save{
+      background: rgba(16,185,129,.95);
+      border: 1px solid rgba(16,185,129,.55);
+      color:#062a1d;
+    }
+    .btn-save:hover{ box-shadow: var(--shadow-soft); }
+    .btn-save:focus{
+      outline: 3px solid rgba(11,95,255,.18);
+      outline-offset: 2px;
+    }
+
+    .btn-danger{
+      background: rgba(254,226,226,.75);
+      border: 1px solid rgba(127,29,29,.25);
+      color:#7f1d1d;
+    }
+    .btn-danger:hover{ box-shadow: var(--shadow-soft); }
+
+    .hintbox{
+      border:1px solid rgba(0,0,0,.08);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background: rgba(0,0,0,.02);
+      margin-top: 10px;
+    }
+    .hintbox strong{ font-weight: 900; }
+    .divider{
+      height:1px;
+      background: rgba(0,0,0,.08);
+      margin: 12px 0;
+    }
+    .req{ color:#7f1d1d; font-weight: 900; }
+
+    /* Inputs (matcha era controls) */
+    .modal label{ display:block; font-size: 12px; opacity: .82; }
+    .modal input, .modal select{
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,.12);
+      background:#fff;
+      margin-top: 6px;
+    }
+    .modal input:focus, .modal select:focus{
+      outline: 3px solid rgba(11,95,255,.18);
+      outline-offset: 2px;
+    }
+
+    .readonly{
+      background: rgba(0,0,0,.03) !important;
+      color: rgba(0,0,0,.75);
+    }
+    .muted2{ color: var(--muted); font-size: .92rem; }
+    .pill-soft{
+      display:inline-flex;
+      gap:8px;
+      align-items:center;
+      padding: 6px 10px;
+      border: 1px solid rgba(0,0,0,.10);
+      border-radius: 999px;
+      background:#fff;
+      font-size: .92rem;
+      color: rgba(0,0,0,.72);
+    }
   </style>
 </head>
 
@@ -275,22 +306,19 @@ MASTER FIX:
 <header class="top">
   <div class="brand">
     <strong>HR-System</strong>
-    <span class="muted">• System • Enheter</span>
+    <span class="muted">• System • Org Builder</span>
   </div>
 
   <nav class="nav" aria-label="Meny">
-    <a href="./dashboard.html">Systemstart</a>
-    <a href="./org.html" aria-current="page">Enheter</a>
+    <a href="./dashboard.html">Dashboard</a>
+    <a href="./org.html" aria-current="page">Org</a>
     <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
   </nav>
 </header>
 
 <main class="container">
-  <h1 class="tight">Enheter</h1>
-  <p class="muted">
-    Bygg verksamhetens struktur (scope). Först skapar du <strong>Bolag</strong>, sedan kan du skapa <strong>Enheter</strong> och <strong>Team</strong>.
-    (SYSTEM_ADMIN-only)
-  </p>
+  <h1 class="tight">Org Builder</h1>
+  <p class="muted">Bygg koncernens struktur (obegränsade nivåer). Root är alltid 1 och allt ligger under den. (SYSTEM_ADMIN-only)</p>
 
   <section class="card">
     <div class="row space-between wrap" style="margin-bottom:10px;">
@@ -302,9 +330,9 @@ MASTER FIX:
 
     <div class="layout">
 
-      <!-- VÄNSTER: (PATCH) Bolagsprofil + actions (HÖGER RÖRS INTE) -->
-      <section class="panel create" aria-label="Skapa bolag och struktur">
-        <div class="panel-title">Bolag & struktur</div>
+      <!-- VÄNSTER: KONTROLL (modal öppnas härifrån) -->
+      <section class="panel create" aria-label="Skapa eller redigera org">
+        <div class="panel-title">Skapa / Redigera</div>
 
         <div class="kpis" aria-label="Sammanfattning">
           <div class="kpi">Noder: <strong id="kpiNodes">0</strong></div>
@@ -312,6 +340,22 @@ MASTER FIX:
           <div class="kpi">Maxdjup: <strong id="kpiDepth">0</strong></div>
         </div>
 
+        <div class="hintbox">
+          <div class="muted2">
+            <strong>Rekommenderad ordning:</strong>
+            1) Skapa <strong>Bolag</strong> (första gången) • 2) Skapa <strong>Enhet</strong> under bolag • 3) (valfritt) Skapa <strong>Team</strong> under enhet.
+            <br/>Fail-closed: Du kan inte skapa Enhet innan minst 1 Bolag finns.
+          </div>
+        </div>
+
+        <div class="row wrap" style="gap:10px; margin-top:12px;">
+          <button id="btnOpenCreate" type="button" class="btn">Skapa (öppnar dialog)</button>
+          <button id="btnOpenEditRoot" type="button" class="secondary" title="Redigera Root-namnet (Strukturnamn)">Redigera strukturnamn</button>
+        </div>
+
+        <p id="msg" class="message" aria-live="polite" style="margin-top:10px;"></p>
+
+        <!-- Hälsa + lås (som tidigare) -->
         <div id="healthBox" class="health" style="display:none;">
           <p class="title">Datahälsa</p>
           <div class="row">
@@ -332,24 +376,13 @@ MASTER FIX:
           <div class="muted" id="lockText" style="margin-top:4px;">—</div>
         </div>
 
-        <p class="sectionTitle">Skapa / redigera bolag</p>
-        <p class="hint">
-          Bolaget är grunden för strukturen. När bolaget finns kan du skapa enheter under det.
-        </p>
-
-        <div class="btnRow">
-          <button id="btnOpenCompany" type="button">Skapa / redigera</button>
-          <button id="btnCreateUnit" type="button" class="secondary">Skapa enhet</button>
-        </div>
-
-        <p id="msg" class="message" aria-live="polite"></p>
-
         <div class="smallnote">
-          Lagring: <code>AO-020_ORG_V1</code> (org-träd). Assignments läses (read-only) från <code>AO-020_ROLE_ASSIGNMENTS_V2</code>.
+          Lagring: <code>AO-020_ORG_V1</code> + (read-only) <code>AO-020_ROLE_ASSIGNMENTS_V2</code>.
+          <br/>Skapa/Redigera sker i dialog för att undvika “fastnar i redigera-läge”.
         </div>
       </section>
 
-      <!-- HÖGER (LÅST: rör inte denna del) -->
+      <!-- HÖGER: LISTA/TRÄD (rör inte layouten mer än nödvändigt) -->
       <section class="panel list" aria-label="Org-träd">
         <div class="panel-title">Org-träd</div>
 
@@ -380,129 +413,113 @@ MASTER FIX:
   </section>
 </main>
 
-<!-- MODAL: Bolagsprofil (lagras på Bolag-nod i AO-020_ORG_V1) -->
-<div id="companyOverlay" class="modalOverlay" aria-hidden="true">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="companyTitle" aria-describedby="companyDesc">
-    <div class="modalHeader">
+<!-- ===== MODAL: Skapa/Redigera ===== -->
+<div id="modalBackdrop" class="modal-backdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle" aria-describedby="modalSub">
+    <div class="modal-head">
       <div>
-        <p id="companyTitle" class="title">Bolagsprofil</p>
-        <p id="companyDesc" class="sub">Fyll i grunduppgifter för bolaget samt ett Strukturnamn.</p>
+        <h2 id="modalTitle" class="modal-title">—</h2>
+        <p id="modalSub" class="modal-sub">—</p>
       </div>
-      <button type="button" class="iconBtn" id="btnCloseCompany" aria-label="Stäng">Stäng</button>
+      <button id="modalCloseX" type="button" class="secondary" aria-label="Stäng dialog">Stäng</button>
     </div>
 
-    <div class="modalBody">
-      <div class="fieldset">
-        <p class="legend">Bolagsuppgifter</p>
+    <form id="modalForm" novalidate>
+      <div class="modal-body">
         <div class="row2">
-          <label>
-            Bolagsnamn *
-            <input id="cName" type="text" autocomplete="organization" />
-          </label>
-          <label>
-            Organisationsnummer *
-            <input id="cOrgNo" type="text" inputmode="numeric" autocomplete="off" placeholder="t.ex. 556123-4567" />
-          </label>
+          <div>
+            <label for="mKind">Typ <span class="req">*</span></label>
+            <select id="mKind">
+              <option value="Bolag">Bolag</option>
+              <option value="Enhet">Enhet</option>
+              <option value="Team">Team</option>
+              <option value="Root">Strukturnamn (Root)</option>
+            </select>
+          </div>
+          <div>
+            <label for="mId">Id (auto)</label>
+            <input id="mId" type="text" class="readonly" disabled />
+          </div>
         </div>
 
-        <div class="row2" style="margin-top:10px;">
-          <label>
-            Kontaktperson
-            <input id="cContact" type="text" autocomplete="name" />
-          </label>
-          <label>
-            Telefonnummer
-            <input id="cPhone" type="tel" autocomplete="tel" />
-          </label>
+        <div class="divider"></div>
+
+        <div id="boxNodeBasics">
+          <div class="row2">
+            <div>
+              <label for="mName">Namn <span class="req">*</span></label>
+              <input id="mName" type="text" placeholder="t.ex. Jarbrant AB / Enhet Kök / Team Kväll" />
+            </div>
+            <div>
+              <label for="mParent">Överordnad (Parent) <span class="req">*</span></label>
+              <select id="mParent"></select>
+              <div class="smallnote" id="mParentNote">—</div>
+            </div>
+          </div>
         </div>
 
-        <div class="row2" style="margin-top:10px;">
-          <label>
-            E-post *
-            <input id="cEmail" type="email" autocomplete="email" />
-          </label>
-          <label>
-            Faktura skickas till (e-post)
-            <input id="cInvoiceEmail" type="email" autocomplete="email" placeholder="valfritt" />
-          </label>
+        <div id="boxCompany" style="display:none; margin-top:12px;">
+          <div class="hintbox">
+            <div class="muted2">
+              <strong>Bolagsuppgifter</strong> lagras på Bolag-noden (samma storage-key). Andra sidor kan ignorera dessa fält.
+            </div>
+          </div>
+
+          <div class="row2" style="margin-top:10px;">
+            <div>
+              <label for="mTreeName">Strukturnamn <span class="req">*</span></label>
+              <input id="mTreeName" type="text" placeholder="t.ex. Jarbrant – HR Struktur" />
+            </div>
+            <div>
+              <label for="mOrgNo">Organisationsnummer <span class="req">*</span></label>
+              <input id="mOrgNo" type="text" placeholder="t.ex. 556677-8899" />
+            </div>
+          </div>
+
+          <div class="row2" style="margin-top:10px;">
+            <div>
+              <label for="mEmail">Mailadress <span class="req">*</span></label>
+              <input id="mEmail" type="email" placeholder="t.ex. info@bolag.se" />
+            </div>
+            <div>
+              <label for="mInvoiceEmail">Faktura-mail <span class="req">*</span></label>
+              <input id="mInvoiceEmail" type="email" placeholder="t.ex. faktura@bolag.se" />
+            </div>
+          </div>
+
+          <div class="row2" style="margin-top:10px;">
+            <div>
+              <label for="mContact">Kontaktperson <span class="req">*</span></label>
+              <input id="mContact" type="text" placeholder="t.ex. Anders Jarbrant" />
+            </div>
+            <div>
+              <label for="mPhone">Telefon <span class="req">*</span></label>
+              <input id="mPhone" type="tel" placeholder="t.ex. +46 70 123 45 67" />
+            </div>
+          </div>
         </div>
 
-        <p class="req">* = obligatoriskt</p>
+        <div id="boxRoot" style="display:none; margin-top:12px;">
+          <div class="hintbox">
+            <div class="muted2">
+              <strong>Root</strong> är systemets toppnod. Här redigerar du endast strukturnamnet (Root-namn).
+            </div>
+          </div>
+        </div>
+
+        <p id="mErr" class="message" aria-live="polite" style="margin:10px 0 0;"></p>
+
+        <div class="smallnote">
+          Tangentbord: Esc stänger dialog. Enter på “Spara”.
+        </div>
       </div>
 
-      <div class="fieldset">
-        <p class="legend">Struktur</p>
-        <div class="row2">
-          <label>
-            Strukturnamn *
-            <input id="cStructureName" type="text" placeholder="t.ex. Jarbrant Strukturen" />
-          </label>
-          <label>
-            (Auto) Bolagsnod-ID
-            <input id="cNodeId" type="text" disabled />
-          </label>
-        </div>
-        <p class="hint" style="margin:8px 0 0;">
-          Strukturnamn = namnet som beskriver hur verksamheten är uppdelad (t.ex. Bolag → Enhet → Team).
-        </p>
+      <div class="modal-actions">
+        <span class="pill-soft" id="mModePill">—</span>
+        <button id="btnCancel" type="button" class="secondary">Avbryt</button>
+        <button id="btnSave" type="submit" class="btn btn-save">Spara</button>
       </div>
-
-      <p id="companyMsg" class="message modalMsg" aria-live="polite"></p>
-    </div>
-
-    <div class="modalFooter">
-      <button type="button" class="secondary" id="btnCancelCompany">Avbryt</button>
-      <button type="button" id="btnSaveCompany">Spara</button>
-    </div>
-  </div>
-</div>
-
-<!-- MODAL: Skapa Enhet (enkelt, men spärras tills bolag finns) -->
-<div id="unitOverlay" class="modalOverlay" aria-hidden="true">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="unitTitle" aria-describedby="unitDesc">
-    <div class="modalHeader">
-      <div>
-        <p id="unitTitle" class="title">Skapa enhet</p>
-        <p id="unitDesc" class="sub">Enheten skapas under bolaget. (Du kan skapa team senare på samma sätt.)</p>
-      </div>
-      <button type="button" class="iconBtn" id="btnCloseUnit" aria-label="Stäng">Stäng</button>
-    </div>
-
-    <div class="modalBody">
-      <div class="fieldset">
-        <p class="legend">Enhet</p>
-        <div class="row2">
-          <label>
-            Namn *
-            <input id="uName" type="text" placeholder="t.ex. Kök / Servering / Produktion" />
-          </label>
-          <label>
-            Typ (låst)
-            <input id="uType" type="text" value="Enhet" disabled />
-          </label>
-        </div>
-
-        <div class="row2" style="margin-top:10px;">
-          <label>
-            Parent (Bolag) *
-            <select id="uParent"></select>
-          </label>
-          <label>
-            Id (auto)
-            <input id="uId" type="text" disabled />
-          </label>
-        </div>
-
-        <p class="req">* = obligatoriskt</p>
-      </div>
-
-      <p id="unitMsg" class="message modalMsg" aria-live="polite"></p>
-    </div>
-
-    <div class="modalFooter">
-      <button type="button" class="secondary" id="btnCancelUnit">Avbryt</button>
-      <button type="button" id="btnSaveUnit">Spara</button>
-    </div>
+    </form>
   </div>
 </div>
 
@@ -587,8 +604,8 @@ MASTER FIX:
     m.className = "message" + (kind ? " " + kind : "");
     m.textContent = text || "";
   }
-  function setModalMsg(id, kind, text){
-    const m = $(id);
+  function setModalMsg(kind, text){
+    const m = $("#mErr");
     if(!m) return;
     m.className = "message" + (kind ? " " + kind : "");
     m.textContent = text || "";
@@ -596,6 +613,34 @@ MASTER FIX:
 
   function genId(prefix){
     return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function normStr(v, max){
+    const s = String(v ?? "").trim();
+    if(!s) return "";
+    return s.length > (max || 120) ? s.slice(0, (max || 120)) : s;
+  }
+  function normEmail(v){
+    const s = normStr(v, 160);
+    if(!s) return "";
+    // enkel sanity (fail-closed men inte överhård)
+    const ok = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+    return ok ? s : "";
+  }
+  function normOrgNo(v){
+    const s = normStr(v, 40);
+    if(!s) return "";
+    // svensk orgnr ofta: 10-12 tecken inkl '-' (vi är snälla men kräver siffror)
+    const digits = s.replace(/[^\d]/g,"");
+    if(digits.length < 6) return "";
+    return s;
+  }
+  function normPhone(v){
+    const s = normStr(v, 40);
+    if(!s) return "";
+    const digits = s.replace(/[^\d]/g,"");
+    if(digits.length < 6) return "";
+    return s;
   }
 
   // --- Bootstrap: skapa root direkt om org saknas/är tom ---
@@ -632,17 +677,20 @@ MASTER FIX:
     return Array.from(set);
   }
 
-  // --- Org model ---
+  function isType(n, t){
+    return String(n?.type || "").trim().toLowerCase() === String(t || "").trim().toLowerCase();
+  }
+
+  // --- Org model (bevara ev. meta för bolag) ---
   function normalizeNode(n){
-    const id = String(n?.id || "").trim();
-    const name = String(n?.name || "").trim();
-    const type = String(n?.type || "").trim();
+    const id = normStr(n?.id, 120);
+    const name = normStr(n?.name, 120);
+    const type = normStr(n?.type, 40);
     const createdAt = Number.isFinite(n?.createdAt) ? n.createdAt : Date.now();
     const updatedAt = Number.isFinite(n?.updatedAt) ? n.updatedAt : Date.now();
 
     if(!id || !name) return null;
 
-    // Root: låst shape + parentId null
     if(id === ROOT_ID){
       return {
         id: ROOT_ID,
@@ -654,32 +702,28 @@ MASTER FIX:
       };
     }
 
-    const parentIdRaw = (n?.parentId === null || n?.parentId === undefined) ? ROOT_ID : String(n.parentId).trim();
+    const parentIdRaw = (n?.parentId === null || n?.parentId === undefined) ? ROOT_ID : normStr(n?.parentId, 120);
     const parentId = parentIdRaw ? parentIdRaw : ROOT_ID;
 
-    // Pass-through bolagsprofilfält (bakåtkompatibelt: okända fält ignoreras i andra vyer)
-    const company = (n && typeof n === "object") ? {
-      companyOrgNo: String(n.companyOrgNo || "").trim(),
-      companyEmail: String(n.companyEmail || "").trim(),
-      companyContact: String(n.companyContact || "").trim(),
-      companyPhone: String(n.companyPhone || "").trim(),
-      companyInvoiceEmail: String(n.companyInvoiceEmail || "").trim(),
-      structureName: String(n.structureName || "").trim()
-    } : {
-      companyOrgNo:"",
-      companyEmail:"",
-      companyContact:"",
-      companyPhone:"",
-      companyInvoiceEmail:"",
-      structureName:""
-    };
+    // valfritt: meta för bolag (persist i samma key, andra sidor kan ignorera)
+    let meta = null;
+    if(n && typeof n === "object" && n.meta && typeof n.meta === "object" && !Array.isArray(n.meta)){
+      const m = n.meta;
+      const cleaned = {
+        treeName: normStr(m.treeName, 140),
+        orgNo: normStr(m.orgNo, 40),
+        email: normStr(m.email, 160),
+        invoiceEmail: normStr(m.invoiceEmail, 160),
+        contact: normStr(m.contact, 120),
+        phone: normStr(m.phone, 40)
+      };
+      const any = Object.values(cleaned).some(v => !!v);
+      meta = any ? cleaned : null;
+    }
 
-    // Om inga bolagsfält finns, lämna dem tomma (minimerar brus)
-    const hasCompanyMeta = Object.values(company).some(v => String(v || "").trim().length > 0);
-
-    return hasCompanyMeta
-      ? { id, name, type, parentId, createdAt, updatedAt, ...company }
-      : { id, name, type, parentId, createdAt, updatedAt };
+    const out = { id, name, type, parentId, createdAt, updatedAt };
+    if(meta) out.meta = meta;
+    return out;
   }
 
   function buildById(nodes){
@@ -925,116 +969,505 @@ MASTER FIX:
     return { deleteLocked:false, invalidScopes:[], blocked, reason:"" };
   }
 
-  // ---------------------------
-  // Bolag/Enhet helpers (PATCH)
-  // ---------------------------
-  function isBolagNode(n){
-    const t = String(n?.type || "").trim().toLowerCase();
-    return t === "bolag";
-  }
-
-  function getBolag(nodes){
-    // Primärt: första root-barn med type=Bolag
-    const childBolag = nodes.find(n => n.parentId === ROOT_ID && isBolagNode(n));
-    if(childBolag) return childBolag;
-
-    // Fallback: om det finns root-barn alls men inga typ-satta (äldre data), ta första root-barn som “bolag”
-    const anyChild = nodes.find(n => n.parentId === ROOT_ID && n.id !== ROOT_ID);
-    return anyChild || null;
-  }
-
-  function ensureBolagType(node){
-    if(!node) return null;
-    const t = String(node.type || "").trim();
-    if(t.toLowerCase() === "bolag") return node;
-    return { ...node, type: "Bolag" };
-  }
-
-  function validateEmail(s){
-    const v = String(s || "").trim();
-    if(!v) return false;
-    // enkel, fail-safe
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-  }
-
-  function validateOrgNo(s){
-    const v = String(s || "").trim();
-    if(!v) return false;
-    // Tillåt "556123-4567" eller "5561234567"
-    return /^(\d{6}-\d{4}|\d{10})$/.test(v);
-  }
-
-  function validateRequiredText(s, maxLen){
-    const v = String(s || "").trim();
-    if(!v) return { ok:false, val:v };
-    if(maxLen && v.length > maxLen) return { ok:false, val:v };
-    return { ok:true, val:v };
-  }
-
-  // ---------------------------
-  // Modal plumbing (focus trap)
-  // ---------------------------
-  function openOverlay(overlayEl){
-    if(!overlayEl) return;
-    overlayEl.classList.add("open");
-    overlayEl.setAttribute("aria-hidden","false");
-
-    const focusable = overlayEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-    const first = focusable && focusable.length ? focusable[0] : null;
-    if(first) setTimeout(() => { try{ first.focus(); }catch{} }, 0);
-  }
-
-  function closeOverlay(overlayEl){
-    if(!overlayEl) return;
-    overlayEl.classList.remove("open");
-    overlayEl.setAttribute("aria-hidden","true");
-  }
-
-  function trapFocus(e, overlayEl){
-    if(!overlayEl || !overlayEl.classList.contains("open")) return;
-    if(e.key !== "Tab") return;
-
-    const focusable = overlayEl.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
-    if(!focusable.length) return;
-
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-
-    if(e.shiftKey && document.activeElement === first){
-      e.preventDefault();
-      try{ last.focus(); }catch{}
-    }else if(!e.shiftKey && document.activeElement === last){
-      e.preventDefault();
-      try{ first.focus(); }catch{}
-    }
-  }
-
-  // --- UI state (för list/guard) ---
-  let editingId = null;
-
   function validateName(name){
     const s = String(name || "").trim();
     if(!s) return { ok:false, val:s };
-    if(s.length > 80) return { ok:false, val:s };
+    if(s.length > 120) return { ok:false, val:s };
     return { ok:true, val:s };
   }
 
-  function getDescendants(nodes, startId){
+  function updateKpis(nodes){
+    const maxDepth = computeDepth(nodes);
     const children = buildChildrenMap(nodes);
-    const seen = new Set();
-    const stack = [startId];
-    while(stack.length){
-      const cur = stack.pop();
-      const kids = children.get(cur) || [];
-      for(const k of kids){
-        if(seen.has(k)) continue;
-        seen.add(k);
-        stack.push(k);
-      }
-    }
-    return seen;
+    const top = (children.get(ROOT_ID) || []).length;
+
+    $("#kpiNodes").textContent = String(nodes.length);
+    $("#kpiTop").textContent = String(top);
+    $("#kpiDepth").textContent = String(maxDepth);
   }
 
+  // ===== Modal state =====
+  const modalBackdrop = $("#modalBackdrop");
+  const modalForm = $("#modalForm");
+  const modalCloseX = $("#modalCloseX");
+  const btnCancel = $("#btnCancel");
+  const btnSave = $("#btnSave");
+  const mModePill = $("#mModePill");
+
+  const mKind = $("#mKind");
+  const mId = $("#mId");
+  const mName = $("#mName");
+  const mParent = $("#mParent");
+  const mParentNote = $("#mParentNote");
+
+  const boxCompany = $("#boxCompany");
+  const boxRoot = $("#boxRoot");
+  const boxNodeBasics = $("#boxNodeBasics");
+
+  const mTreeName = $("#mTreeName");
+  const mOrgNo = $("#mOrgNo");
+  const mEmail = $("#mEmail");
+  const mInvoiceEmail = $("#mInvoiceEmail");
+  const mContact = $("#mContact");
+  const mPhone = $("#mPhone");
+
+  let modalMode = "create"; // create | edit
+  let editingId = null;
+
+  function openModal(){
+    modalBackdrop.hidden = false;
+    setModalMsg("", "");
+    // fokus: första meningsfulla fält
+    setTimeout(() => {
+      try{
+        if(!mKind.disabled) mKind.focus();
+        else mName.focus();
+      }catch{}
+    }, 0);
+  }
+  function closeModal(){
+    modalBackdrop.hidden = true;
+    setModalMsg("", "");
+    modalMode = "create";
+    editingId = null;
+  }
+
+  function setModalTitle(){
+    const title = $("#modalTitle");
+    const sub = $("#modalSub");
+    const kind = String(mKind.value || "");
+    const isEdit = modalMode === "edit";
+
+    if(kind === "Root"){
+      title.textContent = isEdit ? "Redigera strukturnamn (Root)" : "Redigera strukturnamn (Root)";
+      sub.textContent = "Root påverkar endast namnet på toppnoden. Övriga noder ligger under Root.";
+      mModePill.textContent = "Läge: Root";
+      return;
+    }
+
+    title.textContent = (isEdit ? "Redigera" : "Skapa") + " " + kind;
+    if(kind === "Bolag"){
+      sub.textContent = "Första gången: skapa Bolag och fyll i uppgifter. Enhet kan inte skapas innan Bolag finns.";
+    }else if(kind === "Enhet"){
+      sub.textContent = "Skapa Enhet under ett Bolag (scope-nod).";
+    }else{
+      sub.textContent = "Skapa Team under en Enhet (valfritt).";
+    }
+    mModePill.textContent = "Läge: " + (isEdit ? "Redigera" : "Skapa");
+  }
+
+  function getNodesStrict(){
+    bootstrapRootIfMissing();
+    const raw = safeParseLocal(ORG_KEY, []);
+    const v = validateStrict(raw);
+    return v;
+  }
+
+  function getBolagNodes(nodes){
+    return (nodes || []).filter(n => n.id !== ROOT_ID && isType(n, "Bolag"));
+  }
+  function getEnhetNodes(nodes){
+    return (nodes || []).filter(n => n.id !== ROOT_ID && isType(n, "Enhet"));
+  }
+
+  function fillParentOptions(nodes, kind){
+    mParent.innerHTML = "";
+
+    const opt = document.createElement("option");
+    opt.value = ROOT_ID;
+    opt.textContent = "Root (högst upp)";
+    mParent.appendChild(opt);
+
+    if(kind === "Bolag"){
+      mParent.value = ROOT_ID;
+      mParent.disabled = true;
+      mParentNote.textContent = "Bolag ligger alltid direkt under Root.";
+      return;
+    }
+
+    if(kind === "Enhet"){
+      const bolag = getBolagNodes(nodes);
+      bolag.forEach(b => {
+        const o = document.createElement("option");
+        o.value = b.id;
+        o.textContent = `${b.name} • Bolag`;
+        mParent.appendChild(o);
+      });
+      mParent.disabled = false;
+      mParentNote.textContent = bolag.length ? "Välj vilket Bolag enheten ligger under." : "Inga Bolag finns ännu. Skapa Bolag först (fail-closed).";
+      return;
+    }
+
+    if(kind === "Team"){
+      const enheter = getEnhetNodes(nodes);
+      enheter.forEach(e => {
+        const o = document.createElement("option");
+        o.value = e.id;
+        o.textContent = `${e.name} • Enhet`;
+        mParent.appendChild(o);
+      });
+      mParent.disabled = false;
+      mParentNote.textContent = enheter.length ? "Välj vilken Enhet teamet ligger under." : "Inga Enheter finns ännu. Skapa Enhet först.";
+      return;
+    }
+
+    // default
+    mParent.disabled = false;
+    mParentNote.textContent = "";
+  }
+
+  function resetModalForCreate(defaultKind){
+    modalMode = "create";
+    editingId = null;
+
+    mKind.disabled = false;
+    mKind.value = defaultKind || "Bolag";
+
+    mId.value = "";
+    mName.value = "";
+
+    mTreeName.value = "";
+    mOrgNo.value = "";
+    mEmail.value = "";
+    mInvoiceEmail.value = "";
+    mContact.value = "";
+    mPhone.value = "";
+
+    applyKindUI();
+    setModalTitle();
+  }
+
+  function loadModalForEdit(nodes, nodeId){
+    const node = (nodes || []).find(n => n.id === nodeId);
+    if(!node){
+      setMsg("err", "Vald nod hittades inte (fail-closed).");
+      return false;
+    }
+
+    modalMode = "edit";
+    editingId = node.id;
+
+    // Root i egen “kind”
+    if(node.id === ROOT_ID){
+      mKind.value = "Root";
+      mKind.disabled = true;
+      mId.value = node.id;
+      mName.value = node.name || "";
+      // parent irrelevant
+      applyKindUI();
+      setModalTitle();
+      return true;
+    }
+
+    const inferredKind =
+      isType(node, "Bolag") ? "Bolag" :
+      isType(node, "Enhet") ? "Enhet" :
+      isType(node, "Team") ? "Team" : "Enhet";
+
+    mKind.value = inferredKind;
+    mKind.disabled = true; // lås typ vid edit (minskar risk)
+
+    mId.value = node.id;
+    mName.value = node.name || "";
+
+    const meta = (node.meta && typeof node.meta === "object") ? node.meta : {};
+    mTreeName.value = String(meta.treeName || "");
+    mOrgNo.value = String(meta.orgNo || "");
+    mEmail.value = String(meta.email || "");
+    mInvoiceEmail.value = String(meta.invoiceEmail || "");
+    mContact.value = String(meta.contact || "");
+    mPhone.value = String(meta.phone || "");
+
+    applyKindUI(node.parentId || ROOT_ID);
+    setModalTitle();
+    return true;
+  }
+
+  function applyKindUI(forceParent){
+    const v = getNodesStrict();
+    const nodes = v.nodes;
+
+    const kind = String(mKind.value || "");
+
+    // visa/hide sektioner
+    if(kind === "Bolag"){
+      boxCompany.style.display = "block";
+      boxRoot.style.display = "none";
+      boxNodeBasics.style.display = "block";
+    }else if(kind === "Root"){
+      boxCompany.style.display = "none";
+      boxRoot.style.display = "block";
+      boxNodeBasics.style.display = "block";
+    }else{
+      boxCompany.style.display = "none";
+      boxRoot.style.display = "none";
+      boxNodeBasics.style.display = "block";
+    }
+
+    // parent-select innehåll + lås
+    fillParentOptions(nodes, kind);
+
+    // sätt parent om vi har en tvingad
+    if(forceParent){
+      try{ mParent.value = String(forceParent); }catch{}
+    }
+
+    // fail-closed gating
+    if(kind === "Enhet"){
+      const bolag = getBolagNodes(nodes);
+      if(!bolag.length){
+        setModalMsg("err", "Fail-closed: Du kan inte skapa Enhet innan minst 1 Bolag finns.");
+        btnSave.disabled = true;
+        return;
+      }
+    }
+    if(kind === "Team"){
+      const enheter = getEnhetNodes(nodes);
+      if(!enheter.length){
+        setModalMsg("err", "Fail-closed: Du kan inte skapa Team innan minst 1 Enhet finns.");
+        btnSave.disabled = true;
+        return;
+      }
+    }
+
+    btnSave.disabled = false;
+  }
+
+  // Esc / klick utanför
+  modalBackdrop.addEventListener("click", (e) => {
+    if(e.target === modalBackdrop) closeModal();
+  });
+  window.addEventListener("keydown", (e) => {
+    if(modalBackdrop.hidden) return;
+    if(e.key === "Escape") closeModal();
+  });
+
+  modalCloseX.addEventListener("click", closeModal);
+  btnCancel.addEventListener("click", closeModal);
+
+  mKind.addEventListener("change", () => {
+    applyKindUI();
+    setModalTitle();
+  });
+
+  // Buttons to open modal
+  $("#btnOpenCreate").addEventListener("click", () => {
+    const v = getNodesStrict();
+    if(v.criticalLock){
+      setMsg("err", "Skapa stoppas (fail-closed): org-data är korrupt. Kör Reparera först.");
+      return;
+    }
+    const bolagExists = getBolagNodes(v.nodes).length > 0;
+    resetModalForCreate(bolagExists ? "Enhet" : "Bolag");
+    setModalTitle();
+    openModal();
+  });
+
+  $("#btnOpenEditRoot").addEventListener("click", () => {
+    const v = getNodesStrict();
+    if(v.criticalLock){
+      setMsg("err", "Redigering stoppas (fail-closed): org-data är korrupt. Kör Reparera först.");
+      return;
+    }
+    if(loadModalForEdit(v.nodes, ROOT_ID)){
+      openModal();
+    }
+  });
+
+  // Health actions
+  $("#btnHideHealth").addEventListener("click", () => {
+    $("#healthBox").style.display = "none";
+  });
+
+  $("#btnRepair").addEventListener("click", () => {
+    if(!confirm("Reparera org-data? (1 root + bryt loopar + återställ orphans till root)")) return;
+    repairOrg();
+    setMsg("ok", "Reparerat och sparat org-data.");
+    renderAll();
+  });
+
+  // Save modal (create/edit)
+  modalForm.addEventListener("submit", (e) => {
+    e.preventDefault();
+    setModalMsg("", "");
+
+    const v = getNodesStrict();
+    if(v.criticalLock){
+      setModalMsg("err", "Sparande stoppas (fail-closed): org-data är korrupt. Kör Reparera först.");
+      btnSave.disabled = true;
+      return;
+    }
+
+    const nodes = v.nodes.slice();
+    const kind = String(mKind.value || "");
+
+    // Root edit
+    if(kind === "Root"){
+      const vName = validateName(mName.value);
+      if(!vName.ok){
+        setModalMsg("err", "Strukturnamn krävs (max 120 tecken).");
+        return;
+      }
+      const idx = nodes.findIndex(x => x.id === ROOT_ID);
+      if(idx < 0){
+        setModalMsg("err", "Root hittades inte (fail-closed).");
+        return;
+      }
+      const now = Date.now();
+      nodes[idx] = { ...nodes[idx], name: vName.val, updatedAt: now };
+      saveLocal(ORG_KEY, nodes);
+      setMsg("ok", "Strukturnamn sparat.");
+      closeModal();
+      renderAll();
+      return;
+    }
+
+    // Basic fields
+    const vName = validateName(mName.value);
+    if(!vName.ok){
+      setModalMsg("err", "Namn krävs (max 120 tecken).");
+      return;
+    }
+
+    // Parent rules
+    const parentId = String(mParent.value || ROOT_ID);
+
+    // Gating / parent constraints (fail-closed)
+    if(kind === "Bolag"){
+      if(parentId !== ROOT_ID){
+        setModalMsg("err", "Bolag måste ligga under Root (fail-closed).");
+        return;
+      }
+    }
+    if(kind === "Enhet"){
+      const bolag = getBolagNodes(nodes);
+      if(!bolag.length){
+        setModalMsg("err", "Fail-closed: Skapa Bolag först.");
+        return;
+      }
+      const okParent = bolag.some(b => b.id === parentId);
+      if(!okParent){
+        setModalMsg("err", "Enhet måste ligga under ett Bolag (fail-closed).");
+        return;
+      }
+    }
+    if(kind === "Team"){
+      const enheter = getEnhetNodes(nodes);
+      if(!enheter.length){
+        setModalMsg("err", "Fail-closed: Skapa Enhet först.");
+        return;
+      }
+      const okParent = enheter.some(x => x.id === parentId);
+      if(!okParent){
+        setModalMsg("err", "Team måste ligga under en Enhet (fail-closed).");
+        return;
+      }
+    }
+
+    // Company fields if Bolag
+    let meta = null;
+    if(kind === "Bolag"){
+      const treeName = normStr(mTreeName.value, 140);
+      const orgNo = normOrgNo(mOrgNo.value);
+      const email = normEmail(mEmail.value);
+      const invoiceEmail = normEmail(mInvoiceEmail.value);
+      const contact = normStr(mContact.value, 120);
+      const phone = normPhone(mPhone.value);
+
+      // Krav enligt din lista
+      if(!treeName){ setModalMsg("err", "Strukturnamn krävs."); return; }
+      if(!orgNo){ setModalMsg("err", "Organisationsnummer krävs (minst siffror)."); return; }
+      if(!email){ setModalMsg("err", "Mailadress krävs (giltig e-post)."); return; }
+      if(!invoiceEmail){ setModalMsg("err", "Faktura-mail krävs (giltig e-post)."); return; }
+      if(!contact){ setModalMsg("err", "Kontaktperson krävs."); return; }
+      if(!phone){ setModalMsg("err", "Telefon krävs (minst siffror)."); return; }
+
+      meta = { treeName, orgNo, email, invoiceEmail, contact, phone };
+    }
+
+    const now = Date.now();
+
+    // CREATE
+    if(modalMode === "create"){
+      const id = genId("org");
+      const newNode = normalizeNode({
+        id,
+        name: vName.val,
+        type: kind,
+        parentId: parentId || ROOT_ID,
+        createdAt: now,
+        updatedAt: now,
+        meta: meta || undefined
+      });
+
+      if(!newNode){
+        setModalMsg("err", "Kunde inte skapa nod (ogiltig data).");
+        return;
+      }
+
+      // loop-guard: new node kan inte skapa loop (säkert, men vi dubbelcheckar)
+      // För ny nod räcker det att parent inte är node själv (id är nytt) => ok.
+
+      saveLocal(ORG_KEY, nodes.concat([newNode]));
+      setMsg("ok", (kind === "Bolag" ? "Bolag skapat." : (kind === "Enhet" ? "Enhet skapad." : "Team skapat.")));
+
+      // UX: låt användaren skapa flera utan att fastna
+      // - behåll kind
+      // - behåll parent för Enhet/Team
+      // - töm namn + id, bolagsfält om Enhet/Team
+      mId.value = "";
+      mName.value = "";
+      if(kind !== "Bolag"){
+        // parent kvar
+      }else{
+        // efter första bolag: föreslå Enhet som nästa
+        mKind.disabled = false;
+        mKind.value = "Enhet";
+        applyKindUI();
+        setModalTitle();
+      }
+      setModalMsg("ok", "Sparat. Du kan skapa en till eller stänga dialogen.");
+      renderAll();
+      return;
+    }
+
+    // EDIT
+    const targetId = editingId;
+    const idx = nodes.findIndex(x => x.id === targetId);
+    if(idx < 0){
+      setModalMsg("err", "Vald nod hittades inte.");
+      return;
+    }
+
+    const cur = nodes[idx];
+    const next = normalizeNode({
+      ...cur,
+      name: vName.val,
+      type: cur.type || kind,
+      parentId: (kind === "Bolag") ? ROOT_ID : parentId,
+      updatedAt: now,
+      meta: (kind === "Bolag") ? meta : (cur.meta || undefined)
+    });
+
+    if(!next){
+      setModalMsg("err", "Kunde inte spara (ogiltig data).");
+      return;
+    }
+
+    // extra loop-guard vid edit: hindra parent = self
+    if(next.id === next.parentId){
+      setModalMsg("err", "Ogiltig parent (self).");
+      return;
+    }
+
+    nodes[idx] = next;
+    saveLocal(ORG_KEY, nodes);
+    setMsg("ok", "Nod sparad.");
+    closeModal();
+    renderAll();
+  });
+
+  // ===== Render list (höger sida) =====
   function renderHealthAndLocks(v, guards){
     const healthBox = $("#healthBox");
     const lockBox = $("#lockBox");
@@ -1056,9 +1489,9 @@ MASTER FIX:
 
     if(v?.criticalLock){
       lockBox.style.display = "block";
-      $("#lockText").textContent = "Kritiskt fel i org-data. Skapande/sparande är låst tills du kör Reparera.";
-      $("#btnOpenCompany").disabled = true;
-      $("#btnCreateUnit").disabled = true;
+      $("#lockText").textContent = "Kritiskt fel i org-data. Skapa/Redigera är låst tills du kör Reparera.";
+      $("#btnOpenCreate").disabled = true;
+      $("#btnOpenEditRoot").disabled = true;
     }else{
       if(guards?.deleteLocked){
         lockBox.style.display = "block";
@@ -1067,33 +1500,11 @@ MASTER FIX:
         lockBox.style.display = "none";
         $("#lockText").textContent = "—";
       }
-      $("#btnOpenCompany").disabled = false;
-      // btnCreateUnit sätts även av bolags-guard i renderList()
+      $("#btnOpenCreate").disabled = false;
+      $("#btnOpenEditRoot").disabled = false;
     }
   }
 
-  $("#btnHideHealth").addEventListener("click", () => {
-    $("#healthBox").style.display = "none";
-  });
-
-  $("#btnRepair").addEventListener("click", () => {
-    if(!confirm("Reparera org-data? (1 root + bryt loopar + återställ orphans till root)")) return;
-    repairOrg();
-    setMsg("ok", "Reparerat och sparat org-data.");
-    renderList();
-  });
-
-  function updateKpis(nodes){
-    const maxDepth = computeDepth(nodes);
-    const children = buildChildrenMap(nodes);
-    const top = (children.get(ROOT_ID) || []).length;
-
-    $("#kpiNodes").textContent = String(nodes.length);
-    $("#kpiTop").textContent = String(top);
-    $("#kpiDepth").textContent = String(maxDepth);
-  }
-
-  // --- LIST RENDER (HÖGERDELEN: markup oförändrad) ---
   function renderList(){
     const list = $("#list");
     list.innerHTML = "";
@@ -1108,30 +1519,14 @@ MASTER FIX:
     const guards = computeDeleteGuards(v.nodes, scopeIds);
 
     renderHealthAndLocks(v, guards);
+    updateKpis(v.nodes);
 
-    const nodes = v.nodes;
-
-    // Bolag-guard: Enhet-knapp får ej användas innan bolag finns
-    const bolag = ensureBolagType(getBolag(nodes));
-    const btnCreateUnit = $("#btnCreateUnit");
-    if(btnCreateUnit){
-      const disable = !!v.criticalLock || !bolag;
-      btnCreateUnit.disabled = disable;
-      if(disable){
-        btnCreateUnit.title = v.criticalLock ? "Åtgärder låsta (kör Reparera)." : "Skapa bolag först.";
-      }else{
-        btnCreateUnit.title = "";
-      }
-    }
-
-    updateKpis(nodes);
-
-    const flat = flattenTree(nodes);
+    const flat = flattenTree(v.nodes);
 
     const q = String($("#search").value || "").trim().toLowerCase();
     const filter = $("#filter").value;
 
-    const children = buildChildrenMap(nodes);
+    const children = buildChildrenMap(v.nodes);
     const childCount = (id) => (children.get(id) || []).length;
 
     let rows = flat;
@@ -1154,11 +1549,10 @@ MASTER FIX:
       return;
     }
 
-    const criticalLocked = $("#btnOpenCompany").disabled === true;
+    const criticalLocked = ($("#btnOpenCreate").disabled === true);
 
     rows.forEach(r => {
       const isRoot = (r.id === ROOT_ID);
-      const isEditing = (editingId && r.id === editingId);
       const kids = childCount(r.id);
 
       const deleteBlocked =
@@ -1174,6 +1568,7 @@ MASTER FIX:
       el.className = "item";
       el.setAttribute("role", "treeitem");
       el.setAttribute("aria-level", String(r.depth));
+
       el.innerHTML = `
         <div class="treeName">
           <span aria-hidden="true" style="display:inline-block;width:${indentPx}px;"></span>
@@ -1187,7 +1582,6 @@ MASTER FIX:
               ${guards.deleteLocked ? `<span class="pill warnpill">Delete låst</span>` : ``}
               ${(!isRoot && guards.blocked.has(r.id)) ? `<span class="pill warnpill">Scope-skydd</span>` : ``}
               ${isRoot ? `<span class="pill">Root</span>` : ``}
-              ${isEditing ? `<span class="pill">Redigeras</span>` : ``}
             </div>
           </div>
         </div>
@@ -1204,20 +1598,21 @@ MASTER FIX:
 
     list.querySelectorAll("button[data-edit]").forEach(btn => {
       btn.addEventListener("click", () => {
-        if($("#btnOpenCompany").disabled) return;
-        const id = btn.getAttribute("data-edit");
-        const node = nodes.find(x => x.id === id);
-        if(!node) return;
-        editingId = node.id;
+        if($("#btnOpenCreate").disabled) return;
 
-        // Om användaren klickar redigera på bolag: öppna bolagsmodal
-        const maybeBolag = ensureBolagType(getBolag(nodes));
-        if(maybeBolag && node.id === maybeBolag.id){
-          openCompanyModal(nodes, maybeBolag);
+        const id = btn.getAttribute("data-edit");
+        if(!id) return;
+
+        const raw2 = safeParseLocal(ORG_KEY, []);
+        const v2 = validateStrict(raw2);
+        if(v2.criticalLock){
+          setMsg("err", "Redigering stoppas (fail-closed): org-data är korrupt. Kör Reparera först.");
           return;
         }
 
-        setMsg("", "Tips: Enheter/Team skapar du via knappen “Skapa enhet”. (Bolag redigeras i Bolagsprofil.)");
+        if(loadModalForEdit(v2.nodes, id)){
+          openModal();
+        }
       });
     });
 
@@ -1226,7 +1621,7 @@ MASTER FIX:
         const id = btn.getAttribute("data-del");
         if(!id) return;
 
-        if($("#btnOpenCompany").disabled){
+        if($("#btnOpenCreate").disabled){
           setMsg("err", "Radering stoppas (fail-closed): kritiskt datafel. Kör Reparera först.");
           return;
         }
@@ -1235,7 +1630,7 @@ MASTER FIX:
           return;
         }
 
-        const node = nodes.find(x => x.id === id);
+        const node = v.nodes.find(x => x.id === id);
         if(!node) return;
 
         if(id === ROOT_ID){
@@ -1243,7 +1638,7 @@ MASTER FIX:
           return;
         }
 
-        const kids = (buildChildrenMap(nodes).get(id) || []).length;
+        const kids = (buildChildrenMap(v.nodes).get(id) || []).length;
         if(kids > 0){
           setMsg("err", "Noden har barn. Flytta/ta bort barn först.");
           return;
@@ -1256,302 +1651,26 @@ MASTER FIX:
 
         if(!confirm(`Ta bort nod "${node.name}"?`)) return;
 
-        const next = nodes.filter(x => x.id !== id);
+        const next = v.nodes.filter(x => x.id !== id);
         saveLocal(ORG_KEY, next);
 
-        if(editingId === id) editingId = null;
-
         setMsg("ok", "Nod borttagen.");
-        renderList();
+        renderAll();
       });
     });
   }
 
-  // ---------------------------
-  // Company modal (PATCH)
-  // ---------------------------
-  const companyOverlay = $("#companyOverlay");
-
-  function clearCompanyForm(){
-    $("#cName").value = "";
-    $("#cOrgNo").value = "";
-    $("#cEmail").value = "";
-    $("#cContact").value = "";
-    $("#cPhone").value = "";
-    $("#cInvoiceEmail").value = "";
-    $("#cStructureName").value = "";
-    $("#cNodeId").value = "";
-    setModalMsg("#companyMsg", "", "");
-  }
-
-  function openCompanyModal(nodes, bolagNode){
-    clearCompanyForm();
-
-    const node = bolagNode ? ensureBolagType(bolagNode) : null;
-
-    if(node){
-      $("#cName").value = node.name || "";
-      $("#cOrgNo").value = node.companyOrgNo || "";
-      $("#cEmail").value = node.companyEmail || "";
-      $("#cContact").value = node.companyContact || "";
-      $("#cPhone").value = node.companyPhone || "";
-      $("#cInvoiceEmail").value = node.companyInvoiceEmail || "";
-      $("#cStructureName").value = node.structureName || "";
-      $("#cNodeId").value = node.id || "";
-    }else{
-      $("#cNodeId").value = "skapas vid Spara";
-    }
-
-    openOverlay(companyOverlay);
-  }
-
-  function closeCompanyModal(){
-    closeOverlay(companyOverlay);
-  }
-
-  function saveCompany(){
-    bootstrapRootIfMissing();
-
-    const raw = safeParseLocal(ORG_KEY, []);
-    const v = validateStrict(raw);
-    if(v.criticalLock){
-      setModalMsg("#companyMsg", "err", "Sparande stoppas (fail-closed): org-data är korrupt. Kör Reparera först.");
-      return;
-    }
-
-    const nodes = v.nodes.slice();
-
-    const nameV = validateRequiredText($("#cName").value, 80);
-    if(!nameV.ok){ setModalMsg("#companyMsg","err","Bolagsnamn krävs (max 80 tecken)."); return; }
-
-    const orgNo = String($("#cOrgNo").value || "").trim();
-    if(!validateOrgNo(orgNo)){ setModalMsg("#companyMsg","err","Organisationsnummer måste vara 10 siffror (med eller utan bindestreck)."); return; }
-
-    const email = String($("#cEmail").value || "").trim();
-    if(!validateEmail(email)){ setModalMsg("#companyMsg","err","E-post är obligatorisk och måste vara giltig."); return; }
-
-    const invoiceEmail = String($("#cInvoiceEmail").value || "").trim();
-    if(invoiceEmail && !validateEmail(invoiceEmail)){ setModalMsg("#companyMsg","err","Faktura-e-post måste vara giltig (eller lämnas tom)."); return; }
-
-    const structureNameV = validateRequiredText($("#cStructureName").value, 80);
-    if(!structureNameV.ok){ setModalMsg("#companyMsg","err","Strukturnamn krävs (max 80 tecken)."); return; }
-
-    const contact = String($("#cContact").value || "").trim();
-    const phone = String($("#cPhone").value || "").trim();
-
-    const now = Date.now();
-
-    // Hitta befintlig bolagsnod
-    const existing = getBolag(nodes);
-    if(existing){
-      const idx = nodes.findIndex(n => n.id === existing.id);
-      if(idx < 0){
-        setModalMsg("#companyMsg","err","Kunde inte hitta bolagsnod för uppdatering.");
-        return;
-      }
-      const cur = ensureBolagType(nodes[idx]);
-      const next = normalizeNode({
-        ...cur,
-        name: nameV.val,
-        type: "Bolag",
-        companyOrgNo: orgNo,
-        companyEmail: email,
-        companyContact: contact,
-        companyPhone: phone,
-        companyInvoiceEmail: invoiceEmail,
-        structureName: structureNameV.val,
-        updatedAt: now
-      });
-      if(!next){
-        setModalMsg("#companyMsg","err","Kunde inte spara (ogiltig data).");
-        return;
-      }
-
-      nodes[idx] = next;
-      saveLocal(ORG_KEY, nodes);
-      setModalMsg("#companyMsg","ok","Bolagsprofil uppdaterad.");
-      setMsg("ok","Bolagsprofil sparad.");
-      $("#cNodeId").value = next.id;
-      renderList();
-      return;
-    }
-
-    // Skapa ny bolagsnod som root-barn
-    const id = genId("org");
-    const newNode = normalizeNode({
-      id,
-      name: nameV.val,
-      type: "Bolag",
-      parentId: ROOT_ID,
-      createdAt: now,
-      updatedAt: now,
-      companyOrgNo: orgNo,
-      companyEmail: email,
-      companyContact: contact,
-      companyPhone: phone,
-      companyInvoiceEmail: invoiceEmail,
-      structureName: structureNameV.val
-    });
-
-    if(!newNode){
-      setModalMsg("#companyMsg","err","Kunde inte skapa bolag (ogiltig data).");
-      return;
-    }
-
-    nodes.push(newNode);
-    saveLocal(ORG_KEY, nodes);
-
-    $("#cNodeId").value = newNode.id;
-    setModalMsg("#companyMsg","ok","Bolag skapat och sparat.");
-    setMsg("ok","Bolag skapat.");
+  function renderAll(){
     renderList();
   }
-
-  // ---------------------------
-  // Unit modal (PATCH)
-  // ---------------------------
-  const unitOverlay = $("#unitOverlay");
-
-  function openUnitModal(){
-    bootstrapRootIfMissing();
-
-    const raw = safeParseLocal(ORG_KEY, []);
-    const v = validateStrict(raw);
-    if(v.criticalLock){
-      setModalMsg("#unitMsg","err","Skapa enhet stoppas (fail-closed): org-data är korrupt. Kör Reparera först.");
-      openOverlay(unitOverlay);
-      return;
-    }
-
-    const nodes = v.nodes.slice();
-    const bolag = ensureBolagType(getBolag(nodes));
-    if(!bolag){
-      setModalMsg("#unitMsg","err","Skapa bolag först.");
-      openOverlay(unitOverlay);
-      return;
-    }
-
-    // init form
-    $("#uName").value = "";
-    $("#uId").value = "";
-    setModalMsg("#unitMsg", "", "");
-
-    // parent = bolag (låst dropdown med bara bolag för enkelhet)
-    const sel = $("#uParent");
-    sel.innerHTML = "";
-    const opt = document.createElement("option");
-    opt.value = bolag.id;
-    opt.textContent = bolag.name + " • Bolag";
-    sel.appendChild(opt);
-
-    $("#uId").value = "skapas vid Spara";
-
-    openOverlay(unitOverlay);
-  }
-
-  function closeUnitModal(){
-    closeOverlay(unitOverlay);
-  }
-
-  function saveUnit(){
-    bootstrapRootIfMissing();
-
-    const raw = safeParseLocal(ORG_KEY, []);
-    const v = validateStrict(raw);
-    if(v.criticalLock){
-      setModalMsg("#unitMsg","err","Sparande stoppas (fail-closed): org-data är korrupt. Kör Reparera först.");
-      return;
-    }
-
-    const nodes = v.nodes.slice();
-    const bolag = ensureBolagType(getBolag(nodes));
-    if(!bolag){
-      setModalMsg("#unitMsg","err","Skapa bolag först.");
-      return;
-    }
-
-    const nameV = validateRequiredText($("#uName").value, 80);
-    if(!nameV.ok){
-      setModalMsg("#unitMsg","err","Namn krävs (max 80 tecken).");
-      return;
-    }
-
-    const now = Date.now();
-    const id = genId("org");
-
-    const newNode = normalizeNode({
-      id,
-      name: nameV.val,
-      type: "Enhet",
-      parentId: bolag.id,
-      createdAt: now,
-      updatedAt: now
-    });
-
-    if(!newNode){
-      setModalMsg("#unitMsg","err","Kunde inte skapa enhet (ogiltig data).");
-      return;
-    }
-
-    nodes.push(newNode);
-    saveLocal(ORG_KEY, nodes);
-
-    $("#uId").value = newNode.id;
-    setModalMsg("#unitMsg","ok","Enhet skapad.");
-    setMsg("ok","Enhet skapad.");
-    renderList();
-  }
-
-  // ---------------------------
-  // Event wiring
-  // ---------------------------
-  $("#btnOpenCompany").addEventListener("click", () => {
-    bootstrapRootIfMissing();
-    const raw = safeParseLocal(ORG_KEY, []);
-    const v = validateStrict(raw);
-    const nodes = v.nodes || [];
-    const bolag = ensureBolagType(getBolag(nodes));
-    openCompanyModal(nodes, bolag);
-  });
-
-  $("#btnCreateUnit").addEventListener("click", () => {
-    openUnitModal();
-  });
-
-  $("#btnCloseCompany").addEventListener("click", closeCompanyModal);
-  $("#btnCancelCompany").addEventListener("click", closeCompanyModal);
-  $("#btnSaveCompany").addEventListener("click", saveCompany);
-
-  $("#btnCloseUnit").addEventListener("click", closeUnitModal);
-  $("#btnCancelUnit").addEventListener("click", closeUnitModal);
-  $("#btnSaveUnit").addEventListener("click", saveUnit);
-
-  // click outside to close (fail-safe)
-  companyOverlay.addEventListener("click", (e) => {
-    if(e.target === companyOverlay) closeCompanyModal();
-  });
-  unitOverlay.addEventListener("click", (e) => {
-    if(e.target === unitOverlay) closeUnitModal();
-  });
-
-  // ESC + focus trap
-  document.addEventListener("keydown", (e) => {
-    if(e.key === "Escape"){
-      if(companyOverlay.classList.contains("open")) closeCompanyModal();
-      if(unitOverlay.classList.contains("open")) closeUnitModal();
-      return;
-    }
-    trapFocus(e, companyOverlay);
-    trapFocus(e, unitOverlay);
-  });
-
-  // Search/filter (höger)
-  $("#search").addEventListener("input", renderList);
-  $("#filter").addEventListener("change", renderList);
 
   // init
   bootstrapRootIfMissing();
-  renderList();
+  renderAll();
+
+  // search / filter
+  $("#search").addEventListener("input", renderAll);
+  $("#filter").addEventListener("change", renderAll);
 
 })();
 </script>
