@@ -2,12 +2,13 @@
 AO-ADMIN-HOME-REBUILD-01 (PROD) | FIL-ID: admin/home.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN – Start/Dashboard för Utbildningsbiblioteket (read-only)
-Mål: Överblick + genvägar till trainings + packages-block + onboard-plans + onboard-progress (nav)
+Mål: Överblick + genvägar + Trello-lik Board för snabb överblick
 
-PATCH (v1.7) – “Färgkommunikation / mockup-lik”:
-- Lägger till tydlig färgkommunikation för Board-kolumner och status-taggar (utan writes)
-- Behåller exakt samma logik, keys och read-only-beteende
-- XSS-säker rendering (textContent), ingen osäker innerHTML
+PATCH (v1.8) – “Board: kompakt default (inga listor förrän val)”:
+- Visar endast lane-rubriker (Utkast/Publicerade/Saknar blocks/Kvalitet) som “header tiles”
+- Listor/kort renderas först när du väljer en lane i “Visa” (default = Utkast)
+- Behåller sök + modul-filter (påverkar lane-counts och vald lane)
+- Read-only, inga writes, inga nya storage-keys, XSS via textContent
 
 POLICY (LÅST):
 - UI-only • Fail-closed (requireAuth)
@@ -18,7 +19,7 @@ POLICY (LÅST):
 - Read-only: AO-057_TRAININGS_V1 (trainings) + auth via core
 - Fail-closed: saknad/korrupt auth eller roll!=ADMIN => redirect/login (core)
 
-Senaste sanning: 2026-01-06 (PATCH v1.7)
+Senaste sanning: 2026-01-06 (PATCH v1.8)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -34,7 +35,7 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
 
   <style>
     :root{
-      /* PATCH v1.7: färgkommunikation (mjuk men tydlig) */
+      /* Färgkommunikation (mjuk men tydlig) */
       --lane-draft-bg: rgba(245, 158, 11, .10);
       --lane-draft-br: rgba(245, 158, 11, .28);
       --lane-draft-ink: #8a4b00;
@@ -118,7 +119,7 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
 
     .quick{ display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }
 
-    /* PATCH: visa var länkar går (tvåradsknapp) */
+    /* visa var länkar går (tvåradsknapp) */
     .linkCard{
       display:inline-flex;
       flex-direction:column;
@@ -139,8 +140,7 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
     .btn.primary .u{ opacity:.92; }
 
     /* ============================================================
-       PATCH v1.6: Trello-lik Board (read-only)
-       PATCH v1.7: Färgkommunikation
+       Board (kompakt)
     ============================================================ */
     .boardHeader{
       display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;
@@ -161,65 +161,79 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
       outline-offset: 2px;
     }
 
-    .board{
+    /* Header tiles (alltid synliga) */
+    .laneTiles{
       display:grid;
       grid-template-columns: 1fr;
       gap:12px;
       margin-top:12px;
     }
     @media (min-width:980px){
-      .board{ grid-template-columns: repeat(4, minmax(0,1fr)); }
+      .laneTiles{ grid-template-columns: repeat(4, minmax(0,1fr)); }
     }
-
-    .lane{
+    .laneTile{
       border:1px solid rgba(0,0,0,.08);
       border-radius:12px;
-      background:rgba(0,0,0,.02);
       padding:10px;
-      min-height: 220px;
-      display:flex;
-      flex-direction:column;
-      gap:10px;
+      background:rgba(0,0,0,.02);
       position:relative;
       overflow:hidden;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:10px;
     }
-    /* PATCH v1.7: tydlig “topp-strip” per lane */
-    .lane::before{
+    .laneTile::before{
       content:"";
       position:absolute;
       left:0; top:0; right:0;
       height:6px;
       background: rgba(0,0,0,.10);
     }
+    .laneTile .ltTitle{ font-weight:900; font-size:14px; margin-top:4px; }
+    .laneTile .ltCount{ font-size:12px; opacity:.85; margin-top:4px; }
+    .laneTile .ltLeft{ display:flex; flex-direction:column; gap:2px; }
+    .laneTile .ltRight{ font-size:12px; opacity:.8; margin-top:4px; white-space:nowrap; }
 
-    .laneTop{
-      display:flex; align-items:center; justify-content:space-between; gap:8px;
-      padding:2px 2px 6px 2px;
-      border-bottom:1px solid rgba(0,0,0,.06);
-      margin-top:4px; /* för att inte krocka med strip */
+    .laneTile.is-active{
+      box-shadow: 0 0 0 3px rgba(11,95,255,.12);
+      border-color: rgba(11,95,255,.28);
     }
-    .laneTitle{ font-weight:900; font-size:14px; }
-    .laneCount{ font-size:12px; opacity:.85; }
 
-    /* Lane themes */
-    .lane.lane-draft{ background: var(--lane-draft-bg); border-color: var(--lane-draft-br); }
-    .lane.lane-draft::before{ background: rgba(245, 158, 11, .75); }
-    .lane.lane-draft .laneTitle{ color: var(--lane-draft-ink); }
+    .laneTile.tile-draft{ background: var(--lane-draft-bg); border-color: var(--lane-draft-br); }
+    .laneTile.tile-draft::before{ background: rgba(245, 158, 11, .75); }
+    .laneTile.tile-draft .ltTitle{ color: var(--lane-draft-ink); }
 
-    .lane.lane-published{ background: var(--lane-pub-bg); border-color: var(--lane-pub-br); }
-    .lane.lane-published::before{ background: rgba(16, 185, 129, .75); }
-    .lane.lane-published .laneTitle{ color: var(--lane-pub-ink); }
+    .laneTile.tile-published{ background: var(--lane-pub-bg); border-color: var(--lane-pub-br); }
+    .laneTile.tile-published::before{ background: rgba(16, 185, 129, .75); }
+    .laneTile.tile-published .ltTitle{ color: var(--lane-pub-ink); }
 
-    .lane.lane-noblocks{ background: var(--lane-nob-bg); border-color: var(--lane-nob-br); }
-    .lane.lane-noblocks::before{ background: rgba(239, 68, 68, .75); }
-    .lane.lane-noblocks .laneTitle{ color: var(--lane-nob-ink); }
+    .laneTile.tile-noblocks{ background: var(--lane-nob-bg); border-color: var(--lane-nob-br); }
+    .laneTile.tile-noblocks::before{ background: rgba(239, 68, 68, .75); }
+    .laneTile.tile-noblocks .ltTitle{ color: var(--lane-nob-ink); }
 
-    .lane.lane-quality{ background: var(--lane-qlt-bg); border-color: var(--lane-qlt-br); }
-    .lane.lane-quality::before{ background: rgba(59, 130, 246, .75); }
-    .lane.lane-quality .laneTitle{ color: var(--lane-qlt-ink); }
+    .laneTile.tile-quality{ background: var(--lane-qlt-bg); border-color: var(--lane-qlt-br); }
+    .laneTile.tile-quality::before{ background: rgba(59, 130, 246, .75); }
+    .laneTile.tile-quality .ltTitle{ color: var(--lane-qlt-ink); }
+
+    /* Endast vald lane-lista renderas */
+    .laneListWrap{
+      margin-top:12px;
+      border:1px solid rgba(0,0,0,.08);
+      border-radius:12px;
+      padding:12px;
+      background:#fff;
+    }
+    .laneListTop{
+      display:flex; gap:10px; align-items:baseline; justify-content:space-between; flex-wrap:wrap;
+      padding-bottom:8px;
+      border-bottom:1px solid rgba(0,0,0,.06);
+      margin-bottom:10px;
+    }
+    .laneListTitle{ font-weight:900; font-size:14px; }
+    .laneListMeta{ font-size:12px; opacity:.8; }
 
     .cards{ display:flex; flex-direction:column; gap:10px; }
-
     .tcard{
       background:#fff;
       border:1px solid rgba(0,0,0,.10);
@@ -250,7 +264,6 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
       opacity:.95;
       background: rgba(0,0,0,.03);
     }
-    /* PATCH v1.7: statusfärger */
     .tag.tag-draft{ background: var(--tag-draft-bg); border-color: var(--tag-draft-br); color: var(--tag-draft-ink); }
     .tag.tag-published{ background: var(--tag-pub-bg); border-color: var(--tag-pub-br); color: var(--tag-pub-ink); }
 
@@ -271,7 +284,6 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
       border:1px solid rgba(0,0,0,.12);
       background: rgba(0,0,0,.03);
     }
-    /* PATCH v1.7: signal-färger för kvalitetspills */
     .tiny.is-bad{ background: var(--tag-bad-bg); border-color: var(--tag-bad-br); color: var(--tag-bad-ink); }
     .tiny.is-warn{ background: var(--tag-warn-bg); border-color: var(--tag-warn-br); color: var(--tag-warn-ink); }
 
@@ -333,7 +345,6 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
         </span>
       </a>
 
-      <!-- PATCH v1.4: länk till materialisering -->
       <a class="btn" href="./onboard-materialize.html" title="./onboard-materialize.html">
         <span class="linkCard">
           <span class="t">Materialisera onboarding</span>
@@ -400,7 +411,6 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
           </span>
         </a>
 
-        <!-- PATCH v1.4: snabbgenväg materialisering -->
         <a class="btn" href="./onboard-materialize.html" title="./onboard-materialize.html">
           <span class="linkCard">
             <span class="t">Öppna Materialisera onboarding</span>
@@ -423,7 +433,7 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
       </div>
     </section>
 
-    <!-- PATCH v1.6: Trello-lik Board -->
+    <!-- Board (kompakt) -->
     <section class="card" style="margin-top:14px;" aria-label="Board">
       <div style="display:flex; gap:10px; align-items:baseline; justify-content:space-between; flex-wrap:wrap;">
         <div>
@@ -448,7 +458,6 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
           <div class="field">
             <label for="qLane">Visa</label>
             <select class="select" id="qLane">
-              <option value="__all">Alla kolumner</option>
               <option value="draft">Utkast</option>
               <option value="published">Publicerade</option>
               <option value="noblocks">Saknar blocks</option>
@@ -458,44 +467,54 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
         </div>
 
         <div class="row" aria-label="Info">
-          <span class="pill" id="boardCount">0 kort</span>
+          <span class="pill" id="boardCount">0 träffar</span>
           <span class="pill">Read-only</span>
           <span class="pill">XSS-safe</span>
         </div>
       </div>
 
-      <div class="board" id="board">
-        <div class="lane lane-draft" data-lane="draft" aria-label="Utkast">
-          <div class="laneTop">
-            <div class="laneTitle">Utkast</div>
-            <div class="laneCount" id="laneCountDraft">0</div>
+      <!-- Alltid synliga rubrikblock (tiles) -->
+      <div class="laneTiles" aria-label="Lane-översikt">
+        <div class="laneTile tile-draft" id="tileDraft" role="button" tabindex="0" aria-label="Välj Utkast">
+          <div class="ltLeft">
+            <div class="ltTitle">Utkast</div>
+            <div class="ltCount" id="laneCountDraft">0</div>
           </div>
-          <div class="cards" id="laneDraft"></div>
+          <div class="ltRight">Visa</div>
         </div>
 
-        <div class="lane lane-published" data-lane="published" aria-label="Publicerade">
-          <div class="laneTop">
-            <div class="laneTitle">Publicerade</div>
-            <div class="laneCount" id="laneCountPublished">0</div>
+        <div class="laneTile tile-published" id="tilePublished" role="button" tabindex="0" aria-label="Välj Publicerade">
+          <div class="ltLeft">
+            <div class="ltTitle">Publicerade</div>
+            <div class="ltCount" id="laneCountPublished">0</div>
           </div>
-          <div class="cards" id="lanePublished"></div>
+          <div class="ltRight">Visa</div>
         </div>
 
-        <div class="lane lane-noblocks" data-lane="noblocks" aria-label="Saknar blocks">
-          <div class="laneTop">
-            <div class="laneTitle">Saknar blocks</div>
-            <div class="laneCount" id="laneCountNoBlocks">0</div>
+        <div class="laneTile tile-noblocks" id="tileNoBlocks" role="button" tabindex="0" aria-label="Välj Saknar blocks">
+          <div class="ltLeft">
+            <div class="ltTitle">Saknar blocks</div>
+            <div class="ltCount" id="laneCountNoBlocks">0</div>
           </div>
-          <div class="cards" id="laneNoBlocks"></div>
+          <div class="ltRight">Visa</div>
         </div>
 
-        <div class="lane lane-quality" data-lane="quality" aria-label="Kvalitet">
-          <div class="laneTop">
-            <div class="laneTitle">Kvalitet</div>
-            <div class="laneCount" id="laneCountQuality">0</div>
+        <div class="laneTile tile-quality" id="tileQuality" role="button" tabindex="0" aria-label="Välj Kvalitet">
+          <div class="ltLeft">
+            <div class="ltTitle">Kvalitet</div>
+            <div class="ltCount" id="laneCountQuality">0</div>
           </div>
-          <div class="cards" id="laneQuality"></div>
+          <div class="ltRight">Visa</div>
         </div>
+      </div>
+
+      <!-- Endast vald lane listas här -->
+      <div class="laneListWrap" id="laneListWrap" aria-label="Vald lane">
+        <div class="laneListTop">
+          <div class="laneListTitle" id="laneListTitle">Utkast</div>
+          <div class="laneListMeta" id="laneListMeta">0 kort</div>
+        </div>
+        <div class="cards" id="laneCards"></div>
       </div>
     </section>
 
@@ -557,15 +576,20 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
       var qLane = byId("qLane");
       var boardCount = byId("boardCount");
 
-      var laneDraft = byId("laneDraft");
-      var lanePublished = byId("lanePublished");
-      var laneNoBlocks = byId("laneNoBlocks");
-      var laneQuality = byId("laneQuality");
-
       var laneCountDraft = byId("laneCountDraft");
       var laneCountPublished = byId("laneCountPublished");
       var laneCountNoBlocks = byId("laneCountNoBlocks");
       var laneCountQuality = byId("laneCountQuality");
+
+      var tileDraft = byId("tileDraft");
+      var tilePublished = byId("tilePublished");
+      var tileNoBlocks = byId("tileNoBlocks");
+      var tileQuality = byId("tileQuality");
+
+      var laneListWrap = byId("laneListWrap");
+      var laneListTitle = byId("laneListTitle");
+      var laneListMeta = byId("laneListMeta");
+      var laneCards = byId("laneCards");
 
       function showTrainingsError(text) {
         if (!trainingsLoadError) return;
@@ -594,7 +618,6 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
         return;
       }
 
-      // Rendera INTE empNo (minimering)
       safeText(roleBadge, "Roll: " + (auth.role || "?"));
       safeText(scopeBadge, "Scope: " + (auth.scopeId || "saknas"));
 
@@ -665,7 +688,7 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
       }
 
       function buildModuleOverview(trainings) {
-        var map = {}; // module -> {total, published, lastUpdated}
+        var map = {};
         trainings.forEach(function (t) {
           var module = String((t && t.module) || "–").trim() || "–";
           var st = normStatus(t && t.status);
@@ -789,19 +812,8 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
       }
 
       /* ============================
-         Board
+         Board (kompakt)
       ============================ */
-
-      function setLaneVisible(laneKey, visible) {
-        var board = byId("board");
-        if (!board) return;
-        var lanes = board.querySelectorAll(".lane");
-        for (var i = 0; i < lanes.length; i++) {
-          var lane = lanes[i];
-          var k = lane.getAttribute("data-lane");
-          if (k === laneKey) lane.style.display = visible ? "" : "none";
-        }
-      }
 
       function clearLane(node) {
         if (!node) return;
@@ -816,8 +828,93 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
         node.appendChild(d);
       }
 
+      function sortByUpdatedDesc(a, b) {
+        return Number((b && b.updatedAt) || 0) - Number((a && a.updatedAt) || 0);
+      }
+
+      function fillModuleFilter(trainings) {
+        if (!qModule) return;
+        while (qModule.options.length > 1) qModule.remove(1);
+
+        var mods = uniqModules(trainings);
+        for (var i = 0; i < mods.length; i++) {
+          var opt = document.createElement("option");
+          opt.value = mods[i];
+          opt.textContent = mods[i];
+          qModule.appendChild(opt);
+        }
+      }
+
+      function passesFilters(t, f) {
+        var mod = String((t && t.module) || "").trim();
+        var area = String((t && t.area) || "").trim();
+        var title = String((t && t.title) || "").trim();
+
+        if (f.module && f.module !== "__all") {
+          if (String(mod) !== String(f.module)) return false;
+        }
+
+        if (f.q) {
+          var q = f.q.toLowerCase();
+          var hay = (title + " " + mod + " " + area).toLowerCase();
+          if (hay.indexOf(q) === -1) return false;
+        }
+
+        return true;
+      }
+
+      function computeLaneBuckets(trainings, f) {
+        var d = [];
+        var p = [];
+        var nb = [];
+        var ql = [];
+
+        for (var i = 0; i < trainings.length; i++) {
+          var t = trainings[i];
+          if (!passesFilters(t, f)) continue;
+
+          var st = normStatus(t && t.status);
+          var blocksN = countBlocks(t);
+          var qs = qualitySignals(t);
+
+          if (st === "draft") d.push(t);
+          if (st === "published") p.push(t);
+          if (blocksN === 0) nb.push(t);
+          if (qs.length > 0) ql.push(t);
+        }
+
+        d.sort(sortByUpdatedDesc);
+        p.sort(sortByUpdatedDesc);
+        nb.sort(sortByUpdatedDesc);
+        ql.sort(sortByUpdatedDesc);
+
+        return { draft: d, published: p, noblocks: nb, quality: ql };
+      }
+
+      function setActiveTile(laneKey) {
+        var tiles = [
+          { k: "draft", el: tileDraft },
+          { k: "published", el: tilePublished },
+          { k: "noblocks", el: tileNoBlocks },
+          { k: "quality", el: tileQuality }
+        ];
+        for (var i = 0; i < tiles.length; i++) {
+          var it = tiles[i];
+          if (!it.el) continue;
+          if (it.k === laneKey) it.el.classList.add("is-active");
+          else it.el.classList.remove("is-active");
+        }
+      }
+
+      function laneTitleFor(k) {
+        if (k === "draft") return "Utkast";
+        if (k === "published") return "Publicerade";
+        if (k === "noblocks") return "Saknar blocks";
+        if (k === "quality") return "Kvalitet";
+        return "Utkast";
+      }
+
       function makeCard(t) {
-        // Read-only: länka till trainings (ingen write, ingen ny key)
         var a = document.createElement("a");
         a.className = "tcard";
         a.href = "./trainings.html";
@@ -856,7 +953,6 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
           for (var i = 0; i < qs.length; i++) {
             var txt = String(qs[i] || "");
             var s = document.createElement("span");
-            // saknar blocks = rödare, övrigt = blå (info)
             var isBad = (txt === "saknar blocks");
             s.className = "tiny " + (isBad ? "is-bad" : "is-warn");
             s.textContent = txt;
@@ -868,120 +964,93 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
         return a;
       }
 
-      function fillModuleFilter(trainings) {
-        if (!qModule) return;
-        while (qModule.options.length > 1) qModule.remove(1);
+      function renderSelectedLane(bucket, laneKey) {
+        if (!laneCards || !laneListTitle || !laneListMeta) return;
 
-        var mods = uniqModules(trainings);
-        for (var i = 0; i < mods.length; i++) {
-          var opt = document.createElement("option");
-          opt.value = mods[i];
-          opt.textContent = mods[i];
-          qModule.appendChild(opt);
+        setActiveTile(laneKey);
+        safeText(laneListTitle, laneTitleFor(laneKey));
+
+        clearLane(laneCards);
+
+        var list = bucket[laneKey] || [];
+        safeText(laneListMeta, String(list.length) + " kort");
+
+        if (list.length === 0) {
+          addEmptyLane(laneCards);
+          return;
         }
+
+        for (var i = 0; i < list.length; i++) laneCards.appendChild(makeCard(list[i]));
       }
 
-      function passesFilters(t, f) {
-        var mod = String((t && t.module) || "").trim();
-        var area = String((t && t.area) || "").trim();
-        var title = String((t && t.title) || "").trim();
-
-        if (f.module && f.module !== "__all") {
-          if (String(mod) !== String(f.module)) return false;
-        }
-
-        if (f.q) {
-          var q = f.q.toLowerCase();
-          var hay = (title + " " + mod + " " + area).toLowerCase();
-          if (hay.indexOf(q) === -1) return false;
-        }
-
-        return true;
-      }
-
-      function sortByUpdatedDesc(a, b) {
-        return Number((b && b.updatedAt) || 0) - Number((a && a.updatedAt) || 0);
-      }
-
-      function buildBoard(trainings) {
-        if (!laneDraft || !lanePublished || !laneNoBlocks || !laneQuality) return;
-
-        var f = {
-          q: qSearch ? String(qSearch.value || "").trim() : "",
-          module: qModule ? String(qModule.value || "__all") : "__all",
-          lane: qLane ? String(qLane.value || "__all") : "__all"
-        };
-
-        if (f.lane === "__all") {
-          setLaneVisible("draft", true);
-          setLaneVisible("published", true);
-          setLaneVisible("noblocks", true);
-          setLaneVisible("quality", true);
-        } else {
-          setLaneVisible("draft", f.lane === "draft");
-          setLaneVisible("published", f.lane === "published");
-          setLaneVisible("noblocks", f.lane === "noblocks");
-          setLaneVisible("quality", f.lane === "quality");
-        }
-
-        clearLane(laneDraft);
-        clearLane(lanePublished);
-        clearLane(laneNoBlocks);
-        clearLane(laneQuality);
-
-        var d = [];
-        var p = [];
-        var nb = [];
-        var ql = [];
-
-        for (var i = 0; i < trainings.length; i++) {
-          var t = trainings[i];
-          if (!passesFilters(t, f)) continue;
-
-          var st = normStatus(t && t.status);
-          var blocksN = countBlocks(t);
-          var qs = qualitySignals(t);
-
-          if (st === "draft") d.push(t);
-          if (st === "published") p.push(t);
-          if (blocksN === 0) nb.push(t);
-          if (qs.length > 0) ql.push(t);
-        }
-
-        d.sort(sortByUpdatedDesc);
-        p.sort(sortByUpdatedDesc);
-        nb.sort(sortByUpdatedDesc);
-        ql.sort(sortByUpdatedDesc);
-
-        for (var j = 0; j < d.length; j++) laneDraft.appendChild(makeCard(d[j]));
-        for (var k = 0; k < p.length; k++) lanePublished.appendChild(makeCard(p[k]));
-        for (var m = 0; m < nb.length; m++) laneNoBlocks.appendChild(makeCard(nb[m]));
-        for (var n = 0; n < ql.length; n++) laneQuality.appendChild(makeCard(ql[n]));
-
-        if (d.length === 0) addEmptyLane(laneDraft);
-        if (p.length === 0) addEmptyLane(lanePublished);
-        if (nb.length === 0) addEmptyLane(laneNoBlocks);
-        if (ql.length === 0) addEmptyLane(laneQuality);
-
-        safeText(laneCountDraft, String(d.length));
-        safeText(laneCountPublished, String(p.length));
-        safeText(laneCountNoBlocks, String(nb.length));
-        safeText(laneCountQuality, String(ql.length));
-
-        var totalVisible = d.length + p.length + nb.length + ql.length;
-        safeText(boardCount, String(totalVisible) + " kort");
-      }
-
-      function wireBoard(trainings) {
+      function wireCompactBoard(trainings) {
         fillModuleFilter(trainings);
 
-        function rerender() { buildBoard(trainings); }
+        function currentFilters() {
+          return {
+            q: qSearch ? String(qSearch.value || "").trim() : "",
+            module: qModule ? String(qModule.value || "__all") : "__all"
+          };
+        }
 
-        if (qSearch) qSearch.addEventListener("input", rerender);
-        if (qModule) qModule.addEventListener("change", rerender);
-        if (qLane) qLane.addEventListener("change", rerender);
+        function currentLane() {
+          var v = qLane ? String(qLane.value || "draft") : "draft";
+          if (v !== "draft" && v !== "published" && v !== "noblocks" && v !== "quality") v = "draft";
+          return v;
+        }
 
-        buildBoard(trainings);
+        function refresh() {
+          var f = currentFilters();
+          var bucket = computeLaneBuckets(trainings, f);
+
+          safeText(laneCountDraft, String(bucket.draft.length));
+          safeText(laneCountPublished, String(bucket.published.length));
+          safeText(laneCountNoBlocks, String(bucket.noblocks.length));
+          safeText(laneCountQuality, String(bucket.quality.length));
+
+          var laneKey = currentLane();
+          safeText(boardCount, String((bucket[laneKey] || []).length) + " träffar");
+          renderSelectedLane(bucket, laneKey);
+        }
+
+        function setLane(laneKey) {
+          if (!qLane) return;
+          qLane.value = laneKey;
+          refresh();
+        }
+
+        function onTileActivate(laneKey) {
+          return function () { setLane(laneKey); };
+        }
+
+        function onTileKey(el, laneKey) {
+          if (!el) return;
+          el.addEventListener("keydown", function (e) {
+            var key = e.key || "";
+            if (key === "Enter" || key === " ") {
+              e.preventDefault();
+              setLane(laneKey);
+            }
+          });
+        }
+
+        if (qSearch) qSearch.addEventListener("input", refresh);
+        if (qModule) qModule.addEventListener("change", refresh);
+        if (qLane) qLane.addEventListener("change", refresh);
+
+        if (tileDraft) tileDraft.addEventListener("click", onTileActivate("draft"));
+        if (tilePublished) tilePublished.addEventListener("click", onTileActivate("published"));
+        if (tileNoBlocks) tileNoBlocks.addEventListener("click", onTileActivate("noblocks"));
+        if (tileQuality) tileQuality.addEventListener("click", onTileActivate("quality"));
+
+        onTileKey(tileDraft, "draft");
+        onTileKey(tilePublished, "published");
+        onTileKey(tileNoBlocks, "noblocks");
+        onTileKey(tileQuality, "quality");
+
+        // Default: visa bara Utkast-listan (kompakt och kort sida)
+        if (qLane) qLane.value = "draft";
+        refresh();
       }
 
       var res = loadTrainingsReadOnly();
@@ -993,15 +1062,15 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
         safeText(kpiModules, "–");
         buildModuleOverview([]);
         buildRecentList([]);
-        if (laneDraft) { laneDraft.textContent = ""; addEmptyLane(laneDraft); }
-        if (lanePublished) { lanePublished.textContent = ""; addEmptyLane(lanePublished); }
-        if (laneNoBlocks) { laneNoBlocks.textContent = ""; addEmptyLane(laneNoBlocks); }
-        if (laneQuality) { laneQuality.textContent = ""; addEmptyLane(laneQuality); }
+
         safeText(laneCountDraft, "0");
         safeText(laneCountPublished, "0");
         safeText(laneCountNoBlocks, "0");
         safeText(laneCountQuality, "0");
-        safeText(boardCount, "0 kort");
+        safeText(boardCount, "0 träffar");
+        if (laneCards) { laneCards.textContent = ""; addEmptyLane(laneCards); }
+        safeText(laneListTitle, "Utkast");
+        safeText(laneListMeta, "0 kort");
         return;
       }
 
@@ -1009,30 +1078,31 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
       buildKpis(res.trainings);
       buildModuleOverview(res.trainings);
       buildRecentList(res.trainings);
-      wireBoard(res.trainings);
+      wireCompactBoard(res.trainings);
     })();
   </script>
 
   <!-- ============================================================
   Ändringslogg (AO-ADMIN-HOME-REBUILD-01) ≤ 8 rader
-  1) PATCH v1.7: Lade till färgkommunikation för Board-kolumner (topp-strip + bakgrund + border).
-  2) Lade till färgade status-taggar för draft/published på kort.
-  3) Lade till färgade kvalitetspills (saknar blocks=röd, övrigt=blå).
-  4) Ingen ny logik/keys/writes; auth/fail-closed oförändrat; XSS via textContent.
+  1) PATCH v1.8: Board kompakt – visar alltid bara lane-rubriker (tiles) + en vald lista (default Utkast).
+  2) Sök + modul-filter påverkar counts och vald lane (read-only).
+  3) Tile-klick byter “Visa” (lane) utan writes.
+  4) Färgkommunikation kvar; XSS-safe; inga nya storage-keys; auth/fail-closed oförändrat.
   ============================================================ -->
 
   <!-- Testnoteringar (exakta klicksteg)
   1) Logga in som ADMIN.
   2) Gå till /admin/home.html.
-  3) Scrolla till Board: verifiera att kolumnerna har tydlig färgstrip.
-  4) Kontrollera att draft-kort har orange tag och published-kort grön tag.
-  5) Kontrollera att “saknar blocks” pill är röd.
-  6) Sök/filter ska fungera som tidigare.
+  3) Scrolla till Board: verifiera att 4 tiles syns (Utkast/Publicerade/Saknar blocks/Kvalitet).
+  4) Verifiera att endast Utkast-listan visas initialt (sidan blir kortare).
+  5) Klicka tile “Publicerade” → listan byts till publicerade kort.
+  6) Sök i fältet → counts och listan filtreras.
+  7) Välj modul → counts och listan filtreras.
   -->
 
   <!-- Risk/edge cases
-  - Färger är “mjuk accent” för att behålla läsbarhet; om du byter global CSS kan kontrast upplevas annorlunda.
-  - Samma utbildning kan synas i flera kolumner (avsiktligt).
+  - “Träffar” visar antal kort i vald lane efter filter (inte unika utbildningar över alla lanes).
+  - Utbildning kan fortfarande tillhöra flera lanes logiskt, men du ser bara den lane du valt.
   -->
 
   <!-- QA-check (P0/P1/P2)
@@ -1040,7 +1110,7 @@ Senaste sanning: 2026-01-06 (PATCH v1.7)
   P0: XSS (textContent, inga innerHTML) ✅
   P1: Inga nya storage-keys/datamodell ✅
   P1: Read-only: inga writes ✅
-  P2: Endast CSS/klassning + tag/pills styling; låg regressionsrisk ✅
+  P2: Board renderar bara vald lane → kortare sida, låg regressionsrisk ✅
   -->
 </body>
 </html>
