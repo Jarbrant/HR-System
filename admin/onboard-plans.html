@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-UI-01 (PROD v1.5) | FIL-ID: admin/onboard-plans.html
+AO-ONBOARD-PLANS-UI-01 (PROD PATCH v1.6) | FIL-ID: admin/onboard-plans.html
 Projekt: HR-System
 Syfte: ADMIN – Skapa/Redigera Onboarding Plans + Tidsaxel (↑↓) UI-only
 
@@ -16,6 +16,11 @@ Keys (LÅST):
 - Läser: AO-001_LOGIN_V1 (via HRApp), AO-057_TRAININGS_V1, AO-060_PLANS_V1
 - Skriver: AO-060_PLANS_V1
 
+PATCH v1.6 (2026-01-06):
+- NYTT: Snapshot av training-innehåll (module/area/title + blocks inkl questionAnswer/options) sparas per plan-item i AO-060 (ingen UI-öppning här).
+- Bakåtkompatibelt: om snapshot saknas i befintliga planer ignoreras det och sidan fungerar.
+- Fail-closed schema-guard harden: snapshot valideras och kapas (storleksgränser) vid save.
+
 Ändringslogg (v1.5):
 - FIX (1): ↑/↓ är nu konsekvent: flyttar endast inom samma dagOffset (day-grupp) och påverkar ordning deterministiskt.
 - FIX (1): Auto-sort respekterar dayOffset (alltid) + manuell ordning inom dayOffset (order).
@@ -23,7 +28,7 @@ Keys (LÅST):
 - UX (2): Varning om plan innehåller trainingId som inte är allowed (published/verified + blocks>0) – utan write.
 
 Oförändrat:
-- Inga nya keys, inga schemaändringar, writes endast AO-060 vid Spara.
+- Inga nya keys, writes endast AO-060 vid Spara
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -198,7 +203,7 @@ Oförändrat:
         </div>
       </div>
 
-      <!-- Befintliga planer (NU under vänsterkolumnen, samma bredd) -->
+      <!-- Befintliga planer -->
       <div class="card" aria-label="Lista planer">
         <div class="splitHeader">
           <h2>Befintliga planer</h2>
@@ -274,7 +279,6 @@ Oförändrat:
     return;
   }
 
-  // HARDEN: requireAuth redirectar och returnerar null => stoppa direkt.
   if (_authResult === null) return;
 
   if (_authResult === false || (_authResult && typeof _authResult === "object" && _authResult.ok === false)) {
@@ -314,11 +318,11 @@ Oförändrat:
   // ============================
   let trainingsOk = false;
   let trainings = []; // allowed trainings (published/verified) with blocks>0
+  let trainingSnapshotsById = Object.create(null); // { [trainingId]: {id,module,area,title,blocks[]} }
   let plansOk = true;
   let plans = [];
   let currentPlan = null;
 
-  // UI-only warnings (no writes)
   let _lastWarnSig = "";
   function warnOnce(signature, msg){
     const sig = String(signature || "");
@@ -410,6 +414,110 @@ Oförändrat:
     return s === "draft" || s === "active" || s === "archived";
   }
 
+  // ============================
+  // SNAPSHOT NORMALIZATION (AO-057 -> AO-060 items.trainingSnapshot)
+  // ============================
+  function clampInt(v, lo, hi, def){
+    const n = Number(v);
+    if(!Number.isFinite(n)) return def;
+    const x = Math.trunc(n);
+    if(x < lo) return lo;
+    if(x > hi) return hi;
+    return x;
+  }
+
+  function normalizeBlockForSnapshot(raw){
+    const b = (raw && typeof raw === "object") ? raw : {};
+    const kind0 = normStr(b.kind || "info");
+    const okKind = (kind0 === "info" || kind0 === "task" || kind0 === "question" || kind0 === "both" || kind0 === "document");
+    const kind = okKind ? kind0 : "info";
+
+    const title = normStr(b.title).slice(0, 80);
+    const maxText = (kind === "document") ? 2000 : 240;
+
+    let text = "";
+    if (typeof b.text === "string" && b.text) text = b.text;
+    else if (typeof b.description === "string" && b.description) text = b.description;
+    text = String(text || "").slice(0, maxText);
+
+    const taskAnswer = (b.taskAnswer === "scale" || b.taskAnswer === "checkbox") ? b.taskAnswer : "checkbox";
+    const scaleMin = clampInt(b.scaleMin, 1, 10, 1);
+    const scaleMax0 = clampInt(b.scaleMax, 1, 10, 5);
+    const scaleMax = (scaleMax0 < scaleMin) ? scaleMin : scaleMax0;
+
+    const questionAnswer0 = (b.questionAnswer === "choice" || b.questionAnswer === "text") ? b.questionAnswer : "text";
+    const questionAnswer = (kind === "both") ? "text" : questionAnswer0;
+
+    const options = Array.isArray(b.options)
+      ? b.options.slice(0, 10).map(x => normStr(x).slice(0, 40)).filter(Boolean)
+      : [];
+
+    const out = {
+      kind,
+      title,
+      text,
+
+      taskAnswer,
+      scaleMin,
+      scaleMax,
+      scaleMinLabel: normStr(b.scaleMinLabel).slice(0, 40),
+      scaleMaxLabel: normStr(b.scaleMaxLabel).slice(0, 40),
+
+      questionAnswer,
+      options: (questionAnswer === "choice") ? options : []
+    };
+
+    if(kind === "document"){
+      out.taskAnswer = "checkbox";
+      out.scaleMin = 1;
+      out.scaleMax = 5;
+      out.scaleMinLabel = "";
+      out.scaleMaxLabel = "";
+      out.questionAnswer = "text";
+      out.options = [];
+    }
+    if(kind === "info" || kind === "task"){
+      out.questionAnswer = "text";
+      out.options = [];
+    }
+    if(kind === "both"){
+      out.questionAnswer = "text";
+      out.options = [];
+    }
+
+    return out;
+  }
+
+  function buildTrainingSnapshot(t){
+    const id = normStr(t && t.id);
+    const module = normStr(t && t.module).slice(0, 40);
+    const area = normStr(t && t.area).slice(0, 60);
+    const title = normStr(t && t.title).slice(0, 80);
+    const blocksIn = Array.isArray(t && t.blocks) ? t.blocks : [];
+    const blocks = blocksIn.slice(0, 80).map(normalizeBlockForSnapshot);
+
+    // hard cap for safety (avoid huge payloads)
+    return { id, module, area, title, blocks };
+  }
+
+  function sanitizeSnapshotForStorage(snap){
+    if(!isPlainObject(snap)) return null;
+    const id = normStr(snap.id);
+    const module = normStr(snap.module).slice(0, 40);
+    const area = normStr(snap.area).slice(0, 60);
+    const title = normStr(snap.title).slice(0, 80);
+    const blocksIn = Array.isArray(snap.blocks) ? snap.blocks : null;
+    if(!id || !module || !area || !title) return null;
+    if(blocksIn === null) return null;
+
+    const blocks = blocksIn.slice(0, 80).map(normalizeBlockForSnapshot);
+    if(blocks.length < 1) return null;
+    return { id, module, area, title, blocks };
+  }
+
+  // ============================
+  // SCHEMA GUARD (AO-060)
+  // ============================
   function sanitizePlansArray(input) {
     if (!Array.isArray(input)) return { ok:false, error:"PLANS_NOT_ARRAY" };
 
@@ -447,12 +555,23 @@ Oförändrat:
         if (order === null || order < 1) return { ok:false, error:"ITEM_BAD_ORDER" };
         if (typeof gateRequired !== "boolean") return { ok:false, error:"ITEM_BAD_GATEREQUIRED" };
 
-        itemsOut.push({
+        // OPTIONAL: trainingSnapshot (backwards compatible)
+        let trainingSnapshot = null;
+        if (it.trainingSnapshot !== undefined) {
+          const snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
+          if (snap) trainingSnapshot = snap;
+          else trainingSnapshot = null; // fail-closed: drop invalid snapshot silently (still allows plan)
+        }
+
+        const outItem = {
           trainingId: trainingId,
           dayOffset: dayOffset,
           order: order,
           gateRequired: gateRequired === true
-        });
+        };
+        if (trainingSnapshot) outItem.trainingSnapshot = trainingSnapshot;
+
+        itemsOut.push(outItem);
       }
 
       out.push({
@@ -470,9 +589,6 @@ Oförändrat:
 
   // ============================
   // ORDER MODEL (v1.5)
-  // - Sortera alltid på dayOffset ASC
-  // - Inom samma dayOffset: respektera "order" som manuell ordning
-  // - Renumber order 1..n enligt den sorterade ordningen
   // ============================
   function normalizeItemFields(it){
     const trainingId = normStr(it && it.trainingId);
@@ -480,13 +596,22 @@ Oförändrat:
     const order = toInt(it && it.order);
     const gateRequired = (it && typeof it.gateRequired === "boolean") ? it.gateRequired : true;
 
+    // Optional snapshot (keep if valid, else drop)
+    let trainingSnapshot = null;
+    if (it && it.trainingSnapshot !== undefined) {
+      const snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
+      if (snap) trainingSnapshot = snap;
+    }
+
     if (!trainingId) return null;
-    return {
+    const out = {
       trainingId,
       dayOffset: (dayOffset === null || dayOffset < 0) ? 0 : dayOffset,
       order: (order === null || order < 1) ? null : order,
       gateRequired: gateRequired === true
     };
+    if (trainingSnapshot) out.trainingSnapshot = trainingSnapshot;
+    return out;
   }
 
   function sortAndRenumberItems(items){
@@ -503,7 +628,6 @@ Oförändrat:
       const bd = toInt(b.it.dayOffset) ?? 0;
       if (ad !== bd) return ad - bd;
 
-      // within day: manual order is primary, null last; stable fallback idx
       const ao = a.it.order;
       const bo = b.it.order;
 
@@ -515,12 +639,16 @@ Oförändrat:
       return a.idx - b.idx;
     });
 
-    return withIdx.map((x, i) => ({
-      trainingId: String(x.it.trainingId),
-      dayOffset: Number(toInt(x.it.dayOffset) ?? 0),
-      order: i + 1,
-      gateRequired: x.it.gateRequired === true
-    }));
+    return withIdx.map((x, i) => {
+      const out = {
+        trainingId: String(x.it.trainingId),
+        dayOffset: Number(toInt(x.it.dayOffset) ?? 0),
+        order: i + 1,
+        gateRequired: x.it.gateRequired === true
+      };
+      if (x.it.trainingSnapshot) out.trainingSnapshot = x.it.trainingSnapshot;
+      return out;
+    });
   }
 
   // ============================
@@ -534,6 +662,7 @@ Oförändrat:
   function loadTrainings() {
     trainingsOk = false;
     trainings = [];
+    trainingSnapshotsById = Object.create(null);
 
     const res = safeParseLocalStorage(TRAININGS_KEY);
     if (!res.ok) return { ok: false, error: "AO-057 korrupt/oläsbar" };
@@ -558,7 +687,12 @@ Oförändrat:
       if (!isAllowedTrainingStatusForPlans(status)) continue;
       if (!hasBlocks) continue;
 
+      // list-item uses only meta
       out.push({ id, module, area, title });
+
+      // snapshot cached for save
+      const snap = buildTrainingSnapshot(t);
+      if (snap && snap.id) trainingSnapshotsById[snap.id] = snap;
     }
 
     trainings = out;
@@ -813,7 +947,6 @@ Oförändrat:
       deduped.push(it);
     }
 
-    // sort + renumber in v1.5 model
     const normalizedItems = sortAndRenumberItems(deduped);
 
     let statusUi = status;
@@ -877,7 +1010,6 @@ Oförändrat:
 
     currentPlan = norm.plan;
 
-    // warnings (UI-only, no writes)
     if (norm.meta && norm.meta.dedupeDropped > 0) {
       warnOnce(
         "dedupe:" + String(currentPlan.id) + ":" + String(norm.meta.dedupeDropped),
@@ -894,7 +1026,6 @@ Oförändrat:
       setStatus("ok", "Plan laddad: " + (currentPlan.title || "(utan titel)"));
     }
 
-    // warn if plan references trainingId not allowed (when trainingsOk)
     if (trainingsOk) {
       const idxById = buildTrainingIndexById();
       let unknown = 0;
@@ -921,7 +1052,6 @@ Oförändrat:
   function addItemToCurrentPlan(trainingId) {
     if (!currentPlan) return;
 
-    // dubblett
     for (let i = 0; i < currentPlan.items.length; i++) {
       if (currentPlan.items[i].trainingId === trainingId) {
         setStatus("warn", "Dubblett: training finns redan i plan. (Inget tillagt)");
@@ -929,19 +1059,24 @@ Oförändrat:
       }
     }
 
-    // must exist in allowed list
     const idx = trainings.findIndex(t => t.id === trainingId);
     if (idx < 0) {
       setStatus("error", "Training finns inte i listan (published/verified + blocks>0). (fail-closed)");
       return;
     }
 
-    currentPlan.items.push({
+    // snapshot cached from AO-057
+    const snap = trainingSnapshotsById[trainingId] ? sanitizeSnapshotForStorage(trainingSnapshotsById[trainingId]) : null;
+
+    const item = {
       trainingId: trainingId,
       dayOffset: 0,
       order: currentPlan.items.length + 1,
       gateRequired: true
-    });
+    };
+    if (snap) item.trainingSnapshot = snap;
+
+    currentPlan.items.push(item);
 
     autoSortAndRenumber();
     setStatus("ok", "Tillagd i plan.");
@@ -949,7 +1084,6 @@ Oförändrat:
     renderTrainingsList();
   }
 
-  // v1.5: ↑/↓ flyttar endast inom samma dayOffset (grupp)
   function moveItem(index, dir) {
     if (!currentPlan) return;
 
@@ -962,14 +1096,11 @@ Oförändrat:
     const dayI = toInt(currentPlan.items[i].dayOffset) ?? 0;
     const dayJ = toInt(currentPlan.items[j].dayOffset) ?? 0;
 
-    // endast inom samma dayOffset
     if (dayI !== dayJ) return;
 
-    // swap elements
     const a = currentPlan.items[i];
     const b = currentPlan.items[j];
 
-    // swap order values so that sorting respects the move
     const tmpOrder = a.order;
     a.order = b.order;
     b.order = tmpOrder;
@@ -1000,7 +1131,6 @@ Oförändrat:
       return;
     }
 
-    // auto-sort alltid innan render (deterministiskt)
     autoSortAndRenumber();
 
     const idxById = buildTrainingIndexById();
@@ -1043,7 +1173,6 @@ Oförändrat:
           return;
         }
         it.dayOffset = v;
-        // efter ändring: sort + renumber deterministiskt
         autoSortAndRenumber();
         renderTimeline();
       });
@@ -1091,7 +1220,6 @@ Oförändrat:
       const right = document.createElement("div");
       right.className = "rightActions";
 
-      // v1.5: enable ↑/↓ only within same dayOffset group
       const day = toInt(it.dayOffset) ?? 0;
       const prevSameDay = (i > 0) && ((toInt(currentPlan.items[i-1].dayOffset) ?? 0) === day);
       const nextSameDay = (i < currentPlan.items.length - 1) && ((toInt(currentPlan.items[i+1].dayOffset) ?? 0) === day);
@@ -1148,7 +1276,6 @@ Oförändrat:
     const requireItems = (setActiveOnVerify === true) ? true : (st === "active");
     if (requireItems && currentPlan.items.length < 1) return { ok:false, error:"Active kräver minst 1 item" };
 
-    // auto-sort/renumber konsekvent innan validering
     autoSortAndRenumber();
 
     const idxById = buildTrainingIndexById();
@@ -1174,6 +1301,8 @@ Oförändrat:
       seenOrder.add(order);
 
       if (typeof it.gateRequired !== "boolean") return { ok:false, error:"gateRequired måste vara boolean" };
+
+      // Snapshot is optional; if present, it must be valid after sanitize (drop invalid later)
     }
 
     return { ok:true };
@@ -1227,12 +1356,22 @@ Oförändrat:
       status: String(currentPlan.status),
       createdAt: Number(createdAt),
       updatedAt: Number(now),
-      items: currentPlan.items.map(it => ({
-        trainingId: String(it.trainingId),
-        dayOffset: Number(toInt(it.dayOffset) ?? 0),
-        order: Number(toInt(it.order) ?? 1),
-        gateRequired: it.gateRequired === true
-      }))
+      items: currentPlan.items.map(it => {
+        const outIt = {
+          trainingId: String(it.trainingId),
+          dayOffset: Number(toInt(it.dayOffset) ?? 0),
+          order: Number(toInt(it.order) ?? 1),
+          gateRequired: it.gateRequired === true
+        };
+
+        // Ensure snapshot exists & is valid; if missing but training exists in cache, attach now.
+        let snap = null;
+        if (it.trainingSnapshot) snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
+        if (!snap && trainingSnapshotsById[outIt.trainingId]) snap = sanitizeSnapshotForStorage(trainingSnapshotsById[outIt.trainingId]);
+        if (snap) outIt.trainingSnapshot = snap;
+
+        return outIt;
+      })
     };
 
     const next = commitPlanToPlansArray(toSave);
@@ -1334,5 +1473,35 @@ Oförändrat:
 
 })();
 </script>
+
+<!-- ============================================================
+Ändringslogg (≤ 8 rader)
+- PATCH v1.6: Snapshot av training (module/area/title + blocks inkl questionAnswer/options) sparas per plan-item i AO-060.
+- Backwards compatible: befintliga planer utan snapshot fungerar.
+- Schema-guard: snapshot valideras och kapas; invalid snapshot droppas (fail-closed) men plan sparas.
+- Inga nya storage-keys; writes endast AO-060_PLANS_V1.
+============================================================ -->
+
+<!-- ============================================================
+Testnoteringar (exakta klicksteg)
+1) Gå till trainings.html → gör en choice-fråga med 3 alternativ i ett block → publicera/verifiera.
+2) Gå till onboard-plans.html → skapa/välj plan → “+ Lägg till i plan” på training → Spara.
+3) DevTools → Application → LocalStorage → AO-060_PLANS_V1 → hitta item → kontrollera att trainingSnapshot.blocks[?].options finns.
+4) Ladda om sidan → plan kvar → items kvar → inga fel.
+============================================================ -->
+
+<!-- ============================================================
+Risk / edge cases
+- AO-060 kan bli större (snapshot). Vi kapar blocks (80) och options (10) + textlängder för att undvika storage-bloat.
+- Om AO-057 saknas/korrupt vid save: fail-closed stoppar save (som tidigare).
+============================================================ -->
+
+<!-- ============================================================
+QA-check (P0/P1/P2)
+P0: UI-only, inga nya keys, writes endast AO-060 — OK
+P0: Fail-closed guards kvar; invalid snapshot droppas — OK
+P1: Regression: rendering opåverkad; timeline/filters samma — OK
+P2: Data: snapshot skapar redundans men är begränsad/cappad — OK
+============================================================ -->
 </body>
 </html>
