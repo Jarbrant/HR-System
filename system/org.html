@@ -1,9 +1,14 @@
 <!-- ============================================================
-AO-004 (MASTER SYS • UX-MODAL v1.3.3) | FIL-ID: system/org.html
+AO-004 (MASTER SYS • UX-MODAL v1.3.4) | FIL-ID: system/org.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: Org Builder = enda sanna källan för scope-trädet (subtree)
 
-PATCH (DENNA VERSION – JUSTERING ENL DIN FEEDBACK):
+PATCH (DENNA VERSION – JUSTERING ENL DIN FEEDBACK + P0 FIX):
+- P0 FIX: extractScopeIds() läser nu både scopeIds[] (ny) och scopeId (legacy)
+  => Delete-guards blir korrekta även för ADMIN multi-enhet (fail-closed).
+- List-rendering: DOM + textContent (ingen innerHTML från storage) för maximal XSS-säkerhet.
+
+VISNING (DIN SPEC):
 - Root-raden (org_root_v1) ska visa: "Jarbrant Restaurang" (inte Cateringcare).
   * Tar bolagsnamnet och strippar ev. " AB" i visningen.
 - Bolag-noden ska visa: "Cateringcare" (inte Jarbrant Restaurang AB).
@@ -20,7 +25,7 @@ Policy (LÅST):
   - Läs/Skriv: AO-020_ORG_V1 (localStorage)
   - Endast läs: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage)
 - Hel-filsleverans
-- XSS-escape på allt från storage
+- XSS-escape på allt från storage (textContent, ingen osäker innerHTML)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -454,15 +459,6 @@ Policy (LÅST):
     localStorage.setItem(key, JSON.stringify(value));
   }
 
-  function escapeHtml(s){
-    return String(s ?? "")
-      .replace(/&/g,"&amp;")
-      .replace(/</g,"&lt;")
-      .replace(/>/g,"&gt;")
-      .replace(/"/g,"&quot;")
-      .replace(/'/g,"&#039;");
-  }
-
   function setMsg(kind, text){
     const m = $("#msg");
     if(!m) return;
@@ -502,12 +498,21 @@ Policy (LÅST):
     const raw = safeParseLocal(ASSIGN_V2_KEY, {});
     return (raw && typeof raw === "object" && !Array.isArray(raw)) ? raw : {};
   }
+
+  // P0 FIX: läs både scopeIds[] (ny) och scopeId (legacy)
   function extractScopeIds(assignments){
     const set = new Set();
     for(const empNo of Object.keys(assignments || {})){
       const v = assignments[empNo];
-      const sid = String(v?.scopeId || "").trim();
-      if(sid) set.add(sid);
+
+      const legacy = String(v?.scopeId || "").trim();
+      if(legacy) set.add(legacy);
+
+      const arr = Array.isArray(v?.scopeIds) ? v.scopeIds : [];
+      for(const sid of arr){
+        const s = String(sid || "").trim();
+        if(s) set.add(s);
+      }
     }
     return Array.from(set);
   }
@@ -778,7 +783,6 @@ Policy (LÅST):
   function isBolagNodeByType(t){
     return String(t || "").trim().toLowerCase() === "bolag";
   }
-
   function isBolagNodeObj(n){
     return isBolagNodeByType(n?.type);
   }
@@ -1211,10 +1215,11 @@ Policy (LÅST):
     }
 
     const sel = $("#uParent");
-    sel.innerHTML = "";
+    while(sel.firstChild) sel.removeChild(sel.firstChild);
+
     const opt = document.createElement("option");
     opt.value = bolag.id;
-    opt.textContent = bolag.name + " • Bolag";
+    opt.textContent = (bolag.name || "Bolag") + " • Bolag";
     sel.appendChild(opt);
 
     const children = buildChildrenMap(nodes || []);
@@ -1428,13 +1433,19 @@ Policy (LÅST):
   function displayRootNameFromCompany(companyName){
     const raw = String(companyName || "").trim();
     if(!raw) return "Koncern (Root)";
-    // Ta bort trailing " AB" för root-visning
     return raw.replace(/\s+AB\s*$/i, "").trim() || raw;
+  }
+
+  function makePill(text, className){
+    const s = document.createElement("span");
+    s.className = "pill" + (className ? (" " + className) : "");
+    s.textContent = text;
+    return s;
   }
 
   function renderList(){
     const list = $("#list");
-    list.innerHTML = "";
+    while(list.firstChild) list.removeChild(list.firstChild);
 
     bootstrapRootIfMissing();
 
@@ -1485,23 +1496,21 @@ Policy (LÅST):
     }
 
     if(rows.length === 0){
-      list.innerHTML = `<div class="empty">Inga noder matchar filter/sök.</div>`;
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "Inga noder matchar filter/sök.";
+      list.appendChild(empty);
       return;
     }
 
     const criticalLocked = !!v.criticalLock;
 
-    // Root: visa bolagsnamn (utan AB) – INTE structureName
     const rootDisplayName = displayRootNameFromCompany(bolag?.name);
-
-    // Bolag: visa structureName (Cateringcare) om finns, annars bolagets name
     const bolagDisplayName = String(bolag?.structureName || "").trim() || String(bolag?.name || "").trim();
 
     rows.forEach(r => {
       const isRoot = (r.id === ROOT_ID);
       const kids = childCount(r.id);
-
-      // Behövs bara för type-pill regler: “Bolag” ska bort
       const rowIsBolag = (!isRoot && isBolagNodeByType(r.type));
 
       const deleteBlocked =
@@ -1517,34 +1526,50 @@ Policy (LÅST):
       if(isRoot) shownName = rootDisplayName;
       else if(rowIsBolag) shownName = bolagDisplayName;
 
-      // TYPE PILL: visa INTE för bolag (din spec). Visa gärna för andra.
-      const typePill = (!isRoot && !rowIsBolag && r.type)
-        ? `<span class="pill">${escapeHtml(r.type)}</span>`
-        : ``;
-
       const el = document.createElement("div");
       el.className = "item";
       el.setAttribute("role", "treeitem");
       el.setAttribute("aria-level", String(r.depth));
       el.setAttribute("aria-label", `${shownName} ${r.type || ""}`);
 
-      el.innerHTML = `
-        <div class="treeName">
-          <span aria-hidden="true" style="display:inline-block;width:${indentPx}px;"></span>
-          <div>
-            <p class="item-title">${escapeHtml(shownName)}</p>
-            <div class="meta">
-              <span class="pill">ID: ${escapeHtml(r.id)}</span>
-              ${typePill}
-              ${criticalLocked ? `<span class="pill warnpill">Actions låsta</span>` : `<span class="pill okpill">OK</span>`}
-              ${guards.deleteLocked ? `<span class="pill warnpill">Delete låst</span>` : ``}
-              ${(!isRoot && guards.blocked.has(r.id)) ? `<span class="pill warnpill">Scope-skydd</span>` : ``}
-              ${isRoot ? `<span class="pill">Root</span>` : ``}
-              ${deleteBlocked && !isRoot ? `<span class="pill warnpill">Delete spärr</span>` : ``}
-            </div>
-          </div>
-        </div>
-      `;
+      const treeName = document.createElement("div");
+      treeName.className = "treeName";
+
+      const indent = document.createElement("span");
+      indent.setAttribute("aria-hidden", "true");
+      indent.style.display = "inline-block";
+      indent.style.width = indentPx + "px";
+      treeName.appendChild(indent);
+
+      const box = document.createElement("div");
+
+      const title = document.createElement("p");
+      title.className = "item-title";
+      title.textContent = shownName;
+      box.appendChild(title);
+
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.appendChild(makePill("ID: " + r.id));
+
+      // TYPE PILL: visa INTE för bolag (din spec). Visa gärna för andra.
+      if(!isRoot && !rowIsBolag && r.type){
+        meta.appendChild(makePill(String(r.type)));
+      }
+
+      meta.appendChild(
+        criticalLocked ? makePill("Actions låsta", "warnpill") : makePill("OK", "okpill")
+      );
+
+      if(guards.deleteLocked) meta.appendChild(makePill("Delete låst", "warnpill"));
+      if(!isRoot && guards.blocked.has(r.id)) meta.appendChild(makePill("Scope-skydd", "warnpill"));
+      if(isRoot) meta.appendChild(makePill("Root"));
+      if(deleteBlocked && !isRoot) meta.appendChild(makePill("Delete spärr", "warnpill"));
+
+      box.appendChild(meta);
+
+      treeName.appendChild(box);
+      el.appendChild(treeName);
       list.appendChild(el);
     });
   }
