@@ -327,7 +327,8 @@ T: Kontrollera att din station är ren (checkbox)
 
 <script>
 /* ============================================================
-AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
+AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.1
+P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
 ============================================================ */
 (function(){
   "use strict";
@@ -351,6 +352,10 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
     }catch{ return fallback; }
   }
 
+  function safeGetLocalRaw(key){
+    try{ return localStorage.getItem(key); }catch{ return null; }
+  }
+
   function safeParseLocal(key, fallback){
     try{
       const raw = localStorage.getItem(key);
@@ -368,37 +373,57 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
     }
   }
 
-  function escapeHtml(s){
-    return String(s ?? "")
-      .replaceAll("&","&amp;")
-      .replaceAll("<","&lt;")
-      .replaceAll(">","&gt;")
-      .replaceAll('"',"&quot;")
-      .replaceAll("'","&#039;");
-  }
-
   function setMsg(kind, text){
     const m = $("#msg");
     m.className = "message" + (kind ? " " + kind : "");
     m.textContent = text || "";
   }
 
+  // ------------------------------------------------------------
+  // Lockbox (NO innerHTML) — policy
+  // ------------------------------------------------------------
+  function clearNode(node){
+    while(node && node.firstChild) node.removeChild(node.firstChild);
+  }
+
   function showLockBox(lines){
     const box = $("#lockBox");
     if(!lines || !lines.length){
       box.style.display = "none";
-      box.textContent = "";
+      clearNode(box);
       return;
     }
+
     box.style.display = "block";
-    box.innerHTML = `
-      <strong>Låst (fail-closed):</strong>
-      <ul>${lines.map(x => `<li>${escapeHtml(String(x))}</li>`).join("")}</ul>
-    `;
+    clearNode(box);
+
+    const strong = document.createElement("strong");
+    strong.textContent = "Låst (fail-closed):";
+    box.appendChild(strong);
+
+    const ul = document.createElement("ul");
+    for(const line of lines){
+      const li = document.createElement("li");
+      li.textContent = String(line ?? "");
+      ul.appendChild(li);
+    }
+    box.appendChild(ul);
   }
 
+  // ------------------------------------------------------------
+  // IDs
+  // ------------------------------------------------------------
   function genId(prefix){
-    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+    const p = prefix || "id";
+    try{
+      if(window.crypto && typeof window.crypto.getRandomValues === "function"){
+        const buf = new Uint8Array(8);
+        window.crypto.getRandomValues(buf);
+        const hex = Array.from(buf).map(b => b.toString(16).padStart(2,"0")).join("");
+        return p + "_" + hex + "_" + Date.now().toString(16);
+      }
+    }catch{}
+    return p + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
   }
 
   function clampText(s, max){
@@ -504,14 +529,28 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
   // ------------------------------------------------------------
-  // Block store
+  // Block store (strict corruption detection)
   // ------------------------------------------------------------
-  function loadBlocks(){
-    const arr = safeParseLocal(BLOCKS_KEY, []);
-    return Array.isArray(arr) ? arr : [];
+  function loadBlocksState(){
+    const raw = safeGetLocalRaw(BLOCKS_KEY);
+
+    // Missing key: allowed (empty list, no lock)
+    if(raw === null) return { ok:true, missing:true, corrupt:false, blocks:[] };
+
+    // Present but unreadable => corrupt (lock)
+    let parsed;
+    try{
+      parsed = JSON.parse(raw);
+    }catch{
+      return { ok:false, missing:false, corrupt:true, blocks:[] };
+    }
+
+    if(!Array.isArray(parsed)) return { ok:false, missing:false, corrupt:true, blocks:[] };
+
+    return { ok:true, missing:false, corrupt:false, blocks: parsed };
   }
 
-  function safeSaveBlocks(all){
+  function saveBlocksFailClosed(all){
     const res = saveFailClosed(BLOCKS_KEY, all);
     if(!res.ok){
       setMsg("err", "Kunde inte spara (localStorage fullt eller blockerad).");
@@ -568,7 +607,6 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
         if(!text) return bad("Dokument saknar text.");
         items.push({
           kind: "document",
-          title: "Dokument",
           text,
           requiresSign: true
         });
@@ -637,9 +675,7 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
       bad("Okänt prefix. Använd D:, Q:, QC:, T: eller TS:.");
     });
 
-    // Minimal fail-closed rules
     if(items.length === 0) issues.push("Inga giltiga items skapades.");
-
     return { items, issues };
   }
 
@@ -651,7 +687,6 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
     const items = Array.isArray(block?.items) ? block.items : [];
     if(items.length === 0) reasons.push("Minst 1 item krävs.");
 
-    // basic sanity
     items.forEach((it, i) => {
       if(!it || typeof it !== "object") reasons.push(`Item #${i+1}: korrupt.`);
       const k = String(it.kind || "");
@@ -676,12 +711,16 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
 
   // ------------------------------------------------------------
   // Templates (reuse AO-047_TASK_TEMPLATES_V1)
-  // Template shape for blocks:
-  // { id, name, module, area, step, title, itemsLines[], createdAt, updatedAt }
+  // IMPORTANT: Om key finns men är korrupt => skriv inte över (fail-safe)
   // ------------------------------------------------------------
   function seedTemplatesIfEmpty(){
-    const raw = safeParseLocal(TEMPLATES_KEY, null);
-    if(Array.isArray(raw) && raw.length) return;
+    const raw = safeGetLocalRaw(TEMPLATES_KEY);
+    if(raw !== null){
+      // Finns redan: om den är korrupt eller annan shape — rör inte automatiskt
+      const parsed = safeParseJson(raw, null);
+      if(Array.isArray(parsed) && parsed.length) return;
+      if(raw !== null && !Array.isArray(parsed)) return;
+    }
 
     const now = Date.now();
     const seeds = [
@@ -877,10 +916,11 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
   });
 
   // ------------------------------------------------------------
-  // Create block
+  // Create block (fail-closed locks)
   // ------------------------------------------------------------
   const lockReasons = [];
-  // Minimal lock: must have localStorage available for blocks
+
+  // 1) localStorage write probe
   try{
     const t = "__probe__";
     localStorage.setItem(t, "1");
@@ -888,6 +928,13 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
   }catch{
     lockReasons.push("localStorage är blockerad (kan inte spara block).");
   }
+
+  // 2) block-bank corruption gate (MASTER fail-closed)
+  const bankState = loadBlocksState();
+  if(bankState.corrupt){
+    lockReasons.push(`${BLOCKS_KEY} är korrupt (JSON/shape). Åtgärda eller rensa nyckeln innan skapande.`);
+  }
+
   showLockBox(lockReasons);
 
   const canCreate = (lockReasons.length === 0);
@@ -935,13 +982,19 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
       return;
     }
 
-    const all = loadBlocks();
+    // re-check bank state right before write (race-safe)
+    const st = loadBlocksState();
+    if(st.corrupt){
+      setMsg("err", `Fail-closed: ${BLOCKS_KEY} är korrupt. Skapande stoppat.`);
+      return;
+    }
+
+    const all = Array.isArray(st.blocks) ? st.blocks : [];
     all.push(block);
 
-    if(!safeSaveBlocks(all)) return;
+    if(!saveBlocksFailClosed(all)) return;
 
     setMsg("ok", `Block skapat: ${block.blockId}. Nästa steg: Block-editor (redigera/verifiera).`);
-    // lightweight convenience: open editor with user click (no forced navigation)
   });
 
   $("#btnClear").addEventListener("click", () => {
@@ -962,33 +1015,40 @@ AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- Bytt funktion: admin/tasks.html skapar nu BLOCK (blockId) i AO-0XX_BLOCKS_V1 (status=draft).
-- Lagt till enkel rad-parser: D:, Q:, QC:, T:, TS: → items[] (document/question/task).
-- Behållit HRApp auth + fallback-session (fail-closed).
-- Återanvänder AO-047_TASK_TEMPLATES_V1 för block-mallar (ingen extra key).
+- P0: Tog bort innerHTML helt (lockbox byggs med createElement + textContent).
+- P0: Införde strikt korruptionsdetektion för AO-0XX_BLOCKS_V1 → låser skapande (fail-closed).
+- Justerat document-item till kontrakt (tog bort extra fält).
+- Förbättrat id-generator: crypto.getRandomValues när tillgängligt.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
+A) Normal
 1) Logga in som ADMIN eller MANAGER → öppna admin/tasks.html.
 2) Fyll Modul/Område/Steg + Rubrik + minst 1 rad (t.ex. "D: ...") → klicka Skapa blockId.
-3) Öppna devtools → localStorage → kontrollera att AO-0XX_BLOCKS_V1 innehåller nytt block med items[].
-4) Gå till admin/packages-block.html (nästa steg i kedjan) och verifiera att sidan ska uppdateras att läsa block-bank.
+3) Devtools → Application → localStorage → kontrollera AO-0XX_BLOCKS_V1: nytt block med status "draft" och items[].
+
+B) Fail-closed korrupt block-bank
+1) Devtools → localStorage → sätt AO-0XX_BLOCKS_V1 till "not-json" (eller {"x":1}).
+2) Ladda om sidan → se lockbox + "Skapa blockId" disabled.
+
+C) Prefix-validering
+1) Skriv en rad utan prefix → klicka Skapa → får fel “Okänt prefix…”.
 ============================================================ -->
 
 <!-- ============================================================
 Risk / edge cases
-- Om användaren skriver rader utan prefix stoppas skapandet (fail-closed).
-- Om localStorage är blockerad/full: skapande stoppas.
-- QC kräver minst 2 alternativ (annars stopp).
+- Om AO-0XX_BLOCKS_V1 tidigare var annat än array: sidan låser skapande tills nyckeln rensas/åtgärdas (medvetet fail-closed).
+- Om AO-047_TASK_TEMPLATES_V1 redan finns men har annan shape: sidan skriver inte över automatiskt; mallar kan då vara tomma.
 ============================================================ -->
 
 <!-- ============================================================
 QA-check (P0/P1/P2)
-P0: UI-only, auth fail-closed (redirect), inga osäkra innerHTML för data (endast escaped i lockbox) — OK
-P0: Ny key explicit i AO-header (AO-0XX_BLOCKS_V1) — OK
-P1: Parser robust nog för enkel block-bank; strikt validering — OK
-P2: Mallar finns för snabb test — OK
+P0: UI-only, auth fail-closed (redirect) — OK
+P0: Ingen osäker innerHTML för storage-data — OK
+P0: Korrupt block-bank låser create (fail-closed) — OK
+P1: Parser + validering för D/Q/QC/T/TS — OK
+P2: Mallar seedas endast när safe — OK
 ============================================================ -->
 
 </body>
