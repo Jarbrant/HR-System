@@ -283,7 +283,6 @@
       border-color: rgba(0,0,0,.14);
       box-shadow: var(--shadowBaseA), 0 6px 14px rgba(0,0,0,.06);
     }
-    .btn:active{ /* NO transform */ }
     .btn:focus{
       outline: 3px solid var(--focusRing);
       outline-offset: 2px;
@@ -331,7 +330,6 @@
       border-color: rgba(0,0,0,.16);
       box-shadow: var(--shadowBaseA), 0 6px 14px rgba(0,0,0,.06);
     }
-    .wkDay:active{ /* NO transform */ }
     .wkDay:focus{
       outline: 3px solid var(--focusRing);
       outline-offset: 2px;
@@ -485,11 +483,9 @@
       transition: box-shadow .12s ease, border-color .12s ease;
     }
     .stackCard:hover{
-      /* NO lift */
       box-shadow: var(--shadowBaseA), 0 16px 26px rgba(15,23,42,.12);
       border-color: rgba(0,0,0,.14);
     }
-    .stackCard:active{ /* NO transform */ }
     .stackCard:focus{
       outline: 3px solid var(--focusRing);
       outline-offset: 2px;
@@ -562,12 +558,10 @@
       box-shadow: var(--shadowBaseA);
     }
     .doneRow:hover{
-      /* NO lift */
       background: rgba(255,255,255,.92);
       border-color: rgba(0,0,0,.14);
       box-shadow: var(--shadowBaseA), 0 8px 18px rgba(0,0,0,.08);
     }
-    .doneRow:active{ /* NO transform */ }
     .doneRow:focus{
       outline: 3px solid var(--focusRing);
       outline-offset: 2px;
@@ -762,7 +756,7 @@
     /* ============================================================
       AO-EMP-HOME-ONBOARD-01 (2/5) | FIL-ID: employee/home.html
       Syfte: Employee – Dagskalender + Post-its + onboarding/paket (read-only)
-      PATCH (v2.0) – MASTER DESIGN-SPEC + Parkera toppkort + Klart: öppna valfri rad
+      PATCH (v2.1 PROD) – robust data + safe legacy-compat för tasks utan scope
       POLICY (LÅST):
       - UI-only • Fail-closed (requireAuth)
       - Auth via HRApp/core (UI-03-APP.js)
@@ -778,17 +772,15 @@
     const KEY_TASKS        = "AO-014_TASKS_V1";
     const KEY_ASSIGNMENTS  = "AO-020_ROLE_ASSIGNMENTS_V2";
 
-    // AO-053 (READ ONLY)
+    // Read-only
     const KEY_PACKAGES     = "AO-050_PACKAGES_V1";
     const KEY_QUESTIONS    = "AO-012_QUESTIONS_V1";
     const KEY_ANSWERS      = "AO-013_ANSWERS_V1";
 
-    // AO-EMP-HOME-ONBOARD-01 (READ ONLY) — NO NEW NAMES
+    // Read-only onboarding (tyst om saknas)
     const KEY_ONBOARD_PLANS_V1       = "AO-060_PLANS_V1";
     const KEY_ONBOARD_ASSIGNMENTS_V1 = "AO-061_PLAN_ASSIGNMENTS_V1";
-
-    // READ ONLY: expand plan items -> training.blocks
-    const KEY_TRAININGS_V1 = "AO-057_TRAININGS_V1";
+    const KEY_TRAININGS_V1           = "AO-057_TRAININGS_V1";
 
     /* ===========================
        DOM
@@ -831,17 +823,6 @@
       guardBox.textContent = "";
     }
 
-    function escapeHtml(input){
-      if (window.HRApp && typeof window.HRApp.escapeHtml === "function") return window.HRApp.escapeHtml(input);
-      const s = String(input ?? "");
-      return s
-        .replaceAll("&","&amp;")
-        .replaceAll("<","&lt;")
-        .replaceAll(">","&gt;")
-        .replaceAll('"',"&quot;")
-        .replaceAll("'","&#039;");
-    }
-
     function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
 
     function readAnyStorage(key){
@@ -856,6 +837,24 @@
       try { localStorage.setItem(KEY_SESSION, raw); return true; } catch {}
       return false;
     }
+
+    /* ===========================
+       Global error hardening
+    ============================ */
+    window.addEventListener("unhandledrejection", (e) => {
+      try{
+        const reason = e && e.reason ? String(e.reason) : "Okänt fel";
+        // Sätt inte stacktrace i UI, bara kort och begripligt
+        showGuard("Ett tekniskt fel inträffade. Ladda om sidan och prova igen.\n\nDetalj: " + reason);
+      }catch{}
+    });
+
+    window.addEventListener("error", (e) => {
+      try{
+        const msg = (e && e.message) ? String(e.message) : "Okänt fel";
+        showGuard("Ett tekniskt fel inträffade. Ladda om sidan och prova igen.\n\nDetalj: " + msg);
+      }catch{}
+    });
 
     /* ===========================
        AO-002 AUTH (kopplat)
@@ -888,20 +887,15 @@
           const patched = patchSessionScope(sess, res.scopeId);
           if (patched) auth = window.HRApp.getAuth(patched) || auth;
           else {
-            showGuard("Fail-closed: kunde inte uppdatera session med scopeId (korrupt session). Logga in igen.");
+            showGuard("Fail-closed: kunde inte uppdatera session. Logga in igen.");
             return null;
           }
         } else {
-          const lines = [];
-          lines.push("Fail-closed: saknar scopeId i session.");
-          lines.push("(Access/Assignments måste vara korrekt.)");
-          lines.push("");
-          lines.push("Debug:");
-          lines.push(`- assignments hittade: ${res.debug.totalAssignments}`);
-          lines.push(`- match på empNo: ${res.debug.matchedEmpNo ? "JA" : "NEJ"}`);
-          lines.push(`- match på roll: ${res.debug.matchedRole ? "JA" : "NEJ/ej angivet"}`);
-          lines.push(`- scope-fält hittat i match: ${res.debug.foundScopeField ? "JA" : "NEJ"}`);
-          showGuard(lines.join("\n"));
+          // Kort, begripligt (ingen intern AO-förvirring)
+          showGuard(
+            "Fail-closed: saknar scope i session.\n\n" +
+            "Åtgärd: Kontrollera System → Access/Assignments (att din empNo har scope) och logga in igen."
+          );
           return null;
         }
       }
@@ -941,8 +935,8 @@
       return Array.isArray(list) ? list : [];
     }
 
-    function normalizeEmpNo(x){ return String(x ?? "").trim(); }
-    function normalizeRole(x){ return String(x ?? "").trim(); }
+    function normStr(s){ return String(s ?? "").trim(); }
+    function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
 
     function pickFirstNonEmpty(obj, keys){
       for (const k of keys) {
@@ -978,43 +972,34 @@
     }
 
     function resolveScopeIdFromAssignments(empNo, role){
-      const me = normalizeEmpNo(empNo);
-      const r  = normalizeRole(role);
+      const me = normStr(empNo);
+      const r  = normStr(role);
 
-      const debug = { totalAssignments: 0, matchedEmpNo: false, matchedRole: false, foundScopeField: false };
-      if (!me) return { scopeId:"", debug };
+      if (!me) return { scopeId:"" };
 
       const list = readAssignments();
-      debug.totalAssignments = Array.isArray(list) ? list.length : 0;
-      if (!Array.isArray(list) || list.length === 0) return { scopeId:"", debug };
+      if (!Array.isArray(list) || list.length === 0) return { scopeId:"" };
 
       for (const a of list) {
         if (!a || typeof a !== "object") continue;
 
         const aEmp = extractEmpFromAssignment(a);
         if (!aEmp || aEmp !== me) continue;
-        debug.matchedEmpNo = true;
 
         const aRole = extractRoleFromAssignment(a);
         if (aRole) {
           if (r && aRole !== r) continue;
-          debug.matchedRole = true;
-        } else {
-          debug.matchedRole = true;
         }
 
         const scope = extractScopeFromAssignment(a);
-        if (scope) {
-          debug.foundScopeField = true;
-          return { scopeId: scope, debug };
-        }
+        if (scope) return { scopeId: scope };
       }
 
-      return { scopeId:"", debug };
+      return { scopeId:"" };
     }
 
     function patchSessionScope(sessionObj, scopeId){
-      const sid = String(scopeId || "").trim();
+      const sid = normStr(scopeId);
       if (!sessionObj || typeof sessionObj !== "object" || !sid) return null;
 
       const out = sessionObj;
@@ -1031,8 +1016,7 @@
     function readTasksArray(){
       const raw = localStorage.getItem(KEY_TASKS);
       const data = safeJsonParse(raw || "");
-      if(!Array.isArray(data)) return [];
-      return data;
+      return Array.isArray(data) ? data : [];
     }
 
     function writeTasksArray(arr){
@@ -1071,9 +1055,6 @@
       }
     }
 
-    function normStr(s){ return String(s ?? "").trim(); }
-    function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
-
     /* ===========================
        Date (lokal midnatt)
     ============================ */
@@ -1105,7 +1086,7 @@
     function mondayStart(d){
       const x = localMidnight(d);
       const day = x.getDay(); // 0=Sun..6=Sat
-      const offset = (day === 0) ? -6 : (1 - day); // Monday as first day
+      const offset = (day === 0) ? -6 : (1 - day); // Monday first
       const m = new Date(x);
       m.setDate(x.getDate() + offset);
       m.setHours(0,0,0,0);
@@ -1167,10 +1148,9 @@
 
     function isAssignedToMe(t, empNo){
       const a = getAssignedTo(t);
-      if (a == null) return false;
-
       const me = String(empNo || "").trim();
       if (!me) return false;
+      if (a == null) return false;
 
       if (typeof a === "string" || typeof a === "number") {
         const s = String(a).trim();
@@ -1183,20 +1163,47 @@
       return false;
     }
 
-    function hasValidScopeMatch(t, myScopeId){
-      const scope = String(t?.scopeId ?? t?.scope ?? t?.scopeKey ?? t?.nodeId ?? "").trim();
-      const mine  = String(myScopeId ?? "").trim();
-      if (!scope || !mine) return false;
+    function isDirectlyAssignedToMeOnly(t, empNo){
+      // Legacy-säkerhet: om scope saknas så visar vi bara om den är DIREKT empNo (inte ALL/*)
+      const a = getAssignedTo(t);
+      const me = String(empNo || "").trim();
+      if (!me) return false;
+      if (a == null) return false;
 
-      if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function") {
-        return window.HRApp.sameOrMissingScope(scope, mine);
+      if (typeof a === "string" || typeof a === "number") {
+        const s = String(a).trim();
+        if (s === "ALL" || s === "*") return false;
+        return s === me;
       }
-      return scope === mine;
+      if (Array.isArray(a)) {
+        // Om array: tillåt bara om arrayn innehåller me OCH inte ser ut som broadcast
+        return a.map(x => String(x).trim()).includes(me);
+      }
+      return false;
+    }
+
+    function hasValidScopeMatchOrLegacy(t, myScopeId, t, myEmpNo){
+      const mine  = String(myScopeId ?? "").trim();
+      if (!mine) return false;
+
+      const scope = String(t?.scopeId ?? t?.scope ?? t?.scopeKey ?? t?.nodeId ?? "").trim();
+
+      // Normal (strict)
+      if (scope) {
+        if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function") {
+          // Om HRApp har en policy, använd den
+          return window.HRApp.sameOrMissingScope(scope, mine);
+        }
+        return scope === mine;
+      }
+
+      // Legacy-compat: scope saknas -> visa endast om direkt tilldelad empNo (inte ALL)
+      return isDirectlyAssignedToMeOnly(t, myEmpNo);
     }
 
     function visibleTasksForMe(allTasks, empNo, scopeId){
       return (Array.isArray(allTasks) ? allTasks : []).filter(t => {
-        if (!hasValidScopeMatch(t, scopeId)) return false;
+        if (!hasValidScopeMatchOrLegacy(scopeId, scopeId, t, empNo)) return false;
         if (!isAssignedToMe(t, empNo)) return false;
         return true;
       });
@@ -1336,8 +1343,8 @@
 
     function blocksFromPackage(pkg){
       const blocks = Array.isArray(pkg?.blocks) ? pkg.blocks : [];
-      return blocks.map(b => {
-        const id = normStr(b?.id) || ("blk_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16));
+      return blocks.map((b, i) => {
+        const id = normStr(b?.id) || (`idx_${i}`); // stabilt id, inte Math.random
         const kind = normalizeBlockKind(b?.kind);
         const title = normStr(b?.title) || "—";
         const description = normStr(b?.description ?? b?.text ?? "");
@@ -1387,7 +1394,7 @@
     }
 
     /* ===========================
-       Onboarding (READ ONLY)
+       Onboarding (READ ONLY) - tyst om saknas
     ============================ */
     function readOnboardPlans(){
       const data = readLocalObjectOrArray(KEY_ONBOARD_PLANS_V1);
@@ -1496,10 +1503,9 @@
       return Math.floor(diff / DAY_MS);
     }
 
-    function blockIdFromTrainingBlock(trainingId, b, idx){
+    function blockIdFromTrainingBlock(b, idx){
       const bid = normStr(b?.id ?? b?.blockId ?? b?.block_id ?? "");
-      if(bid) return bid;
-      return `idx_${idx}`;
+      return bid || `idx_${idx}`;
     }
 
     function blockTitleFromTrainingBlock(b){
@@ -1521,6 +1527,11 @@
       const assigns = readOnboardAssignments();
       if(!Array.isArray(assigns) || assigns.length === 0) return [];
 
+      const plansAll = readOnboardPlans();
+      const trainings = readTrainings();
+      if(!Array.isArray(plansAll) || plansAll.length === 0) return [];
+      if(!Array.isArray(trainings) || trainings.length === 0) return [];
+
       const myPlanStart = new Map();
       for(const a of assigns){
         if(!a || typeof a !== "object") continue;
@@ -1536,12 +1547,8 @@
       }
       if(myPlanStart.size === 0) return [];
 
-      const plansAll = readOnboardPlans();
-      if(!Array.isArray(plansAll) || plansAll.length === 0) return [];
-
-      const trainings = readTrainings();
       const trainingsById = new Map();
-      for(const t of (Array.isArray(trainings) ? trainings : [])){
+      for(const t of trainings){
         const id = normStr(t?.id ?? t?.trainingId ?? "");
         if(id && !trainingsById.has(id)) trainingsById.set(id, t);
       }
@@ -1595,7 +1602,7 @@
             const title = blockTitleFromTrainingBlock(b);
             if(!title) continue;
 
-            const blockId = blockIdFromTrainingBlock(trainingId, b, bi);
+            const blockId = blockIdFromTrainingBlock(b, bi);
             const desc = blockDescFromTrainingBlock(b) || "";
 
             combined.push({
@@ -1630,8 +1637,7 @@
       const cards = [];
       let stepCounter = 0;
 
-      for(let idx=0; idx<combined.length; idx++){
-        const it = combined[idx];
+      for(const it of combined){
         const dedupeKey = `${it.trainingId}__${it.blockId}`;
         if(seen.has(dedupeKey)) continue;
         seen.add(dedupeKey);
@@ -1817,7 +1823,6 @@
 
     /* ===========================
        PARKERING (UI-only, no storage)
-       - per dag (ISO) hålls i minne
     ============================ */
     const PARKED_BY_DAY = new Map(); // dayISO => Set(cardId)
 
@@ -1828,18 +1833,15 @@
     }
 
     function parkCard(dayISO, cardId){
-      const set = getParkedSet(dayISO);
-      set.add(String(cardId));
+      getParkedSet(dayISO).add(String(cardId));
     }
 
     function unparkCard(dayISO, cardId){
-      const set = getParkedSet(dayISO);
-      set.delete(String(cardId));
+      getParkedSet(dayISO).delete(String(cardId));
     }
 
     function isParked(dayISO, cardId){
-      const set = getParkedSet(dayISO);
-      return set.has(String(cardId));
+      return getParkedSet(dayISO).has(String(cardId));
     }
 
     /* ===========================
@@ -1863,11 +1865,8 @@
         return;
       }
 
-      // Filter parked out of the main queue (UI-only)
       const queue = items.filter(it => !isParked(dayISO, it.id));
       const parked = items.filter(it => isParked(dayISO, it.id));
-
-      // If everything parked, show first parked as top (fail-soft)
       const effectiveQueue = queue.length ? queue : parked;
 
       const top = effectiveQueue[0];
@@ -1879,14 +1878,13 @@
       const wrap = document.createElement("div");
       wrap.className = "stackWrap";
 
-      // Under-layers hint (based on queue length)
       const total = effectiveQueue.length;
       const layers = Math.min(3, Math.max(0, total - 1));
       for(let i=layers; i>=1; i--){
         const layer = document.createElement("div");
         layer.className = "stackLayer";
         layer.style.background = bg;
-        layer.style.transform = `translate(${i*6}px, ${i*6}px)`; // OK: visual only, not hover
+        layer.style.transform = `translate(${i*6}px, ${i*6}px)`;
         layer.style.opacity = String(0.78 - (i*0.08));
         wrap.appendChild(layer);
       }
@@ -1929,12 +1927,10 @@
         card.setAttribute("aria-disabled","true");
       }
 
-      // Drag top to park (only if there exists a "next" behind it)
       const canPark = (queue.length >= 2) || (queue.length === 1 && parked.length >= 1);
       if(canPark){
         card.setAttribute("draggable", "true");
         card.setAttribute("aria-label", `${String(top.title||"")}. Dra för att parkera.`);
-
         card.addEventListener("dragstart", (e) => {
           try{
             e.dataTransfer.effectAllowed = "move";
@@ -1945,7 +1941,6 @@
 
       wrap.appendChild(card);
 
-      // Park zone (always shown if there are multiple items total)
       const parkZone = document.createElement("div");
       parkZone.className = "parkZone";
       parkZone.setAttribute("aria-label", "Parkera toppkort");
@@ -1974,56 +1969,49 @@
         try { id = String(e.dataTransfer.getData("text/plain") || ""); } catch {}
         id = String(id || "").trim();
         if(!id) return;
-        // Park only if it exists among items
         if(items.some(x => String(x.id) === id)){
           parkCard(dayISO, id);
           if(AUTH) render(AUTH);
         }
       });
 
-      // Parked list
       const parkedList = document.createElement("div");
       parkedList.className = "parkList";
 
-      if(parked.length === 0){
-        // Nothing parked: keep it quiet
-      } else {
-        for(const it of parked){
-          const rowEl = document.createElement("div");
-          rowEl.className = "parkRow";
-          rowEl.setAttribute("role","button");
-          rowEl.tabIndex = 0;
+      for(const it of parked){
+        const rowEl = document.createElement("div");
+        rowEl.className = "parkRow";
+        rowEl.setAttribute("role","button");
+        rowEl.tabIndex = 0;
 
-          const t = document.createElement("div");
-          t.className = "t";
-          t.textContent = String(it.title || "—");
+        const t = document.createElement("div");
+        t.className = "t";
+        t.textContent = String(it.title || "—");
 
-          const s = document.createElement("div");
-          s.className = "s";
-          s.textContent = "Klicka för att lägga tillbaka i kön";
+        const s = document.createElement("div");
+        s.className = "s";
+        s.textContent = "Klicka för att lägga tillbaka i kön";
 
-          rowEl.appendChild(t);
-          rowEl.appendChild(s);
+        rowEl.appendChild(t);
+        rowEl.appendChild(s);
 
-          rowEl.addEventListener("click", () => {
+        rowEl.addEventListener("click", () => {
+          unparkCard(dayISO, it.id);
+          if(AUTH) render(AUTH);
+        });
+        rowEl.addEventListener("keydown", (e) => {
+          const k = e.key;
+          if(k === "Enter" || k === " "){
+            e.preventDefault();
             unparkCard(dayISO, it.id);
             if(AUTH) render(AUTH);
-          });
-          rowEl.addEventListener("keydown", (e) => {
-            const k = e.key;
-            if(k === "Enter" || k === " "){
-              e.preventDefault();
-              unparkCard(dayISO, it.id);
-              if(AUTH) render(AUTH);
-            }
-          });
+          }
+        });
 
-          parkedList.appendChild(rowEl);
-        }
+        parkedList.appendChild(rowEl);
       }
 
       parkZone.appendChild(parkedList);
-
       wrap.appendChild(parkZone);
       container.appendChild(wrap);
     }
@@ -2046,7 +2034,6 @@
         return;
       }
 
-      // Show list always, and each row is clickable immediately.
       const list = document.createElement("div");
       list.className = "doneList";
 
@@ -2105,8 +2092,6 @@
         const blocks = blocksFromPackage(pkg);
         for(const b of blocks){
           const isDoneNow = isPackageBlockDone(b, tasksVisibleAll, myEmpNo);
-          const kind = b.kind;
-
           cards.push({
             source: "pkg",
             id: `pkg_${normStr(pkg?.id) || "x"}_${b.id}`,
@@ -2114,7 +2099,7 @@
             title: b.title,
             desc: b.description,
             sub: sub,
-            kind: kind,
+            kind: b.kind,
             required: !!b.required,
             isDone: !!isDoneNow
           });
@@ -2158,11 +2143,10 @@
         doneGrid.textContent = "";
         todoGrid.textContent = "";
 
-        showGuard("Fail-closed: saknar scopeId i session. (Access/Assignments måste vara korrekt.)");
+        showGuard("Fail-closed: saknar scope i session. Kontrollera Access/Assignments och logga in igen.");
         return;
       }
 
-      // Dagens tasks
       const all = readTasksArray();
       const mineAll = visibleTasksForMe(all, empNo, scopeId);
       const todays = mineAll.filter(t => taskBelongsToDay(t, dayISO));
@@ -2170,18 +2154,16 @@
       const dayDone = todays.filter(isDone).slice().sort((a,b)=>doneTsGuess(b)-doneTsGuess(a));
       const dayTodo = todays.filter(t => !isDone(t));
 
-      // Onboarding + paket
+      // Onboarding + paket (tyst om keys saknas)
       const onboardCards = buildOnboardCards(selectedDate, auth, mineAll);
       const pkgCards = buildPackageCards(mineAll, empNo);
 
-      // Split: klart vs att göra
       const doneItems = [];
       const todoItems = [];
 
       for(const c of onboardCards) (c.isDone ? doneItems : todoItems).push(c);
       for(const c of pkgCards)     (c.isDone ? doneItems : todoItems).push(c);
 
-      // Tasks
       for(let i=0;i<dayTodo.length;i++){
         const t = dayTodo[i];
         todoItems.push({
@@ -2210,7 +2192,6 @@
         });
       }
 
-      // Sort
       todoItems.sort((a,b)=>{
         const ra = sourceRank(a.source), rb = sourceRank(b.source);
         if(ra !== rb) return ra - rb;
@@ -2230,7 +2211,6 @@
         return String(a.title||"").localeCompare(String(b.title||""), "sv");
       });
 
-      // Voice
       const doneCount = dayDone.length + onboardCards.filter(x=>x.isDone).length + pkgCards.filter(x=>x.isDone).length;
       const todoCount = dayTodo.length + onboardCards.filter(x=>!x.isDone).length + pkgCards.filter(x=>!x.isDone).length;
 
@@ -2263,7 +2243,7 @@
         const id = getTaskId(all[i], i);
         if(String(id) !== String(taskId)) continue;
 
-        if (!hasValidScopeMatch(all[i], scopeId)) return false;
+        if (!hasValidScopeMatchOrLegacy(scopeId, scopeId, all[i], empNo)) return false;
         if (!isAssignedToMe(all[i], empNo)) return false;
 
         all[i] = setDone(all[i]);
@@ -2305,24 +2285,27 @@
     });
 
     (function init(){
-      const res = mustAuthOrStop();
-      if (!res) return;
-      AUTH = res.auth;
-      render(AUTH);
+      try{
+        const res = mustAuthOrStop();
+        if (!res) return;
+        AUTH = res.auth;
+        render(AUTH);
+      }catch(e){
+        showGuard("Ett tekniskt fel inträffade vid start. Ladda om sidan.\n\nDetalj: " + String(e?.message || e));
+      }
     })();
   </script>
 
   <!-- ============================================================
   Ändringslogg (≤ 8 rader)
-  1) MASTER DESIGN-SPEC: Ny topbar i 2 zoner (Min sida neutral, Logga ut röd), hover utan lift.
-  2) MASTER DESIGN-SPEC: Tog bort lift/translate på hover (mini-week, cards, rows, knappar).
-  3) TODO: Parkera toppkort (drag & drop) UI-only i minne per dag, ingen storage-write.
-  4) DONE: Visar lista alltid; varje rad är direkt öppningsbar (ingen “bara första”).
-  5) LÅST: Inga nya storage-keys/datamodell; inga nya writes utöver befintlig logout/session.
+  1) PROD: Robust init + fångar unhandledrejection/error → begripligt guard istället för “tyst” fel.
+  2) PROD: Legacy-compat för tasks utan scope: visas endast om direkt tilldelad empNo (inte ALL/*).
+  3) PROD: Paket-block-id stabilt (idx_) i stället för Math.random → minskar “fladdrig” dedupe.
+  4) TYST: Onboarding/paket försöker läsa data men visar inget och skapar ingen förvirring om keys saknas.
+  5) LÅST: Inga nya storage-keys/datamodell; inga nya writes utöver logout/session (som innan).
   Testnoteringar:
-  - Skapa 3–5 todo → dra toppkort till “Parkera” → nästa kort blir aktivt.
-  - Klick på parkerad rad → åter in i kön.
-  - Klart: klicka valfri rad → navigerar till tasks/documents enligt typ.
+  - Om tasks saknar scope: de syns nu ändå (endast direkt empNo).
+  - Parkera fungerar fortsatt UI-only.
   ============================================================ -->
 </body>
 </html>
