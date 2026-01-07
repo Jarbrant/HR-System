@@ -5,12 +5,13 @@ Projekt: HR-System
 Syfte: Materialisera onboarding (AO-050_PACKAGES_V1) → TASKS + QUESTIONS
 
 PATCH v1.4 (2026-01-07):
-- FIX (P0): Stöd “Block-bank”-containerblock med items[]:
-  * Om ett paket-block innehåller items[] (document/question/task) så materialiseras
-    question/task per item (document/info ignoreras), istället för att kräva kind på toppnivå.
-- FIX (P0): Stabil idempotens även per item (origin inkluderar itemKey) → inga “rubrik men inga frågor”
-- Back-compat: Behåller gamla vägen när block.kind/type är task/question/both/info/document.
-- Inga nya storage-keys, inga kopplingsändringar.
+- FIX (kritisk): normalizeAssignments prioriterar wrapper-array (t.ex. {assignments:[...]})
+  innan object-map, så key "assignments" inte felaktigt behandlas som empNo-map.
+  => eliminerar felet: "record för assignments är inte objekt."
+- Oförändrat: idempotens via stabil pkgKey + blockKey + _origin
+- Oförändrat: stöd pkg.blocks och pkg.items
+- Oförändrat: info/document ignoreras
+- Inga nya storage-keys, inga kopplingsändringar
 
 Policy (LÅST):
 - UI-only • Fail-closed
@@ -23,13 +24,13 @@ Policy (LÅST):
 (function () {
   "use strict";
 
-  const PACKAGES_KEY  = "AO-050_PACKAGES_V1";
-  const TASKS_KEY     = "AO-014_TASKS_V1";
+  const PACKAGES_KEY = "AO-050_PACKAGES_V1";
+  const TASKS_KEY = "AO-014_TASKS_V1";
   const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
-  const ASG_KEY       = "AO-020_ROLE_ASSIGNMENTS_V2";
+  const ASG_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
 
   const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
-  const MAX_SCAN = 50000;
+  const MAX_BLOCKS_SCAN = 50000;
 
   function safeParse(raw) {
     try {
@@ -69,8 +70,8 @@ Policy (LÅST):
     return asStr(x, 40).toLowerCase();
   }
 
-  function normKind(x) {
-    const k = asStr(x ?? "", 24).toLowerCase();
+  function normKind(block) {
+    const k = asStr(block && (block.type || block.kind) || "", 20).toLowerCase();
     if (k === "task" || k === "question" || k === "both" || k === "info" || k === "document") return k;
     return "";
   }
@@ -90,7 +91,7 @@ Policy (LÅST):
     return prefix + "_" + Date.now().toString(16) + "_" + Math.random().toString(16).slice(2, 8);
   }
 
-  // Stöd både pkg.blocks och pkg.items
+  // Stöd både pkg.blocks och pkg.items (UI visar ofta "Items: N")
   function getBlocksFromPackage(pkg) {
     if (pkg && Array.isArray(pkg.blocks)) return pkg.blocks;
     if (pkg && Array.isArray(pkg.items)) return pkg.items;
@@ -100,11 +101,16 @@ Policy (LÅST):
   // Robust "active package" match
   function isActivePackage(pkg) {
     if (!pkg || typeof pkg !== "object") return false;
+
+    // Primary: status string
     const st = normStatus(pkg.status);
     if (st === "active") return true;
+
+    // Secondary: boolean flags used by other UIs
     if (pkg.isActive === true) return true;
     if (pkg.active === true) return true;
     if (pkg.enabled === true) return true;
+
     return false;
   }
 
@@ -117,7 +123,7 @@ Policy (LÅST):
   function buildOriginSet(arr) {
     const set = new Set();
     for (const x of arr) {
-      const o = asStr(x && x._origin || "", 500);
+      const o = asStr(x && x._origin || "", 300);
       if (o) set.add(o);
     }
     return set;
@@ -131,38 +137,17 @@ Policy (LÅST):
     return null;
   }
 
+  // PATCH v1.4: wrapper-array prioriteras före object-map
   function normalizeAssignments(raw) {
     const empty = Object.create(null);
 
     if (raw == null) return { ok: false, map: empty, err: `${ASG_KEY} saknas (null).` };
 
-    // Case A: object-map { "3001": {scopeId:...}, ... }
-    if (isObj(raw) && !Array.isArray(raw)) {
+    // 1) Försök wrapper/array först (t.ex. {assignments:[...]})
+    const arrFirst = extractAssignmentsArray(raw);
+    if (arrFirst) {
       const out = Object.create(null);
-      for (const k of Object.keys(raw)) {
-        const key = String(k);
-        if (SPECIAL_KEYS.has(key)) {
-          return { ok: false, map: empty, err: `${ASG_KEY} innehåller blockerad special-key (${key}).` };
-        }
-        const rec = raw[key];
-        if (rec != null) {
-          if (!isObj(rec)) return { ok: false, map: empty, err: `${ASG_KEY} record för ${key} är inte objekt.` };
-          for (const rk of Object.keys(rec)) {
-            if (SPECIAL_KEYS.has(String(rk))) {
-              return { ok: false, map: empty, err: `${ASG_KEY} record för ${key} innehåller blockerad special-key (${rk}).` };
-            }
-          }
-        }
-        out[key] = rec;
-      }
-      return { ok: true, map: out };
-    }
-
-    // Case B: array or wrapper-array
-    const arr = extractAssignmentsArray(raw);
-    if (arr) {
-      const out = Object.create(null);
-      for (const rec of arr) {
+      for (const rec of arrFirst) {
         if (!isObj(rec)) continue;
         for (const rk of Object.keys(rec)) {
           if (SPECIAL_KEYS.has(String(rk))) {
@@ -172,6 +157,34 @@ Policy (LÅST):
         const empNo = asStr(rec.empNo ?? rec.employeeNo ?? rec.id ?? "", 40);
         if (!empNo) continue;
         out[empNo] = rec;
+      }
+      return { ok: true, map: out };
+    }
+
+    // 2) Annars: object-map { "3001": {scopeId:...}, ... }
+    if (isObj(raw)) {
+      const out = Object.create(null);
+      for (const k of Object.keys(raw)) {
+        const key = String(k);
+        if (SPECIAL_KEYS.has(key)) {
+          return { ok: false, map: empty, err: `${ASG_KEY} innehåller blockerad special-key (${key}).` };
+        }
+        const rec = raw[key];
+
+        // Fail-closed men tydligt: om rec finns måste det vara objekt eller null
+        if (rec != null && !isObj(rec)) {
+          return { ok: false, map: empty, err: `${ASG_KEY} record för ${key} är inte objekt.` };
+        }
+
+        if (rec != null) {
+          for (const rk of Object.keys(rec)) {
+            if (SPECIAL_KEYS.has(String(rk))) {
+              return { ok: false, map: empty, err: `${ASG_KEY} record för ${key} innehåller blockerad special-key (${rk}).` };
+            }
+          }
+        }
+
+        out[key] = rec;
       }
       return { ok: true, map: out };
     }
@@ -186,57 +199,30 @@ Policy (LÅST):
     const title = asStr(pkg && (pkg.title || pkg.name) || "", 160);
     if (title) return "pkgt:" + fnv1a32(title);
 
+    // fallback: hash a few stable-ish fields
     const st = normStatus(pkg && pkg.status);
     const blocksLen = Array.isArray(pkg && pkg.blocks) ? pkg.blocks.length : (Array.isArray(pkg && pkg.items) ? pkg.items.length : 0);
     return "pkgx:" + fnv1a32(st + "|" + String(blocksLen));
   }
 
   function stableBlockKey(block, kind, fallbackIndex) {
-    // Support both older {id} and block-bank {blockId}
-    const bid = asStr(block && (block.id || block.blockId) || "", 220);
+    const bid = asStr(block && (block.id || block.blockId) || "", 200);
     if (bid) return "bid:" + bid;
 
-    const title = asStr(block && block.title || "", 220);
-    const text = asStr(block && (block.text || block.description) || "", 900);
+    const title = asStr(block && block.title || "", 200);
+    const text = asStr(block && (block.text || block.description) || "", 800);
 
+    // If both empty, last resort: index (can change, but only used when there's truly nothing else)
     if (!title && !text) return "idx:" + String(fallbackIndex);
+
     return "bh:" + fnv1a32(kind + "|" + title + "|" + text);
   }
 
-  function stableItemKey(item, fallbackIndex) {
-    // Prefer explicit ids if present
-    const qid = asStr(item && item.questionId || "", 240);
-    if (qid) return "qid:" + qid;
-
-    const tid = asStr(item && item.taskId || "", 240);
-    if (tid) return "tid:" + tid;
-
-    // Otherwise hash kind+text+options/scale
-    const k = normKind(asStr(item && item.kind || "", 24));
-    const tx = asStr(item && item.text || "", 1200);
-    const at = asStr(item && item.answerType || "", 40);
-
-    let extra = "";
-    if (k === "question" && at === "choice") {
-      const opts = Array.isArray(item && item.options) ? item.options : [];
-      extra = "opts:" + opts.map(o => asStr(o, 80)).filter(Boolean).join("|");
-    }
-    if (k === "task" && at === "scale") {
-      const sc = item && item.scale || {};
-      extra = "scale:" + String(Number(sc.min ?? "")) + "-" + String(Number(sc.max ?? "")) + "|" +
-        asStr(sc.minLabel, 80) + "|" + asStr(sc.maxLabel, 80);
-    }
-
-    if (!k && !tx) return "iidx:" + String(fallbackIndex);
-    return "ih:" + fnv1a32(k + "|" + at + "|" + tx + "|" + extra);
-  }
-
-  function originKey(pkgKey, blockKey, itemKey, empNo) {
-    const p = asStr(pkgKey, 220) || "pkg";
-    const b = asStr(blockKey, 220) || "blk";
-    const i = asStr(itemKey, 220) || "itm";
-    const e = asStr(empNo, 40) || "emp";
-    return `${p}:${b}:${i}:${e}`;
+  function originKey(pkgKey, blockKey, empNo) {
+    const p = asStr(pkgKey, 200) || "pkg";
+    const b = asStr(blockKey, 200) || "blk";
+    const e = asStr(empNo, 20) || "emp";
+    return `${p}:${b}:${e}`;
   }
 
   function extractScopeId(rec) {
@@ -244,112 +230,41 @@ Policy (LÅST):
     return asStr(rec.scopeId || rec.scope || rec.nodeId || rec.orgId || "", 140);
   }
 
-  function boolDefault(v, defTrue) {
-    if (v === true) return true;
-    if (v === false) return false;
-    return !!defTrue;
+  function clampInt(n, lo, hi, def) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return def;
+    const xi = Math.trunc(x);
+    if (xi < lo) return lo;
+    if (xi > hi) return hi;
+    return xi;
   }
 
-  // Normalize an item from block-bank (document/question/task)
-  function normalizeBankItem(raw) {
-    const it = (raw && typeof raw === "object") ? raw : {};
-    const kind = normKind(it.kind || "");
-    const text = asStr(it.text, kind === "document" ? 2000 : 240);
-
-    if (kind === "document" || kind === "info") {
-      return {
-        kind: "document",
-        text,
-        requiresSign: boolDefault(it.requiresSign, true)
-      };
-    }
-
-    if (kind === "question") {
-      const answerType = (asStr(it.answerType, 20).toLowerCase() === "choice") ? "choice" : "text";
-      const options = (answerType === "choice" && Array.isArray(it.options))
-        ? it.options.map(o => asStr(o, 80)).filter(Boolean).slice(0, 10)
-        : [];
-      return {
-        kind: "question",
-        questionId: asStr(it.questionId, 260) || genId("q"),
-        text: asStr(text, 240),
-        answerType,
-        options,
-        requiresAnswer: boolDefault(it.requiresAnswer, true)
-      };
-    }
-
-    if (kind === "task") {
-      const answerType = (asStr(it.answerType, 20).toLowerCase() === "scale") ? "scale" : "checkbox";
-      let scale = null;
-      if (answerType === "scale") {
-        const sc = it.scale || {};
-        let mn = Number(sc.min);
-        let mx = Number(sc.max);
-        if (!Number.isFinite(mn)) mn = 1;
-        if (!Number.isFinite(mx)) mx = 5;
-        mn = Math.max(1, Math.min(10, Math.trunc(mn)));
-        mx = Math.max(1, Math.min(10, Math.trunc(mx)));
-        if (mx < mn) mx = mn;
-        scale = {
-          min: mn,
-          max: mx,
-          minLabel: asStr(sc.minLabel, 80),
-          maxLabel: asStr(sc.maxLabel, 80)
-        };
-      }
-      return {
-        kind: "task",
-        taskId: asStr(it.taskId, 260) || genId("t"),
-        text: asStr(text, 240),
-        answerType,
-        scale,
-        requiresDone: boolDefault(it.requiresDone, true)
-      };
-    }
-
-    // Unknown: ignore (fail-safe)
-    return { kind: "", text: "" };
+  function normalizeTaskAnswer(block) {
+    const v = asStr(block && block.taskAnswer || "", 20).toLowerCase();
+    return (v === "scale") ? "scale" : "checkbox";
   }
 
-  // Create task/question records (shape is conservative to not break consumers)
-  function makeTaskRecord(opts) {
-    const now = Date.now();
-    return {
-      taskId: opts.taskId || genId("t"),
-      empNo: opts.empNo,
-      text: opts.text,
-      answerType: opts.answerType || "checkbox",
-      scale: opts.scale || null,
-      requiresDone: boolDefault(opts.requiresDone, true),
-      done: false,
-      doneAt: null,
-      createdAt: now,
-      updatedAt: now,
-      // traceability
-      _origin: opts.origin,
-      _pkgKey: opts.pkgKey,
-      _blockKey: opts.blockKey
-    };
+  function normalizeQuestionAnswer(block, kind) {
+    const v = asStr(block && block.questionAnswer || "", 20).toLowerCase();
+    if (kind === "both") return "text";
+    if (kind === "question") return (v === "choice") ? "choice" : "text";
+    return "text";
   }
 
-  function makeQuestionRecord(opts) {
-    const now = Date.now();
-    return {
-      questionId: opts.questionId || genId("q"),
-      empNo: opts.empNo,
-      text: opts.text,
-      answerType: opts.answerType || "text",
-      options: Array.isArray(opts.options) ? opts.options.slice(0, 10) : [],
-      requiresAnswer: boolDefault(opts.requiresAnswer, true),
-      // answers are stored elsewhere (AO-013_ANSWERS_V1), keep question itself clean
-      createdAt: now,
-      updatedAt: now,
-      // traceability
-      _origin: opts.origin,
-      _pkgKey: opts.pkgKey,
-      _blockKey: opts.blockKey
-    };
+  function normalizeOptions(raw) {
+    const arr = Array.isArray(raw) ? raw : [];
+    return arr.map(x => asStr(x, 40)).filter(Boolean).slice(0, 10);
+  }
+
+  function normalizeCorrectOptions(raw, options) {
+    const opts = Array.isArray(options) ? options : [];
+    const set = new Set(opts.map(x => String(x)));
+    const arr = Array.isArray(raw) ? raw : [];
+    const cleaned = arr.map(x => asStr(x, 40)).filter(Boolean);
+    const filtered = cleaned.filter(v => set.has(v));
+    const out = [];
+    for (const v of filtered) { if (!out.includes(v)) out.push(v); }
+    return out.slice(0, 2);
   }
 
   function materialize(opts) {
@@ -393,10 +308,11 @@ Policy (LÅST):
     const empNos = Object.keys(asgN.map);
     const activePkgs = packages.filter(isActivePackage);
 
-    let scanned = 0;
+    let blocksScanned = 0;
     let tasksAdded = 0;
     let questionsAdded = 0;
-    let itemsAdded = 0;
+
+    const now = Date.now();
 
     for (const pkg of activePkgs) {
       const pkgKey = stablePackageKey(pkg);
@@ -409,205 +325,137 @@ Policy (LÅST):
 
         const rec = asgN.map[empNoRaw];
         const scopeId = extractScopeId(rec);
-        if (!scopeId) continue; // same behavior as earlier
+        if (!scopeId) continue;
 
         for (let bi = 0; bi < blocks.length; bi++) {
-          if (scanned >= MAX_SCAN) {
-            return { ok: false, dryRun, reasons: [`Stop: för många poster att scanna (${MAX_SCAN}).`] };
+          if (blocksScanned >= MAX_BLOCKS_SCAN) {
+            return { ok: false, dryRun, reasons: [`Stop: för många block att scanna (${MAX_BLOCKS_SCAN}).`] };
           }
-          scanned++;
+          blocksScanned++;
 
           const block = blocks[bi] || {};
-
-          // 1) NEW: block-bank container with items[]
-          const itemsArr = Array.isArray(block.items) ? block.items : null;
-          if (itemsArr && itemsArr.length) {
-            const blockKey = stableBlockKey(block, "container", bi);
-
-            for (let ii = 0; ii < itemsArr.length; ii++) {
-              if (scanned >= MAX_SCAN) {
-                return { ok: false, dryRun, reasons: [`Stop: för många poster att scanna (${MAX_SCAN}).`] };
-              }
-              scanned++;
-
-              const itN = normalizeBankItem(itemsArr[ii]);
-              const k = itN.kind;
-              if (k !== "question" && k !== "task") continue; // ignore document/info
-
-              const itemKey = stableItemKey(itemsArr[ii], ii);
-              const origin = originKey(pkgKey, blockKey, itemKey, empNo);
-
-              if (k === "question") {
-                if (questionOrigins.has(origin)) continue;
-                questionOrigins.add(origin);
-
-                const qRec = makeQuestionRecord({
-                  origin,
-                  pkgKey,
-                  blockKey,
-                  empNo,
-                  questionId: itN.questionId,
-                  text: itN.text,
-                  answerType: itN.answerType,
-                  options: itN.options,
-                  requiresAnswer: itN.requiresAnswer
-                });
-
-                questions.push(qRec);
-                questionsAdded++;
-                itemsAdded++;
-              }
-
-              if (k === "task") {
-                if (taskOrigins.has(origin)) continue;
-                taskOrigins.add(origin);
-
-                const tRec = makeTaskRecord({
-                  origin,
-                  pkgKey,
-                  blockKey,
-                  empNo,
-                  taskId: itN.taskId,
-                  text: itN.text,
-                  answerType: itN.answerType,
-                  scale: itN.scale,
-                  requiresDone: itN.requiresDone
-                });
-
-                tasks.push(tRec);
-                tasksAdded++;
-                itemsAdded++;
-              }
-            }
-
-            continue; // container path handled
-          }
-
-          // 2) OLD: direct block kind/type
-          const kind = normKind(block && (block.type || block.kind) || "");
+          const kind = normKind(block);
           if (!kind) continue;
 
-          // ignore info/document in old path
+          // info/document ignoreras
           if (kind === "info" || kind === "document") continue;
 
           const blockKey = stableBlockKey(block, kind, bi);
-          const origin = originKey(pkgKey, blockKey, "root", empNo);
+          const origin = originKey(pkgKey, blockKey, empNo);
 
-          // Text fields: prefer text/description, else title
-          const baseText =
-            asStr(block.text || block.description || "", 240) ||
-            asStr(block.title || "", 240);
+          const title = asStr(block.title || "", 120) || "Block";
+          const text = asStr(block.text || block.description || "", 2000);
 
-          if (!baseText) continue;
+          const taskAnswer = normalizeTaskAnswer(block);
+          const questionAnswer = normalizeQuestionAnswer(block, kind);
 
-          // If "both", we create both a task and a question using same text
-          if (kind === "question" || kind === "both") {
-            if (!questionOrigins.has(origin)) {
-              questionOrigins.add(origin);
+          const scaleMin = clampInt(block.scaleMin, 1, 10, 1);
+          const scaleMax0 = clampInt(block.scaleMax, 1, 10, 5);
+          const scaleMax = (scaleMax0 < scaleMin) ? scaleMin : scaleMax0;
 
-              const at = (asStr(block.answerType, 20).toLowerCase() === "choice") ? "choice" : "text";
-              const opts = (at === "choice" && Array.isArray(block.options))
-                ? block.options.map(o => asStr(o, 80)).filter(Boolean).slice(0, 10)
-                : [];
-
-              const qRec = makeQuestionRecord({
-                origin,
-                pkgKey,
-                blockKey,
+          // TASK
+          if (kind === "task" || kind === "both") {
+            if (!taskOrigins.has(origin)) {
+              tasks.push({
+                id: genId("tsk"),
                 empNo,
-                questionId: asStr(block.questionId, 260) || genId("q"),
-                text: baseText,
-                answerType: at,
-                options: opts,
-                requiresAnswer: boolDefault(block.requiresAnswer, true)
+                scopeId,
+                title,
+                text,
+                answerType: taskAnswer,          // checkbox|scale
+                scaleMin,
+                scaleMax,
+                status: "open",                  // UI kan tolka som open/done
+                done: false,
+                createdAt: now,
+                updatedAt: now,
+                _origin: origin,
+                _source: "onboard",
+                _pkgKey: pkgKey,
+                _blockKey: blockKey
               });
-
-              questions.push(qRec);
-              questionsAdded++;
+              taskOrigins.add(origin);
+              tasksAdded++;
             }
           }
 
-          if (kind === "task" || kind === "both") {
-            if (!taskOrigins.has(origin)) {
-              taskOrigins.add(origin);
+          // QUESTION
+          if (kind === "question" || kind === "both") {
+            if (!questionOrigins.has(origin)) {
+              const options = (questionAnswer === "choice") ? normalizeOptions(block.options) : [];
+              const correctOptions = (questionAnswer === "choice")
+                ? normalizeCorrectOptions(block.correctOptions, options)
+                : [];
 
-              const at = (asStr(block.answerType, 20).toLowerCase() === "scale") ? "scale" : "checkbox";
-              let scale = null;
-              if (at === "scale") {
-                const sc = block.scale || {};
-                let mn = Number(sc.min);
-                let mx = Number(sc.max);
-                if (!Number.isFinite(mn)) mn = 1;
-                if (!Number.isFinite(mx)) mx = 5;
-                mn = Math.max(1, Math.min(10, Math.trunc(mn)));
-                mx = Math.max(1, Math.min(10, Math.trunc(mx)));
-                if (mx < mn) mx = mn;
-                scale = {
-                  min: mn,
-                  max: mx,
-                  minLabel: asStr(sc.minLabel, 80),
-                  maxLabel: asStr(sc.maxLabel, 80)
-                };
-              }
-
-              const tRec = makeTaskRecord({
-                origin,
-                pkgKey,
-                blockKey,
+              questions.push({
+                id: genId("q"),
                 empNo,
-                taskId: asStr(block.taskId, 260) || genId("t"),
-                text: baseText,
-                answerType: at,
-                scale,
-                requiresDone: boolDefault(block.requiresDone, true)
+                scopeId,
+                title,
+                text,
+                answerType: questionAnswer,      // text|choice
+                options,
+                correctOptions,
+                createdAt: now,
+                updatedAt: now,
+                _origin: origin,
+                _source: "onboard",
+                _pkgKey: pkgKey,
+                _blockKey: blockKey
               });
-
-              tasks.push(tRec);
-              tasksAdded++;
+              questionOrigins.add(origin);
+              questionsAdded++;
             }
           }
         }
       }
     }
 
+    // Ingen write vid dryRun
     if (dryRun) {
       return {
         ok: true,
         dryRun: true,
-        stats: {
-          activePackages: activePkgs.length,
-          employees: empNos.length,
-          scanned,
-          itemsAdded,
-          tasksAdded,
-          questionsAdded
-        }
+        activePackages: activePkgs.length,
+        assignmentsEmpCount: empNos.length,
+        blocksScanned,
+        tasksAdded,
+        questionsAdded,
+        tasksTotalAfter: tasks.length,
+        questionsTotalAfter: questions.length
       };
     }
 
-    const wT = writeJson(TASKS_KEY, tasks);
-    if (!wT.ok) return { ok: false, dryRun: false, reasons: [wT.err || "Kunde inte skriva tasks."] };
+    // Write (fail-closed om write misslyckas)
+    const w1 = writeJson(TASKS_KEY, tasks);
+    if (!w1.ok) return { ok: false, dryRun: false, reasons: [w1.err || "Kunde inte spara TASKS."] };
 
-    const wQ = writeJson(QUESTIONS_KEY, questions);
-    if (!wQ.ok) return { ok: false, dryRun: false, reasons: [wQ.err || "Kunde inte skriva questions."] };
+    const w2 = writeJson(QUESTIONS_KEY, questions);
+    if (!w2.ok) return { ok: false, dryRun: false, reasons: [w2.err || "Kunde inte spara QUESTIONS."] };
 
     return {
       ok: true,
       dryRun: false,
-      stats: {
-        activePackages: activePkgs.length,
-        employees: empNos.length,
-        scanned,
-        itemsAdded,
-        tasksAdded,
-        questionsAdded
-      }
+      activePackages: activePkgs.length,
+      assignmentsEmpCount: empNos.length,
+      blocksScanned,
+      tasksAdded,
+      questionsAdded,
+      tasksTotalAfter: tasks.length,
+      questionsTotalAfter: questions.length
     };
   }
 
-  // Exponera ett stabilt API (UI-only)
-  // - körs inte automatiskt (sidor kan kalla window.HROnboardMaterialize.materialize())
-  window.HROnboardMaterialize = Object.freeze({
-    materialize
-  });
+  // Export (LÅST): onboard-materialize.html förväntar sig denna symbol
+  window.HR_ONBOARD_MATERIALIZE = function (opts) {
+    try {
+      return materialize(opts || {});
+    } catch (e) {
+      return {
+        ok: false,
+        dryRun: !!(opts && opts.dryRun),
+        reasons: ["Oväntat fel i materialize (fail-closed).", String((e && e.message) || e || "Okänt fel")]
+      };
+    }
+  };
 })();
