@@ -1,49 +1,35 @@
 <!-- ============================================================
-AO-046 + AO-019 6/8 (SPLIT-STEP1) | FIL-ID: admin/tasks.html
+AO-TASKS-TO-BLOCKS-01 (PROD) | FIL-ID: admin/tasks.html
 Projekt: HR-System
-Syfte: Admin/Manager – Uppgifter (SKAPA) – UI-only v1.4 (nivå 3)
+Syfte: Admin/Manager – BLOCK-SKAPARE (Skapa blockId med frågor/dokument/uppgifter) – UI-only
 
-SPLIT-STEP1:
-- Denna sida = endast SKAPA (snabbskapning + Avancerat inkl. Mallar)
-- Översikt/lista flyttas till admin/tasks-list.html (Steg 2)
+NYTT (AO-TASKS-TO-BLOCKS-01):
+- Denna sida skapar BLOCK (blockId) som “paket” med items (question/document/task)
+- Block sparas i en separat block-bank (NY key) och går vidare till:
+  1) admin/packages-block.html (redigera/verifiera)
+  2) admin/onboard-plans.html (tidsaxel med blockId)
+  3) admin/onboard-progress.html (vem ser vad)
+  4) employee/home.html (post-it rubrik)
+  5) employee/tasks.html (utför: svara/läs/signera)
 
-UX-QUICK-01:
-- “Snabb skapning” som standard
-- Behåll alla funktioner, men flytta “Mallar / Prioritet / Admin-notis / Återkommande / Dedupe / Startdatum” till “Avancerat”
-- Skapa ska gå att göra på 30 sek: Mottagare + Scope + Uppgifter + Deadline (valfri) + Skapa
-
-FIX-01 (PRC/FIX-ARBETORDER – AO-019 6/8-FIX-01):
-- Org-integritetscheck: särskilj root/orphan/loop utan falska positives
-  - Root (parentId=null) = OK
-  - Missing parentId target = orphan/korrupt (inte “loop”)
-  - Loop = återbesök i kedjan
-- Harden assignmentsV2:
-  - Normalisera till Object.create(null)
-  - Kopiera endast egna keys
-  - Blockera special-keys (__proto__, constructor, prototype) om de dyker upp (fail-closed)
-- ViewerScope-krav policy:
-  - MANAGER: kräver viewerScopeId (fail-closed om saknas)
-  - ADMIN/SYSTEM: får skapa även om viewerScopeId saknas, men:
-    - inget default-scope (scope måste väljas manuellt innan spara)
-    - org + assignments måste vara friska
-
-EXTRA (UX-HELP-01):
-- Om org har exakt 1 root-nod: visa “Välj root” knapp för ADMIN/SYSTEM (manuell click = fortfarande “ingen default”)
-
-Policy (LÅST):
+POLICY (LÅST):
 - Ingen backend
-- sessionStorage först, fallback localStorage (fail-closed)
-- Ingen känslig persondata (endast anst.nr)
-- Inga nya storage-keys/datamodell utan explicit AO
-- XSS-escape på all rendering från storage
+- sessionStorage först, fallback localStorage (auth) (fail-closed)
+- Ingen känslig persondata (endast anst.nr i auth-session)
+- XSS-escape på all rendering från storage (ingen osäker innerHTML)
 - Hel-filsleverans
+
+EXPLICIT AO-UNDANTAG (tillåtet här):
+- NY storage-key: AO-0XX_BLOCKS_V1 (Block-bank)  ✅
+- Återanvänder befintlig mall-key: AO-047_TASK_TEMPLATES_V1 (för block-mallar) ✅
+
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Admin/Manager • Uppgifter (Skapa)</title>
+  <title>HR-System – Admin/Manager • Block (Skapa)</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
   <!-- HRApp (auth/routing). Fail-safe: sidan har egen fallback om HRApp saknas -->
@@ -159,40 +145,6 @@ Policy (LÅST):
     .tplactions{ display:flex; gap:8px; flex-wrap:wrap; }
     .tplhint{ font-size:.9rem; color: var(--muted); margin-top:6px; width:100%; }
 
-    /* Datum/återkommande */
-    .subcard{
-      margin-top: 10px;
-      padding: 10px;
-      border: 1px solid var(--line);
-      border-radius: var(--r14);
-      background: rgba(255,255,255,.7);
-    }
-    .subcard .title{
-      font-weight: 850;
-      margin: 0 0 8px;
-    }
-    .radios{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-      margin-top: 6px;
-    }
-    .radios label{
-      display:flex;
-      align-items:center;
-      gap:8px;
-      margin:0;
-      padding: 8px 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background:#fff;
-      cursor:pointer;
-      user-select:none;
-    }
-    .radios input{ transform: translateY(0.5px); }
-    .inline-help{ font-size:.9rem; color: var(--muted); margin-top:6px; }
-
     code{ font-size:.95em; }
 
     .lockbox{
@@ -207,14 +159,6 @@ Policy (LÅST):
     .lockbox ul{ margin:8px 0 0; padding-left: 18px; }
     .lockbox li{ margin: 3px 0; }
 
-    .scope-helpbar{
-      display:flex;
-      gap:8px;
-      align-items:center;
-      flex-wrap:wrap;
-      margin-top: 8px;
-    }
-
     .toplinks{
       display:flex;
       gap:10px;
@@ -222,6 +166,18 @@ Policy (LÅST):
       align-items:center;
       justify-content:flex-end;
     }
+
+    .hintbox{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.82);
+      color: var(--muted);
+    }
+    .hintbox strong{ color:#111; }
+    .hintbox ul{ margin:8px 0 0; padding-left: 18px; }
+    .hintbox li{ margin: 4px 0; }
   </style>
 </head>
 
@@ -230,12 +186,12 @@ Policy (LÅST):
 <header class="top">
   <div class="brand">
     <strong>HR-System</strong>
-    <span class="muted">• Admin/Manager • Uppgifter (Skapa)</span>
+    <span class="muted">• Admin/Manager • Block (Skapa)</span>
   </div>
 
   <nav class="nav" aria-label="Meny">
     <a href="./home.html">Hem</a>
-    <a href="./tasks.html" aria-current="page">Skapa uppgift</a>
+    <a href="./tasks.html" aria-current="page">Skapa block</a>
     <a href="./tasks-list.html">Översikt</a>
     <a href="./questions.html">Frågor</a>
     <a href="./reports.html">Felrapporter</a>
@@ -246,10 +202,10 @@ Policy (LÅST):
 </header>
 
 <main class="container">
-  <h1 class="tight">Skapa uppgifter (Admin/Manager)</h1>
+  <h1 class="tight">Skapa block (Admin/Manager)</h1>
   <p class="muted">
-    Skapa och tilldela uppgifter. Medarbetaren uppdaterar status på sin sida.
-    Scope styr vad som kan skapas. Översikt finns på <a href="./tasks-list.html">admin/tasks-list.html</a>.
+    Här skapar du ett <strong>blockId</strong> med innehåll (<strong>dokument</strong>, <strong>frågor</strong>, <strong>uppgifter</strong>).
+    Efter skapande går blocket vidare till <a href="./packages-block.html">admin/packages-block.html</a> för redigering/verifiering.
   </p>
 
   <section class="card">
@@ -258,92 +214,82 @@ Policy (LÅST):
         Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
       </div>
       <div class="toplinks">
-        <a class="btn secondary" href="../employee/tasks.html">Öppna employee/tasks (demo)</a>
-        <a class="btn" href="./tasks-list.html">Gå till översikt</a>
+        <a class="btn secondary" href="./packages-block.html">Öppna Block-editor</a>
+        <a class="btn" href="./onboard-plans.html">Öppna Onboard-planer</a>
       </div>
     </div>
 
     <div id="lockBox" class="lockbox" style="display:none;"></div>
 
-    <section class="panel" aria-label="Skapa uppgifter">
-      <div class="panel-title">Skapa uppgifter</div>
+    <section class="panel" aria-label="Skapa block">
+      <div class="panel-title">Skapa block</div>
 
       <!-- Snabbskapande -->
       <div class="quickbox" aria-label="Snabb skapning">
         <p class="quicktitle">Snabb skapning</p>
         <p class="quickhint">
-          Gör så här: <span class="req"><strong>1</strong> Mottagare</span>
-          <span class="req"><strong>2</strong> Scope</span>
-          <span class="req"><strong>3</strong> Uppgifter</span>
-          <span class="req"><strong>4</strong> Deadline (valfri)</span>
-          <span class="req"><strong>5</strong> Skapa</span>
+          Gör så här: <span class="req"><strong>1</strong> Modul/område/steg</span>
+          <span class="req"><strong>2</strong> Rubrik</span>
+          <span class="req"><strong>3</strong> Innehåll</span>
+          <span class="req"><strong>4</strong> Skapa block</span>
         </p>
 
         <div class="row2">
           <label>
-            Mottagare
-            <select id="targetMode">
-              <option value="one">En medarbetare</option>
-              <option value="all">Alla (från grupper)</option>
-              <option value="group">Grupp</option>
-            </select>
-          </label>
-
-          <label id="oneWrap">
-            Anst.nr (employee)
-            <input id="targetEmpNo" type="text" inputmode="numeric" placeholder="t.ex. 1234" />
-          </label>
-
-          <label id="groupWrap" style="display:none;">
-            Grupp
-            <select id="targetGroup"></select>
+            Modul
+            <input id="moduleInp" type="text" placeholder="t.ex. Onboarding" />
           </label>
 
           <label>
-            Scope (org-nod) <span class="muted">• krävs</span>
-            <select id="scopeSelect"></select>
-
-            <div class="scope-helpbar">
-              <button id="btnPickRoot" type="button" class="secondary" style="display:none;">Välj root</button>
-              <span id="scopeHint" class="smallnote" style="margin:0;"></span>
-            </div>
-          </label>
-        </div>
-
-        <div class="inline-row">
-          <div class="smallnote" style="margin:0;">
-            <strong>Manager:</strong> endast inom din subtree.
-            <strong>Admin/System:</strong> du måste välja scope manuellt.
-          </div>
-        </div>
-
-        <div class="row2" style="margin-top:10px;">
-          <label>
-            Titel (valfri)
-            <input id="title" type="text" placeholder="t.ex. Introduktion dag 1" />
+            Område
+            <input id="areaInp" type="text" placeholder="t.ex. Hygien" />
           </label>
 
           <label>
-            Deadline (valfri)
-            <input id="endDate" type="date" />
+            Steg
+            <input id="stepInp" type="text" placeholder="t.ex. Dag 1" />
+          </label>
+
+          <label>
+            Rubrik (syns som post-it)
+            <input id="titleInp" type="text" maxlength="80" placeholder="t.ex. Introduktion – första passet" />
           </label>
         </div>
 
         <label style="margin-top:10px;">
-          Uppgifter (en per rad) <span class="muted">• krävs</span>
-          <textarea id="tasks" placeholder="Skriv en uppgift per rad..."></textarea>
+          Innehåll (en rad per item) <span class="muted">• krävs</span>
+          <textarea id="itemsInp" placeholder="Ex:
+D: Läs hygienrutiner och signera
+Q: Vad heter din närmaste arbetsledare?
+T: Kontrollera att din station är ren (checkbox)
+"></textarea>
         </label>
 
+        <div class="hintbox" aria-label="Format-hjälp">
+          <strong>Rad-format</strong> (börja raden med):
+          <ul>
+            <li><code>D:</code> Dokument (läs + signera)</li>
+            <li><code>Q:</code> Fråga (text-svar)</li>
+            <li><code>QC:</code> Fråga med val (alternativ separeras med <code>|</code>)</li>
+            <li><code>T:</code> Uppgift (checkbox)</li>
+            <li><code>TS:</code> Uppgift med skala (ange <code>min-max</code> först, t.ex. <code>TS:1-5|Hur trygg känner du dig?</code>)</li>
+          </ul>
+          <div class="smallnote" style="margin:8px 0 0;">
+            Exempel: <code>QC: Vilken dag börjar du? | Mån | Tis | Ons</code><br/>
+            Exempel: <code>TS:1-10|Hur tydlig var introduktionen?</code>
+          </div>
+        </div>
+
         <div class="row-actions" style="margin-top:10px;">
-          <button id="btnCreate" type="button">Skapa & tilldela</button>
+          <button id="btnCreate" type="button">Skapa blockId</button>
           <button id="btnClear" class="secondary" type="button">Rensa</button>
-          <a class="btn secondary" href="./tasks-list.html" style="margin-left:auto;">Öppna översikt</a>
+          <a class="btn secondary" href="./packages-block.html" style="margin-left:auto;">Till Block-editor</a>
         </div>
 
         <p id="msg" class="message" aria-live="polite"></p>
 
         <div class="smallnote">
-          Tips: Vill du ha mallar, återkommande eller prioritet → öppna <strong>Avancerat</strong> nedan.
+          Skapat block hamnar i <code>AO-0XX_BLOCKS_V1</code> med <code>status=draft</code>. Verifiera i Block-editor.
         </div>
       </div>
 
@@ -351,12 +297,10 @@ Policy (LÅST):
       <details class="advanced" id="advancedDetails">
         <summary>
           Avancerat
-          <span class="adv-pill">Mallar • Prio • Notis • Återkommande</span>
+          <span class="adv-pill">Mallar</span>
         </summary>
 
         <div class="advanced-body">
-
-          <!-- Mallar -->
           <div class="tplbar" aria-label="Mallar">
             <label>
               Mall
@@ -368,135 +312,13 @@ Policy (LÅST):
               <button id="btnTplDelete" type="button" class="secondary">Ta bort mall</button>
             </div>
             <div class="tplhint">
-              Mallar fyller i Titel/Uppgifter/Admin-notis/Prioritet + Datum/Återkommande. Mottagare påverkas inte.
-            </div>
-          </div>
-
-          <div class="row2">
-            <label>
-              Prioritet
-              <select id="prio">
-                <option value="normal">Normal</option>
-                <option value="high">Hög</option>
-                <option value="low">Låg</option>
-              </select>
-            </label>
-
-            <label>
-              Admin-notis (valfri)
-              <input id="adminNote" type="text" placeholder="t.ex. Klart senast fredag" />
-            </label>
-          </div>
-
-          <!-- Datum / Återkommande -->
-          <div class="subcard" aria-label="Datum och återkommande">
-            <p class="title">Datum & återkommande</p>
-
-            <div class="row2">
-              <label>
-                Typ
-                <select id="taskKind">
-                  <option value="oneoff">Engångsuppgift</option>
-                  <option value="recurring">Återkommande</option>
-                </select>
-              </label>
-
-              <label>
-                Startdatum <span class="muted">(krävs för återkommande)</span>
-                <input id="startDate" type="date" />
-              </label>
-            </div>
-
-            <!-- Engång -->
-            <div id="oneoffBox" style="margin-top:10px;">
-              <div class="row2">
-                <label>
-                  Undvik dubletter (rekommenderas)
-                  <select id="dedupeMode">
-                    <option value="on" selected>På</option>
-                    <option value="off">Av</option>
-                  </select>
-                </label>
-
-                <div class="smallnote" style="margin-top:0; align-self:end;">
-                  Engång: deadline styrs av fältet <strong>Deadline</strong> i snabb-läget.
-                </div>
-              </div>
-              <div class="inline-help">
-                Tips: lämna startdatum tomt om det inte behövs (för engång).
-              </div>
-            </div>
-
-            <!-- Återkommande -->
-            <div id="recurringBox" style="margin-top:10px; display:none;">
-              <div class="row2">
-                <label>
-                  Frekvens
-                  <select id="freq">
-                    <option value="daily">Dagligen</option>
-                    <option value="weekly">Veckovis</option>
-                    <option value="monthly">Månadsvis</option>
-                  </select>
-                </label>
-
-                <label>
-                  Intervall
-                  <select id="interval">
-                    <option value="1">Var 1</option>
-                    <option value="2">Var 2</option>
-                    <option value="3">Var 3</option>
-                    <option value="4">Var 4</option>
-                  </select>
-                </label>
-              </div>
-
-              <div id="weeklyDays" style="margin-top:10px;">
-                <label>
-                  Veckodagar (valfritt, annars “samma veckodag som startdatum”)
-                  <select id="byWeekday" multiple size="7">
-                    <option value="1">Mån</option>
-                    <option value="2">Tis</option>
-                    <option value="3">Ons</option>
-                    <option value="4">Tor</option>
-                    <option value="5">Fre</option>
-                    <option value="6">Lör</option>
-                    <option value="7">Sön</option>
-                  </select>
-                </label>
-                <div class="inline-help">Håll Ctrl/Cmd för att välja flera.</div>
-              </div>
-
-              <div class="radios" aria-label="Slut">
-                <label><input type="radio" name="untilMode" value="forever" checked /> Tillsvidare</label>
-                <label><input type="radio" name="untilMode" value="until" /> Till datum</label>
-              </div>
-
-              <div class="row2" style="margin-top:10px;">
-                <label id="untilWrap" style="display:none;">
-                  Slutdatum (för återkommande)
-                  <input id="untilDate" type="date" />
-                </label>
-
-                <label>
-                  Undvik dubletter (rekommenderas)
-                  <select id="dedupeModeR">
-                    <option value="on" selected>På</option>
-                    <option value="off">Av</option>
-                  </select>
-                </label>
-              </div>
-
-              <div class="inline-help">
-                Medarbetaren ska kunna markera “Klar” för en specifik dag (per datum). Det stöds via <code>exceptionsDone</code>.
-                <br/>Policy: <strong>untilDate är inklusive</strong> (gäller t.o.m. angivet datum).
-              </div>
+              Mallar fyller i Modul/Område/Steg/Rubrik + Innehåll. De påverkar inte auth eller något annat.
             </div>
           </div>
 
           <div class="smallnote">
-            Batch: en rad = en uppgift. Skapas per mottagare. Alla uppgifter får <code>scopeId</code> (fail-closed).
+            Mallar sparas i <code>AO-047_TASK_TEMPLATES_V1</code> (återanvänd key för att undvika fler keys).
           </div>
-
         </div>
       </details>
     </section>
@@ -505,37 +327,35 @@ Policy (LÅST):
 
 <script>
 /* ============================================================
-AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
-- SPLIT-STEP1: endast skapa + avancerat/mallar/scope.
+AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.0
 ============================================================ */
 (function(){
   "use strict";
 
   const SESSION_KEY   = "AO-001_LOGIN_V1";
-  const TASKS_KEY     = "AO-014_TASKS_V1";
-  const GROUPS_KEY    = "AO-017_GROUPS_V1";
+
+  // NEW (explicit AO exception)
+  const BLOCKS_KEY    = "AO-0XX_BLOCKS_V1";
+
+  // Reuse existing templates key (no extra keys)
   const TEMPLATES_KEY = "AO-047_TASK_TEMPLATES_V1";
 
-  // AO-019 6/8 reads:
-  const ORG_KEY       = "AO-020_ORG_V1";
-  const ASG_V2_KEY    = "AO-020_ROLE_ASSIGNMENTS_V2";
-
-  const MAX_CHAIN_GUARD = 200;
-  const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
-
   const $ = (s) => document.querySelector(s);
-  const $$ = (s) => Array.from(document.querySelectorAll(s));
 
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
-  function hasLocalKey(key){
-    try{ return localStorage.getItem(key) !== null; }catch{ return false; }
+  function safeParseJson(raw, fallback){
+    try{
+      const v = JSON.parse(raw);
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
   }
 
   function safeParseLocal(key, fallback){
     try{
-      const v = JSON.parse(localStorage.getItem(key) || "null");
-      return (v === null || v === undefined) ? fallback : v;
+      const raw = localStorage.getItem(key);
+      if(raw === null) return fallback;
+      return safeParseJson(raw, fallback);
     }catch{ return fallback; }
   }
 
@@ -544,7 +364,7 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
       localStorage.setItem(key, JSON.stringify(value));
       return { ok:true };
     }catch(e){
-      return { ok:false, err: e };
+      return { ok:false, err:e };
     }
   }
 
@@ -581,45 +401,6 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
     return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
   }
 
-  function todayISO(){
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth()+1).padStart(2,"0");
-    const day = String(d.getDate()).padStart(2,"0");
-    return `${y}-${m}-${day}`;
-  }
-
-  function isISODate(s){
-    return /^\d{4}-\d{2}-\d{2}$/.test(String(s||""));
-  }
-
-  function parseISOToTime(iso){
-    if(!isISODate(iso)) return null;
-    const t = Date.parse(iso + "T00:00:00");
-    return Number.isFinite(t) ? t : null;
-  }
-
-  function normalizeEmpNo(v){
-    const s = String(v || "").trim();
-    const digits = s.replace(/[^\d]/g, "");
-    return digits;
-  }
-
-  function validateEmpNo(v){
-    const emp = normalizeEmpNo(v);
-    if(!emp) return { ok:false, empNo:"" };
-    if(emp.length > 10) return { ok:false, empNo: emp };
-    return { ok:true, empNo: emp };
-  }
-
-  function weekdayFromISO(iso){
-    const t = parseISOToTime(iso);
-    if(t === null) return null;
-    const d = new Date(t);
-    const js = d.getDay();
-    return js === 0 ? 7 : js;
-  }
-
   function clampText(s, max){
     const str = String(s ?? "");
     if(str.length <= max) return str;
@@ -632,48 +413,28 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
   }
 
   // ------------------------------------------------------------
-  // Access source of truth (HRApp first; fallback to local session)
+  // Auth (HRApp first; fallback session)
   // ------------------------------------------------------------
   function readRawSession(){
-    const s1 = sessionStorage.getItem(SESSION_KEY);
-    if (s1) return s1;
-    const s2 = localStorage.getItem(SESSION_KEY);
-    if (s2) return s2;
+    try{
+      const s1 = sessionStorage.getItem(SESSION_KEY);
+      if (s1) return s1;
+    }catch{}
+    try{
+      const s2 = localStorage.getItem(SESSION_KEY);
+      if (s2) return s2;
+    }catch{}
     return null;
   }
 
-  function safeParseJson(raw, fallback){
-    try{
-      const v = JSON.parse(raw);
-      return (v === null || v === undefined) ? fallback : v;
-    }catch{ return fallback; }
-  }
-
   function readAuthFallback(){
-    try{
-      const raw = readRawSession();
-      if(!raw) return null;
-      const data = safeParseJson(raw, null);
-      if(!data?.auth?.isAuthed) return null;
-      if (data.auth.expiresAt && Number(data.auth.expiresAt) < Date.now()) return null;
-      if(!data.auth.role) return null;
-      return data.auth;
-    }catch{
-      return null;
-    }
-  }
-
-  function pickEmpNoFromAuth(auth){
-    const candidates = [
-      auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier
-    ];
-    for(const c of candidates){
-      const s = String(c || "").trim();
-      if(!s) continue;
-      const digits = s.replace(/[^\d]/g, "");
-      if(digits) return digits.slice(0, 10);
-    }
-    return "";
+    const raw = readRawSession();
+    if(!raw) return null;
+    const data = safeParseJson(raw, null);
+    if(!data?.auth?.isAuthed) return null;
+    if (data.auth.expiresAt && Number(data.auth.expiresAt) < Date.now()) return null;
+    if(!data.auth.role) return null;
+    return data.auth;
   }
 
   function roleClassFromAuthRole(role){
@@ -684,47 +445,15 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
     return "UNKNOWN";
   }
 
-  // Hardened assignments V2: Object.create(null) + block special keys
-  function normalizeAssignmentsV2(raw, opts){
-    const requireKeyPresent = !!(opts && opts.requireKeyPresent);
-    const issues = [];
-
-    if(requireKeyPresent && !hasLocalKey(ASG_V2_KEY)){
-      return { ok:false, map: Object.create(null), issues: ["Assignments saknas (key finns inte)."] };
+  function pickEmpNoFromAuth(auth){
+    const candidates = [auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier];
+    for(const c of candidates){
+      const s = String(c || "").trim();
+      if(!s) continue;
+      const digits = s.replace(/[^\d]/g, "");
+      if(digits) return digits.slice(0, 10);
     }
-
-    if(raw === null || raw === undefined){
-      if(requireKeyPresent) return { ok:false, map: Object.create(null), issues: ["Assignments är korrupt (null/undefined)."] };
-      return { ok:true, map: Object.create(null), issues: [] };
-    }
-
-    if(typeof raw !== "object" || Array.isArray(raw)){
-      return { ok:false, map: Object.create(null), issues: ["Assignments korrupt (förväntar objekt)."] };
-    }
-
-    const out = Object.create(null);
-    let blocked = false;
-
-    for(const k of Object.keys(raw)){ // egna keys only
-      const key = String(k);
-      if(SPECIAL_KEYS.has(key)){
-        blocked = true;
-        continue;
-      }
-      out[key] = raw[key];
-    }
-
-    if(blocked){
-      issues.push("Assignments innehåller blockerade special-keys (__proto__/constructor/prototype).");
-      return { ok:false, map: out, issues };
-    }
-
-    return { ok:true, map: out, issues };
-  }
-
-  function loadAssignmentsV2Hardened(){
-    const parsed = safeParseLocal(ASG_V2_KEY, null);
-    return normalizeAssignmentsV2(parsed, { requireKeyPresent: true });
+    return "";
   }
 
   function getAccessCtx(){
@@ -736,9 +465,7 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
           source: "HRApp",
           roleClass: cls,
           auth: acc.auth,
-          empNo: String(acc.empNo || "").trim(),
-          viewerScopeId: String(acc.scopeId || "").trim(),
-          assignment: acc.assignment || null
+          empNo: String(acc.empNo || "").trim()
         };
       }
     }
@@ -746,20 +473,11 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
     const auth = readAuthFallback();
     if(!auth) return null;
 
-    const empNo = pickEmpNoFromAuth(auth);
-
-    const parsed = safeParseLocal(ASG_V2_KEY, null);
-    const asgV = normalizeAssignmentsV2(parsed, { requireKeyPresent: false });
-    const rec = empNo ? (asgV.map[empNo] || null) : null;
-
     return {
       source: "fallback",
       roleClass: roleClassFromAuthRole(auth.role),
       auth,
-      empNo,
-      viewerScopeId: String(rec?.scopeId || "").trim(),
-      assignment: rec || null,
-      _asgIssues: asgV.ok ? [] : asgV.issues
+      empNo: pickEmpNoFromAuth(auth)
     };
   }
 
@@ -786,471 +504,180 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
   // ------------------------------------------------------------
-  // Org helpers (AO-019 6/8) – FIX-01 integrity check
+  // Block store
   // ------------------------------------------------------------
-  function normalizeOrgNodes(raw){
-    const arr = Array.isArray(raw) ? raw : [];
-    const out = [];
-    for(const n of arr){
-      const id = String(n?.id || "").trim();
-      const name = String(n?.name || "").trim();
-      const type = String(n?.type || "").trim();
-      const parentId = (n?.parentId === null || n?.parentId === undefined) ? null : String(n.parentId).trim();
-      if(!id || !name) continue;
-      out.push({ id, name, type, parentId });
-    }
-    return out;
-  }
-
-  function buildOrgIndex(nodes){
-    const byId = new Map();
-    for(const n of nodes){ if(!byId.has(n.id)) byId.set(n.id, n); }
-
-    const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
-    const children = new Map();
-    nodes.forEach(n => children.set(n.id, []));
-    nodes.forEach(n => {
-      if(n.parentId && children.has(n.parentId)) children.get(n.parentId).push(n.id);
-    });
-    return { byId, parentOf, children };
-  }
-
-  function validateOrgIntegrity(nodes){
-    const issues = [];
-    if(!Array.isArray(nodes) || nodes.length === 0){
-      return { ok:false, issues:["Org saknas/korrupt (tom eller fel format)."], rootIds: [], hasOrphans:false, hasLoop:false };
-    }
-
-    const idx = buildOrgIndex(nodes);
-    const ids = new Set(nodes.map(n => n.id));
-    const rootIds = nodes.filter(n => n.parentId === null).map(n => n.id);
-
-    if(rootIds.length === 0){
-      issues.push("Org saknar root (ingen nod med parentId=null).");
-    }
-    if(rootIds.length > 1){
-      issues.push("Org har flera root-noder (förväntar exakt 1).");
-    }
-
-    let hasOrphans = false;
-    for(const n of nodes){
-      if(n.parentId === null) continue;
-      if(!n.parentId || !ids.has(n.parentId)){
-        hasOrphans = true;
-        break;
-      }
-    }
-    if(hasOrphans){
-      issues.push("Org har orphan-noder (parentId pekar på saknad nod).");
-    }
-
-    let hasLoop = false;
-    for(const n of nodes){
-      let cur = n.id;
-      let steps = 0;
-      const seen = new Set([cur]);
-
-      while(steps < MAX_CHAIN_GUARD){
-        const p = idx.parentOf.get(cur);
-
-        if(p === null) break;                 // root reached => OK
-        if(!p || !idx.byId.has(p)) break;     // orphan chain => orphan, NOT loop
-
-        if(seen.has(p)){
-          hasLoop = true;
-          break;
-        }
-
-        seen.add(p);
-        cur = p;
-        steps++;
-      }
-
-      if(hasLoop) break;
-      if(steps >= MAX_CHAIN_GUARD){
-        hasLoop = true;
-        break;
-      }
-    }
-    if(hasLoop){
-      issues.push("Org har loop i parent-kedjan (återbesök upptäckt).");
-    }
-
-    const ok = (rootIds.length === 1) && !hasOrphans && !hasLoop;
-    return { ok, issues, rootIds, hasOrphans, hasLoop };
-  }
-
-  function isInScope(viewerScopeId, itemScopeId, orgIndex){
-    const v = String(viewerScopeId || "").trim();
-    const s = String(itemScopeId || "").trim();
-    if(!v || !s) return false;
-
-    const { byId, parentOf } = orgIndex;
-    if(!byId.has(v)) return false;
-    if(!byId.has(s)) return false;
-
-    if(v === s) return true;
-
-    let cur = s;
-    let steps = 0;
-    const seen = new Set([cur]);
-    while(cur && steps < MAX_CHAIN_GUARD){
-      const p = parentOf.get(cur);
-
-      if(p === null) return false;
-      if(!p || !byId.has(p)) return false;
-
-      if(p === v) return true;
-
-      if(seen.has(p)) return false;
-      seen.add(p);
-
-      cur = p;
-      steps++;
-    }
-    return false;
-  }
-
-  function computeSubtreeSet(rootId, orgIndex){
-    const r = String(rootId || "").trim();
-    if(!r) return new Set();
-    if(!orgIndex.byId.has(r)) return new Set();
-    const set = new Set([r]);
-    const stack = [r];
-    while(stack.length){
-      const cur = stack.pop();
-      const kids = orgIndex.children.get(cur) || [];
-      for(const k of kids){
-        if(set.has(k)) continue;
-        set.add(k);
-        stack.push(k);
-      }
-    }
-    return set;
-  }
-
-  function flattenOrgForSelect(nodes, orgIndex){
-    const roots = nodes.filter(n => n.parentId === null).map(n => n.id);
-    const visited = new Set();
-    const out = [];
-
-    function walk(id, depth){
-      if(visited.has(id)) return;
-      visited.add(id);
-      const n = orgIndex.byId.get(id);
-      if(!n) return;
-      out.push({ id:n.id, name:n.name, type:n.type, depth });
-      const kids = (orgIndex.children.get(id) || []).slice().sort((a,b)=>{
-        const na = orgIndex.byId.get(a)?.name || "";
-        const nb = orgIndex.byId.get(b)?.name || "";
-        return na.localeCompare(nb, "sv");
-      });
-      kids.forEach(k => walk(k, depth+1));
-    }
-
-    if(roots.length){
-      roots.slice().sort((a,b)=>{
-        const na = orgIndex.byId.get(a)?.name || "";
-        const nb = orgIndex.byId.get(b)?.name || "";
-        return na.localeCompare(nb, "sv");
-      }).forEach(r => walk(r, 1));
-    }else{
-      nodes.slice().sort((a,b)=>a.name.localeCompare(b.name,"sv"))
-        .forEach(n => out.push({ id:n.id, name:n.name, type:n.type, depth:1 }));
-    }
-
-    return out;
-  }
-
-  // ------------------------------------------------------------
-  // Load org + assignments (fail-closed for create)
-  // ------------------------------------------------------------
-  const orgRaw = safeParseLocal(ORG_KEY, []);
-  const orgNodes = normalizeOrgNodes(orgRaw);
-  const orgIndex = buildOrgIndex(orgNodes);
-  const orgIntegrity = validateOrgIntegrity(orgNodes);
-
-  const asgV2 = loadAssignmentsV2Hardened();
-  const assignmentsV2 = asgV2.map;
-
-  const lockReasons = [];
-
-  if(!orgIntegrity.ok){
-    lockReasons.push(...orgIntegrity.issues);
-  }
-
-  if(!asgV2.ok){
-    lockReasons.push(...asgV2.issues);
-  }
-
-  const viewerScopeId = String(access.viewerScopeId || "").trim();
-
-  if(access.roleClass === "MANAGER"){
-    if(!viewerScopeId) lockReasons.push("MANAGER: ditt viewerScopeId saknas (assignment saknar scopeId).");
-    if(viewerScopeId && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("MANAGER: ditt viewerScopeId finns inte i org.");
-  }
-
-  const canCreate = (lockReasons.length === 0);
-  showLockBox(lockReasons);
-
-  // ------------------------------------------------------------
-  // Groups
-  // ------------------------------------------------------------
-  function loadGroups(){
-    const arr = safeParseLocal(GROUPS_KEY, []);
-    return Array.isArray(arr) ? arr : [];
-  }
-  function renderGroupSelect(){
-    const sel = $("#targetGroup");
-    sel.innerHTML = "";
-    const groups = loadGroups();
-    if(!groups.length){
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "(Skapa grupp först)";
-      sel.appendChild(opt);
-      return;
-    }
-    groups.forEach(g => {
-      const opt = document.createElement("option");
-      opt.value = String(g.id || "");
-      opt.textContent = `${String(g.name || g.id || "Grupp")} (${(g.members||[]).length})`;
-      sel.appendChild(opt);
-    });
-  }
-
-  // ------------------------------------------------------------
-  // Scope select (FIX-01: Admin/System ingen default-scope)
-  // ------------------------------------------------------------
-  function setScopeHint(text){
-    const el = $("#scopeHint");
-    if(!el) return;
-    el.textContent = text || "";
-  }
-
-  function getSingleRootId(){
-    if(!orgIntegrity.ok) return "";
-    const roots = (orgIntegrity.rootIds || []).filter(Boolean);
-    if(roots.length === 1) return String(roots[0] || "");
-    return "";
-  }
-
-  function renderScopeSelect(){
-    const sel = $("#scopeSelect");
-    sel.innerHTML = "";
-
-    const btnPickRoot = $("#btnPickRoot");
-    if(btnPickRoot) btnPickRoot.style.display = "none";
-
-    if(!orgIntegrity.ok){
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "— Org saknas/korrupt —";
-      sel.appendChild(opt);
-      sel.disabled = true;
-      setScopeHint("Org måste vara frisk innan du kan välja scope.");
-      return;
-    }
-
-    sel.disabled = false;
-
-    let allowed = null;
-    if(access.roleClass === "MANAGER"){
-      allowed = computeSubtreeSet(viewerScopeId, orgIndex);
-    }
-
-    const flat = flattenOrgForSelect(orgNodes, orgIndex);
-
-    const opt0 = document.createElement("option");
-    opt0.value = "";
-    opt0.textContent = "(Välj scope)";
-    sel.appendChild(opt0);
-
-    flat.forEach(row => {
-      if(allowed && !allowed.has(row.id)) return;
-
-      const opt = document.createElement("option");
-      opt.value = row.id;
-      const indent = "—".repeat(Math.min((row.depth - 1), 10));
-      opt.textContent = `${indent} ${row.name}${row.type ? " • " + row.type : ""}`;
-      sel.appendChild(opt);
-    });
-
-    if(access.roleClass === "MANAGER"){
-      if(viewerScopeId && (!allowed || allowed.has(viewerScopeId))){
-        sel.value = viewerScopeId; // manager får default till sin scope
-      }
-      setScopeHint(viewerScopeId ? "Manager: scope är låst till din subtree." : "Manager: saknar viewerScopeId (låst).");
-      return;
-    }
-
-    // ADMIN / SYSTEM: ingen default-scope
-    sel.value = "";
-    setScopeHint("Admin/System: välj scope manuellt innan du skapar.");
-
-    // EXTRA (UX-HELP-01): om exakt 1 root, erbjud “Välj root” (manuellt klick)
-    const rootId = getSingleRootId();
-    if(rootId && btnPickRoot){
-      btnPickRoot.style.display = "inline-block";
-      btnPickRoot.onclick = () => {
-        sel.value = rootId;
-        const nm = orgIndex.byId.get(rootId)?.name || rootId;
-        setScopeHint(`Scope valt: ${nm}`);
-        setMsg("", "");
-      };
-    }
-  }
-
-  // ------------------------------------------------------------
-  // Target mode UI
-  // ------------------------------------------------------------
-  function syncTargetUI(){
-    const mode = $("#targetMode").value;
-    $("#oneWrap").style.display = (mode === "one") ? "block" : "none";
-    $("#groupWrap").style.display = (mode === "group") ? "block" : "none";
-  }
-  $("#targetMode").addEventListener("change", syncTargetUI);
-
-  // ------------------------------------------------------------
-  // Kind UI
-  // ------------------------------------------------------------
-  function syncKindUI(){
-    const kind = $("#taskKind").value;
-    $("#oneoffBox").style.display = (kind === "oneoff") ? "block" : "none";
-    $("#recurringBox").style.display = (kind === "recurring") ? "block" : "none";
-    $("#weeklyDays").style.display = ($("#freq").value === "weekly") ? "block" : "none";
-    syncUntilUI();
-  }
-  function syncUntilUI(){
-    const kind = $("#taskKind").value;
-    const mode = ($$("input[name='untilMode']").find(x => x.checked)?.value) || "forever";
-    const show = (kind === "recurring" && mode === "until");
-    $("#untilWrap").style.display = show ? "block" : "none";
-  }
-
-  $("#taskKind").addEventListener("change", syncKindUI);
-  $("#freq").addEventListener("change", syncKindUI);
-  $$("input[name='untilMode']").forEach(r => r.addEventListener("change", syncUntilUI));
-
-  // ------------------------------------------------------------
-  // Tasks store
-  // ------------------------------------------------------------
-  function loadTasks(){
-    const arr = safeParseLocal(TASKS_KEY, []);
+  function loadBlocks(){
+    const arr = safeParseLocal(BLOCKS_KEY, []);
     return Array.isArray(arr) ? arr : [];
   }
 
-  function safeSaveTasks(all){
-    const res = saveFailClosed(TASKS_KEY, all);
+  function safeSaveBlocks(all){
+    const res = saveFailClosed(BLOCKS_KEY, all);
     if(!res.ok){
-      setMsg("err", "Kunde inte spara (localStorage fullt eller blockerad). Testa rensa cache eller minska antal rader.");
+      setMsg("err", "Kunde inte spara (localStorage fullt eller blockerad).");
       return false;
     }
     return true;
   }
 
-  function computeAllTargets(){
-    const set = new Set();
-    loadGroups().forEach(g => (g.members||[]).forEach(m => {
-      const v = validateEmpNo(m);
-      if(v.ok) set.add(v.empNo);
-    }));
-    if(set.size > 0) return Array.from(set);
+  function normalizeChoiceOptionsFromPipe(text){
+    // "Fråga | opt1 | opt2"
+    const parts = String(text || "").split("|").map(x => normalizeLine(x, 60)).filter(Boolean);
+    if(parts.length < 3) return { ok:false, question:"", options:[] }; // require question + 2 options
+    const question = parts[0];
+    const options = parts.slice(1).filter(Boolean).slice(0, 10);
+    const uniq = [];
+    options.forEach(o => { if(!uniq.includes(o)) uniq.push(o); });
+    if(uniq.length < 2) return { ok:false, question, options:[] };
+    return { ok:true, question, options: uniq };
+  }
 
-    loadTasks().forEach(t => {
-      const v = validateEmpNo(t?.empNo);
-      if(v.ok) set.add(v.empNo);
+  function parseTSScale(text){
+    // "1-5|Fråga..."
+    const parts = String(text || "").split("|");
+    const first = normalizeLine(parts[0] || "", 20);
+    const rest = normalizeLine(parts.slice(1).join("|") || "", 240);
+    const m = first.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+    if(!m) return { ok:false };
+    let mn = Number(m[1]), mx = Number(m[2]);
+    if(!Number.isFinite(mn) || !Number.isFinite(mx)) return { ok:false };
+    mn = Math.max(1, Math.min(10, Math.trunc(mn)));
+    mx = Math.max(1, Math.min(10, Math.trunc(mx)));
+    if(mx < mn) mx = mn;
+    if(!rest) return { ok:false };
+    return { ok:true, min: mn, max: mx, text: rest };
+  }
+
+  function parseItemsFromTextarea(raw){
+    const lines = String(raw || "")
+      .split("\n")
+      .map(x => String(x).trim())
+      .filter(Boolean)
+      .slice(0, 200);
+
+    const items = [];
+    const issues = [];
+
+    lines.forEach((line, idx) => {
+      const up = line.toUpperCase();
+
+      function bad(msg){ issues.push(`Rad ${idx+1}: ${msg}`); }
+
+      if(up.startsWith("D:")){
+        const text = normalizeLine(line.slice(2), 2000);
+        if(!text) return bad("Dokument saknar text.");
+        items.push({
+          kind: "document",
+          title: "Dokument",
+          text,
+          requiresSign: true
+        });
+        return;
+      }
+
+      if(up.startsWith("QC:")){
+        const rest = line.slice(3).trim();
+        const parsed = normalizeChoiceOptionsFromPipe(rest);
+        if(!parsed.ok) return bad("QC kräver format: 'QC: Fråga | opt1 | opt2 ...' (minst 2 alternativ).");
+        items.push({
+          kind: "question",
+          questionId: genId("q"),
+          text: clampText(parsed.question, 240),
+          answerType: "choice",
+          options: parsed.options,
+          requiresAnswer: true
+        });
+        return;
+      }
+
+      if(up.startsWith("Q:")){
+        const text = normalizeLine(line.slice(2), 240);
+        if(!text) return bad("Fråga saknar text.");
+        items.push({
+          kind: "question",
+          questionId: genId("q"),
+          text,
+          answerType: "text",
+          options: [],
+          requiresAnswer: true
+        });
+        return;
+      }
+
+      if(up.startsWith("TS:")){
+        const rest = line.slice(3).trim();
+        const parsed = parseTSScale(rest);
+        if(!parsed.ok) return bad("TS kräver format: 'TS:min-max|Text'. Ex: TS:1-5|Hur trygg…");
+        items.push({
+          kind: "task",
+          taskId: genId("t"),
+          text: clampText(parsed.text, 240),
+          answerType: "scale",
+          scale: { min: parsed.min, max: parsed.max, minLabel:"", maxLabel:"" },
+          requiresDone: true
+        });
+        return;
+      }
+
+      if(up.startsWith("T:")){
+        const text = normalizeLine(line.slice(2), 240);
+        if(!text) return bad("Uppgift saknar text.");
+        items.push({
+          kind: "task",
+          taskId: genId("t"),
+          text,
+          answerType: "checkbox",
+          scale: null,
+          requiresDone: true
+        });
+        return;
+      }
+
+      // Default: fail-closed
+      bad("Okänt prefix. Använd D:, Q:, QC:, T: eller TS:.");
     });
-    return Array.from(set);
+
+    // Minimal fail-closed rules
+    if(items.length === 0) issues.push("Inga giltiga items skapades.");
+
+    return { items, issues };
   }
 
-  function makeBaseTask(empNo, title, text, prio, adminNote, scopeId){
-    const now = Date.now();
-    return {
-      id: genId("t"),
-      empNo: String(empNo).trim(),
-      title: title || "Uppgift",
-      text: text || "",
-      prio: prio || "normal",
-      adminNote: adminNote || "",
-      status: "open",
-      employeeComment: "",
-      scopeId: String(scopeId || "").trim(),
-      createdAt: now,
-      updatedAt: now
-    };
-  }
+  function validateBlockDraft(block){
+    const reasons = [];
+    const title = String(block?.title || "").trim();
+    if(!title) reasons.push("Rubrik saknas.");
 
-  function normalizeByWeekday(arr){
-    const a = Array.isArray(arr) ? arr : [];
-    const nums = a.map(x => Number(x)).filter(n => Number.isFinite(n) && n >= 1 && n <= 7);
-    return Array.from(new Set(nums)).sort((x,y)=>x-y);
-  }
+    const items = Array.isArray(block?.items) ? block.items : [];
+    if(items.length === 0) reasons.push("Minst 1 item krävs.");
 
-  function signatureForDedupe(t){
-    const byW = normalizeByWeekday(t?.recurring?.byWeekday || []);
-    const parts = [
-      String(t.empNo||""),
-      String(t.scopeId||""),
-      String(t.kind||"oneoff"),
-      normalizeLine(t.title||"", 240),
-      normalizeLine(t.text||"", 2000),
-      String(t.startDate||""),
-      String(t.endDate||""),
-      t.kind === "recurring" ? String(t.recurring?.freq||"") : "",
-      t.kind === "recurring" ? String(t.recurring?.interval||"") : "",
-      t.kind === "recurring" ? String(t.recurring?.untilDate||"") : "",
-      t.kind === "recurring" ? JSON.stringify(byW) : ""
-    ];
-    return parts.join("|").toLowerCase();
-  }
-
-  function pushTasks(targetEmpNos, payload){
-    const all = loadTasks();
-    const existingSig = new Set(all.map(signatureForDedupe));
-    let count = 0;
-
-    const dedupeOn = payload.dedupe === true;
-
-    targetEmpNos.forEach(empNo => {
-      payload.lines.forEach(text => {
-        const t = makeBaseTask(empNo, payload.title, text, payload.prio, payload.adminNote, payload.scopeId);
-
-        if(payload.startDate) t.startDate = payload.startDate;
-        if(payload.endDate) t.endDate = payload.endDate;
-
-        t.kind = payload.kind;
-
-        if(payload.kind === "recurring"){
-          t.recurring = {
-            kind: "recurring",
-            freq: payload.freq,
-            interval: payload.interval,
-            byWeekday: normalizeByWeekday(payload.byWeekday || []),
-            untilDate: payload.untilDate || null,
-            untilInclusive: true
-          };
-          t.exceptionsDone = [];
-          t.exceptionsSnoozed = {};
-        }
-
-        if(dedupeOn){
-          const sig = signatureForDedupe(t);
-          if(existingSig.has(sig)) return;
-          existingSig.add(sig);
-        }
-
-        all.push(t);
-        count++;
-      });
+    // basic sanity
+    items.forEach((it, i) => {
+      if(!it || typeof it !== "object") reasons.push(`Item #${i+1}: korrupt.`);
+      const k = String(it.kind || "");
+      if(k !== "document" && k !== "question" && k !== "task") reasons.push(`Item #${i+1}: okänd kind.`);
+      if(k === "document" && !String(it.text||"").trim()) reasons.push(`Item #${i+1}: dokument saknar text.`);
+      if(k === "question" && !String(it.text||"").trim()) reasons.push(`Item #${i+1}: fråga saknar text.`);
+      if(k === "question" && it.answerType === "choice"){
+        const opts = Array.isArray(it.options) ? it.options : [];
+        if(opts.length < 2) reasons.push(`Item #${i+1}: QC kräver minst 2 alternativ.`);
+      }
+      if(k === "task" && !String(it.text||"").trim()) reasons.push(`Item #${i+1}: uppgift saknar text.`);
+      if(k === "task" && it.answerType === "scale"){
+        const mn = Number(it?.scale?.min);
+        const mx = Number(it?.scale?.max);
+        if(!Number.isFinite(mn) || !Number.isFinite(mx)) reasons.push(`Item #${i+1}: skala saknar min/max.`);
+        if(Number.isFinite(mn) && Number.isFinite(mx) && mx < mn) reasons.push(`Item #${i+1}: skala max < min.`);
+      }
     });
 
-    if(!safeSaveTasks(all)) return 0;
-    return count;
+    return { ok: reasons.length === 0, reasons };
   }
 
   // ------------------------------------------------------------
-  // Templates
+  // Templates (reuse AO-047_TASK_TEMPLATES_V1)
+  // Template shape for blocks:
+  // { id, name, module, area, step, title, itemsLines[], createdAt, updatedAt }
   // ------------------------------------------------------------
   function seedTemplatesIfEmpty(){
     const raw = safeParseLocal(TEMPLATES_KEY, null);
@@ -1259,39 +686,32 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
     const now = Date.now();
     const seeds = [
       {
-        id: "tpl_intro_v1",
-        name: "Introduktion (Dag 1)",
-        title: "Introduktion",
-        prio: "normal",
-        adminNote: "Gör detta dag 1.",
-        tasks: [
-          "Läs hygienrutiner",
-          "Gå igenom säkerhetsgenomgång",
-          "Prata med arbetsledare (10 min)"
+        id: "tpl_block_intro_v1",
+        name: "Onboarding (Dag 1) – Introduktion",
+        module: "Onboarding",
+        area: "Introduktion",
+        step: "Dag 1",
+        title: "Introduktion – första passet",
+        itemsLines: [
+          "D: Läs hygienrutiner och signera",
+          "Q: Vad heter din närmaste arbetsledare?",
+          "T: Kontrollera att din station är ren"
         ],
-        schedule: { kind:"oneoff", startDate:"", endDate:"" },
         createdAt: now,
         updatedAt: now
       },
       {
-        id: "tpl_hygien_weekly_v1",
-        name: "Hygien (Veckovis)",
-        title: "Hygienrutin",
-        prio: "high",
-        adminNote: "Bekräfta när klart.",
-        tasks: [
-          "Kontrollera arbetsstation (rent/ordning)",
-          "Rapportera avvikelse om något saknas"
+        id: "tpl_block_safety_v1",
+        name: "Arbetsmiljö – Grund",
+        module: "Arbetsmiljö",
+        area: "Säkerhet",
+        step: "Steg 1",
+        title: "Säkerhet – grund",
+        itemsLines: [
+          "D: Läs säkerhetsgenomgång och signera",
+          "QC: Vilken är rätt åtgärd vid spill? | Torka direkt | Vänta till senare",
+          "TS:1-5|Hur tydlig var genomgången?"
         ],
-        schedule: {
-          kind:"recurring",
-          startDate:"",
-          freq:"weekly",
-          interval: 1,
-          byWeekday: [1],
-          untilMode: "forever",
-          untilDate: ""
-        },
         createdAt: now,
         updatedAt: now
       }
@@ -1304,6 +724,7 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
     const arr = safeParseLocal(TEMPLATES_KEY, []);
     return Array.isArray(arr) ? arr : [];
   }
+
   function saveTemplates(arr){
     return saveFailClosed(TEMPLATES_KEY, Array.isArray(arr) ? arr : []);
   }
@@ -1344,75 +765,30 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
     return loadTemplates().find(t => String(t.id) === id) || null;
   }
 
-  function getSelectedWeekdays(){
-    const sel = $("#byWeekday");
-    return Array.from(sel.selectedOptions).map(o => Number(o.value)).filter(n => Number.isFinite(n) && n>=1 && n<=7);
-  }
-
-  function setSelectedWeekdays(days){
-    const norm = new Set(normalizeByWeekday(days).map(x => String(x)));
-    Array.from($("#byWeekday").options).forEach(o => { o.selected = norm.has(String(o.value)); });
-  }
-
   function applyTemplateToForm(tpl){
     if(!tpl) return;
-
-    $("#title").value = String(tpl.title || "");
-    $("#prio").value = String(tpl.prio || "normal");
-    $("#adminNote").value = String(tpl.adminNote || "");
-    $("#tasks").value = Array.isArray(tpl.tasks) ? tpl.tasks.join("\n") : "";
-
-    const sch = tpl.schedule || { kind:"oneoff" };
-    $("#taskKind").value = (sch.kind === "recurring") ? "recurring" : "oneoff";
-    $("#startDate").value = String(sch.startDate || "");
-    $("#endDate").value = String(sch.endDate || "");
-
-    $("#freq").value = String(sch.freq || "daily");
-    $("#interval").value = String(sch.interval || "1");
-    setSelectedWeekdays(sch.byWeekday || []);
-
-    const untilMode = (sch.untilMode === "until") ? "until" : "forever";
-    $$("input[name='untilMode']").forEach(r => r.checked = (r.value === untilMode));
-    $("#untilDate").value = String(sch.untilDate || "");
-
+    $("#moduleInp").value = String(tpl.module || "");
+    $("#areaInp").value = String(tpl.area || "");
+    $("#stepInp").value = String(tpl.step || "");
+    $("#titleInp").value = String(tpl.title || "");
+    $("#itemsInp").value = Array.isArray(tpl.itemsLines) ? tpl.itemsLines.join("\n") : "";
     const det = $("#advancedDetails");
-    if(det && sch.kind === "recurring") det.open = true;
-
-    syncKindUI();
+    if(det) det.open = true;
   }
 
   function currentFormAsTemplateDraft(){
-    const title = normalizeLine($("#title").value || "", 160);
-    const prio = $("#prio").value;
-    const adminNote = normalizeLine($("#adminNote").value || "", 200);
-    const lines = String($("#tasks").value || "")
+    const module = normalizeLine($("#moduleInp").value || "", 60);
+    const area   = normalizeLine($("#areaInp").value || "", 60);
+    const step   = normalizeLine($("#stepInp").value || "", 60);
+    const title  = normalizeLine($("#titleInp").value || "", 80);
+
+    const lines = String($("#itemsInp").value || "")
       .split("\n")
-      .map(x => normalizeLine(x, 600))
-      .filter(Boolean);
+      .map(x => String(x).trim())
+      .filter(Boolean)
+      .slice(0, 200);
 
-    const kind = $("#taskKind").value;
-    const startDate = String($("#startDate").value || "").trim();
-    const endDate = String($("#endDate").value || "").trim();
-
-    const schedule = { kind, startDate };
-
-    if(kind === "oneoff"){
-      schedule.endDate = endDate || "";
-    }else{
-      const freq = $("#freq").value;
-      const interval = Number($("#interval").value || 1);
-      const byWeekday = (freq === "weekly") ? normalizeByWeekday(getSelectedWeekdays()) : [];
-      const untilMode = ($$("input[name='untilMode']").find(x => x.checked)?.value) || "forever";
-      const untilDate = String($("#untilDate").value || "").trim();
-
-      schedule.freq = freq;
-      schedule.interval = Number.isFinite(interval) ? interval : 1;
-      schedule.byWeekday = byWeekday;
-      schedule.untilMode = untilMode;
-      schedule.untilDate = (untilMode === "until") ? (untilDate || "") : "";
-    }
-
-    return { title, prio, adminNote, tasks: lines, schedule };
+    return { module, area, step, title, itemsLines: lines };
   }
 
   function promptTemplateName(defaultName){
@@ -1436,12 +812,16 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
     setMsg("", "");
 
     const draft = currentFormAsTemplateDraft();
-    if(draft.tasks.length === 0){
-      setMsg("err", "Skriv minst en uppgift innan du sparar som mall.");
+    if(!draft.title){
+      setMsg("err", "Rubrik krävs innan du sparar som mall.");
+      return;
+    }
+    if(!draft.itemsLines.length){
+      setMsg("err", "Skriv minst en rad i Innehåll innan du sparar som mall.");
       return;
     }
 
-    const defaultName = draft.title || "Ny mall";
+    const defaultName = draft.title || "Ny block-mall";
     const name = promptTemplateName(defaultName);
     if(name === null) return;
     if(!name){
@@ -1455,11 +835,11 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
     const newTpl = {
       id: genId("tpl"),
       name: clampText(name, 80),
-      title: draft.title || "Uppgift",
-      prio: draft.prio || "normal",
-      adminNote: draft.adminNote || "",
-      tasks: draft.tasks,
-      schedule: draft.schedule,
+      module: draft.module,
+      area: draft.area,
+      step: draft.step,
+      title: draft.title,
+      itemsLines: draft.itemsLines,
       createdAt: now,
       updatedAt: now
     };
@@ -1497,270 +877,119 @@ AO-046 + AO-019 6/8 | admin/tasks.html (CREATE-ONLY) – AUTOPATCH v1.4.0
   });
 
   // ------------------------------------------------------------
-  // Create (AO-019 6/8 scope policy)
+  // Create block
   // ------------------------------------------------------------
-  function getOrgName(scopeId){
-    const id = String(scopeId || "").trim();
-    return orgIndex.byId.get(id)?.name || "";
+  const lockReasons = [];
+  // Minimal lock: must have localStorage available for blocks
+  try{
+    const t = "__probe__";
+    localStorage.setItem(t, "1");
+    localStorage.removeItem(t);
+  }catch{
+    lockReasons.push("localStorage är blockerad (kan inte spara block).");
   }
+  showLockBox(lockReasons);
 
-  function validateSelectedScope(){
-    const sid = String($("#scopeSelect").value || "").trim();
-    if(!sid) return { ok:false, scopeId:"" };
-    if(!orgIndex.byId.has(sid)) return { ok:false, scopeId:sid };
-    if(access.roleClass === "MANAGER"){
-      if(!isInScope(viewerScopeId, sid, orgIndex)) return { ok:false, scopeId:sid };
-    }
-    return { ok:true, scopeId:sid };
-  }
-
-  function preflightTargetsAgainstScope(targets, taskScopeId){
-    const missing = [];
-    const mismatch = [];
-    const invalidEmpScope = [];
-
-    for(const empNo of targets){
-      const rec = assignmentsV2[String(empNo)] || null;
-      const empScope = String(rec?.scopeId || "").trim();
-      if(!empScope){
-        missing.push(String(empNo));
-        continue;
-      }
-      if(!orgIndex.byId.has(empScope)){
-        invalidEmpScope.push(`${empNo}(${empScope})`);
-        continue;
-      }
-      if(!isInScope(empScope, taskScopeId, orgIndex)){
-        mismatch.push(`${empNo}(${empScope})`);
-      }
-    }
-
-    return { missing, invalidEmpScope, mismatch };
-  }
-
-  function summarizeBlockers(blockers){
-    const parts = [];
-    if(blockers.missing.length){
-      const a = blockers.missing.slice(0, 10);
-      parts.push(`Saknar assignment/scope: ${a.join(", ")}${blockers.missing.length>10?"…":""}.`);
-    }
-    if(blockers.invalidEmpScope.length){
-      const a = blockers.invalidEmpScope.slice(0, 10);
-      parts.push(`Emp scopeId finns inte i org: ${a.join(", ")}${blockers.invalidEmpScope.length>10?"…":""}.`);
-    }
-    if(blockers.mismatch.length){
-      const a = blockers.mismatch.slice(0, 10);
-      parts.push(`Scope-mismatch (task scope ligger utanför mottagarens subtree): ${a.join(", ")}${blockers.mismatch.length>10?"…":""}.`);
-    }
-    return parts.join(" ");
-  }
+  const canCreate = (lockReasons.length === 0);
+  $("#btnCreate").disabled = !canCreate;
 
   $("#btnCreate").addEventListener("click", () => {
     setMsg("", "");
-
     if(!canCreate){
-      setMsg("err", "Skapande är låst (fail-closed). Åtgärda org/assignments först.");
+      setMsg("err", "Skapande är låst (fail-closed).");
       return;
     }
 
-    const mode = $("#targetMode").value;
+    const module = normalizeLine($("#moduleInp").value || "", 60);
+    const area   = normalizeLine($("#areaInp").value || "", 60);
+    const step   = normalizeLine($("#stepInp").value || "", 60);
+    const title  = normalizeLine($("#titleInp").value || "", 80);
 
-    const title = normalizeLine($("#title").value || "", 160);
-    const prio = $("#prio") ? $("#prio").value : "normal";
-    const adminNote = $("#adminNote") ? normalizeLine($("#adminNote").value || "", 200) : "";
-
-    const lines = String($("#tasks").value || "")
-      .split("\n")
-      .map(x => normalizeLine(x, 600))
-      .filter(Boolean);
-
-    if(lines.length === 0){
-      setMsg("err", "Skriv minst en uppgift (en per rad).");
+    const parsed = parseItemsFromTextarea($("#itemsInp").value || "");
+    if(parsed.issues.length){
+      setMsg("err", "Kan inte skapa block: " + parsed.issues.join(" "));
       return;
     }
 
-    const vScope = validateSelectedScope();
-    if(!vScope.ok){
-      setMsg("err", "Välj ett giltigt scope. (Manager: endast inom din subtree.)");
-      return;
-    }
+    const now = Date.now();
+    const by  = String(access.empNo || "").trim();
 
-    const kind = $("#taskKind") ? $("#taskKind").value : "oneoff";
-    const startDate = $("#startDate") ? String($("#startDate").value || "").trim() : "";
-    const endDate = String($("#endDate").value || "").trim();
-
-    if(startDate && !isISODate(startDate)){
-      setMsg("err", "Startdatum är ogiltigt.");
-      return;
-    }
-    if(endDate && !isISODate(endDate)){
-      setMsg("err", "Deadline är ogiltig.");
-      return;
-    }
-    if(startDate && endDate){
-      const a = parseISOToTime(startDate);
-      const b = parseISOToTime(endDate);
-      if(a !== null && b !== null && b < a){
-        setMsg("err", "Deadline kan inte vara före startdatum.");
-        return;
-      }
-    }
-
-    let recurringMeta = null;
-    let dedupe = true;
-
-    if(kind === "recurring"){
-      const freq = $("#freq").value;
-      const interval = Number($("#interval").value || 1);
-      const untilMode = ($$("input[name='untilMode']").find(x => x.checked)?.value) || "forever";
-      const untilDate = String($("#untilDate").value || "").trim();
-
-      if(!startDate){
-        setMsg("err", "Återkommande kräver startdatum.");
-        return;
-      }
-
-      let byWeekday = [];
-      if(freq === "weekly"){
-        byWeekday = normalizeByWeekday(getSelectedWeekdays());
-        if(byWeekday.length === 0){
-          const wd = weekdayFromISO(startDate);
-          if(wd) byWeekday = [wd];
-        }
-      }
-
-      if(untilMode === "until"){
-        if(!untilDate || !isISODate(untilDate)){
-          setMsg("err", "Välj ett giltigt slutdatum (till datum).");
-          return;
-        }
-        const a = parseISOToTime(startDate);
-        const b = parseISOToTime(untilDate);
-        if(a !== null && b !== null && b < a){
-          setMsg("err", "Slutdatum kan inte vara före startdatum.");
-          return;
-        }
-      }
-
-      dedupe = ($("#dedupeModeR").value === "on");
-
-      recurringMeta = {
-        freq,
-        interval: Number.isFinite(interval) && interval > 0 ? interval : 1,
-        byWeekday,
-        untilDate: (untilMode === "until") ? untilDate : null
-      };
-    }else{
-      dedupe = ($("#dedupeMode").value === "on");
-    }
-
-    let targets = [];
-
-    if(mode === "one"){
-      const v = validateEmpNo($("#targetEmpNo").value);
-      if(!v.ok){
-        setMsg("err", "Skriv ett giltigt anst.nr (bara siffror, max 10).");
-        return;
-      }
-      targets = [v.empNo];
-    }
-
-    if(mode === "all"){
-      targets = computeAllTargets();
-      if(targets.length === 0){
-        setMsg("err", "‘Alla’ kräver att minst en medarbetare finns i grupper (eller redan i uppgifter).");
-        return;
-      }
-    }
-
-    if(mode === "group"){
-      const gid = $("#targetGroup").value;
-      const g = loadGroups().find(x => String(x.id) === String(gid));
-      if(!g){
-        setMsg("err", "Välj en grupp.");
-        return;
-      }
-      const set = new Set();
-      (g.members||[]).forEach(m => {
-        const v = validateEmpNo(m);
-        if(v.ok) set.add(v.empNo);
-      });
-      targets = Array.from(set);
-      if(targets.length === 0){
-        setMsg("err", "Gruppen har inga giltiga medlemmar (anst.nr).");
-        return;
-      }
-    }
-
-    const blockers = preflightTargetsAgainstScope(targets, vScope.scopeId);
-    if(blockers.missing.length || blockers.invalidEmpScope.length || blockers.mismatch.length){
-      const msg = summarizeBlockers(blockers);
-      setMsg("err", "Skapande stoppas (fail-closed). " + (msg || "Mottagare saknar giltigt scope."));
-      return;
-    }
-
-    const payload = {
-      kind,
+    const block = {
+      blockId: genId("blk"),
       title,
-      prio,
-      adminNote,
-      lines,
-      scopeId: vScope.scopeId,
-      startDate: startDate || "",
-      endDate: (kind === "oneoff") ? (endDate || "") : "",
-      dedupe
+      module,
+      area,
+      step,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+      createdBy: by || "",
+      verifiedAt: null,
+      verifiedBy: "",
+      items: parsed.items
     };
 
-    if(kind === "recurring"){
-      payload.freq = recurringMeta.freq;
-      payload.interval = recurringMeta.interval;
-      payload.byWeekday = recurringMeta.byWeekday;
-      payload.untilDate = recurringMeta.untilDate;
+    const chk = validateBlockDraft(block);
+    if(!chk.ok){
+      setMsg("err", "Fail-closed: " + chk.reasons.join(" "));
+      return;
     }
 
-    const created = pushTasks(targets, payload);
-    if(created > 0){
-      const scopeNm = getOrgName(vScope.scopeId) || vScope.scopeId;
-      setMsg("ok", `Skapat ${created} uppgift(er). Scope: ${scopeNm}. Öppna Översikt för att se listan.`);
-    }
+    const all = loadBlocks();
+    all.push(block);
+
+    if(!safeSaveBlocks(all)) return;
+
+    setMsg("ok", `Block skapat: ${block.blockId}. Nästa steg: Block-editor (redigera/verifiera).`);
+    // lightweight convenience: open editor with user click (no forced navigation)
   });
 
   $("#btnClear").addEventListener("click", () => {
-    $("#title").value = "";
-    $("#tasks").value = "";
-    $("#adminNote").value = "";
-    $("#targetEmpNo").value = "";
-    $("#startDate").value = "";
-    $("#endDate").value = "";
-    $("#taskKind").value = "oneoff";
-    $("#freq").value = "daily";
-    $("#interval").value = "1";
-    setSelectedWeekdays([]);
-    $$("input[name='untilMode']").forEach(r => r.checked = (r.value === "forever"));
-    $("#untilDate").value = "";
-    $("#dedupeMode").value = "on";
-    $("#dedupeModeR").value = "on";
-    $("#prio").value = "normal";
+    $("#moduleInp").value = "";
+    $("#areaInp").value = "";
+    $("#stepInp").value = "";
+    $("#titleInp").value = "";
+    $("#itemsInp").value = "";
     setMsg("", "");
-    syncKindUI();
   });
 
-  // Disable create button if locked
-  $("#btnCreate").disabled = !canCreate;
-  $("#scopeSelect").disabled = $("#scopeSelect").disabled || !canCreate;
-
-  // ------------------------------------------------------------
   // init
-  // ------------------------------------------------------------
   seedTemplatesIfEmpty();
   renderTemplateSelect();
-  renderGroupSelect();
-  syncTargetUI();
-  syncKindUI();
-  renderScopeSelect();
 
 })();
 </script>
+
+<!-- ============================================================
+Ändringslogg (≤ 8 rader)
+- Bytt funktion: admin/tasks.html skapar nu BLOCK (blockId) i AO-0XX_BLOCKS_V1 (status=draft).
+- Lagt till enkel rad-parser: D:, Q:, QC:, T:, TS: → items[] (document/question/task).
+- Behållit HRApp auth + fallback-session (fail-closed).
+- Återanvänder AO-047_TASK_TEMPLATES_V1 för block-mallar (ingen extra key).
+============================================================ -->
+
+<!-- ============================================================
+Testnoteringar (exakta klicksteg)
+1) Logga in som ADMIN eller MANAGER → öppna admin/tasks.html.
+2) Fyll Modul/Område/Steg + Rubrik + minst 1 rad (t.ex. "D: ...") → klicka Skapa blockId.
+3) Öppna devtools → localStorage → kontrollera att AO-0XX_BLOCKS_V1 innehåller nytt block med items[].
+4) Gå till admin/packages-block.html (nästa steg i kedjan) och verifiera att sidan ska uppdateras att läsa block-bank.
+============================================================ -->
+
+<!-- ============================================================
+Risk / edge cases
+- Om användaren skriver rader utan prefix stoppas skapandet (fail-closed).
+- Om localStorage är blockerad/full: skapande stoppas.
+- QC kräver minst 2 alternativ (annars stopp).
+============================================================ -->
+
+<!-- ============================================================
+QA-check (P0/P1/P2)
+P0: UI-only, auth fail-closed (redirect), inga osäkra innerHTML för data (endast escaped i lockbox) — OK
+P0: Ny key explicit i AO-header (AO-0XX_BLOCKS_V1) — OK
+P1: Parser robust nog för enkel block-bank; strikt validering — OK
+P2: Mallar finns för snabb test — OK
+============================================================ -->
 
 </body>
 </html>
