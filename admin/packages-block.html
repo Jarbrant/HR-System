@@ -7,6 +7,11 @@ Tillagt (AO-VERIFY-TRAINING-01):
 - Fail-closed validering (“klart nog”) innan verifiering
 - Tydlig UI-indikator för Verifierad / Publicerad
 
+PATCH v1.4 (2026-01-07):
+- FIX/UX: Slutar re-rendera hela blocklistan vid varje tangenttryck (titel/text/options) → fokus/cursor hoppar inte.
+- UI: Blockrader får data-attribut så vi kan uppdatera aktiv rad (titel + tag) utan full redraw.
+- Ingen ny data/keys. Endast AO-057_TRAININGS_V1 skrivs.
+
 PATCH v1.3 (2026-01-06):
 - UI: Återinför “Redigera”-knapp och samlar Redigera+Spara+Verifiera högt upp till vänster
 - UI: “Redigera” väljer första blocket (om inget valt) och fokuserar editor (ingen ny data/keys)
@@ -190,7 +195,6 @@ POLICY (LÅST):
     .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; font-size:.92rem; color: var(--muted); }
     .docArea{ min-height: 220px; }
 
-    /* PATCH v1.3: åtgärdsrad högt upp till vänster */
     .actionBar{
       margin-top:10px;
       display:flex;
@@ -240,7 +244,6 @@ POLICY (LÅST):
         <span class="pill" id="selPill">Val: —</span>
       </div>
 
-      <!-- PATCH v1.3: knappar samlade högt upp till vänster -->
       <div class="actionBar" aria-label="Åtgärder">
         <button class="btn secondary" id="btnEdit" type="button" disabled>Redigera</button>
         <button class="btn" id="btnSave" type="button" disabled>Spara</button>
@@ -433,7 +436,7 @@ POLICY (LÅST):
   const elSel = $("#selPill");
 
   const btnBackToTrainings = $("#btnBackToTrainings");
-  const btnEdit = $("#btnEdit");     // PATCH v1.3
+  const btnEdit = $("#btnEdit");
   const btnVerify = $("#btnVerify");
   const btnSave = $("#btnSave");
 
@@ -780,7 +783,6 @@ POLICY (LÅST):
     const t = STATE.editTraining;
     btnAddBlock.disabled = !t;
 
-    // PATCH v1.3: "Redigera" är tillgänglig när en utbildning är vald (och har block)
     const hasBlocks = !!(t && Array.isArray(t.blocks) && t.blocks.length > 0);
     btnEdit.disabled = !hasBlocks;
 
@@ -930,6 +932,26 @@ POLICY (LÅST):
     setSelectionPill();
   }
 
+  // PATCH v1.4: uppdatera aktiv blockrad (tag + titel) utan full re-render (förhindrar cursor-hop)
+  function updateActiveBlockRowUI(){
+    try{
+      const i = STATE.selectedBlockIndex;
+      const t = STATE.editTraining;
+      if(!t) return;
+      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+      if(i < 0 || i >= blocks.length) return;
+
+      const b = normalizeBlock(blocks[i]);
+      const row = blockRows.querySelector(`.blockRow[data-idx="${i}"]`);
+      if(!row) return;
+
+      const tagEl = row.querySelector('[data-part="tag"]');
+      const titleEl = row.querySelector('[data-part="title"]');
+      if(tagEl) tagEl.textContent = kindLabel(b.kind);
+      if(titleEl) titleEl.textContent = b.title ? b.title : "Namnlöst block";
+    }catch{}
+  }
+
   function renderBlocks(){
     clear(blockRows);
 
@@ -970,15 +992,18 @@ POLICY (LÅST):
       row.className = "blockRow" + (idx === STATE.selectedBlockIndex ? " active" : "");
       row.setAttribute("role","button");
       row.setAttribute("tabindex","0");
+      row.setAttribute("data-idx", String(idx)); // PATCH v1.4
 
       const titleRow = document.createElement("div");
       titleRow.className = "blockTitle";
 
       const tag = document.createElement("span");
       tag.className = "tag";
+      tag.setAttribute("data-part","tag"); // PATCH v1.4
       tag.textContent = kindLabel(b.kind);
 
       const tt = document.createElement("span");
+      tt.setAttribute("data-part","title"); // PATCH v1.4
       tt.textContent = b.title ? b.title : "Namnlöst block";
 
       titleRow.appendChild(tag);
@@ -1101,7 +1126,6 @@ POLICY (LÅST):
       return;
     }
 
-    // FIX: Tillåt “Verifiera igen” även om status redan är verified
     const st = normStatus(t.status || "");
     btnVerify.textContent = (st === "verified") ? "Verifiera igen" : "Verifiera";
 
@@ -1118,7 +1142,6 @@ POLICY (LÅST):
       : "Verifiera: markerar utbildningen som Verified.";
   }
 
-  // PATCH v1.3: Redigera-knapp (snabb fokus till editor)
   function enterEdit(){
     const t = STATE.editTraining;
     if(!t){
@@ -1149,11 +1172,13 @@ POLICY (LÅST):
   kindSel.addEventListener("change", () => {
     applyEditorToState();
     markDirty();
+    // kind kan ändra tag/sektioner → full re-render OK här
     renderBlocks();
     showEditorForIndex(STATE.selectedBlockIndex);
   });
 
-  titleInp.addEventListener("input", () => { applyEditorToState(); markDirty(); renderBlocks(); });
+  // PATCH v1.4: inga fulla re-renders vid input → stabil cursor/fokus
+  titleInp.addEventListener("input", () => { applyEditorToState(); markDirty(); updateActiveBlockRowUI(); });
   textInp.addEventListener("input", () => { applyEditorToState(); markDirty(); });
 
   taskAnswerSel.addEventListener("change", () => { applyEditorToState(); markDirty(); showEditorForIndex(STATE.selectedBlockIndex); });
@@ -1163,7 +1188,7 @@ POLICY (LÅST):
   scaleMaxLabelInp.addEventListener("input", () => { applyEditorToState(); markDirty(); });
 
   questionAnswerSel.addEventListener("change", () => { applyEditorToState(); markDirty(); showEditorForIndex(STATE.selectedBlockIndex); });
-  optionsInp.addEventListener("input", () => { applyEditorToState(); markDirty(); });
+  optionsInp.addEventListener("input", () => { applyEditorToState(); markDirty(); updateActiveBlockRowUI(); });
 
   btnMoveUp.addEventListener("click", () => {
     const t = STATE.editTraining; if(!t) return;
@@ -1362,31 +1387,31 @@ POLICY (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- UI: Återinfört “Redigera” och flyttat Redigera+Spara+Verifiera till en samlad rad högt upp till vänster.
-- UI: “Redigera” väljer första blocket om inget valt och fokuserar editor.
-- Inga nya storage-keys; inga datamodelländringar; auth/orouting orört.
+- PATCH v1.4: Slutar re-rendera blocklistan vid titel/text/options-input → ingen cursor/fokus-hop.
+- PATCH v1.4: Blockrader får data-idx + data-part så aktiv rad kan uppdateras utan redraw.
+- Inga nya storage-keys; inga datamodelländringar; auth/reads/writes oförändrat (AO-057).
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Öppna sidan → verifiera att Redigera/Spara/Verifiera ligger uppe till vänster.
-2) Välj en utbildning med block → klicka “Redigera” → första block väljs (om inget valt) + fokus i Titel-fält.
-3) Ändra titel/text → “Spara” aktiveras → klicka Spara → statuspill ska visa OK + meddelande “Sparat”.
-4) Utan osparade ändringar → “Verifiera/Verifiera igen” ska fungera enligt validering.
+1) Öppna sidan → välj utbildning → klicka “Redigera” → börja skriva i Titel.
+2) Verifiera att cursor INTE hoppar/att fokus stannar kvar medan du skriver.
+3) Ändra Titel → se att titeln i blocklistan uppdateras direkt utan att panelen “blinkar”.
+4) Spara → status OK + “Sparat”.
 ============================================================ -->
 
 <!-- ============================================================
 Risk / edge cases
-- Om utbildning saknar block: “Redigera” är disabled (fail-closed) tills block finns.
-- Om osparade ändringar: “Verifiera” förblir disabled (oförändrat beteende).
+- Kind-ändring gör fortfarande full re-render (avsiktligt) eftersom tag/sektioner ändras.
+- Om någon annan flik ändrar AO-057 samtidigt finns ingen realtids-sync (UI-only).
 ============================================================ -->
 
 <!-- ============================================================
 QA-check (P0/P1/P2)
-P0: UI-only, inga nya keys, XSS-safe (textContent), inga innerHTML — OK
+P0: UI-only, inga nya keys, XSS-safe (textContent) — OK
 P0: Fail-closed auth via HRApp.requireAuth allowRoles ADMIN — OK
-P1: Regression: endast knapp-layout + fokuslogik; dataflöde oförändrat — OK
-P2: UX: knappar samlade & “Redigera” tar dig direkt till editor — OK
+P1: Regression: endast rendering/input-hantering; dataflöde oförändrat — OK
+P2: UX: stabil editor vid typing — OK
 ============================================================ -->
 
 </body>
