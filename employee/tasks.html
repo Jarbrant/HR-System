@@ -1,1651 +1,1617 @@
-<!-- ============================================================
-AO-008/22 + AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.9) | FIL-ID: employee/tasks.html
-Projekt: HR-System
-Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only
-
-PATCH v1.9:
-- Tar bort “dubbelt Klart” i Task-detalj: status-pill i detaljvyn bort (status finns i dropdown).
-- Nytt: Datumfilter (tasks): välj dag → visa vad som blev klart den dagen (status=done + updatedAt inom vald dag).
-- Ingen papperskorg/ta-bort UI på denna sida (read-only delete).
-
-POLICY (LÅST):
-- UI-only (GitHub Pages) • Ingen backend
-- Fail-closed • sessionStorage först (session) • fallback localStorage
-- Ingen känslig persondata (endast empNo)
-- Inga nya storage-keys • Datamodell ändras inte
-- XSS-escape på all rendering (textContent, ingen osäker innerHTML)
-
-Beroenden (LÅSTA):
-- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
-- AO-020_ORG_V1 (localStorage) – org-träd
-- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – empNo → scopeId
-- AO-014_TASKS_V1 (localStorage)
-- AO-012_QUESTIONS_V1 (localStorage) [READ]
-- AO-013_ANSWERS_V1 (localStorage) [WRITE]
-
-Tillåten mutation (tasks, enda fält employee får ändra):
-- status (open→progress→done)
-- employeeComment (string)
-- updatedAt (timestamp)
-- updatedBy (empNo)
-
-Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
-- answerText (string)
-- signed (bool)
-- signedAt (timestamp)
-- updatedAt (timestamp)
-- updatedBy (empNo)
-============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HR-System – Medarbetare • Gör</title>
-
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
-  <script src="../UI/UI-03-APP.js"></script>
 
   <style>
-    .layout{
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      align-items:start;
-    }
-    @media (max-width: 980px){
-      .layout{ grid-template-columns: 1fr; }
+    :root{
+      --bg:#f6f7fb;
+      --card:#ffffff;
+      --ink:#0f172a;
+      --muted:#64748b;
+      --line:rgba(15,23,42,.12);
+
+      --focus: rgba(11,95,255,.18);
+
+      /* MASTER: tile shadows */
+      --tileShadowA: 0 1px 0 rgba(0,0,0,.03);
+      --tileShadowB: 0 10px 24px rgba(0,0,0,.06);
+      --tileShadowBHover: 0 10px 24px rgba(0,0,0,.08);
+
+      /* Topbar semantic */
+      --btnNeutralBg:#111827;
+      --btnNeutralInk:#ffffff;
+      --btnNeutralBorder: rgba(17,24,39,.18);
+
+      --btnDangerBg: rgba(220,38,38,.12);
+      --btnDangerInk: #991b1b;
+      --btnDangerBorder: rgba(220,38,38,.28);
+
+      /* Page color id (employee/tasks = neutral-indigo-ish) */
+      --pageColor: 99,102,241; /* indigo */
+      --pageStripe: rgba(var(--pageColor), .75);
+      --pageShadow: rgba(var(--pageColor), .15);
+      --pageShadowHover: rgba(var(--pageColor), .24);
+
+      /* Kind accents for small markers (NOT title color) */
+      --kTask: 16,185,129;     /* green */
+      --kQuestion: 245,158,11; /* amber */
+      --kInfo: 59,130,246;     /* blue */
     }
 
-    .panel{
-      border: 1px solid var(--line);
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    body{
+      margin:0;
+      background:var(--bg);
+      color:var(--ink);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
     }
-    .panel:hover{
-      transform: translateY(-1px);
-      box-shadow: var(--shadow-soft);
-      filter: brightness(1.01);
-    }
-    .panel.list{ background: rgba(191,219,254,.18); }
-    .panel.detail{ background: rgba(167,243,208,.18); min-height: 420px; }
 
-    .seg{
+    /* =========================
+       MASTER: Topbar
+    ========================== */
+    .topbar{
+      position: sticky;
+      top:0;
+      z-index:10;
+      background: rgba(246,247,251,.92);
+      backdrop-filter: blur(10px);
+      border-bottom:1px solid var(--line);
+    }
+    .topWrap{
+      max-width:1100px;
+      margin:0 auto;
+      padding:10px 16px;
       display:flex;
-      gap:8px;
-      flex-wrap:wrap;
       align-items:center;
-      margin: 10px 0 2px;
+      gap:10px;
+      flex-wrap:wrap;
     }
-    .seg button{
-      border:1px solid var(--line);
+    .brand{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .brandTitle{
+      font-weight:950;
+      font-size:14px;
+      letter-spacing:.2px;
+    }
+    .badge{
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid rgba(0,0,0,.08);
       background:#fff;
-      border-radius: 999px;
-      padding: 8px 12px;
-      cursor:pointer;
-      font-weight: 900;
+      padding:6px 10px;
+      border-radius:999px;
+      white-space:nowrap;
     }
-    .seg button[aria-pressed="true"]{
-      background: rgba(15,23,42,.06);
-    }
-
-    .item{
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      padding: 12px;
-      background:#fff;
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    .navLinks{
       display:flex;
       gap:10px;
-      justify-content:space-between;
-      align-items:flex-start;
+      align-items:center;
       flex-wrap:wrap;
-      margin-top:10px;
+    }
+
+    .navLink{
+      text-decoration:none;
+      color:var(--ink);
+      font-size:14px;
+      padding:8px 10px;
+      border-radius:12px;
+      border:1px solid transparent;
+      background: transparent;
+    }
+    .navLink:hover{
+      border-color:rgba(0,0,0,.08);
+      background:#fff;
+    }
+    .navLink[aria-current="page"]{
+      border-color: rgba(var(--pageColor), .28);
+      box-shadow: var(--tileShadowA), var(--tileShadowB), 0 8px 18px var(--pageShadow);
+      background:#fff;
+    }
+
+    .spacer{ flex:1; }
+
+    .topActions{
+      display:flex;
+      gap:10px;
+      align-items:center;
+      flex-wrap:wrap;
+      margin-left:auto;
+    }
+    .topBtn{
+      text-decoration:none;
+      font-size:13px;
+      font-weight:900;
+      padding:8px 10px;
+      border-radius:12px;
+      border:1px solid rgba(0,0,0,.08);
+      background:#fff;
+      color:var(--ink);
+      box-shadow: var(--tileShadowA), var(--tileShadowB);
       cursor:pointer;
+      user-select:none;
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
     }
-    .item:hover{
-      transform: var(--lift);
-      box-shadow: var(--shadow-soft);
-      filter: brightness(1.02);
+    .topBtn:hover{
+      box-shadow: var(--tileShadowA), var(--tileShadowBHover);
+      border-color: rgba(0,0,0,.12);
     }
-    .item:focus{
-      outline: 2px solid rgba(59,130,246,.55);
+    .topBtn:focus{
+      outline: 3px solid var(--focus);
       outline-offset: 2px;
     }
 
-    .item-title{ font-weight: 950; margin:0; }
-    .meta{ color: var(--muted); font-size:.9rem; display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
-    .empty{
-      padding:18px;
-      border:1px dashed var(--line);
-      border-radius: var(--r14);
-      color: var(--muted);
-      background:#fff;
-      text-align:center;
-      margin-top:10px;
+    /* MASTER: Min sida neutral, Logga ut röd */
+    .btnMy{
+      background: var(--btnNeutralBg);
+      color: var(--btnNeutralInk);
+      border-color: var(--btnNeutralBorder);
+    }
+    .btnMy:hover{
+      border-color: rgba(17,24,39,.28);
+    }
+    .btnLogout{
+      background: var(--btnDangerBg);
+      color: var(--btnDangerInk);
+      border-color: var(--btnDangerBorder);
+    }
+    .btnLogout:hover{
+      border-color: rgba(220,38,38,.40);
+    }
+
+    /* =========================
+       MASTER: Wrapper
+    ========================== */
+    .wrap{ max-width:1100px; margin:0 auto; padding:16px; }
+
+    .guard{
+      border:1px solid rgba(239,68,68,.25);
+      background:rgba(254,242,242,.9);
+      color:#7f1d1d;
+      padding:12px 14px;
+      border-radius:14px;
+      margin:14px 0;
+      display:none;
       white-space:pre-wrap;
     }
 
-    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
-
-    .detailbox{
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      background:#fff;
-      padding: 12px;
+    /* =========================
+       Header tile (uses page color)
+    ========================== */
+    .hero{
+      border-radius:12px;
+      border:1px solid rgba(0,0,0,.08);
+      background: var(--card);
+      box-shadow: var(--tileShadowA), var(--tileShadowB), 0 10px 22px var(--pageShadow);
+      overflow:hidden;
+      margin-bottom:12px;
     }
-
-    .btnrow{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
-    textarea{ min-height: 120px; }
-    .muted2{ color: var(--muted); font-size:.95rem; }
-
-    .kpis{
+    .stripe{ height:6px; background: var(--pageStripe); }
+    .heroIn{
+      padding:14px;
       display:flex;
-      gap:10px;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
       flex-wrap:wrap;
-      align-items:center;
-      margin: 10px 0 2px;
     }
-    .kpi{
-      display:flex;
-      gap:8px;
-      align-items:center;
-      padding: 6px 10px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      background:#fff;
-      font-size:.95rem;
+    .hero h1{
+      margin:0 0 6px;
+      font-size:16px;
+      font-weight:950;
     }
-
-    .lockbox{
-      margin: 10px 0;
-      padding: 10px 12px;
-      border: 1px dashed var(--line);
-      border-radius: var(--r14);
-      background:#fff;
-      color: var(--muted);
-      white-space:pre-wrap;
-    }
-    .lockbox strong{ color:#111; }
-
-    .formRow{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-      margin-top:10px;
-    }
-    .check{
-      display:flex;
-      gap:8px;
-      align-items:center;
-      padding: 8px 10px;
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      background:#fff;
-    }
-    .danger{
-      border-color: rgba(239,68,68,.35) !important;
-      background: rgba(254,242,242,.9) !important;
+    .hero p{
+      margin:0;
+      font-size:13px;
+      color:var(--muted);
+      line-height:1.4;
     }
 
-    .dateRow{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:flex-end;
-      margin-top:10px;
+    /* =========================
+       Layout: list + detail
+    ========================== */
+    .grid{
+      display:grid;
+      grid-template-columns: 1fr 1.2fr;
+      gap:12px;
+      align-items:start;
     }
-    .dateRow label{ flex: 1; min-width: 220px; }
-    .dateRow .miniBtn{
-      height: 40px;
-      align-self:flex-end;
-    }
-
     @media (max-width: 980px){
-      .seg button{ padding: 10px 14px; }
+      .grid{ grid-template-columns: 1fr; }
+    }
+
+    /* MASTER: tiles */
+    .tile{
+      border-radius:12px;
+      border:1px solid rgba(0,0,0,.08);
+      background: var(--card);
+      box-shadow: var(--tileShadowA), var(--tileShadowB);
+      overflow:hidden;
+    }
+    .tile:hover{
+      box-shadow: var(--tileShadowA), var(--tileShadowBHover);
+      border-color: rgba(0,0,0,.12);
+    }
+
+    .tileHead{
+      padding:12px 14px;
+      border-bottom:1px solid rgba(0,0,0,.08);
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap:12px;
+      flex-wrap:wrap;
+      background: linear-gradient(180deg, #fff, #fafafa);
+    }
+    .tileHead h2{
+      margin:0;
+      font-size:14px;
+      font-weight:950;
+    }
+    .tileHint{
+      font-size:12px;
+      color:var(--muted);
+      line-height:1.35;
+      margin-top:4px;
+      max-width: 520px;
+    }
+    .pill2{
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid rgba(0,0,0,.08);
+      background:#fff;
+      padding:6px 10px;
+      border-radius:999px;
+      white-space:nowrap;
+    }
+
+    /* Tabs */
+    .tabs{
+      display:flex;
+      gap:8px;
+      padding:12px 14px 0;
+      flex-wrap:wrap;
+    }
+    .tabBtn{
+      border-radius:999px;
+      border:1px solid rgba(0,0,0,.08);
+      background:#fff;
+      padding:8px 10px;
+      font-size:13px;
+      font-weight:950;
+      cursor:pointer;
+      user-select:none;
+      box-shadow: 0 1px 0 rgba(0,0,0,.03);
+    }
+    .tabBtn:hover{
+      border-color: rgba(0,0,0,.12);
+    }
+    .tabBtn[aria-selected="true"]{
+      border-color: rgba(var(--pageColor), .28);
+      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 8px 18px var(--pageShadow);
+    }
+    .tabBtn:focus{
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    /* Search row */
+    .searchRow{
+      padding:12px 14px;
+      display:flex;
+      gap:10px;
+      align-items:flex-end;
+      flex-wrap:wrap;
+    }
+    label{
+      font-size:12px;
+      opacity:.82;
+      display:block;
+      margin-bottom:6px;
+    }
+    .field{
+      display:flex;
+      flex-direction:column;
+      gap:0;
+    }
+    input[type="text"], select, textarea{
+      padding:10px 12px;
+      border-radius:10px;
+      border:1px solid rgba(0,0,0,.12);
+      background:#fff;
+      font-size:14px;
+      color:var(--ink);
+    }
+    textarea{ min-height:110px; resize:vertical; }
+    input:focus, select:focus, textarea:focus{
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+
+    .list{
+      padding:0 14px 14px;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+
+    .card{
+      border-radius:12px;
+      border:1px solid rgba(0,0,0,.08);
+      background:#fff;
+      box-shadow: var(--tileShadowA), 0 10px 18px rgba(15,23,42,.06);
+      overflow:hidden;
+      cursor:pointer;
+      user-select:none;
+    }
+    .card:hover{
+      border-color: rgba(0,0,0,.12);
+      box-shadow: var(--tileShadowA), 0 14px 22px rgba(15,23,42,.10);
+    }
+    .card:focus{
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+    .cardIn{ padding:12px; display:flex; gap:10px; align-items:flex-start; }
+    .marker{
+      width:10px; min-width:10px;
+      border-radius:999px;
+      margin-top:4px;
+      height:10px;
+      background: rgba(var(--pageColor), .55);
+      border: 1px solid rgba(0,0,0,.08);
+    }
+    .marker.task{ background: rgba(var(--kTask), .70); }
+    .marker.question{ background: rgba(var(--kQuestion), .70); }
+    .marker.info{ background: rgba(var(--kInfo), .70); }
+
+    .cardTxt{ min-width:0; flex:1; }
+    .cardTitle{
+      margin:0 0 4px;
+      font-size:14px;
+      font-weight:950;
+      color: rgba(15,23,42,.92); /* neutral title */
+      line-height:1.25;
+    }
+    .cardSub{
+      margin:0;
+      font-size:12px;
+      color: rgba(15,23,42,.62);
+      line-height:1.25;
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
+    }
+
+    .mono{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    /* Detail */
+    .detail{
+      padding:14px;
+    }
+    .detailEmpty{
+      border-radius:12px;
+      border:1px solid rgba(0,0,0,.08);
+      background: rgba(255,255,255,.75);
+      padding:12px;
+      color: var(--muted);
+      font-size:13px;
+    }
+    .detailTitle{
+      font-size:15px;
+      font-weight:950;
+      margin:0 0 6px;
+    }
+    .detailMeta{
+      font-size:12px;
+      color:var(--muted);
+      margin:0 0 10px;
+    }
+    .hr{ height:1px; background: rgba(0,0,0,.08); margin:12px 0; }
+
+    .actions{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:flex-end;
+      margin-top:12px;
+    }
+    .btn{
+      border-radius:12px;
+      border:1px solid rgba(0,0,0,.10);
+      background:#fff;
+      padding:10px 12px;
+      font-size:13px;
+      font-weight:950;
+      cursor:pointer;
+      user-select:none;
+      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 10px 18px rgba(15,23,42,.06);
+    }
+    .btn:hover{
+      border-color: rgba(0,0,0,.14);
+      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 14px 22px rgba(15,23,42,.10);
+    }
+    .btn:focus{
+      outline: 3px solid var(--focus);
+      outline-offset: 2px;
+    }
+    .btnPrimary{
+      border-color: rgba(var(--pageColor), .30);
+      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 10px 18px var(--pageShadow);
+    }
+    .btnDanger{
+      border-color: rgba(220,38,38,.28);
+      background: rgba(220,38,38,.10);
+      color:#991b1b;
+    }
+
+    /* Radios */
+    .radios{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top:6px;
+    }
+    .radioPill{
+      display:flex;
+      align-items:center;
+      gap:8px;
+      border:1px solid rgba(0,0,0,.10);
+      border-radius:999px;
+      background:#fff;
+      padding:8px 10px;
+      font-size:13px;
+      cursor:pointer;
+      user-select:none;
+    }
+    .radioPill input{ margin:0; }
+
+    /* Small note */
+    .note{
+      font-size:12px;
+      color: var(--muted);
+      line-height:1.35;
+      margin-top:10px;
+    }
+
+    @media (prefers-reduced-motion: reduce){
+      *{ transition:none !important; }
     }
   </style>
 </head>
 
 <body>
+  <div class="topbar">
+    <div class="topWrap" aria-label="Topbar">
+      <div class="brand">
+        <div class="brandTitle">HR-System • Medarbetare • Gör</div>
+        <span class="badge" id="whoBadge">—</span>
+        <span class="badge" id="scopeBadge">Scope: —</span>
+      </div>
 
-<header class="top">
-  <div class="brand">
-    <strong>HR-System</strong>
-    <span class="muted">• Medarbetare • Gör</span>
+      <div class="navLinks" aria-label="Primär navigation">
+        <a class="navLink" href="./home.html">Hem</a>
+        <a class="navLink" href="./tasks.html" aria-current="page">Gör</a>
+        <a class="navLink" href="./questions.html">Frågor</a>
+        <a class="navLink" href="./schedule.html">Schema</a>
+        <a class="navLink" href="./documents.html">Dokument</a>
+        <a class="navLink" href="../report.html">Rapportera fel</a>
+      </div>
+
+      <div class="spacer"></div>
+
+      <div class="topActions" aria-label="Konto">
+        <a class="topBtn btnMy" href="./profile.html">Min sida</a>
+        <a class="topBtn btnLogout" href="#" id="logoutLink">Logga ut</a>
+      </div>
+    </div>
   </div>
 
-  <nav class="nav" aria-label="Meny">
-    <a href="./home.html">Hem</a>
-    <a href="./tasks.html" aria-current="page">Gör</a>
-    <a href="./tasks.html#questions">Frågor</a>
-    <a href="./schedule.html">Schema</a>
-    <a href="./docs.html">Dokument</a>
-    <a href="./report.html">Rapportera fel</a>
-    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
-  </nav>
-</header>
+  <main class="wrap">
+    <div class="guard" id="guardBox" role="alert"></div>
 
-<main class="container">
-  <h1 class="tight">Gör</h1>
-  <p class="muted">Här gör du dina uppgifter och svarar på frågor. Svar kan signeras (bekräftelse).</p>
-
-  <section class="card">
-    <div class="row space-between wrap" style="margin-bottom:10px;">
-      <div class="muted">
-        Hej <strong id="whoName">—</strong> • Anst.nr <span id="whoEmpNo">—</span> • Roll <span>employee</span>
+    <section class="hero">
+      <div class="stripe"></div>
+      <div class="heroIn">
+        <div>
+          <h1>Gör</h1>
+          <p>Här gör du dina uppgifter och svarar på frågor. Signering sparar endast: signed=true + signedAt + updatedBy (empNo).</p>
+        </div>
+        <div class="pill2" id="countsPill">—</div>
       </div>
-      <div class="row wrap">
-        <span class="pill" id="scopePill">scope: —</span>
-      </div>
-    </div>
+    </section>
 
-    <div id="lockBox" class="lockbox" style="display:none;"></div>
-
-    <div class="layout">
-
-      <!-- LISTA -->
-      <section class="panel list" aria-label="Lista">
-        <div class="panel-title">Lista</div>
-
-        <div class="seg" role="group" aria-label="Välj typ">
-          <button type="button" id="tabTasks" aria-pressed="true">Uppgifter</button>
-          <button type="button" id="tabQuestions" aria-pressed="false">Frågor</button>
+    <section class="grid" aria-label="Uppgifter och frågor">
+      <!-- LIST -->
+      <section class="tile" aria-label="Lista">
+        <div class="tileHead">
+          <div>
+            <h2>Lista</h2>
+            <div class="tileHint">Tips: Klicka på ett kort för att öppna i detaljpanelen.</div>
+          </div>
+          <span class="pill2" id="listPill">—</span>
         </div>
 
-        <div class="kpis" aria-label="Sammanfattning">
-          <div class="kpi" id="kpiA">—</div>
-          <div class="kpi" id="kpiB">—</div>
-          <div class="kpi" id="kpiC">—</div>
+        <div class="tabs" role="tablist" aria-label="Välj typ">
+          <button class="tabBtn" id="tabTasks" role="tab" aria-selected="true" type="button">Uppgifter</button>
+          <button class="tabBtn" id="tabQuestions" role="tab" aria-selected="false" type="button">Frågor</button>
         </div>
 
-        <div class="row" style="gap:10px; margin-top:10px;">
-          <label style="flex:1; min-width: 220px;">
-            Visa
-            <select id="filter"></select>
-          </label>
-
-          <label style="flex:1; min-width: 220px;">
-            Sök
-            <input id="search" type="text" placeholder="t.ex. hygien" />
-          </label>
-        </div>
-
-        <!-- v1.9: datumfilter för “vad blev gjort den dagen” -->
-        <div id="doneDateWrap" class="dateRow" style="display:none;">
-          <label>
-            Dag (visa “Klara” för vald dag)
-            <input id="doneDate" type="date" />
-          </label>
-          <button id="btnClearDoneDate" type="button" class="secondary miniBtn">Rensa datum</button>
-        </div>
-
-        <div id="list"></div>
-
-        <div class="smallnote" id="tipLine">Tips: Klicka på ett kort för att öppna.</div>
-      </section>
-
-      <!-- DETALJ -->
-      <section class="panel detail" aria-label="Detaljvy">
-        <div class="panel-title">Detalj</div>
-
-        <div id="detailEmpty" class="empty">Välj ett kort i listan.</div>
-
-        <!-- TASK DETAIL -->
-        <div id="detailTask" class="detailbox" style="display:none;">
-          <h2 class="tight" id="dTitle">—</h2>
-
-          <div class="meta">
-            <!-- v1.9: dStatusPill borttaget för att undvika “dubbelt Klart” -->
-            <span class="pill" id="dDates">—</span>
+        <div class="searchRow" aria-label="Sök och filter">
+          <div class="field" style="min-width:240px; flex:1;">
+            <label for="qSearch">Sök</label>
+            <input id="qSearch" type="text" placeholder="Sök på titel/text…" />
           </div>
 
-          <p class="muted2" style="margin-top:8px;">
-            <strong>Text:</strong> <span id="dText">—</span>
-          </p>
-
-          <p class="muted2" id="dAdminNoteWrap" style="display:none; margin-top:8px;">
-            <strong>Admin:</strong> <span id="dAdminNote">—</span>
-          </p>
-
-          <hr style="border:none; border-top:1px solid var(--line); margin:12px 0;" />
-
-          <label>
-            Status
-            <select id="dStatus">
-              <option value="open">Ej startad</option>
-              <option value="progress">Pågår</option>
-              <option value="done">Klar</option>
+          <div class="field" style="min-width:170px;">
+            <label for="qShow">Visa</label>
+            <select id="qShow">
+              <option value="open">Öppna</option>
+              <option value="all">Alla</option>
+              <option value="done">Klart / Svarat</option>
             </select>
-          </label>
-
-          <label style="margin-top:10px;">
-            Kommentar (valfri)
-            <textarea id="dComment" placeholder="Skriv en kort kommentar..."></textarea>
-          </label>
-
-          <div class="btnrow">
-            <button id="btnSaveTask" type="button">Spara</button>
-            <button id="btnCloseDetailA" type="button" class="secondary">Stäng</button>
-          </div>
-
-          <p id="msgA" class="message" aria-live="polite"></p>
-        </div>
-
-        <!-- QUESTION DETAIL -->
-        <div id="detailQuestion" class="detailbox" style="display:none;">
-          <h2 class="tight" id="qTitle">—</h2>
-
-          <div class="meta">
-            <span class="pill" id="qStatePill">—</span>
-            <span class="pill" id="qMetaPill">—</span>
-          </div>
-
-          <p class="muted2" style="margin-top:8px;">
-            <strong>Fråga:</strong> <span id="qText">—</span>
-          </p>
-
-          <hr style="border:none; border-top:1px solid var(--line); margin:12px 0;" />
-
-          <label>
-            Svar
-            <textarea id="qAnswer" placeholder="Skriv ditt svar..."></textarea>
-          </label>
-
-          <div class="formRow">
-            <label class="check" id="signWrap">
-              <input type="checkbox" id="qSign" />
-              <span>Jag bekräftar mitt svar (signera)</span>
-            </label>
-
-            <span class="pill" id="qSignedPill">Signatur: —</span>
-          </div>
-
-          <div class="btnrow">
-            <button id="btnSaveAnswer" type="button">Spara svar</button>
-            <button id="btnSign" type="button" class="secondary">Signera</button>
-            <button id="btnCloseDetailB" type="button" class="secondary">Stäng</button>
-          </div>
-
-          <p id="msgB" class="message" aria-live="polite"></p>
-
-          <div class="smallnote">
-            Signering sparar endast: signed=true + signedAt + updatedBy (empNo). Inget namn.
           </div>
         </div>
+
+        <div class="list" id="listBox" aria-live="polite"></div>
       </section>
 
-    </div>
-  </section>
-</main>
+      <!-- DETAIL -->
+      <section class="tile" aria-label="Detalj">
+        <div class="tileHead">
+          <div>
+            <h2>Detalj</h2>
+            <div class="tileHint" id="detailHint">Välj ett kort i listan.</div>
+          </div>
+          <span class="pill2 mono" id="detailIdPill">—</span>
+        </div>
 
-<script>
-/* ============================================================
-AO-008/22 + AO-EMP-TASKS-QA-01 | employee/tasks.html – PROD v1.9
+        <div class="detail" id="detailBox">
+          <div class="detailEmpty">Välj ett kort i listan.</div>
+        </div>
+      </section>
+    </section>
+  </main>
 
-AUTOPATCH v1.9:
-- Task-detalj: bort med status-pill (undvik “dubbelt Klart”).
-- Nytt datumfilter (tasks): välj dag → visa vad som blev klart (status=done + updatedAt inom dagen).
+  <!-- AO-002 beroenden (LÅSTA): config måste laddas före app -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
+  <script src="../UI/UI-03-APP.js"></script>
 
-GUARD:
-- EMPLOYEE-only
-- Kräver: session(auth) + empNo + assignments(scopeId) + org
-- Fail-closed: tasks skrivbara endast om org+assignments+tasks-format OK.
-- Questions/Answers: avstängs om HARD_LOCK.
+  <script>
+    "use strict";
 
-XSS:
-- All rendering via textContent / DOM-bygg.
-============================================================ */
-(function(){
-  "use strict";
+    /* ============================================================
+      AO-EMP-TASKS-QA-01 (PROD) | FIL-ID: employee/tasks.html
+      Projekt: HR-System (GitHub Pages / localStorage-first)
+      Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only
 
-  const SESSION_KEY = "AO-001_LOGIN_V1";
-  const ORG_KEY     = "AO-020_ORG_V1";
-  const ASG_V2_KEY  = "AO-020_ROLE_ASSIGNMENTS_V2";
-  const TASKS_KEY   = "AO-014_TASKS_V1";
-  const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
-  const ANSWERS_KEY   = "AO-013_ANSWERS_V1";
+      POLICY (LÅST):
+      - UI-only • Fail-closed (requireAuth)
+      - sessionStorage först (auth) • fallback localStorage (auth)
+      - Ingen känslig persondata (endast empNo)
+      - Inga nya storage-keys/datamodell
+      - XSS: rendera från storage via textContent (ingen osäker innerHTML)
+    ============================================================ */
 
-  const MAX_CHAIN_GUARD = 200;
-  const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
-  const ALLOWED_STATUS = new Set(["open","progress","done"]);
-  const MAX_COMMENT_LEN = 500;
-  const MAX_ANSWER_LEN  = 4000;
+    /* ===========================
+       Keys (LÅST)
+    ============================ */
+    const KEY_SESSION      = "AO-001_LOGIN_V1";
+    const KEY_TASKS        = "AO-014_TASKS_V1";
+    const KEY_ASSIGNMENTS  = "AO-020_ROLE_ASSIGNMENTS_V2";
+    const KEY_QUESTIONS    = "AO-012_QUESTIONS_V1";
+    const KEY_ANSWERS      = "AO-013_ANSWERS_V1";
 
-  const $  = (s) => document.querySelector(s);
+    /* ===========================
+       DOM
+    ============================ */
+    const guardBox   = document.getElementById("guardBox");
+    const whoBadge   = document.getElementById("whoBadge");
+    const scopeBadge = document.getElementById("scopeBadge");
+    const countsPill = document.getElementById("countsPill");
+    const listPill   = document.getElementById("listPill");
 
-  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+    const tabTasks     = document.getElementById("tabTasks");
+    const tabQuestions = document.getElementById("tabQuestions");
+    const qSearch = document.getElementById("qSearch");
+    const qShow   = document.getElementById("qShow");
 
-  function doLogout(){
-    if(window.HRApp && typeof window.HRApp.logout === "function"){
-      try{ window.HRApp.logout(); return; }catch{}
+    const listBox   = document.getElementById("listBox");
+    const detailBox = document.getElementById("detailBox");
+    const detailHint = document.getElementById("detailHint");
+    const detailIdPill = document.getElementById("detailIdPill");
+
+    const logoutLink = document.getElementById("logoutLink");
+
+    /* ===========================
+       Guard
+    ============================ */
+    function showGuard(msg){
+      guardBox.style.display = "block";
+      guardBox.textContent = String(msg || "");
     }
-    try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
-    try{ localStorage.removeItem(SESSION_KEY); }catch{}
-    redirectLogin();
-  }
-  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
-
-  function setMsg(elId, kind, text){
-    const m = $(elId);
-    m.className = "message" + (kind ? " " + kind : "");
-    m.textContent = text || "";
-  }
-  const setMsgA = (k,t)=>setMsg("#msgA",k,t);
-  const setMsgB = (k,t)=>setMsg("#msgB",k,t);
-
-  function showLockBox(lines){
-    const box = $("#lockBox");
-    if(!lines || !lines.length){
-      box.style.display = "none";
-      box.textContent = "";
-      return;
+    function hideGuard(){
+      guardBox.style.display = "none";
+      guardBox.textContent = "";
     }
-    box.style.display = "block";
-    box.textContent = "";
-    const strong = document.createElement("strong");
-    strong.textContent = "Låst (fail-closed):";
-    box.appendChild(strong);
-    box.appendChild(document.createTextNode("\n" + lines.join("\n")));
-  }
 
-  function readRawSession(){
-    try{ const s1 = sessionStorage.getItem(SESSION_KEY); if (s1) return s1; }catch{}
-    try{ const s2 = localStorage.getItem(SESSION_KEY); if (s2) return s2; }catch{}
-    return null;
-  }
+    function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
 
-  function safeParseJson(raw, fallback){
-    try{
-      const v = JSON.parse(raw);
-      return (v === null || v === undefined) ? fallback : v;
-    }catch{ return fallback; }
-  }
-
-  function normalizeRole(role){ return String(role || "").trim().toLowerCase(); }
-
-  function pickEmpNoFromAuth(auth){
-    const candidates = [auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier];
-    for(const c of candidates){
-      const s = String(c || "").trim();
-      if(!s) continue;
-      const digits = s.replace(/[^\d]/g, "");
-      if(digits) return digits.slice(0, 10);
+    function readAnyStorage(key){
+      try { const s1 = sessionStorage.getItem(key); if (s1) return s1; } catch {}
+      try { const s2 = localStorage.getItem(key); if (s2) return s2; } catch {}
+      return null;
     }
-    return "";
-  }
 
-  function getAccessCtx(){
-    if(window.HRApp && typeof window.HRApp.getCurrentAccess === "function"){
-      try{
-        const acc = window.HRApp.getCurrentAccess();
-        if(acc && acc.ok && acc.auth){
-          const role = normalizeRole(acc.auth.role);
-          const empNo = String(acc.empNo || pickEmpNoFromAuth(acc.auth) || "").trim();
-          return {
-            source: "HRApp",
-            role,
-            empNo,
-            displayName: acc.auth.displayName || "",
-            viewerScopeId: String(acc.scopeId || "").trim(),
-            auth: acc.auth
-          };
+    /* ===========================
+       Auth (fail-closed)
+    ============================ */
+    function mustAuthOrStop(){
+      if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+        showGuard("Systemfel: HRApp saknas. (UI-03-APP.js)");
+        return null;
+      }
+      if (!window.HR_CONFIG || !window.HR_CONFIG.ROLES) {
+        showGuard("Systemfel: HR_CONFIG saknas. (UI-04-CONFIG.js)");
+        return null;
+      }
+
+      const sess = window.HRApp.requireAuth({ allowRoles: [ window.HR_CONFIG.ROLES.EMPLOYEE ] });
+      if (!sess) return null;
+
+      let auth = window.HRApp.getAuth(sess);
+      if (!auth || auth.isAuthed !== true) {
+        showGuard("Fail-closed: saknar giltig session. Logga in igen.");
+        return null;
+      }
+
+      if (!String(auth.scopeId || "").trim()) {
+        const empNo = String(auth.empNo || "").trim();
+        const role  = String(auth.role || "").trim();
+        const res = resolveScopeIdFromAssignments(empNo, role);
+        if (res.scopeId) {
+          const patched = patchSessionScope(sess, res.scopeId);
+          if (patched) auth = window.HRApp.getAuth(patched) || auth;
+          else {
+            showGuard("Fail-closed: kunde inte uppdatera session med scopeId. Logga in igen.");
+            return null;
+          }
+        } else {
+          const lines = [];
+          lines.push("Fail-closed: saknar scopeId i session.");
+          lines.push("(Access/Assignments måste vara korrekt.)");
+          lines.push("");
+          lines.push("Debug:");
+          lines.push(`- assignments hittade: ${res.debug.totalAssignments}`);
+          lines.push(`- match på empNo: ${res.debug.matchedEmpNo ? "JA" : "NEJ"}`);
+          lines.push(`- match på roll: ${res.debug.matchedRole ? "JA" : "NEJ/ej angivet"}`);
+          lines.push(`- scope-fält hittat i match: ${res.debug.foundScopeField ? "JA" : "NEJ"}`);
+          showGuard(lines.join("\n"));
+          return null;
         }
-      }catch{}
-    }
-
-    const raw = readRawSession();
-    if(!raw) return null;
-
-    const data = safeParseJson(raw, null);
-    if(!data?.auth?.isAuthed) return null;
-
-    const auth = data.auth;
-    if(auth.expiresAt && Number(auth.expiresAt) < Date.now()) return null;
-
-    const role = normalizeRole(auth.role);
-    const empNo = pickEmpNoFromAuth(auth);
-    if(!role || !empNo) return null;
-
-    return {
-      source: "fallback",
-      role,
-      empNo,
-      displayName: auth.displayName || "",
-      viewerScopeId: "",
-      auth
-    };
-  }
-
-  const access = getAccessCtx();
-  if(!access) { redirectLogin(); return; }
-  if(access.role !== "employee"){ redirectLogin(); return; }
-
-  $("#whoName").textContent = access.displayName || "—";
-  $("#whoEmpNo").textContent = access.empNo || "—";
-
-  function hasLocalKey(key){
-    try{ return localStorage.getItem(key) !== null; }catch{ return false; }
-  }
-
-  function safeParseLocal(key, fallback){
-    try{
-      const v = JSON.parse(localStorage.getItem(key) || "null");
-      return (v === null || v === undefined) ? fallback : v;
-    }catch{ return fallback; }
-  }
-
-  function saveFailClosedLocal(key, value){
-    try{
-      localStorage.setItem(key, JSON.stringify(value));
-      return { ok:true };
-    }catch(e){
-      return { ok:false, err:e };
-    }
-  }
-
-  function normalizeAssignmentsV2(raw){
-    if(!hasLocalKey(ASG_V2_KEY)){
-      return { ok:false, map: Object.create(null), issues: ["Assignments saknas (key finns inte)."] };
-    }
-    if(raw === null || raw === undefined){
-      return { ok:false, map: Object.create(null), issues: ["Assignments är korrupt (null/undefined)."] };
-    }
-    if(typeof raw !== "object" || Array.isArray(raw)){
-      return { ok:false, map: Object.create(null), issues: ["Assignments korrupt (förväntar objekt)."] };
-    }
-
-    const out = Object.create(null);
-    let blocked = false;
-
-    for(const k of Object.keys(raw)){
-      const key = String(k);
-      if(SPECIAL_KEYS.has(key)){
-        blocked = true;
-        continue;
       }
-      out[key] = raw[key];
+
+      return { sess, auth };
     }
 
-    if(blocked){
-      return { ok:false, map: out, issues: ["Assignments innehåller blockerade special-keys (__proto__/constructor/prototype)."] };
-    }
-
-    return { ok:true, map: out, issues: [] };
-  }
-
-  function normalizeOrgNodes(raw){
-    const arr = Array.isArray(raw) ? raw : [];
-    const out = [];
-    for(const n of arr){
-      const id = String(n?.id || "").trim();
-      const name = String(n?.name || "").trim();
-      const parentId = (n?.parentId === null || n?.parentId === undefined) ? null : String(n.parentId).trim();
-      if(!id || !name) continue;
-      out.push({ id, name, parentId });
-    }
-    return out;
-  }
-
-  function buildOrgIndex(nodes){
-    const byId = new Map();
-    for(const n of nodes){ if(!byId.has(n.id)) byId.set(n.id, n); }
-
-    const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
-    const children = new Map();
-    nodes.forEach(n => children.set(n.id, []));
-    nodes.forEach(n => {
-      if(n.parentId && children.has(n.parentId)) children.get(n.parentId).push(n.id);
-    });
-    return { byId, parentOf, children };
-  }
-
-  function validateOrgIntegrity(nodes, orgIndex){
-    const issues = [];
-    if(!Array.isArray(nodes) || nodes.length === 0){
-      return { ok:false, issues:["Org saknas/korrupt (tom eller fel format)."] };
-    }
-
-    const ids = new Set(nodes.map(n => n.id));
-    const rootIds = nodes.filter(n => n.parentId === null).map(n => n.id);
-
-    if(rootIds.length === 0) issues.push("Org saknar root (ingen nod med parentId=null).");
-    if(rootIds.length > 1) issues.push("Org har flera root-noder (förväntar exakt 1).");
-
-    for(const n of nodes){
-      if(n.parentId === null) continue;
-      if(!n.parentId || !ids.has(n.parentId)){
-        issues.push("Org har orphan-noder (parentId pekar på saknad nod).");
-        break;
-      }
-    }
-
-    let hasLoop = false;
-    for(const n of nodes){
-      let cur = n.id;
-      let steps = 0;
-      const seen = new Set([cur]);
-
-      while(steps < MAX_CHAIN_GUARD){
-        const p = orgIndex.parentOf.get(cur);
-        if(p === null) break;
-        if(!p || !orgIndex.byId.has(p)) break;
-        if(seen.has(p)){ hasLoop = true; break; }
-        seen.add(p);
-        cur = p;
-        steps++;
-      }
-      if(hasLoop || steps >= MAX_CHAIN_GUARD){ hasLoop = true; break; }
-    }
-    if(hasLoop) issues.push("Org har loop i parent-kedjan (återbesök upptäckt).");
-
-    return { ok: issues.length === 0, issues };
-  }
-
-  function isInScope(viewerScopeId, itemScopeId, orgIndex){
-    const v = String(viewerScopeId || "").trim();
-    const s = String(itemScopeId || "").trim();
-    if(!v || !s) return false;
-
-    if(!orgIndex.byId.has(v)) return false;
-    if(!orgIndex.byId.has(s)) return false;
-    if(v === s) return true;
-
-    let cur = s;
-    let steps = 0;
-    const seen = new Set([cur]);
-
-    while(steps < MAX_CHAIN_GUARD){
-      const p = orgIndex.parentOf.get(cur);
-      if(p === null) return false;
-      if(!p || !orgIndex.byId.has(p)) return false;
-      if(p === v) return true;
-
-      if(seen.has(p)) return false;
-      seen.add(p);
-
-      cur = p;
-      steps++;
-    }
-    return false;
-  }
-
-  const lockReasons = [];
-
-  if(!hasLocalKey(ORG_KEY)) lockReasons.push("Org saknas (key finns inte).");
-  const orgRaw = safeParseLocal(ORG_KEY, null);
-  const orgNodes = normalizeOrgNodes(orgRaw);
-  const orgIndex = buildOrgIndex(orgNodes);
-  const orgIntegrity = validateOrgIntegrity(orgNodes, orgIndex);
-  if(!orgIntegrity.ok) lockReasons.push(...orgIntegrity.issues);
-
-  const asgParsed = safeParseLocal(ASG_V2_KEY, null);
-  const asgV2 = normalizeAssignmentsV2(asgParsed);
-  if(!asgV2.ok) lockReasons.push(...asgV2.issues);
-
-  let viewerScopeId = String(access.viewerScopeId || "").trim();
-  if(!viewerScopeId && asgV2.ok){
-    const rec = asgV2.map[String(access.empNo)] || null;
-    viewerScopeId = String(rec?.scopeId || "").trim();
-  }
-
-  if(!viewerScopeId) lockReasons.push("Ditt viewerScopeId saknas (assignment saknar scopeId).");
-  if(viewerScopeId && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("Ditt viewerScopeId finns inte i org.");
-
-  $("#scopePill").textContent = "scope: " + (viewerScopeId || "—");
-
-  const HARD_LOCK = lockReasons.length > 0;
-  showLockBox(lockReasons);
-
-  function normalizeStatus(s){
-    const v = String(s || "").trim().toLowerCase();
-    return ALLOWED_STATUS.has(v) ? v : "";
-  }
-  function sanitizeText(s, maxLen){
-    const v = String(s ?? "").trim();
-    if(!v) return "";
-    return v.length > maxLen ? v.slice(0, maxLen) : v;
-  }
-
-  function statusLabel(s){
-    if(s === "done") return "Klar";
-    if(s === "progress") return "Pågår";
-    return "Ej startad";
-  }
-  function dateLabel(task){
-    const s = String(task?.startDate || "").trim();
-    const e = String(task?.endDate || "").trim();
-    if(s && e) return `${s}–${e}`;
-    if(s) return `${s}`;
-    if(e) return `t.o.m. ${e}`;
-    return "—";
-  }
-  function fmtDateTime(ts){
-    const n = Number(ts);
-    if(!Number.isFinite(n) || n <= 0) return "—";
-    try{ return new Date(n).toLocaleString("sv-SE"); }catch{ return "—"; }
-  }
-  function dayRangeFromInput(dateStr){
-    // dateStr = "YYYY-MM-DD" (local)
-    const s = String(dateStr || "").trim();
-    if(!s) return null;
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
-    if(!m) return null;
-    const y = Number(m[1]), mo = Number(m[2]) - 1, d = Number(m[3]);
-    if(!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return null;
-    const start = new Date(y, mo, d, 0,0,0,0).getTime();
-    const end   = new Date(y, mo, d+1, 0,0,0,0).getTime();
-    if(!Number.isFinite(start) || !Number.isFinite(end)) return null;
-    return { start, end };
-  }
-
-  function pill(text){
-    const s = document.createElement("span");
-    s.className = "pill";
-    s.textContent = text;
-    return s;
-  }
-  function emptyBox(text){
-    const d = document.createElement("div");
-    d.className = "empty";
-    d.textContent = text;
-    return d;
-  }
-  function clearChildren(el){
-    while(el && el.firstChild) el.removeChild(el.firstChild);
-  }
-
-  function tasksExistsAndValid(){
-    if(!hasLocalKey(TASKS_KEY)) return { ok:false, reason:"Tasks saknas (key finns inte)." };
-    const raw = safeParseLocal(TASKS_KEY, null);
-    if(!Array.isArray(raw)) return { ok:false, reason:"Tasks är korrupt (förväntar array)." };
-    return { ok:true };
-  }
-
-  function loadAllTasks(){
-    const arr = safeParseLocal(TASKS_KEY, []);
-    return Array.isArray(arr) ? arr : [];
-  }
-
-  function safeSaveAllTasks(all){
-    const res = saveFailClosedLocal(TASKS_KEY, all);
-    if(!res.ok){
-      setMsgA("err", "Kunde inte spara (localStorage fullt eller blockerad).");
+    function writeSessionPreferred(sessionObj){
+      const raw = JSON.stringify(sessionObj);
+      try { sessionStorage.setItem(KEY_SESSION, raw); return true; } catch {}
+      try { localStorage.setItem(KEY_SESSION, raw); return true; } catch {}
       return false;
     }
-    return true;
-  }
 
-  function isTaskCorrupt(t){
-    const id = String(t?.id || "").trim();
-    const empNo = String(t?.empNo || "").trim();
-    const scopeId = String(t?.scopeId || "").trim();
-    if(!id || !empNo || !scopeId) return true;
-    if(!orgIndex.byId.has(scopeId)) return true;
-    return false;
-  }
+    function patchSessionScope(sessionObj, scopeId){
+      const sid = String(scopeId || "").trim();
+      if (!sessionObj || typeof sessionObj !== "object" || !sid) return null;
 
-  function canSeeTask(t){
-    if(HARD_LOCK) return false;
-    if(isTaskCorrupt(t)) return false;
-    if(String(t.empNo).trim() !== String(access.empNo).trim()) return false;
-    return isInScope(viewerScopeId, String(t.scopeId).trim(), orgIndex);
-  }
+      const out = sessionObj;
+      if (out.auth && typeof out.auth === "object") out.auth.scopeId = sid;
+      out.scopeId = sid;
 
-  function computeMineVisibleTasks(){
-    const all = loadAllTasks();
-    return all
-      .filter(canSeeTask)
-      .slice()
-      .sort((a,b) => (Number(b?.createdAt) || 0) - (Number(a?.createdAt) || 0));
-  }
-
-  function isValidTransition(prev, next){
-    const p = normalizeStatus(prev) || "open";
-    const n = normalizeStatus(next) || "";
-    if(!n) return false;
-    if(p === n) return true;
-    if(p === "open" && n === "progress") return true;
-    if(p === "progress" && n === "done") return true;
-    return false;
-  }
-
-  function upsertTaskMutation(next){
-    const all = loadAllTasks();
-    const idx = all.findIndex(x => String(x?.id) === String(next.id));
-    if(idx < 0) return { ok:false, err:"Uppgift hittades inte." };
-
-    const cur = all[idx];
-
-    if(String(cur?.empNo||"").trim() !== String(access.empNo).trim()){
-      return { ok:false, err:"Åtkomst nekad (inte din uppgift)." };
-    }
-    if(String(cur?.scopeId||"").trim() !== String(next?.scopeId||"").trim()){
-      return { ok:false, err:"Policy-bugg: scopeId får inte ändras." };
-    }
-    if(!canSeeTask(cur)){
-      return { ok:false, err:"Åtkomst nekad (scope)." };
-    }
-
-    const patched = { ...cur };
-
-    const prevStatus = normalizeStatus(cur?.status) || "open";
-    const nextStatus = normalizeStatus(next?.status) || "";
-    if(!nextStatus) return { ok:false, err:"Ogiltig status (okänt värde)." };
-
-    if(prevStatus === "done" && nextStatus !== "done"){
-      return { ok:false, err:"DONE är slutläge (status kan inte ändras)." };
-    }
-    if(!isValidTransition(prevStatus, nextStatus)){
-      return { ok:false, err:"Ogiltig status-övergång (endast OPEN→PROGRESS→DONE)." };
-    }
-
-    patched.status = nextStatus;
-    patched.employeeComment = sanitizeText(next?.employeeComment || "", MAX_COMMENT_LEN);
-
-    patched.updatedAt = Date.now();
-    patched.updatedBy = String(access.empNo || "").trim();
-
-    all[idx] = patched;
-    if(!safeSaveAllTasks(all)){
-      return { ok:false, err:"Kunde inte spara (lagring)." };
-    }
-    return { ok:true };
-  }
-
-  // v1.8: wrapper-kompat för frågor (utan ny datamodell)
-  function unwrapQuestions(raw){
-    if(Array.isArray(raw)) return { ok:true, arr: raw, shape:"array", total: raw.length };
-
-    if(raw && typeof raw === "object" && !Array.isArray(raw)){
-      const cands = [raw.questions, raw.items, raw.blocks, raw.list, raw.data];
-      for(const c of cands){
-        if(Array.isArray(c)) return { ok:true, arr: c, shape:"wrapper", total: c.length };
-      }
-    }
-    return { ok:false, arr: [], shape:"invalid", total: 0 };
-  }
-
-  function readQuestionsArray(){
-    if(!hasLocalKey(QUESTIONS_KEY)) return { ok:false, arr:[], reason:"Questions saknas (key finns inte).", meta:{ total:0, shape:"missing" } };
-    const raw = safeParseLocal(QUESTIONS_KEY, null);
-
-    const un = unwrapQuestions(raw);
-    if(!un.ok){
-      return { ok:false, arr:[], reason:"Questions är korrupt (förväntar array eller wrapper med questions/items/blocks).", meta:{ total:0, shape:"invalid" } };
-    }
-    return { ok:true, arr: un.arr, meta:{ total: un.total, shape: un.shape } };
-  }
-
-  function readAnswersArray(){
-    const raw = safeParseLocal(ANSWERS_KEY, []);
-    return Array.isArray(raw) ? raw : [];
-  }
-
-  function safeSaveAnswersArray(all){
-    const res = saveFailClosedLocal(ANSWERS_KEY, all);
-    if(!res.ok){
-      setMsgB("err", "Kunde inte spara svar (localStorage fullt eller blockerad).");
-      return false;
-    }
-    return true;
-  }
-
-  function qId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? "").trim(); }
-  function qTitle(q){ return String(q?.title ?? q?.name ?? "Fråga").trim(); }
-  function qText(q){ return String(q?.text ?? q?.question ?? q?.body ?? q?.title ?? "—").trim(); }
-  function qScope(q){ return String(q?.scopeId ?? q?.scope ?? q?.nodeId ?? "").trim(); }
-  function qEmp(q){ return String(q?.empNo ?? q?.employeeNo ?? q?.toEmpNo ?? q?.assignedTo ?? "").trim(); }
-
-  function answerEmp(a){ return String(a?.empNo ?? a?.employeeNo ?? "").trim(); }
-  function answerQid(a){ return String(a?.questionId ?? a?.qid ?? "").trim(); }
-  function normKey(s){ return String(s ?? "").toLowerCase().replace(/\s+/g," ").trim(); }
-
-  function canSeeQuestion(q){
-    if(HARD_LOCK) return false;
-
-    const id = qId(q);
-    const title = qTitle(q);
-    if(!id && !title) return false;
-
-    const targetEmp = qEmp(q);
-    if(targetEmp && targetEmp !== String(access.empNo).trim()) return false;
-
-    const scope = qScope(q);
-    if(scope){
-      if(!orgIndex.byId.has(scope)) return false;
-      return isInScope(viewerScopeId, scope, orgIndex);
-    }
-    return true;
-  }
-
-  function findMyAnswerForQuestion(q){
-    const myEmp = String(access.empNo).trim();
-    const id = qId(q);
-    const title = qTitle(q);
-
-    const answers = readAnswersArray();
-
-    if(id){
-      const hit = answers.find(a => answerEmp(a) === myEmp && answerQid(a) === id);
-      if(hit) return hit;
-    }
-
-    const tKey = normKey(title);
-    if(tKey){
-      const hit2 = answers.find(a =>
-        answerEmp(a) === myEmp &&
-        normKey(String(a?.questionTitle ?? a?.title ?? "")) === tKey &&
-        (!String(a?.questionId || "").trim() || !id)
-      );
-      if(hit2) return hit2;
-    }
-    return null;
-  }
-
-  function upsertMyAnswer(q, patch){
-    if(HARD_LOCK) return { ok:false, err:"Låst (fail-closed)." };
-
-    const myEmp = String(access.empNo).trim();
-    const id = qId(q);
-    const title = qTitle(q);
-
-    const answers = readAnswersArray();
-    let idx = -1;
-
-    if(id){
-      idx = answers.findIndex(a => answerEmp(a) === myEmp && answerQid(a) === id);
-    }
-
-    if(idx < 0){
-      const tKey = normKey(title);
-      if(tKey){
-        idx = answers.findIndex(a =>
-          answerEmp(a) === myEmp &&
-          normKey(String(a?.questionTitle ?? a?.title ?? "")) === tKey &&
-          (!String(a?.questionId || "").trim() || !id)
-        );
-      }
-    }
-
-    const now = Date.now();
-
-    function finalize(obj){
-      const out = { ...obj };
-
-      out.empNo = myEmp;
-      out.questionId = id || String(out.questionId || "").trim();
-      out.questionTitle = title || String(out.questionTitle || "").trim();
-
-      out.answerText = sanitizeText(out.answerText, MAX_ANSWER_LEN);
-
-      const hasText = String(out.answerText || "").trim().length > 0;
-      out.signed = !!out.signed && hasText;
-      out.signedAt = out.signed ? (Number(out.signedAt) > 0 ? Number(out.signedAt) : now) : null;
-
-      out.updatedAt = now;
-      out.updatedBy = myEmp;
-
+      writeSessionPreferred(out);
       return out;
     }
 
-    if(idx < 0){
-      const base = {
-        id: "ans_" + Math.random().toString(16).slice(2) + "_" + now.toString(16),
-        questionId: id || "",
-        questionTitle: title || "",
-        empNo: myEmp,
-        answerText: "",
+    /* ===========================
+       Assignments parsing (tolerant)
+    ============================ */
+    function readAssignmentsRaw(){
+      const raw = readAnyStorage(KEY_ASSIGNMENTS);
+      if (!raw) return null;
+      return safeJsonParse(raw);
+    }
+    function normalizeAssignments(raw){
+      if (Array.isArray(raw)) return raw;
+      if (raw && typeof raw === "object") {
+        if (Array.isArray(raw.assignments)) return raw.assignments;
+        if (Array.isArray(raw.items)) return raw.items;
+        if (Array.isArray(raw.data)) return raw.data;
+        const byEmp = raw.byEmpNo || raw.byEmployee || raw.empNoMap || raw.map || null;
+        if (byEmp && typeof byEmp === "object") {
+          const out = [];
+          for (const [k, v] of Object.entries(byEmp)) {
+            if (v && typeof v === "object") out.push({ empNo: k, ...v });
+          }
+          return out;
+        }
+      }
+      return [];
+    }
+    function readAssignments(){
+      const parsed = readAssignmentsRaw();
+      const list = normalizeAssignments(parsed);
+      return Array.isArray(list) ? list : [];
+    }
+
+    function pickFirstNonEmpty(obj, keys){
+      for (const k of keys) {
+        const v = obj?.[k];
+        if (v == null) continue;
+        const s = String(v).trim();
+        if (s) return s;
+      }
+      return "";
+    }
+    function extractScopeFromAssignment(a){
+      return pickFirstNonEmpty(a, [
+        "scopeId","scopeID","scope_id",
+        "scope","scopeKey","scope_key",
+        "orgScopeId","orgScope","orgScopeKey",
+        "nodeId","nodeID","node_id",
+        "orgNodeId","orgNodeID","org_node_id",
+        "unitId","unitID","unit_id",
+        "orgUnitId","orgUnitID","org_unit_id",
+        "teamId","teamID","team_id",
+        "orgId","orgID","org_id",
+        "path","scopePath","orgPath"
+      ]);
+    }
+    function extractRoleFromAssignment(a){
+      return pickFirstNonEmpty(a, ["role","roleId","roleID","role_id","roleName"]);
+    }
+    function extractEmpFromAssignment(a){
+      return pickFirstNonEmpty(a, ["empNo","employeeNo","employeeID","employeeId","emp","id","userId"]);
+    }
+
+    function resolveScopeIdFromAssignments(empNo, role){
+      const me = String(empNo ?? "").trim();
+      const r  = String(role ?? "").trim();
+
+      const debug = {
+        totalAssignments: 0,
+        matchedEmpNo: false,
+        matchedRole: false,
+        foundScopeField: false
+      };
+
+      if (!me) return { scopeId:"", debug };
+
+      const list = readAssignments();
+      debug.totalAssignments = Array.isArray(list) ? list.length : 0;
+      if (!Array.isArray(list) || list.length === 0) return { scopeId:"", debug };
+
+      for (const a of list) {
+        if (!a || typeof a !== "object") continue;
+
+        const aEmp = extractEmpFromAssignment(a);
+        if (!aEmp || aEmp !== me) continue;
+        debug.matchedEmpNo = true;
+
+        const aRole = extractRoleFromAssignment(a);
+        if (aRole) {
+          if (r && aRole !== r) continue;
+          debug.matchedRole = true;
+        } else {
+          debug.matchedRole = true;
+        }
+
+        const scope = extractScopeFromAssignment(a);
+        if (scope) {
+          debug.foundScopeField = true;
+          return { scopeId: scope, debug };
+        }
+      }
+
+      return { scopeId:"", debug };
+    }
+
+    /* ===========================
+       Data readers (NO NEW KEYS)
+    ============================ */
+    function readLocalArray(key){
+      try{
+        const raw = localStorage.getItem(key);
+        const data = safeJsonParse(raw || "");
+        return Array.isArray(data) ? data : [];
+      }catch{
+        return [];
+      }
+    }
+
+    function writeLocalArray(key, arr){
+      try{
+        localStorage.setItem(key, JSON.stringify(arr));
+        return true;
+      }catch{
+        return false;
+      }
+    }
+
+    function normStr(s){ return String(s ?? "").trim(); }
+    function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
+
+    /* ===========================
+       Tasks (tolerant schema)
+    ============================ */
+    function getTaskId(t, idx){
+      const raw = (t && (t.id || t.taskId || t.uuid)) ?? `task_${idx}`;
+      return String(raw);
+    }
+    function getTaskTitle(t){ return String(t?.title ?? t?.name ?? t?.text ?? "Uppgift"); }
+    function getTaskDesc(t){ return String(t?.description ?? t?.desc ?? ""); }
+    function getTaskAdminNote(t){ return String(t?.adminNote ?? t?.admin ?? t?.note ?? ""); }
+
+    function isDoneTask(t){
+      const s = String(t?.status ?? t?.state ?? "").toLowerCase();
+      if (t?.done === true) return true;
+      if (t?.isDone === true) return true;
+      if (s === "done" || s === "klar" || s === "completed" || s === "complete") return true;
+      return false;
+    }
+
+    function taskStatusValue(t){
+      const s = String(t?.status ?? t?.state ?? "").toLowerCase();
+      if (isDoneTask(t)) return "done";
+      if (s === "in_progress" || s === "pågår" || s === "progress" || s === "doing") return "doing";
+      return "todo";
+    }
+
+    function setTaskStatus(t, v){
+      const val = String(v || "todo");
+      if (val === "done"){
+        if ("done" in t) t.done = true; else if ("isDone" in t) t.isDone = true; else t.done = true;
+        t.status = "done";
+      } else if (val === "doing"){
+        if ("done" in t) t.done = false;
+        if ("isDone" in t) t.isDone = false;
+        t.status = "in_progress";
+      } else {
+        if ("done" in t) t.done = false;
+        if ("isDone" in t) t.isDone = false;
+        t.status = "todo";
+      }
+      t.updatedAt = Date.now();
+      return t;
+    }
+
+    function getAssignedTo(t){
+      return t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
+    }
+    function isAssignedToMe(t, empNo){
+      const a = getAssignedTo(t);
+      const me = String(empNo || "").trim();
+      if (!me || a == null) return false;
+
+      if (typeof a === "string" || typeof a === "number"){
+        const s = String(a).trim();
+        if (s === "ALL" || s === "*") return true;
+        return s === me;
+      }
+      if (Array.isArray(a)){
+        return a.map(x => String(x).trim()).includes(me);
+      }
+      return false;
+    }
+
+    function hasValidScopeMatch(t, myScopeId){
+      const scope = String(t?.scopeId ?? t?.scope ?? t?.scopeKey ?? t?.nodeId ?? "").trim();
+      const mine  = String(myScopeId ?? "").trim();
+      if (!scope || !mine) return false;
+
+      if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function"){
+        return window.HRApp.sameOrMissingScope(scope, mine);
+      }
+      return scope === mine;
+    }
+
+    function visibleTasksForMe(allTasks, empNo, scopeId){
+      return (Array.isArray(allTasks) ? allTasks : []).filter(t => {
+        if (!hasValidScopeMatch(t, scopeId)) return false;
+        if (!isAssignedToMe(t, empNo)) return false;
+        return true;
+      });
+    }
+
+    /* ===========================
+       Questions + Answers
+    ============================ */
+    function readQuestions(){
+      const raw = localStorage.getItem(KEY_QUESTIONS);
+      const parsed = safeJsonParse(raw || "");
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && typeof parsed === "object"){
+        if (Array.isArray(parsed.questions)) return parsed.questions;
+        if (Array.isArray(parsed.items)) return parsed.items;
+        if (Array.isArray(parsed.data)) return parsed.data;
+      }
+      return [];
+    }
+
+    function readAnswers(){ return readLocalArray(KEY_ANSWERS); }
+
+    function getQuestionId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? ""); }
+    function getQuestionTitle(q){ return String(q?.title ?? q?.name ?? q?.text ?? "Fråga"); }
+    function getQuestionBody(q){ return String(q?.body ?? q?.question ?? q?.prompt ?? q?.text ?? ""); }
+
+    function answerEmpNo(ans){
+      return String(ans?.empNo ?? ans?.employeeNo ?? ans?.employeeId ?? ans?.userId ?? "").trim();
+    }
+
+    function findMyAnswerForQuestion(q, myEmpNo){
+      const qId = normStr(getQuestionId(q));
+      const qTitle = normStr(getQuestionTitle(q));
+      const answers = readAnswers();
+      const me = normStr(myEmpNo);
+
+      // Prefer exact questionId match
+      if (qId){
+        const hit = answers.find(a => {
+          if (!a || typeof a !== "object") return false;
+          const aEmp = answerEmpNo(a);
+          if (aEmp && me && aEmp !== me) return false;
+          const aQid = String(a.questionId ?? a.qid ?? a.question_id ?? "");
+          return aQid && aQid === qId;
+        });
+        if (hit) return hit;
+      }
+
+      // Fallback: title match
+      if (qTitle){
+        const hit2 = answers.find(a => {
+          if (!a || typeof a !== "object") return false;
+          const aEmp = answerEmpNo(a);
+          if (aEmp && me && aEmp !== me) return false;
+          const aTitle = String(a.questionTitle ?? a.title ?? a.questionText ?? "");
+          return aTitle && normKey(aTitle) === normKey(qTitle);
+        });
+        if (hit2) return hit2;
+      }
+
+      return null;
+    }
+
+    function isAnswered(q, myEmpNo){
+      const a = findMyAnswerForQuestion(q, myEmpNo);
+      const txt = normStr(a?.answer ?? a?.text ?? a?.value ?? "");
+      return !!txt;
+    }
+
+    function ensureAnswerId(a){
+      if (a && (a.id || a.answerId || a.aid)) return String(a.id || a.answerId || a.aid);
+      return "ans_" + Date.now().toString(16) + "_" + Math.random().toString(16).slice(2);
+    }
+
+    function upsertMyAnswer(q, myEmpNo, answerText){
+      const me = normStr(myEmpNo);
+      if (!me) return { ok:false, err:"Saknar empNo." };
+
+      const qId = normStr(getQuestionId(q));
+      const qTitle = normStr(getQuestionTitle(q));
+
+      const all = readAnswers();
+      const existing = findMyAnswerForQuestion(q, me);
+
+      const now = Date.now();
+
+      if (existing){
+        existing.answer = String(answerText ?? "");
+        existing.updatedAt = now;
+        existing.updatedBy = me;
+        // keep signed flags as-is unless empty -> keep
+        const ok = writeLocalArray(KEY_ANSWERS, all);
+        return ok ? { ok:true, id: ensureAnswerId(existing), updated:true } : { ok:false, err:"Kunde inte spara svar (storage)." };
+      }
+
+      const obj = {
+        id: ensureAnswerId({}),
+        empNo: me,
+        questionId: qId || "",
+        questionTitle: qTitle || "",
+        answer: String(answerText ?? ""),
         signed: false,
         signedAt: null,
         createdAt: now,
         updatedAt: now,
-        updatedBy: myEmp
+        updatedBy: me
       };
-      const merged = finalize({ ...base, ...patch });
-      answers.push(merged);
-      if(!safeSaveAnswersArray(answers)) return { ok:false, err:"Kunde inte spara." };
-      return { ok:true, answer: merged };
+
+      all.push(obj);
+      const ok2 = writeLocalArray(KEY_ANSWERS, all);
+      return ok2 ? { ok:true, id: obj.id, created:true } : { ok:false, err:"Kunde inte spara svar (storage)." };
     }
 
-    const cur = answers[idx];
-    if(answerEmp(cur) !== myEmp) return { ok:false, err:"Åtkomst nekad (inte ditt svar)." };
+    function signMyAnswer(q, myEmpNo){
+      const me = normStr(myEmpNo);
+      if (!me) return { ok:false, err:"Saknar empNo." };
 
-    const merged = finalize({ ...cur, ...patch });
-    answers[idx] = merged;
+      const all = readAnswers();
+      const existing = findMyAnswerForQuestion(q, me);
+      if (!existing) return { ok:false, err:"Inget svar att signera ännu." };
 
-    if(!safeSaveAnswersArray(answers)) return { ok:false, err:"Kunde inte spara." };
-    return { ok:true, answer: merged };
-  }
+      const txt = normStr(existing.answer ?? existing.text ?? existing.value ?? "");
+      if (!txt) return { ok:false, err:"Svar är tomt (fail-closed)." };
 
-  const MODE = { TASKS:"tasks", QUESTIONS:"questions" };
-  let mode = MODE.TASKS;
+      existing.signed = true;
+      existing.signedAt = Date.now();
+      existing.updatedAt = Date.now();
+      existing.updatedBy = me;
 
-  let selectedTaskId = null;
-  let selectedQuestionKey = null;
-
-  function setKpis(a,b,c){
-    $("#kpiA").textContent = a;
-    $("#kpiB").textContent = b;
-    $("#kpiC").textContent = c;
-  }
-
-  function closeDetail(){
-    selectedTaskId = null;
-    selectedQuestionKey = null;
-
-    $("#detailEmpty").style.display = "block";
-    $("#detailTask").style.display = "none";
-    $("#detailQuestion").style.display = "none";
-
-    setMsgA("", "");
-    setMsgB("", "");
-  }
-
-  $("#btnCloseDetailA").addEventListener("click", closeDetail);
-  $("#btnCloseDetailB").addEventListener("click", closeDetail);
-
-  function setHashForMode(m){
-    const want = (m === MODE.QUESTIONS) ? "#questions" : "";
-    const cur = String(window.location.hash || "");
-    if(cur !== want){
-      try{ history.replaceState(null, "", window.location.pathname + window.location.search + want); }catch{}
-    }
-  }
-
-  function updateDoneDateUI(){
-    const wrap = $("#doneDateWrap");
-    if(mode === MODE.TASKS){
-      wrap.style.display = "flex";
-    }else{
-      wrap.style.display = "none";
-      $("#doneDate").value = "";
-    }
-  }
-
-  function setMode(next){
-    mode = next;
-    $("#tabTasks").setAttribute("aria-pressed", String(mode === MODE.TASKS));
-    $("#tabQuestions").setAttribute("aria-pressed", String(mode === MODE.QUESTIONS));
-    setHashForMode(mode);
-
-    updateDoneDateUI();
-
-    const filterEl = $("#filter");
-    clearChildren(filterEl);
-
-    if(mode === MODE.TASKS){
-      filterEl.appendChild(new Option("Ej klara", "open", true, true));
-      filterEl.appendChild(new Option("Pågår", "progress"));
-      filterEl.appendChild(new Option("Klara", "done"));
-      filterEl.appendChild(new Option("Alla", "all"));
-      $("#tipLine").textContent = "Tips: Välj ev. dag för att se vad som blev klart, och klicka på en uppgift för att öppna.";
-    }else{
-      filterEl.appendChild(new Option("Ej svarade", "open", true, true));
-      filterEl.appendChild(new Option("Svarade", "done"));
-      filterEl.appendChild(new Option("Alla", "all"));
-      $("#tipLine").textContent = "Tips: Klicka på en fråga för att svara och signera.";
+      const ok = writeLocalArray(KEY_ANSWERS, all);
+      return ok ? { ok:true, id: ensureAnswerId(existing) } : { ok:false, err:"Kunde inte signera (storage)." };
     }
 
-    closeDetail();
-    render();
-  }
+    /* ===========================
+       UI state
+    ============================ */
+    let AUTH = null;
+    let ACTIVE_TAB = "tasks"; // tasks | questions
+    let SELECTED = null;      // {type:"task"|"question", id:"..."}
 
-  $("#tabTasks").addEventListener("click", () => setMode(MODE.TASKS));
-  $("#tabQuestions").addEventListener("click", () => setMode(MODE.QUESTIONS));
-
-  function makeItemCardBase(titleText, pillsArr, linesArr, openKey){
-    const el = document.createElement("div");
-    el.className = "item";
-    el.tabIndex = 0;
-    el.setAttribute("role", "button");
-    el.dataset.open = String(openKey || "");
-    el.setAttribute("aria-label", "Öppna");
-
-    const left = document.createElement("div");
-    left.style.minWidth = "260px";
-    left.style.flex = "1 1 520px";
-
-    const title = document.createElement("p");
-    title.className = "item-title";
-    title.textContent = String(titleText || "—");
-    left.appendChild(title);
-
-    const meta1 = document.createElement("div");
-    meta1.className = "meta";
-    (pillsArr || []).forEach(p => meta1.appendChild(pill(p)));
-    left.appendChild(meta1);
-
-    (linesArr || []).forEach(({label, value}) => {
-      const div = document.createElement("div");
-      div.className = "meta";
-      const s = document.createElement("span");
-      const strong = document.createElement("strong");
-      strong.textContent = label;
-      s.appendChild(strong);
-      s.appendChild(document.createTextNode(" " + String(value || "—")));
-      div.appendChild(s);
-      left.appendChild(div);
-    });
-
-    const right = document.createElement("div");
-    right.className = "row";
-    right.style.gap = "8px";
-
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.dataset.open = String(openKey || "");
-    btn.textContent = "Öppna";
-    right.appendChild(btn);
-
-    el.appendChild(left);
-    el.appendChild(right);
-
-    return el;
-  }
-
-  function renderTasksList(listEl){
-    const tOk = tasksExistsAndValid();
-    if(!tOk.ok){
-      setKpis("Öppna: 0", "Pågår: 0", "Klara: 0");
-      listEl.appendChild(emptyBox(tOk.reason));
-      return { items: [] };
+    function setTab(tab){
+      ACTIVE_TAB = (tab === "questions") ? "questions" : "tasks";
+      tabTasks.setAttribute("aria-selected", ACTIVE_TAB === "tasks" ? "true" : "false");
+      tabQuestions.setAttribute("aria-selected", ACTIVE_TAB === "questions" ? "true" : "false");
+      SELECTED = null;
+      renderAll();
     }
 
-    if(HARD_LOCK){
-      setKpis("Öppna: 0", "Pågår: 0", "Klara: 0");
-      listEl.appendChild(emptyBox("Listning är avstängd (fail-closed)."));
-      return { items: [] };
+    function el(tag, cls){
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      return e;
     }
 
-    const filter = $("#filter").value;
-    const q = String($("#search").value || "").trim().toLowerCase();
+    function cardMarkerClass(type){
+      if (type === "task") return "marker task";
+      if (type === "question") return "marker question";
+      return "marker";
+    }
 
-    const mine = computeMineVisibleTasks();
+    function filterBySearch(items){
+      const s = normKey(qSearch.value);
+      if (!s) return items;
+      return items.filter(it => normKey(it.title + " " + (it.sub || "") + " " + (it.body || "")).includes(s));
+    }
 
-    const doneTotal = mine.filter(x => (normalizeStatus(x?.status) || "open") === "done").length;
-    const progTotal = mine.filter(x => (normalizeStatus(x?.status) || "open") === "progress").length;
-    const openTotal = mine.filter(x => (normalizeStatus(x?.status) || "open") === "open").length;
-    setKpis("Öppna: " + openTotal, "Pågår: " + progTotal, "Klara: " + doneTotal);
+    function filterByShow(items){
+      const mode = String(qShow.value || "open");
+      if (mode === "all") return items;
+      if (mode === "done") return items.filter(it => it.isDone === true);
+      // open
+      return items.filter(it => it.isDone !== true);
+    }
 
-    let items = mine;
+    function renderList(items){
+      listBox.textContent = "";
 
-    if(filter === "open") items = items.filter(x => (normalizeStatus(x?.status) || "open") !== "done");
-    if(filter === "progress") items = items.filter(x => (normalizeStatus(x?.status) || "open") === "progress");
-    if(filter === "done") items = items.filter(x => (normalizeStatus(x?.status) || "open") === "done");
+      if (!items.length){
+        const empty = el("div", "detailEmpty");
+        empty.textContent = "Inget att visa med vald filter/sökning.";
+        listBox.appendChild(empty);
+        return;
+      }
 
-    if(q){
-      items = items.filter(x => {
-        const blob = `${x?.title||""} ${x?.text||""} ${x?.adminNote||""} ${x?.prio||""}`.toLowerCase();
-        return blob.includes(q);
+      for (const it of items){
+        const c = el("div", "card");
+        c.tabIndex = 0;
+        c.setAttribute("role", "button");
+        c.setAttribute("aria-label", it.title);
+
+        const inside = el("div", "cardIn");
+        const m = el("div", cardMarkerClass(it.type));
+        const txt = el("div", "cardTxt");
+
+        const t = el("div", "cardTitle");
+        t.textContent = it.title;
+
+        const sub = el("div", "cardSub");
+        sub.classList.add("mono");
+        sub.textContent = it.sub || "—";
+
+        txt.appendChild(t);
+        txt.appendChild(sub);
+
+        inside.appendChild(m);
+        inside.appendChild(txt);
+        c.appendChild(inside);
+
+        c.addEventListener("click", () => {
+          SELECTED = { type: it.type, id: it.id };
+          renderAll();
+        });
+        c.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " "){
+            e.preventDefault();
+            SELECTED = { type: it.type, id: it.id };
+            renderAll();
+          }
+        });
+
+        listBox.appendChild(c);
+      }
+    }
+
+    function renderDetailEmpty(){
+      detailHint.textContent = "Välj ett kort i listan.";
+      detailIdPill.textContent = "—";
+      detailBox.textContent = "";
+      const empty = el("div", "detailEmpty");
+      empty.textContent = "Välj ett kort i listan.";
+      detailBox.appendChild(empty);
+    }
+
+    function renderTaskDetail(task, taskIndex, auth){
+      detailBox.textContent = "";
+      const id = getTaskId(task, taskIndex);
+
+      detailHint.textContent = "Uppgift";
+      detailIdPill.textContent = `task:${id}`;
+
+      const title = el("div", "detailTitle");
+      title.textContent = getTaskTitle(task);
+
+      const meta = el("div", "detailMeta");
+      meta.textContent = "Status och kommentar (valfri).";
+
+      const desc = el("div", "");
+      desc.style.fontSize = "13px";
+      desc.style.color = "rgba(15,23,42,.82)";
+      desc.style.lineHeight = "1.4";
+      desc.textContent = getTaskDesc(task) || "—";
+
+      const admin = normStr(getTaskAdminNote(task));
+      const adminP = el("div", "note");
+      adminP.textContent = admin ? ("Admin: " + admin) : "Admin: —";
+
+      const hr = el("div", "hr");
+
+      const current = taskStatusValue(task);
+
+      const radios = el("div", "radios");
+      const mkRadio = (val, label) => {
+        const wrap = el("label", "radioPill");
+        const input = document.createElement("input");
+        input.type = "radio";
+        input.name = "taskStatus";
+        input.value = val;
+        input.checked = (current === val);
+        const span = el("span", "");
+        span.textContent = label;
+        wrap.appendChild(input);
+        wrap.appendChild(span);
+        return { wrap, input };
+      };
+
+      const rTodo = mkRadio("todo", "Ej startad");
+      const rDoing = mkRadio("doing", "Pågår");
+      const rDone = mkRadio("done", "Klar");
+      radios.appendChild(rTodo.wrap);
+      radios.appendChild(rDoing.wrap);
+      radios.appendChild(rDone.wrap);
+
+      const commentField = el("div", "field");
+      commentField.style.marginTop = "12px";
+      const lab = document.createElement("label");
+      lab.textContent = "Kommentar (valfri)";
+      const ta = document.createElement("textarea");
+      ta.value = String(task?.comment ?? task?.notes ?? "");
+      commentField.appendChild(lab);
+      commentField.appendChild(ta);
+
+      const actions = el("div", "actions");
+      const btnSave = el("button", "btn btnPrimary");
+      btnSave.type = "button";
+      btnSave.textContent = "Spara";
+
+      const btnClose = el("button", "btn");
+      btnClose.type = "button";
+      btnClose.textContent = "Stäng";
+
+      btnClose.addEventListener("click", () => {
+        SELECTED = null;
+        renderAll();
+      });
+
+      btnSave.addEventListener("click", () => {
+        hideGuard();
+
+        const all = readLocalArray(KEY_TASKS);
+        if (!Array.isArray(all) || all.length === 0){
+          showGuard("Fail-closed: uppgifter saknas eller är korrupta.");
+          return;
+        }
+
+        // Find task by id within visible constraints (scope + assigned)
+        const empNo = normStr(auth.empNo);
+        const scopeId = normStr(auth.scopeId);
+        if (!empNo || !scopeId){
+          showGuard("Fail-closed: saknar empNo eller scopeId.");
+          return;
+        }
+
+        const newStatus =
+          (rDone.input.checked ? "done" :
+          (rDoing.input.checked ? "doing" : "todo"));
+
+        let found = false;
+
+        for (let i=0;i<all.length;i++){
+          const tid = getTaskId(all[i], i);
+          if (String(tid) !== String(id)) continue;
+
+          if (!hasValidScopeMatch(all[i], scopeId)) {
+            showGuard("Fail-closed: scope matchar inte (uppgiften ligger utanför din scope).");
+            return;
+          }
+          if (!isAssignedToMe(all[i], empNo)) {
+            showGuard("Fail-closed: uppgiften är inte tilldelad dig.");
+            return;
+          }
+
+          all[i] = setTaskStatus(all[i], newStatus);
+          all[i].comment = String(ta.value ?? "");
+          found = true;
+          break;
+        }
+
+        if (!found){
+          showGuard("Fail-closed: kunde inte hitta uppgiften att spara.");
+          return;
+        }
+
+        const ok = writeLocalArray(KEY_TASKS, all);
+        if (!ok){
+          showGuard("Fail-closed: kunde inte spara (storage).");
+          return;
+        }
+
+        // Keep selection; refresh
+        renderAll();
+      });
+
+      actions.appendChild(btnSave);
+      actions.appendChild(btnClose);
+
+      detailBox.appendChild(title);
+      detailBox.appendChild(meta);
+      detailBox.appendChild(desc);
+      detailBox.appendChild(adminP);
+      detailBox.appendChild(hr);
+      detailBox.appendChild(radios);
+      detailBox.appendChild(commentField);
+      detailBox.appendChild(actions);
+    }
+
+    function renderQuestionDetail(q, auth){
+      detailBox.textContent = "";
+
+      const qid = normStr(getQuestionId(q));
+      const titleTxt = normStr(getQuestionTitle(q)) || "Fråga";
+      const bodyTxt = normStr(getQuestionBody(q)) || titleTxt;
+
+      detailHint.textContent = "Fråga";
+      detailIdPill.textContent = qid ? `q:${qid}` : "q:—";
+
+      const title = el("div", "detailTitle");
+      title.textContent = titleTxt;
+
+      const meta = el("div", "detailMeta");
+      const myAns = findMyAnswerForQuestion(q, auth.empNo);
+      const isSigned = !!myAns?.signed;
+      const signedAt = myAns?.signedAt ? new Date(Number(myAns.signedAt)) : null;
+      meta.textContent = isSigned
+        ? ("Signerat" + (signedAt && Number.isFinite(signedAt.getTime()) ? (" • " + signedAt.toLocaleString("sv-SE")) : ""))
+        : (isAnswered(q, auth.empNo) ? "Sparat (ej signerat)" : "Ej besvarad");
+
+      const qBox = el("div", "");
+      qBox.style.fontSize = "13px";
+      qBox.style.color = "rgba(15,23,42,.82)";
+      qBox.style.lineHeight = "1.4";
+      qBox.textContent = bodyTxt;
+
+      const hr = el("div", "hr");
+
+      const field = el("div", "field");
+      const lab = document.createElement("label");
+      lab.textContent = "Svar";
+      const ta = document.createElement("textarea");
+      ta.value = String(myAns?.answer ?? myAns?.text ?? "");
+      field.appendChild(lab);
+      field.appendChild(ta);
+
+      const signRow = el("div", "note");
+      signRow.textContent = "Jag bekräftar mitt svar (signera). Signatur: endast anst.nr (empNo) sparas.";
+
+      const actions = el("div", "actions");
+      const btnSave = el("button", "btn btnPrimary");
+      btnSave.type = "button";
+      btnSave.textContent = "Spara svar";
+
+      const btnSign = el("button", "btn");
+      btnSign.type = "button";
+      btnSign.textContent = "Signera";
+      if (isSigned) {
+        btnSign.disabled = true;
+        btnSign.style.opacity = "0.65";
+        btnSign.style.cursor = "default";
+      }
+
+      const btnClose = el("button", "btn");
+      btnClose.type = "button";
+      btnClose.textContent = "Stäng";
+
+      btnClose.addEventListener("click", () => {
+        SELECTED = null;
+        renderAll();
+      });
+
+      btnSave.addEventListener("click", () => {
+        hideGuard();
+        const txt = String(ta.value ?? "");
+        const res = upsertMyAnswer(q, auth.empNo, txt);
+        if (!res.ok){
+          showGuard("Fail-closed: " + String(res.err || "kunde inte spara svar."));
+          return;
+        }
+        renderAll();
+      });
+
+      btnSign.addEventListener("click", () => {
+        hideGuard();
+
+        // Save first (fail-closed if empty)
+        const txt = String(ta.value ?? "");
+        const saveRes = upsertMyAnswer(q, auth.empNo, txt);
+        if (!saveRes.ok){
+          showGuard("Fail-closed: " + String(saveRes.err || "kunde inte spara svar."));
+          return;
+        }
+
+        const signRes = signMyAnswer(q, auth.empNo);
+        if (!signRes.ok){
+          showGuard("Fail-closed: " + String(signRes.err || "kunde inte signera."));
+          return;
+        }
+
+        renderAll();
+      });
+
+      actions.appendChild(btnSave);
+      actions.appendChild(btnSign);
+      actions.appendChild(btnClose);
+
+      detailBox.appendChild(title);
+      detailBox.appendChild(meta);
+      detailBox.appendChild(qBox);
+      detailBox.appendChild(hr);
+      detailBox.appendChild(field);
+      detailBox.appendChild(signRow);
+      detailBox.appendChild(actions);
+    }
+
+    /* ===========================
+       Build list models
+    ============================ */
+    function buildTaskItems(auth){
+      const all = readLocalArray(KEY_TASKS);
+      const empNo = normStr(auth.empNo);
+      const scopeId = normStr(auth.scopeId);
+      const mine = visibleTasksForMe(all, empNo, scopeId);
+
+      return mine.map((t, idx) => {
+        const id = getTaskId(t, idx);
+        const title = getTaskTitle(t);
+        const subParts = [];
+        subParts.push("task");
+        const st = taskStatusValue(t);
+        subParts.push(st === "done" ? "klar" : (st === "doing" ? "pågår" : "ej startad"));
+        const due = normStr(t?.dueDate ?? t?.date ?? t?.day ?? "");
+        if (due) subParts.push("datum:" + due);
+        return {
+          type: "task",
+          id,
+          title,
+          sub: subParts.join(" • "),
+          isDone: isDoneTask(t),
+          _raw: t
+        };
       });
     }
 
-    // v1.9: datumfilter för “vad blev gjort den dagen”
-    const dateStr = String($("#doneDate").value || "").trim();
-    const range = dayRangeFromInput(dateStr);
-    if(range){
-      items = items.filter(x => {
-        const st = normalizeStatus(x?.status) || "open";
-        if(st !== "done") return false;
-        const ts = Number(x?.updatedAt);
-        if(!Number.isFinite(ts) || ts <= 0) return false;
-        return ts >= range.start && ts < range.end;
+    function buildQuestionItems(auth){
+      const questions = readQuestions();
+      const empNo = normStr(auth.empNo);
+
+      // Employee sees questions; optional: if questions have scope/assigned, you can add filtering later.
+      return (Array.isArray(questions) ? questions : []).map(q => {
+        const id = normStr(getQuestionId(q)) || ("q_" + normKey(getQuestionTitle(q)));
+        const title = normStr(getQuestionTitle(q)) || "Fråga";
+        const answered = isAnswered(q, empNo);
+        const a = findMyAnswerForQuestion(q, empNo);
+        const signed = !!a?.signed;
+        const sub = signed ? "signerat" : (answered ? "sparat" : "ej besvarad");
+        return {
+          type: "question",
+          id,
+          title,
+          body: normStr(getQuestionBody(q)) || "",
+          sub: "question • " + sub,
+          isDone: answered, // "done" means answered
+          _raw: q
+        };
       });
     }
 
-    if(items.length === 0){
-      if(range){
-        listEl.appendChild(emptyBox("Inga uppgifter markerade som KLARA den valda dagen.\n\nTips: Om uppgiften blev klar men saknar updatedAt kan den inte sorteras på dag (fail-closed)."));
-      }else{
-        listEl.appendChild(emptyBox("Inga uppgifter att visa.\n\nOBS: Den här sidan läser endast AO-014_TASKS_V1.\nOm dina onboarding-block inte publiceras dit kommer listan bli tom."));
-      }
-      return { items: mine };
+    function findSelected(items){
+      if (!SELECTED) return null;
+      return items.find(it => it.type === SELECTED.type && String(it.id) === String(SELECTED.id)) || null;
     }
 
-    items.slice(0, 80).forEach(x => {
-      const st = normalizeStatus(x?.status) || "open";
-      const dates = dateLabel(x || {});
-      const prio = String(x?.prio || "normal");
-
-      const pillsArr = [statusLabel(st), "Prio: " + prio, "Datum: " + dates];
-      const lines = [{ label:"Text:", value: String(x?.text || "—") }];
-
-      if(range && st === "done"){
-        lines.push({ label:"Klart:", value: fmtDateTime(x?.updatedAt) });
+    /* ===========================
+       Render all
+    ============================ */
+    function renderAll(){
+      hideGuard();
+      if (!AUTH){
+        renderDetailEmpty();
+        return;
       }
 
-      if(x?.adminNote) lines.push({ label:"Admin:", value: String(x.adminNote) });
-      if(x?.employeeComment){
-        lines.push({ label:"Din kommentar:", value: sanitizeText(String(x.employeeComment), MAX_COMMENT_LEN) });
+      const empNo = normStr(AUTH.empNo);
+      const role  = normStr(AUTH.role || "EMPLOYEE");
+      const scopeId = normStr(AUTH.scopeId);
+
+      whoBadge.textContent = `${empNo || "—"} • ${role}`;
+      scopeBadge.textContent = `Scope: ${scopeId || "—"}`;
+
+      if (!scopeId){
+        countsPill.textContent = "Fail-closed";
+        listPill.textContent = "—";
+        listBox.textContent = "";
+        renderDetailEmpty();
+        showGuard("Fail-closed: saknar scopeId i session. (Access/Assignments måste vara korrekt.)");
+        return;
       }
 
-      listEl.appendChild(
-        makeItemCardBase(
-          String(x?.title || "Uppgift"),
-          pillsArr,
-          lines,
-          String(x?.id || "")
-        )
-      );
-    });
+      const taskItems = buildTaskItems(AUTH);
+      const questionItems = buildQuestionItems(AUTH);
 
-    return { items: mine };
-  }
+      const openTasks = taskItems.filter(x => !x.isDone).length;
+      const doneTasks = taskItems.filter(x => x.isDone).length;
 
-  function renderQuestionsList(listEl){
-    const qRes = readQuestionsArray();
-    if(!qRes.ok){
-      setKpis("Ej svarade: 0", "Svarade: 0", "Totalt: 0");
-      listEl.appendChild(emptyBox(qRes.reason));
-      return { items: [] };
-    }
-    if(HARD_LOCK){
-      setKpis("Ej svarade: 0", "Svarade: 0", "Totalt: 0");
-      listEl.appendChild(emptyBox("Frågor är avstängda (fail-closed) eftersom org/assignments saknas/korrupt."));
-      return { items: [] };
-    }
+      const openQs = questionItems.filter(x => !x.isDone).length;
+      const doneQs = questionItems.filter(x => x.isDone).length;
 
-    const filter = $("#filter").value;
-    const q = String($("#search").value || "").trim().toLowerCase();
+      countsPill.textContent = `Uppgifter: ${openTasks} öppna • ${doneTasks} klara  |  Frågor: ${openQs} öppna • ${doneQs} besvarade`;
 
-    const allVisible = qRes.arr.filter(canSeeQuestion);
+      let items = (ACTIVE_TAB === "questions") ? questionItems : taskItems;
+      items = filterBySearch(items);
+      items = filterByShow(items);
 
-    const decorated = allVisible.map(qq => {
-      const ans = findMyAnswerForQuestion(qq);
-      const answered = !!(ans && String(ans.answerText || "").trim());
-      const signed = !!(ans && ans.signed === true);
-      const key = (qId(qq) ? ("id:" + qId(qq)) : ("t:" + normKey(qTitle(qq))));
-      return { q: qq, key, answered, signed, ans };
-    });
+      listPill.textContent = `${items.length} visade`;
 
-    const answeredCount = decorated.filter(x => x.answered).length;
-    const openCount = decorated.filter(x => !x.answered).length;
-    setKpis("Ej svarade: " + openCount, "Svarade: " + answeredCount, "Totalt: " + decorated.length);
+      // Render list
+      renderList(items);
 
-    let items = decorated.slice();
-
-    if(filter === "open") items = items.filter(x => !x.answered);
-    if(filter === "done") items = items.filter(x => x.answered);
-
-    if(q){
-      items = items.filter(x => {
-        const blob = `${qTitle(x.q)} ${qText(x.q)} ${x.answered ? "svarad" : "osvarad"}`.toLowerCase();
-        return blob.includes(q);
-      });
-    }
-
-    items.sort((a,b)=>{
-      const ao = Number(!!a.answered), bo = Number(!!b.answered);
-      if(ao !== bo) return ao - bo;
-      const as = Number(!!a.signed), bs = Number(!!b.signed);
-      if(as !== bs) return as - bs;
-      return qTitle(a.q).localeCompare(qTitle(b.q), "sv");
-    });
-
-    if(items.length === 0){
-      const total = Number(qRes?.meta?.total ?? 0);
-      const visible = allVisible.length;
-
-      let msg = "Inga frågor att visa.\n\nOBS: Den här sidan läser endast AO-012_QUESTIONS_V1.";
-      msg += `\n\nDiagnos:\n- Hittade ${total} frågor i storage (shape: ${String(qRes?.meta?.shape || "okänd")})\n- Synliga efter scope/emp-filter: ${visible}`;
-
-      if(total === 0){
-        msg += "\n\nTrolig orsak: materialize/skapande har inte skrivit några frågor ännu.";
-      }else if(visible === 0){
-        msg += "\n\nTrolig orsak: scopeId i frågorna matchar inte org eller ligger utanför ditt scope, eller empNo i frågan är inte du.";
+      // Detail
+      const sel = findSelected(items);
+      if (!sel){
+        renderDetailEmpty();
+        return;
       }
 
-      listEl.appendChild(emptyBox(msg));
-      return { items: decorated };
-    }
+      if (sel.type === "task"){
+        // Need the original task and index in "taskItems list".
+        // Rebuild with reference index: find in visible tasks by id.
+        const all = readLocalArray(KEY_TASKS);
+        const mine = visibleTasksForMe(all, empNo, scopeId);
 
-    items.slice(0, 120).forEach(x => {
-      const title = qTitle(x.q);
-      const text  = qText(x.q);
-
-      const state = x.answered ? (x.signed ? "Svarad + signerad" : "Svarad (osignerad)") : "Ej svarad";
-      const scope = qScope(x.q) ? ("scope: " + qScope(x.q)) : "scope: global";
-
-      const lines = [{ label:"Fråga:", value: text }];
-
-      if(x.answered){
-        const snip = sanitizeText(String(x.ans?.answerText || ""), 160);
-        lines.push({ label:"Ditt svar:", value: snip || "—" });
+        let found = null;
+        let foundIdx = -1;
+        for (let i=0;i<mine.length;i++){
+          const id = getTaskId(mine[i], i);
+          if (String(id) === String(sel.id)){
+            found = mine[i];
+            foundIdx = i;
+            break;
+          }
+        }
+        if (!found){
+          renderDetailEmpty();
+          showGuard("Fail-closed: kunde inte hitta vald uppgift (korrupt data eller filter).");
+          return;
+        }
+        renderTaskDetail(found, foundIdx, AUTH);
+        return;
       }
 
-      listEl.appendChild(
-        makeItemCardBase(
-          title || "Fråga",
-          [state, scope],
-          lines,
-          x.key
-        )
-      );
-    });
+      if (sel.type === "question"){
+        const questions = readQuestions();
+        let qHit = null;
 
-    return { items: decorated };
-  }
+        // Prefer id match
+        qHit = questions.find(q => normStr(getQuestionId(q)) && normStr(getQuestionId(q)) === String(sel.id)) || null;
 
-  function openTaskDetail(task){
-    selectedTaskId = String(task?.id || "");
-    selectedQuestionKey = null;
+        // Fallback by title-key if needed
+        if (!qHit){
+          qHit = questions.find(q => ("q_" + normKey(getQuestionTitle(q))) === String(sel.id)) || null;
+        }
 
-    $("#detailEmpty").style.display = "none";
-    $("#detailTask").style.display = "block";
-    $("#detailQuestion").style.display = "none";
+        if (!qHit){
+          renderDetailEmpty();
+          showGuard("Fail-closed: kunde inte hitta vald fråga (korrupt data).");
+          return;
+        }
 
-    setMsgA("", "");
-
-    $("#dTitle").textContent = String(task.title || "Uppgift");
-    $("#dText").textContent = String(task.text || "—");
-    $("#dDates").textContent = "Datum: " + dateLabel(task);
-
-    if(task.adminNote){
-      $("#dAdminNoteWrap").style.display = "block";
-      $("#dAdminNote").textContent = String(task.adminNote);
-    }else{
-      $("#dAdminNoteWrap").style.display = "none";
-      $("#dAdminNote").textContent = "";
-    }
-
-    const st = normalizeStatus(task.status) || "open";
-    $("#dStatus").value = st;
-    $("#dComment").value = String(task.employeeComment || "");
-
-    const isDone = (st === "done");
-    const writable = !HARD_LOCK && tasksExistsAndValid().ok;
-
-    $("#dStatus").disabled = (!writable) || isDone;
-    $("#btnSaveTask").disabled = (!writable);
-    $("#dComment").disabled = (!writable);
-
-    for(const opt of $("#dStatus").options) opt.disabled = false;
-    if(st === "open"){
-      const oDone = Array.from($("#dStatus").options).find(o => o.value === "done");
-      if(oDone) oDone.disabled = true;
-    }
-    if(st === "progress"){
-      const oOpen = Array.from($("#dStatus").options).find(o => o.value === "open");
-      if(oOpen) oOpen.disabled = true;
-    }
-  }
-
-  function currentQuestionDecorated(){
-    const qRes = readQuestionsArray();
-    if(!qRes.ok) return null;
-
-    const allVisible = qRes.arr.filter(canSeeQuestion).map(qq => {
-      const ans = findMyAnswerForQuestion(qq);
-      const answered = !!(ans && String(ans.answerText || "").trim());
-      const signed = !!(ans && ans.signed === true);
-      const key = (qId(qq) ? ("id:" + qId(qq)) : ("t:" + normKey(qTitle(qq))));
-      return { q: qq, key, answered, signed, ans };
-    });
-
-    return allVisible.find(x => String(x.key) === String(selectedQuestionKey || "")) || null;
-  }
-
-  function openQuestionDetail(decorated){
-    selectedQuestionKey = String(decorated.key || "");
-    selectedTaskId = null;
-
-    $("#detailEmpty").style.display = "none";
-    $("#detailTask").style.display = "none";
-    $("#detailQuestion").style.display = "block";
-
-    setMsgB("", "");
-
-    const qq = decorated.q;
-    const ans = findMyAnswerForQuestion(qq);
-
-    $("#qTitle").textContent = qTitle(qq) || "Fråga";
-    $("#qText").textContent  = qText(qq) || "—";
-
-    const scope = qScope(qq) ? qScope(qq) : "global";
-    $("#qMetaPill").textContent = "scope: " + scope;
-
-    const answered = !!(ans && String(ans.answerText || "").trim());
-    const signed = !!(ans && ans.signed === true);
-
-    $("#qStatePill").textContent = answered ? (signed ? "Svarad + signerad" : "Svarad (osignerad)") : "Ej svarad";
-    $("#qAnswer").value = String(ans?.answerText || "");
-
-    $("#qSign").checked = signed;
-    $("#qSignedPill").textContent = signed && ans?.signedAt ? ("Signatur: " + new Date(Number(ans.signedAt)).toLocaleString("sv-SE")) : "Signatur: —";
-
-    const hasText = String($("#qAnswer").value || "").trim().length > 0;
-    $("#signWrap").classList.toggle("danger", !hasText);
-
-    const writable = !HARD_LOCK;
-    $("#qAnswer").disabled = !writable;
-    $("#btnSaveAnswer").disabled = !writable;
-    $("#btnSign").disabled = !writable || !hasText;
-  }
-
-  $("#btnSaveTask").addEventListener("click", () => {
-    setMsgA("", "");
-
-    const tOk = tasksExistsAndValid();
-    if(!tOk.ok){ setMsgA("err", tOk.reason); return; }
-    if(HARD_LOCK){ setMsgA("err", "Skrivning är låst (fail-closed)."); return; }
-
-    const mine = computeMineVisibleTasks();
-    const t = mine.find(x => String(x?.id) === String(selectedTaskId || ""));
-    if(!t){
-      setMsgA("err", "Vald uppgift hittades inte.");
-      closeDetail();
-      render();
-      return;
-    }
-
-    const desiredStatus = normalizeStatus($("#dStatus").value || (t.status||"open"));
-    if(!desiredStatus){ setMsgA("err", "Ogiltig status (okänt värde)."); return; }
-
-    const desiredComment = sanitizeText($("#dComment").value || "", MAX_COMMENT_LEN);
-
-    const res = upsertTaskMutation({
-      id: t.id,
-      scopeId: t.scopeId,
-      status: desiredStatus,
-      employeeComment: desiredComment
-    });
-
-    if(!res.ok){
-      setMsgA("err", res.err || "Kunde inte spara.");
-      render();
-      const mine2 = computeMineVisibleTasks();
-      const again = mine2.find(x => String(x?.id) === String(t.id));
-      if(again) openTaskDetail(again); else closeDetail();
-      return;
-    }
-
-    setMsgA("ok", "Sparat.");
-    render();
-    const mine2 = computeMineVisibleTasks();
-    const again = mine2.find(x => String(x?.id) === String(t.id));
-    if(again) openTaskDetail(again);
-  });
-
-  $("#qAnswer").addEventListener("input", () => {
-    const hasText = String($("#qAnswer").value || "").trim().length > 0;
-    $("#signWrap").classList.toggle("danger", !hasText);
-    $("#btnSign").disabled = HARD_LOCK || !hasText;
-    if(!hasText){
-      $("#qSign").checked = false;
-      $("#qSignedPill").textContent = "Signatur: —";
-    }
-  });
-
-  $("#btnSaveAnswer").addEventListener("click", () => {
-    setMsgB("", "");
-    if(HARD_LOCK){ setMsgB("err", "Låst (fail-closed)."); return; }
-
-    const dec = currentQuestionDecorated();
-    if(!dec){
-      setMsgB("err", "Vald fråga hittades inte.");
-      closeDetail();
-      render();
-      return;
-    }
-
-    const text = sanitizeText($("#qAnswer").value || "", MAX_ANSWER_LEN);
-    const wantSigned = !!$("#qSign").checked;
-
-    const patch = {
-      answerText: text,
-      signed: (wantSigned && String(text).trim().length > 0),
-      signedAt: (wantSigned && String(text).trim().length > 0) ? Date.now() : null
-    };
-
-    const res = upsertMyAnswer(dec.q, patch);
-    if(!res.ok){
-      setMsgB("err", res.err || "Kunde inte spara svar.");
-      render();
-      const dec2 = currentQuestionDecorated();
-      if(dec2) openQuestionDetail(dec2);
-      return;
-    }
-
-    const signed = !!res.answer?.signed;
-    $("#qSignedPill").textContent = signed && res.answer?.signedAt ? ("Signatur: " + new Date(Number(res.answer.signedAt)).toLocaleString("sv-SE")) : "Signatur: —";
-
-    setMsgB("ok", signed ? "Sparat + signerad." : "Sparat.");
-    render();
-    const dec2 = currentQuestionDecorated();
-    if(dec2) openQuestionDetail(dec2);
-  });
-
-  $("#btnSign").addEventListener("click", () => {
-    setMsgB("", "");
-    if(HARD_LOCK){ setMsgB("err", "Låst (fail-closed)."); return; }
-
-    const dec = currentQuestionDecorated();
-    if(!dec){
-      setMsgB("err", "Vald fråga hittades inte.");
-      closeDetail();
-      render();
-      return;
-    }
-
-    const text = sanitizeText($("#qAnswer").value || "", MAX_ANSWER_LEN);
-    if(!String(text).trim()){
-      setMsgB("err", "Du kan inte signera ett tomt svar.");
-      $("#qSign").checked = false;
-      return;
-    }
-
-    $("#qSign").checked = true;
-
-    const res = upsertMyAnswer(dec.q, { answerText: text, signed: true, signedAt: Date.now() });
-    if(!res.ok){
-      setMsgB("err", res.err || "Kunde inte signera.");
-      render();
-      const dec2 = currentQuestionDecorated();
-      if(dec2) openQuestionDetail(dec2);
-      return;
-    }
-
-    $("#qSignedPill").textContent = "Signatur: " + new Date(Number(res.answer.signedAt)).toLocaleString("sv-SE");
-    setMsgB("ok", "Signerad.");
-    render();
-    const dec2 = currentQuestionDecorated();
-    if(dec2) openQuestionDetail(dec2);
-  });
-
-  const MODE_OBJ = { TASKS:"tasks", QUESTIONS:"questions" };
-
-  function activateOpenKey(key){
-    if(mode === MODE_OBJ.TASKS){
-      const mine = computeMineVisibleTasks();
-      const task = mine.find(t => String(t?.id) === String(key));
-      if(task) openTaskDetail(task);
-      return;
-    }
-    if(mode === MODE_OBJ.QUESTIONS){
-      selectedQuestionKey = String(key || "");
-      const dec = currentQuestionDecorated();
-      if(dec) openQuestionDetail(dec);
-      return;
-    }
-  }
-
-  $("#list").addEventListener("click", (e) => {
-    const node = e.target && e.target.closest ? e.target.closest("[data-open]") : null;
-    if(!node) return;
-    const key = node.getAttribute("data-open") || node.dataset.open || "";
-    if(!key) return;
-    activateOpenKey(key);
-  });
-
-  $("#list").addEventListener("keydown", (e) => {
-    const isEnter = (e.key === "Enter");
-    const isSpace = (e.key === " " || e.key === "Spacebar");
-    if(!isEnter && !isSpace) return;
-
-    const node = e.target && e.target.closest ? e.target.closest(".item[data-open]") : null;
-    if(!node) return;
-
-    e.preventDefault();
-    const key = node.getAttribute("data-open") || node.dataset.open || "";
-    if(!key) return;
-    activateOpenKey(key);
-  });
-
-  function render(){
-    const list = $("#list");
-    clearChildren(list);
-
-    $("#detailEmpty").style.display = "block";
-    $("#detailTask").style.display = "none";
-    $("#detailQuestion").style.display = "none";
-
-    if(mode === MODE_OBJ.TASKS){
-      const { items } = renderTasksList(list);
-      if(selectedTaskId){
-        const mine = (items && items.length) ? items : computeMineVisibleTasks();
-        const t = mine.find(x => String(x?.id) === String(selectedTaskId));
-        if(t) openTaskDetail(t); else selectedTaskId = null;
+        renderQuestionDetail(qHit, AUTH);
+        return;
       }
-      return;
+
+      renderDetailEmpty();
     }
 
-    const { items } = renderQuestionsList(list);
-    if(selectedQuestionKey){
-      const dec = (items && items.length) ? (items.find(x => String(x.key) === String(selectedQuestionKey)) || null) : currentQuestionDecorated();
-      if(dec) openQuestionDetail(dec); else selectedQuestionKey = null;
-    }
-  }
+    /* ===========================
+       Events
+    ============================ */
+    tabTasks.addEventListener("click", () => setTab("tasks"));
+    tabQuestions.addEventListener("click", () => setTab("questions"));
 
-  $("#filter").addEventListener("change", render);
-  $("#search").addEventListener("input", render);
+    qSearch.addEventListener("input", () => renderAll());
+    qShow.addEventListener("change", () => renderAll());
 
-  $("#doneDate").addEventListener("change", render);
-  $("#btnClearDoneDate").addEventListener("click", () => {
-    $("#doneDate").value = "";
-    render();
-  });
+    logoutLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (window.HRApp && typeof window.HRApp.logout === "function") {
+        window.HRApp.logout();
+      } else {
+        try { sessionStorage.removeItem(KEY_SESSION); } catch {}
+        try { localStorage.removeItem(KEY_SESSION); } catch {}
+        window.location.href = "../UI/UI-01-SKELETON.html?err=logout";
+      }
+    });
 
-  function initFromHash(){
-    const h = String(window.location.hash || "").toLowerCase();
-    if(h === "#questions") setMode(MODE_OBJ.QUESTIONS);
-    else setMode(MODE_OBJ.TASKS);
-  }
-  window.addEventListener("hashchange", initFromHash);
+    (function init(){
+      const res = mustAuthOrStop();
+      if (!res) return;
+      AUTH = res.auth;
+      setTab("tasks");
+    })();
+  </script>
 
-  initFromHash();
-
-})();
-</script>
-
-<!-- ============================================================
-Ändringslogg (≤ 8 rader)
-- v1.9: Task-detalj: tog bort status-pill för att undvika “dubbelt Klart”.
-- v1.9: Lade till datumfilter (tasks) för att se vad som blev klart den dagen (status=done + updatedAt i dagspann).
-- Oförändrad fail-closed, oförändrade keys, inga innerHTML från storage.
-Testnoteringar:
-- Logga in som EMPLOYEE. Markera en uppgift Klar → välj dagens datum → se den i listan och öppna detalj.
-- Verifiera att datumfilter inte påverkar Frågor-läget.
-============================================================ -->
+  <!-- ============================================================
+  Ändringslogg (≤ 8 rader)
+  1) MASTER DESIGN-SPEC: 1100px wrap, topbar-semantik (Min sida neutral, Logga ut röd), inga lift-hovers.
+  2) List-tabbing: Uppgifter/Frågor + sök + visa (öppna/alla/klara).
+  3) Frågor visas här och matchar svar via questionId eller titel-fallback (read AO-012/013).
+  4) Spara svar + signera (sign sparar endast signed=true + signedAt + updatedBy=empNo).
+  5) Task-status: ej startad/pågår/klar – sparas tillbaka i AO-014_TASKS_V1 (inom scope + assigned).
+  6) Fail-closed: kräver auth + scopeId, och blockerar vid korrupt/otillåten data.
+  Testnoteringar:
+  - Logga in som EMPLOYEE med scopeId → se uppgifter + frågor i samma vy.
+  - Välj en fråga → svara → Spara → Signera → kontrollera AO-013_ANSWERS_V1 att id finns kvar.
+  ============================================================ -->
 </body>
 </html>
