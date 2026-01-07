@@ -1,41 +1,31 @@
 <!-- ============================================================
-AO-VERIFY-TRAINING-01 (2/4) | FIL-ID: admin/packages-block.html
+AO-BLOCK-PIPELINE-01 (MASTER) | BLOCK 2/5 | FIL-ID: admin/packages-block.html
 Projekt: HR-System
-Syfte: ADMIN – Visa + redigera BLOCK för publicerade/verifierade utbildningar (AO-057)
-Tillagt (AO-VERIFY-TRAINING-01):
-- Verifiera utbildning: status="verified" + verifiedAt + verifiedBy + updatedAt (endast AO-057)
-- Fail-closed validering (“klart nog”) innan verifiering
-- Tydlig UI-indikator för Verifierad / Publicerad
+Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
 
-PATCH v1.4 (2026-01-07):
-- FIX/UX: Slutar re-rendera hela blocklistan vid varje tangenttryck (titel/text/options) → fokus/cursor hoppar inte.
-- UI: Blockrader får data-attribut så vi kan uppdatera aktiv rad (titel + tag) utan full redraw.
-- Ingen ny data/keys. Endast AO-057_TRAININGS_V1 skrivs.
-
-PATCH v1.3 (2026-01-06):
-- UI: Återinför “Redigera”-knapp och samlar Redigera+Spara+Verifiera högt upp till vänster
-- UI: “Redigera” väljer första blocket (om inget valt) och fokuserar editor (ingen ny data/keys)
-
-PATCH v1.2 (2026-01-06):
-- FIX: “Verifiera igen” är tillåtet även om utbildningen redan är verified (uppdaterar verifiedAt/verifiedBy)
-- FIX: Status-normalisering (trim+lowercase) så casing/whitespace inte låser Verify på vissa poster
-- Fail-closed bibehållen: published/verified + titel + blockregler + inga osparade ändringar
+NYTT i BLOCK 2/5:
+- Kopplar sidan till Block-bank: AO-0XX_BLOCKS_V1 (source of truth för block)
+- Lista/öppna block (draft/published)
+- Redigera block-metadata + items (document/question/task)
+- Publicera (draft → published) med hård validering (fail-closed)
+- Fail-closed vid korrupt block-bank (låser Save/Publish)
 
 POLICY (LÅST):
-- UI-only • Fail-closed • ADMIN-only
-- sessionStorage först (auth) • fallback localStorage via CORE (AO-002)
+- UI-only • Fail-closed
+- sessionStorage först (auth) • fallback localStorage via CORE (HRApp)
 - XSS-safe rendering (textContent, inga osäkra innerHTML)
-- Inga nya storage-keys
-- Läser/Skriver endast: AO-057_TRAININGS_V1 (trainings), AO-001_LOGIN_V1 (session via CORE)
+- Inga nya storage-keys (endast AO-0XX_BLOCKS_V1 läses/skrivs här)
+- SYSTEM_ADMIN = steward-läge (read-only)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Admin • Utbildningar • Block</title>
+  <title>HR-System – Admin/Manager • Block-editor</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  <script src="../UI/UI-03-APP.js"></script>
 
   <style>
     .muted2{ color: var(--muted); font-size:.92rem; line-height:1.35; }
@@ -46,26 +36,16 @@ POLICY (LÅST):
     }
     .pill.ok{ background: rgba(167,243,208,.18); border-color: rgba(16,185,129,.28); color:#065f46; }
     .pill.warn{ background: rgba(254,243,199,.65); border-color: rgba(245,158,11,.30); color:#7c2d12; }
-    .pill.bad{ background: rgba(254,242,242,.9); border-color: rgba(239,68,68,.30); color:#7f1d1d; }
+    .pill.bad{ background: rgba(254,242,242,.90); border-color: rgba(239,68,68,.30); color:#7f1d1d; }
 
     .grid2{
       display:grid;
-      grid-template-columns: 360px 1fr;
+      grid-template-columns: 380px 1fr;
       gap: 14px;
       align-items:start;
     }
     @media (max-width: 1100px){
       .grid2{ grid-template-columns: 1fr; }
-    }
-
-    .editorSplit{
-      display:grid;
-      grid-template-columns: 420px 1fr;
-      gap: 14px;
-      align-items:start;
-    }
-    @media (max-width: 1100px){
-      .editorSplit{ grid-template-columns: 1fr; }
     }
 
     .sideCard{ position: sticky; top: 10px; }
@@ -129,47 +109,6 @@ POLICY (LÅST):
     input[type="text"], textarea, select, input[type="number"]{ width:100%; margin-top:6px; }
     textarea{ min-height: 92px; resize: vertical; }
 
-    .blockRow{
-      border:1px solid var(--line);
-      border-radius: 14px;
-      padding:10px;
-      background:#fff;
-      cursor:pointer;
-      box-shadow: var(--shadow-soft);
-    }
-    .blockRow.active{ outline: 2px solid rgba(59,130,246,.35); }
-
-    .blockTitle{
-      font-weight: 950;
-      display:flex;
-      gap:8px;
-      align-items:center;
-      flex-wrap:wrap;
-      line-height:1.2;
-    }
-
-    .miniBtn{
-      border: 1px solid var(--line);
-      background: #fff;
-      border-radius: 12px;
-      padding: 8px 10px;
-      cursor:pointer;
-      user-select:none;
-      font-weight: 900;
-      font-size: 13px;
-      line-height: 1;
-      text-decoration: none;
-      color: inherit;
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      gap:6px;
-    }
-    .miniBtn:hover{ background:#fafafa; }
-    .miniBtn:disabled{ opacity:.55; cursor:not-allowed; }
-    .miniBtn.danger{ border-color: rgba(239,68,68,.35); }
-    .miniBtn.danger:hover{ background: rgba(254,242,242,.8); }
-
     .panel{
       border:1px solid var(--line);
       border-radius: var(--r14);
@@ -193,7 +132,29 @@ POLICY (LÅST):
     @media (max-width: 1100px){ .row2{ grid-template-columns: 1fr; } }
 
     .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; font-size:.92rem; color: var(--muted); }
-    .docArea{ min-height: 220px; }
+
+    .miniBtn{
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 12px;
+      padding: 8px 10px;
+      cursor:pointer;
+      user-select:none;
+      font-weight: 900;
+      font-size: 13px;
+      line-height: 1;
+      text-decoration: none;
+      color: inherit;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:6px;
+    }
+    .miniBtn:hover{ background:#fafafa; }
+    .miniBtn:disabled{ opacity:.55; cursor:not-allowed; }
+
+    .miniBtn.danger{ border-color: rgba(239,68,68,.35); }
+    .miniBtn.danger:hover{ background: rgba(254,242,242,.8); }
 
     .actionBar{
       margin-top:10px;
@@ -203,6 +164,31 @@ POLICY (LÅST):
       align-items:center;
       justify-content:flex-start;
     }
+
+    .lockbox{
+      margin-top:10px;
+      padding:10px 12px;
+      border: 1px dashed var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      color: var(--muted);
+    }
+    .lockbox strong{ color:#111; }
+    .lockbox ul{ margin:8px 0 0; padding-left:18px; }
+    .lockbox li{ margin:4px 0; }
+
+    .itemRow{
+      border:1px solid var(--line);
+      border-radius: 14px;
+      padding:10px;
+      background:#fff;
+      cursor:pointer;
+      box-shadow: var(--shadow-soft);
+    }
+    .itemRow.active{ outline: 2px solid rgba(59,130,246,.35); }
+    .itemTop{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
+    .itemTitle{ font-weight: 950; line-height:1.2; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .itemMeta{ margin-top:6px; }
   </style>
 </head>
 
@@ -210,18 +196,15 @@ POLICY (LÅST):
 <header class="top">
   <div class="brand">
     <strong>HR-System</strong>
-    <span class="muted">• Admin • Utbildningar • Block</span>
+    <span class="muted">• Admin/Manager • Block-editor</span>
   </div>
 
   <nav class="nav" aria-label="Meny">
     <a href="./home.html">Hem</a>
-    <a href="./tasks.html">Uppgifter</a>
-    <a href="./questions.html">Frågor</a>
-    <a href="./docs.html">Dokument</a>
+    <a href="./tasks.html">Skapa block</a>
+    <a href="./packages-block.html" aria-current="page">Block-editor</a>
+    <a href="./onboard-plans.html">Onboard-planer</a>
     <a href="./reports.html">Felrapporter</a>
-    <a href="./answers.html">Svar</a>
-    <a href="./trainings.html">Utbildningar</a>
-    <a href="./packages-block.html" aria-current="page">Block</a>
     <a href="./integrations.html">Integrationer</a>
     <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
   </nav>
@@ -230,16 +213,15 @@ POLICY (LÅST):
 <main class="container">
   <div class="row space-between wrap" style="align-items:flex-start;">
     <div>
-      <h1 class="tight">Block (publicerade/verifierade utbildningar)</h1>
+      <h1 class="tight">Block-editor (Block-bank)</h1>
       <p class="muted2">
-        Välj en utbildning → redigera block. Stöd för <strong>Dokument</strong>-block (lång text, utan svarstyp/alternativ).
-        <span class="tiny" style="display:block; margin-top:6px;">
-          Verifiera markerar utbildningen som <strong>Verified</strong> när innehållet är “klart nog”.
-        </span>
+        Här ser du block som skapats i <strong>Skapa block</strong> och kan redigera dem innan publicering.
+        Publicering gör blocket valbart i <strong>Onboard-planer</strong>.
       </p>
 
       <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
         <span class="pill" id="whoPill">Inloggad: —</span>
+        <span class="pill" id="modePill">Läge: —</span>
         <span class="pill" id="statePill">Status: —</span>
         <span class="pill" id="selPill">Val: —</span>
       </div>
@@ -247,171 +229,222 @@ POLICY (LÅST):
       <div class="actionBar" aria-label="Åtgärder">
         <button class="btn secondary" id="btnEdit" type="button" disabled>Redigera</button>
         <button class="btn" id="btnSave" type="button" disabled>Spara</button>
-        <button class="btn secondary" id="btnVerify" type="button" disabled>Verifiera</button>
+        <button class="btn secondary" id="btnPublish" type="button" disabled>Publicera</button>
       </div>
+
+      <div id="lockBox" class="lockbox" style="display:none;"></div>
     </div>
 
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
-      <button class="btn secondary" id="btnBackToTrainings" type="button">Till Utbildningar</button>
+      <a class="btn secondary" href="./tasks.html">+ Skapa nytt block</a>
     </div>
   </div>
 
   <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
 
   <div class="grid2" style="margin-top:12px;">
-    <section class="card sideCard" aria-label="Utbildningar">
+    <!-- LEFT: Blocks -->
+    <section class="card sideCard" aria-label="Blocklista">
       <div class="listHead">
         <div>
-          <div style="font-weight:950;">Utbildningar</div>
-          <div class="tiny"><span id="countTrainings">—</span></div>
+          <div style="font-weight:950;">Block</div>
+          <div class="tiny"><span id="countBlocks">—</span></div>
         </div>
         <div style="min-width: 160px;">
           <label class="tiny" style="margin:0; font-weight:900;">
             Sök
-            <input id="qTrain" type="text" placeholder="Titel, modul, område…" autocomplete="off" />
+            <input id="qBlocks" type="text" placeholder="Rubrik, modul, område…" autocomplete="off" />
           </label>
         </div>
       </div>
-      <div class="rows" id="trainingRows">
+
+      <div style="padding:10px; border-bottom:1px solid var(--line); background: rgba(250,250,250,.75);">
+        <label class="tiny" style="margin:0; font-weight:900;">
+          Visa
+          <select id="filterStatus">
+            <option value="all">Alla</option>
+            <option value="draft">Utkast</option>
+            <option value="published">Publicerade</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="rows" id="blockList">
         <div class="muted2">Laddar…</div>
       </div>
+
       <div class="tiny" style="margin-top:10px;">
-        Saknas utbildning här? Den måste vara <strong>publicerad</strong> eller <strong>verifierad</strong> i trainings.html.
+        <strong>Key:</strong> <span class="mono">AO-0XX_BLOCKS_V1</span> (read/write)
       </div>
     </section>
 
+    <!-- RIGHT: Editor -->
     <section class="card" aria-label="Editor">
-      <div class="editorSplit">
-        <div class="listBox sideCard" style="background:transparent; border:none; box-shadow:none;">
-          <div class="listHead" style="border:1px solid var(--line); border-radius: var(--r14) var(--r14) 0 0;">
-            <div>
-              <div style="font-weight:950;">Block</div>
-              <div class="tiny" id="blocksSummary">Välj en utbildning…</div>
-            </div>
-            <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-              <button class="miniBtn" id="btnMoveUp" type="button" disabled title="Flytta upp">↑</button>
-              <button class="miniBtn" id="btnMoveDown" type="button" disabled title="Flytta ner">↓</button>
-              <button class="miniBtn danger" id="btnDeleteBlock" type="button" disabled title="Ta bort block">Ta bort</button>
-            </div>
-          </div>
+      <div class="panel" id="editorPanel" aria-label="Blockpanel">
+        <div class="row space-between wrap" style="align-items:center;">
+          <h2>Editor</h2>
+          <span class="tag" id="blockTag">—</span>
+        </div>
 
-          <div class="rows" id="blockRows" style="border:1px solid var(--line); border-top:none; border-radius: 0 0 var(--r14) var(--r14);">
-            <div class="muted2">Välj en utbildning till vänster.</div>
-          </div>
+        <div class="tiny" id="panelHint" style="margin-top:6px;">Välj ett block i listan.</div>
 
-          <div style="margin-top:10px; border:1px solid var(--line); border-radius: var(--r14); background:#fff; padding:10px;">
-            <label style="margin:0; font-weight:900;">
-              Lägg till block
-              <select id="addKind">
-                <option value="info">Information</option>
-                <option value="task">Uppgift</option>
-                <option value="question">Fråga</option>
-                <option value="both">Uppgift + Fråga</option>
-                <option value="document">Dokument</option>
-              </select>
+        <div id="editorWrap" style="margin-top:10px; display:none;">
+          <div class="row2">
+            <label>
+              Modul
+              <input id="moduleInp" type="text" maxlength="60" autocomplete="off" />
             </label>
-            <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
-              <button class="miniBtn" id="btnAddBlock" type="button" disabled>+ Lägg till</button>
-              <div class="tiny">Spara när du är klar.</div>
+            <label>
+              Område
+              <input id="areaInp" type="text" maxlength="60" autocomplete="off" />
+            </label>
+          </div>
+
+          <div class="row2" style="margin-top:10px;">
+            <label>
+              Steg
+              <input id="stepInp" type="text" maxlength="60" autocomplete="off" />
+            </label>
+            <label>
+              Status
+              <input id="statusInp" type="text" disabled />
+            </label>
+          </div>
+
+          <label style="margin-top:10px;">
+            Rubrik (post-it)
+            <input id="titleInp" type="text" maxlength="80" autocomplete="off" />
+          </label>
+
+          <div style="margin-top:12px; border-top:1px dashed var(--line); padding-top:12px;">
+            <div class="row space-between wrap" style="align-items:center;">
+              <div>
+                <h3 style="margin:0;">Items</h3>
+                <div class="tiny" id="itemsSummary">—</div>
+              </div>
+              <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+                <button class="miniBtn" id="btnItemUp" type="button" disabled title="Flytta upp">↑</button>
+                <button class="miniBtn" id="btnItemDown" type="button" disabled title="Flytta ner">↓</button>
+                <button class="miniBtn danger" id="btnItemDelete" type="button" disabled title="Ta bort item">Ta bort</button>
+              </div>
+            </div>
+
+            <div class="rows" id="itemRows" style="margin-top:10px; padding:0;">
+              <div class="muted2">Välj ett block.</div>
+            </div>
+
+            <div style="margin-top:12px; border:1px solid var(--line); border-radius: var(--r14); background:#fff; padding:10px;">
+              <label style="margin:0; font-weight:900;">
+                Lägg till item
+                <select id="addItemKind">
+                  <option value="document">Dokument</option>
+                  <option value="question_text">Fråga (text)</option>
+                  <option value="question_choice">Fråga (val)</option>
+                  <option value="task_checkbox">Uppgift (checkbox)</option>
+                  <option value="task_scale">Uppgift (skala)</option>
+                </select>
+              </label>
+              <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
+                <button class="miniBtn" id="btnAddItem" type="button" disabled>+ Lägg till</button>
+                <div class="tiny">Spara när du är klar.</div>
+              </div>
+            </div>
+
+            <!-- Item editor -->
+            <div id="itemEditor" style="margin-top:12px; display:none; border-top:1px dashed var(--line); padding-top:12px;">
+              <h3 style="margin-top:0;">Item-editor</h3>
+
+              <label>
+                Typ
+                <input id="itemKindInp" type="text" disabled />
+              </label>
+
+              <label style="margin-top:10px;">
+                Text
+                <textarea id="itemTextInp" maxlength="2000"></textarea>
+              </label>
+
+              <!-- Question -->
+              <div id="qWrap" style="margin-top:12px; display:none;">
+                <label>
+                  Svarstyp
+                  <select id="qAnswerSel">
+                    <option value="text">Text</option>
+                    <option value="choice">Val</option>
+                  </select>
+                </label>
+
+                <label style="margin-top:10px;">
+                  Alternativ (en per rad, max 10)
+                  <textarea id="qOptionsInp" maxlength="500" placeholder="Skriv ett alternativ per rad…"></textarea>
+                </label>
+
+                <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
+                  <input id="qReqInp" type="checkbox" />
+                  <span>Krver svar</span>
+                </label>
+
+                <div class="tiny" id="qHint" style="margin-top:6px;">Val kräver minst 2 alternativ.</div>
+              </div>
+
+              <!-- Task -->
+              <div id="tWrap" style="margin-top:12px; display:none;">
+                <label>
+                  Svarstyp
+                  <select id="tAnswerSel">
+                    <option value="checkbox">Checkbox</option>
+                    <option value="scale">Skala</option>
+                  </select>
+                </label>
+
+                <div class="row2" style="margin-top:10px;">
+                  <label>
+                    Min (1–10)
+                    <input id="tMinInp" type="number" min="1" max="10" step="1" inputmode="numeric" />
+                  </label>
+                  <label>
+                    Max (1–10)
+                    <input id="tMaxInp" type="number" min="1" max="10" step="1" inputmode="numeric" />
+                  </label>
+                </div>
+
+                <div class="row2" style="margin-top:10px;">
+                  <label>
+                    Label min (valfritt)
+                    <input id="tMinLabelInp" type="text" maxlength="40" autocomplete="off" />
+                  </label>
+                  <label>
+                    Label max (valfritt)
+                    <input id="tMaxLabelInp" type="text" maxlength="40" autocomplete="off" />
+                  </label>
+                </div>
+
+                <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
+                  <input id="tReqInp" type="checkbox" />
+                  <span>Krver klar (done)</span>
+                </label>
+
+                <div class="tiny" id="tHint" style="margin-top:6px;">Skala kräver min/max och text.</div>
+              </div>
+
+              <!-- Document -->
+              <div id="dWrap" style="margin-top:12px; display:none;">
+                <label style="margin:0; display:flex; gap:10px; align-items:center;">
+                  <input id="dSignInp" type="checkbox" />
+                  <span>Kräver signering</span>
+                </label>
+              </div>
+
+              <details style="margin-top:12px;">
+                <summary class="tiny" style="cursor:pointer; font-weight:900; color: var(--muted);">Debug (valt)</summary>
+                <pre id="debugPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
+              </details>
             </div>
           </div>
         </div>
 
-        <div class="panel" aria-label="Blockpanel" id="editorPanel">
-          <div class="row space-between wrap" style="align-items:center;">
-            <h2>Blockeditor</h2>
-            <span class="tag" id="blockIndexTag">—</span>
-          </div>
-
-          <div class="tiny" id="panelHint" style="margin-top:6px;">Välj ett block i listan.</div>
-
-          <div id="editorWrap" style="margin-top:10px; display:none;">
-            <label>
-              Typ
-              <select id="kindSel">
-                <option value="info">Information</option>
-                <option value="task">Uppgift</option>
-                <option value="question">Fråga</option>
-                <option value="both">Uppgift + Fråga</option>
-                <option value="document">Dokument</option>
-              </select>
-            </label>
-
-            <label style="margin-top:10px;">
-              Titel
-              <input id="titleInp" type="text" maxlength="80" autocomplete="off" />
-            </label>
-
-            <label style="margin-top:10px;">
-              Text
-              <textarea id="textInp" maxlength="2000" class="docArea"></textarea>
-            </label>
-            <div class="tiny" id="textHint" style="margin-top:6px;">
-              Dokument: längre text (upp till 2000 tecken). Övriga block: rekommenderat kortare.
-            </div>
-
-            <div id="taskWrap" style="margin-top:12px; display:none;">
-              <h3>Uppgift</h3>
-              <label>
-                Svarstyp
-                <select id="taskAnswerSel">
-                  <option value="checkbox">Checkbox</option>
-                  <option value="scale">Skala</option>
-                </select>
-              </label>
-
-              <div class="row2" style="margin-top:10px;">
-                <label>
-                  Min (1–10)
-                  <input id="scaleMinInp" type="number" min="1" max="10" step="1" inputmode="numeric" />
-                </label>
-                <label>
-                  Max (1–10)
-                  <input id="scaleMaxInp" type="number" min="1" max="10" step="1" inputmode="numeric" />
-                </label>
-              </div>
-
-              <div class="row2" style="margin-top:10px;">
-                <label>
-                  Label min (valfritt)
-                  <input id="scaleMinLabelInp" type="text" maxlength="40" autocomplete="off" />
-                </label>
-                <label>
-                  Label max (valfritt)
-                  <input id="scaleMaxLabelInp" type="text" maxlength="40" autocomplete="off" />
-                </label>
-              </div>
-
-              <div class="tiny" id="scaleHint" style="margin-top:6px;">Skala används bara när svarstyp = Skala.</div>
-            </div>
-
-            <div id="questionWrap" style="margin-top:12px; display:none;">
-              <h3>Fråga</h3>
-              <label>
-                Svarstyp
-                <select id="questionAnswerSel">
-                  <option value="text">Text</option>
-                  <option value="choice">Kryss (val)</option>
-                </select>
-              </label>
-
-              <label style="margin-top:10px;">
-                Alternativ (en per rad, max 10)
-                <textarea id="optionsInp" maxlength="500" placeholder="Skriv ett alternativ per rad…"></textarea>
-              </label>
-
-              <div class="tiny" id="optionsHint" style="margin-top:6px;">Alternativ används bara när svarstyp = Kryss (val).</div>
-            </div>
-
-            <details style="margin-top:12px;">
-              <summary class="tiny" style="cursor:pointer; font-weight:900; color: var(--muted);">Debug (valt block)</summary>
-              <pre id="debugPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
-            </details>
-          </div>
-
-          <div class="tiny" style="margin-top:12px;">
-            <strong>Key:</strong> <span class="mono">AO-057_TRAININGS_V1</span> (read/write)
-          </div>
+        <div class="tiny" style="margin-top:12px;">
+          <strong>Fail-closed:</strong> Om block-banken är korrupt låses redigering/publicering.
         </div>
       </div>
     </section>
@@ -419,70 +452,93 @@ POLICY (LÅST):
 </main>
 
 <script src="../UI/UI-04-CONFIG.js"></script>
-<script src="../UI/UI-03-APP.js"></script>
 
 <script>
 (function(){
   "use strict";
 
-  const SESSION_KEY   = "AO-001_LOGIN_V1";
-  const TRAININGS_KEY = "AO-057_TRAININGS_V1";
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const BLOCKS_KEY  = "AO-0XX_BLOCKS_V1";
 
   const $ = (s) => document.querySelector(s);
 
   const elMsg = $("#msgBox");
   const elWho = $("#whoPill");
+  const elMode = $("#modePill");
   const elState = $("#statePill");
   const elSel = $("#selPill");
+  const lockBox = $("#lockBox");
 
-  const btnBackToTrainings = $("#btnBackToTrainings");
+  const qBlocks = $("#qBlocks");
+  const filterStatus = $("#filterStatus");
+  const countBlocks = $("#countBlocks");
+  const blockList = $("#blockList");
+
   const btnEdit = $("#btnEdit");
-  const btnVerify = $("#btnVerify");
   const btnSave = $("#btnSave");
+  const btnPublish = $("#btnPublish");
 
-  const qTrain = $("#qTrain");
-  const countTrainings = $("#countTrainings");
-  const trainingRows = $("#trainingRows");
-
-  const blocksSummary = $("#blocksSummary");
-  const blockRows = $("#blockRows");
-
-  const btnMoveUp = $("#btnMoveUp");
-  const btnMoveDown = $("#btnMoveDown");
-  const btnDeleteBlock = $("#btnDeleteBlock");
-
-  const addKind = $("#addKind");
-  const btnAddBlock = $("#btnAddBlock");
-
-  const blockIndexTag = $("#blockIndexTag");
-  const panelHint = $("#panelHint");
   const editorWrap = $("#editorWrap");
+  const panelHint = $("#panelHint");
+  const blockTag = $("#blockTag");
 
-  const kindSel = $("#kindSel");
+  const moduleInp = $("#moduleInp");
+  const areaInp = $("#areaInp");
+  const stepInp = $("#stepInp");
   const titleInp = $("#titleInp");
-  const textInp = $("#textInp");
-  const textHint = $("#textHint");
+  const statusInp = $("#statusInp");
 
-  const taskWrap = $("#taskWrap");
-  const taskAnswerSel = $("#taskAnswerSel");
-  const scaleMinInp = $("#scaleMinInp");
-  const scaleMaxInp = $("#scaleMaxInp");
-  const scaleMinLabelInp = $("#scaleMinLabelInp");
-  const scaleMaxLabelInp = $("#scaleMaxLabelInp");
-  const scaleHint = $("#scaleHint");
+  const itemsSummary = $("#itemsSummary");
+  const itemRows = $("#itemRows");
+  const btnItemUp = $("#btnItemUp");
+  const btnItemDown = $("#btnItemDown");
+  const btnItemDelete = $("#btnItemDelete");
 
-  const questionWrap = $("#questionWrap");
-  const questionAnswerSel = $("#questionAnswerSel");
-  const optionsInp = $("#optionsInp");
-  const optionsHint = $("#optionsHint");
+  const addItemKind = $("#addItemKind");
+  const btnAddItem = $("#btnAddItem");
+
+  const itemEditor = $("#itemEditor");
+  const itemKindInp = $("#itemKindInp");
+  const itemTextInp = $("#itemTextInp");
+
+  const qWrap = $("#qWrap");
+  const qAnswerSel = $("#qAnswerSel");
+  const qOptionsInp = $("#qOptionsInp");
+  const qReqInp = $("#qReqInp");
+  const qHint = $("#qHint");
+
+  const tWrap = $("#tWrap");
+  const tAnswerSel = $("#tAnswerSel");
+  const tMinInp = $("#tMinInp");
+  const tMaxInp = $("#tMaxInp");
+  const tMinLabelInp = $("#tMinLabelInp");
+  const tMaxLabelInp = $("#tMaxLabelInp");
+  const tReqInp = $("#tReqInp");
+  const tHint = $("#tHint");
+
+  const dWrap = $("#dWrap");
+  const dSignInp = $("#dSignInp");
 
   const debugPre = $("#debugPre");
+
+  const isText = (v) => (typeof v === "string");
+  const clampInt = (n, lo, hi, def) => {
+    const x = Number(n);
+    if(!Number.isFinite(x)) return def;
+    const xi = Math.trunc(x);
+    if(xi < lo) return lo;
+    if(xi > hi) return hi;
+    return xi;
+  };
 
   function setMsg(kind, text){
     elMsg.className = "msg" + (kind ? " " + kind : "");
     elMsg.textContent = text || "";
     elMsg.style.display = text ? "block" : "none";
   }
+
+  function clear(node){ while(node && node.firstChild) node.removeChild(node.firstChild); }
+
   function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
   function doLogout(){
@@ -493,174 +549,256 @@ POLICY (LÅST):
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  btnBackToTrainings.addEventListener("click", () => { window.location.href = "./trainings.html"; });
-
-  function safeParseArray(key){
-    try{
-      const raw = localStorage.getItem(key);
-      if(raw == null) return { ok:true, value: [] };
-      const v = JSON.parse(raw);
-      if(!Array.isArray(v)) return { ok:false, err: key + " är inte en array." };
-      return { ok:true, value: v };
-    }catch{
-      return { ok:false, err: key + " är korrupt JSON." };
+  function showLockBox(lines){
+    if(!lines || !lines.length){
+      lockBox.style.display = "none";
+      clear(lockBox);
+      return;
     }
+    lockBox.style.display = "block";
+    clear(lockBox);
+
+    const strong = document.createElement("strong");
+    strong.textContent = "Låst (fail-closed):";
+    lockBox.appendChild(strong);
+
+    const ul = document.createElement("ul");
+    lines.forEach(line => {
+      const li = document.createElement("li");
+      li.textContent = String(line ?? "");
+      ul.appendChild(li);
+    });
+    lockBox.appendChild(ul);
   }
-  function saveArray(key, arr){
+
+  // ------------------------------
+  // Auth (HRApp)
+  // ------------------------------
+  if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
+    redirectLogin(); return;
+  }
+  // allow ADMIN/MANAGER/SYSTEM_ADMIN to access page; SYSTEM_ADMIN is read-only
+  const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN","MANAGER","SYSTEM_ADMIN"] });
+  if(!session) return;
+
+  const auth = window.HRApp.getAuth(session);
+  const role = String(auth?.role || "").trim();
+  const empNo = String(auth?.empNo || "").trim();
+
+  const isAdmin = (role === "ADMIN");
+  const isManager = (role === "MANAGER");
+  const isSystemAdmin = (role === "SYSTEM_ADMIN" || role === "SYSTEMADMIN");
+
+  if(!isAdmin && !isManager && !isSystemAdmin){
+    setMsg("err", "Otillräcklig behörighet.");
+    redirectLogin(); return;
+  }
+
+  elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ${role || "—"}`;
+  elMode.textContent = isSystemAdmin ? "Läge: Steward (read-only)" : "Läge: Editor";
+  elMode.className = "pill " + (isSystemAdmin ? "warn" : "ok");
+
+  // ------------------------------
+  // Storage helpers
+  // ------------------------------
+  function safeGetLocalRaw(key){
+    try{ return localStorage.getItem(key); }catch{ return null; }
+  }
+
+  function loadBlocksState(){
+    const raw = safeGetLocalRaw(BLOCKS_KEY);
+
+    // Missing key: ok (empty list)
+    if(raw === null) return { ok:true, missing:true, corrupt:false, blocks:[] };
+
+    let parsed;
+    try{ parsed = JSON.parse(raw); }
+    catch{ return { ok:false, missing:false, corrupt:true, blocks:[] }; }
+
+    if(!Array.isArray(parsed)) return { ok:false, missing:false, corrupt:true, blocks:[] };
+
+    return { ok:true, missing:false, corrupt:false, blocks: parsed };
+  }
+
+  function saveBlocks(blocks){
     try{
-      localStorage.setItem(key, JSON.stringify(arr));
+      localStorage.setItem(BLOCKS_KEY, JSON.stringify(blocks));
       return { ok:true };
     }catch{
       return { ok:false, err:"Kunde inte spara (localStorage fullt/blockerat)." };
     }
   }
-  function clampInt(n, lo, hi, def){
-    const x = Number(n);
-    if(!Number.isFinite(x)) return def;
-    const xi = Math.trunc(x);
-    if(xi < lo) return lo;
-    if(xi > hi) return hi;
-    return xi;
-  }
-  function clear(node){ while(node.firstChild) node.removeChild(node.firstChild); }
 
-  function kindLabel(kind){
-    if(kind === "info") return "Information";
-    if(kind === "task") return "Uppgift";
-    if(kind === "question") return "Fråga";
-    if(kind === "both") return "Uppgift + Fråga";
-    if(kind === "document") return "Dokument (läs)";
-    return "Block";
+  function genId(prefix){
+    const p = prefix || "id";
+    try{
+      if(window.crypto && typeof window.crypto.getRandomValues === "function"){
+        const buf = new Uint8Array(8);
+        window.crypto.getRandomValues(buf);
+        const hex = Array.from(buf).map(b => b.toString(16).padStart(2,"0")).join("");
+        return p + "_" + hex + "_" + Date.now().toString(16);
+      }
+    }catch{}
+    return p + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function normText(s, max){
+    const x = String(s ?? "").replace(/\s+/g, " ").trim();
+    if(x.length <= max) return x;
+    return x.slice(0, max);
   }
 
   function normStatus(s){
-    return String(s || "").trim().toLowerCase();
+    const st = String(s || "").trim().toLowerCase();
+    if(st === "draft" || st === "published") return st;
+    return "draft";
   }
 
-  function statusLabel(s){
-    const st = normStatus(s);
-    if(st === "published") return "Publicerad";
-    if(st === "verified") return "Verifierad";
-    if(st === "draft") return "Utkast";
-    return "Okänd";
+  function blockStatusLabel(st){
+    const s = normStatus(st);
+    if(s === "published") return "Publicerad";
+    return "Utkast";
   }
 
-  function isAllowedEditStatus(s){
-    const st = normStatus(s);
-    return (st === "published" || st === "verified");
+  function itemKindLabel(it){
+    const k = String(it?.kind || "");
+    if(k === "document") return "Dokument";
+    if(k === "question"){
+      const at = String(it?.answerType || "text");
+      return (at === "choice") ? "Fråga (val)" : "Fråga (text)";
+    }
+    if(k === "task"){
+      const at = String(it?.answerType || "checkbox");
+      return (at === "scale") ? "Uppgift (skala)" : "Uppgift (checkbox)";
+    }
+    return "Item";
+  }
+
+  function normalizeItem(raw){
+    const it = (raw && typeof raw === "object") ? raw : {};
+    const kind = String(it.kind || "").trim();
+
+    if(kind === "document"){
+      return {
+        kind: "document",
+        text: String(it.text || "").slice(0, 2000),
+        requiresSign: !!it.requiresSign
+      };
+    }
+
+    if(kind === "question"){
+      const answerType = (it.answerType === "choice") ? "choice" : "text";
+      const options = Array.isArray(it.options)
+        ? it.options.slice(0,10).map(x => String(x||"").trim().slice(0,60)).filter(Boolean)
+        : [];
+      return {
+        kind: "question",
+        questionId: String(it.questionId || genId("q")),
+        text: String(it.text || "").slice(0, 240),
+        answerType,
+        options: (answerType === "choice") ? options : [],
+        requiresAnswer: (it.requiresAnswer !== false)
+      };
+    }
+
+    if(kind === "task"){
+      const answerType = (it.answerType === "scale") ? "scale" : "checkbox";
+      const scale = (answerType === "scale")
+        ? {
+            min: clampInt(it?.scale?.min, 1, 10, 1),
+            max: clampInt(it?.scale?.max, 1, 10, 5),
+            minLabel: String(it?.scale?.minLabel || "").slice(0,40),
+            maxLabel: String(it?.scale?.maxLabel || "").slice(0,40)
+          }
+        : null;
+
+      if(scale && scale.max < scale.min) scale.max = scale.min;
+
+      return {
+        kind: "task",
+        taskId: String(it.taskId || genId("t")),
+        text: String(it.text || "").slice(0, 240),
+        answerType,
+        scale,
+        requiresDone: (it.requiresDone !== false)
+      };
+    }
+
+    // fail-closed: unknown -> safe placeholder item (still editable)
+    return {
+      kind: "document",
+      text: "Okänd item-typ (normaliserad till dokument).",
+      requiresSign: true
+    };
   }
 
   function normalizeBlock(raw){
     const b = (raw && typeof raw === "object") ? raw : {};
-    const kind0 = String(b.kind || "info").trim();
-
-    const okKind = (kind0 === "info" || kind0 === "task" || kind0 === "question" || kind0 === "both" || kind0 === "document");
-    const kind = okKind ? kind0 : "info";
-
-    const taskAnswer = (b.taskAnswer === "scale" || b.taskAnswer === "checkbox") ? b.taskAnswer : "checkbox";
-    const questionAnswer = (b.questionAnswer === "choice" || b.questionAnswer === "text") ? b.questionAnswer : "text";
-
-    const scaleMin = clampInt(b.scaleMin, 1, 10, 1);
-    const scaleMax0 = clampInt(b.scaleMax, 1, 10, 5);
-    const scaleMax = (scaleMax0 < scaleMin) ? scaleMin : scaleMax0;
-
-    const options = Array.isArray(b.options)
-      ? b.options.slice(0,10).map(x => String(x||"").trim().slice(0,40)).filter(Boolean)
-      : [];
-
-    const maxText = (kind === "document") ? 2000 : 240;
-    let text = "";
-    if(typeof b.text === "string" && b.text) text = b.text;
-    else if(typeof b.description === "string" && b.description) text = b.description;
-    else text = "";
-
-    if(!okKind){
-      text = "Okänd blocktyp";
-    }
-
-    const out = {
-      kind,
-      title: String(b.title || "").slice(0,80),
-      text: String(text || "").slice(0, maxText),
-
-      taskAnswer,
-      scaleMin,
-      scaleMax,
-      scaleMinLabel: String(b.scaleMinLabel || "").slice(0,40),
-      scaleMaxLabel: String(b.scaleMaxLabel || "").slice(0,40),
-
-      questionAnswer: (kind === "both") ? "text" : questionAnswer,
-      options: (questionAnswer === "choice") ? options : []
+    const items = Array.isArray(b.items) ? b.items.map(normalizeItem).slice(0, 200) : [];
+    return {
+      blockId: String(b.blockId || genId("blk")),
+      title: String(b.title || "").slice(0, 80),
+      module: String(b.module || "").slice(0, 60),
+      area: String(b.area || "").slice(0, 60),
+      step: String(b.step || "").slice(0, 60),
+      status: normStatus(b.status || "draft"),
+      createdAt: Number.isFinite(Number(b.createdAt)) ? Number(b.createdAt) : Date.now(),
+      updatedAt: Number.isFinite(Number(b.updatedAt)) ? Number(b.updatedAt) : Date.now(),
+      createdBy: String(b.createdBy || ""),
+      verifiedAt: (b.verifiedAt === null || b.verifiedAt === undefined) ? null : (Number.isFinite(Number(b.verifiedAt)) ? Number(b.verifiedAt) : null),
+      verifiedBy: String(b.verifiedBy || ""),
+      items
     };
-
-    if(kind === "document"){
-      out.taskAnswer = "checkbox";
-      out.scaleMin = 1;
-      out.scaleMax = 5;
-      out.scaleMinLabel = "";
-      out.scaleMaxLabel = "";
-      out.questionAnswer = "text";
-      out.options = [];
-    }
-
-    if(kind === "info" || kind === "task"){
-      out.options = [];
-      out.questionAnswer = "text";
-    }
-
-    if(kind === "both"){
-      out.questionAnswer = "text";
-      out.options = [];
-    }
-
-    return out;
   }
 
-  function normalizeTraining(raw){
-    const t = (raw && typeof raw === "object") ? raw : {};
-    const id = String(t.id || "").trim();
-    const module = String(t.module || "").trim();
-    const area = String(t.area || "").trim();
-    const title = String(t.title || "").trim();
+  function validateForPublish(block){
+    const reasons = [];
+    const title = String(block?.title || "").trim();
+    if(!title) reasons.push("Rubrik saknas.");
 
-    const st0 = normStatus(t.status || "draft");
-    const status = (st0 === "published" || st0 === "verified" || st0 === "draft") ? st0 : "draft";
+    const items = Array.isArray(block?.items) ? block.items : [];
+    if(items.length < 1) reasons.push("Minst 1 item krävs.");
 
-    const blocksArr = Array.isArray(t.blocks) ? t.blocks : [];
-    const blocks = blocksArr.map(normalizeBlock);
+    items.forEach((it, i) => {
+      const k = String(it?.kind || "");
+      const tx = String(it?.text || "").trim();
+      if(!tx) reasons.push(`Item #${i+1}: Text saknas.`);
 
-    const verifiedAt = Number.isFinite(Number(t.verifiedAt)) ? Number(t.verifiedAt) : undefined;
-    const verifiedBy = (typeof t.verifiedBy === "string") ? String(t.verifiedBy) : undefined;
+      if(k === "question"){
+        const at = String(it?.answerType || "text");
+        if(at === "choice"){
+          const opts = Array.isArray(it?.options) ? it.options : [];
+          const uniq = [];
+          opts.forEach(o => { const s = String(o||"").trim(); if(s && !uniq.includes(s)) uniq.push(s); });
+          if(uniq.length < 2) reasons.push(`Item #${i+1}: Val-fråga kräver minst 2 alternativ.`);
+        }
+      }
 
-    const out = { ...t, id, module, area, title, status, blocks };
-    if(verifiedAt !== undefined) out.verifiedAt = verifiedAt;
-    if(verifiedBy !== undefined) out.verifiedBy = verifiedBy;
+      if(k === "task"){
+        const at = String(it?.answerType || "checkbox");
+        if(at === "scale"){
+          const mn = Number(it?.scale?.min);
+          const mx = Number(it?.scale?.max);
+          if(!Number.isFinite(mn) || !Number.isFinite(mx)) reasons.push(`Item #${i+1}: Skala saknar min/max.`);
+          if(Number.isFinite(mn) && Number.isFinite(mx) && mx < mn) reasons.push(`Item #${i+1}: Skala max < min.`);
+        }
+      }
+    });
 
-    return out;
+    return { ok: reasons.length === 0, reasons };
   }
 
-  // --- AUTH (ADMIN) ---
-  if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-    redirectLogin(); return;
-  }
-  const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN"] });
-  if(!session) return;
-
-  const auth = window.HRApp.getAuth(session);
-  if(!auth || !auth.role || String(auth.role) !== "ADMIN"){
-    setMsg("err", "Otillräcklig behörighet. Den här sidan är endast för ADMIN.");
-    redirectLogin(); return;
-  }
-
-  const empNo = String(auth.empNo || (session.auth && session.auth.empNo) || "").trim();
-  elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ADMIN`;
-
+  // ------------------------------
+  // State
+  // ------------------------------
   const STATE = {
-    allTrainings: [],
+    locked: false,
+    lockReasons: [],
+    all: [],
     visible: [],
-    selectedTrainingId: "",
-    selectedBlockIndex: -1,
-    editTraining: null,
+    selectedId: "",
+    edit: null,          // normalized block (working copy)
+    selectedItemIndex: -1,
     dirty: false
   };
 
@@ -668,51 +806,128 @@ POLICY (LÅST):
     STATE.dirty = !!on;
     elState.textContent = STATE.dirty ? "Status: Osparade ändringar" : "Status: OK";
     elState.className = "pill " + (STATE.dirty ? "warn" : "ok");
-    btnSave.disabled = !STATE.dirty;
-    updateVerifyButton();
+
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    btnSave.disabled = !(canWrite && STATE.dirty && STATE.edit);
+    btnPublish.disabled = true;
+    btnEdit.disabled = !(STATE.edit && (STATE.edit.items?.length > 0));
+
+    updatePublishButton();
   }
 
   function setSelectionPill(){
-    const t = STATE.editTraining;
-    if(!t){
+    const b = STATE.edit;
+    if(!b){
       elSel.textContent = "Val: —";
       elSel.className = "pill";
       return;
     }
-    const blocks = Array.isArray(t.blocks) ? t.blocks.length : 0;
-    const st = normStatus(t.status || "draft");
-    const stLabel = statusLabel(st);
-    const isV = (st === "verified");
-    const pillKind = isV ? "ok" : (blocks > 0 ? "ok" : "warn");
-
-    elSel.textContent = `Val: ${t.module || "—"} • ${t.area || "—"} • ${t.title || "—"} • ${blocks} block • ${stLabel}`;
-    elSel.className = "pill " + pillKind;
+    const nItems = Array.isArray(b.items) ? b.items.length : 0;
+    const st = normStatus(b.status || "draft");
+    elSel.textContent = `Val: ${b.title || "—"} • ${nItems} items • ${blockStatusLabel(st)}`;
+    elSel.className = "pill " + (st === "published" ? "ok" : (nItems ? "ok" : "warn"));
   }
 
-  function trainingMatches(t, q){
-    if(!q) return true;
-    const hay = (String(t.title||"") + " " + String(t.module||"") + " " + String(t.area||"")).toLowerCase();
-    return hay.includes(q.toLowerCase());
-  }
-
-  function renderTrainings(){
-    const q = String(qTrain.value || "").trim();
-    const filtered = STATE.visible.filter(t => trainingMatches(t, q));
-    countTrainings.textContent = `${filtered.length} st`;
-
-    clear(trainingRows);
-
-    if(filtered.length === 0){
-      const d = document.createElement("div");
-      d.className = "muted2";
-      d.textContent = "Inga utbildningar (eller inget matchar sök).";
-      trainingRows.appendChild(d);
+  function updatePublishButton(){
+    const b = STATE.edit;
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    if(!b || !canWrite){
+      btnPublish.disabled = true;
+      btnPublish.textContent = "Publicera";
+      btnPublish.title = isSystemAdmin ? "Steward-läge (read-only)." : "Välj ett block först.";
+      return;
+    }
+    if(STATE.dirty){
+      btnPublish.disabled = true;
+      btnPublish.textContent = "Publicera";
+      btnPublish.title = "Spara först (osparade ändringar).";
       return;
     }
 
-    filtered.slice(0,300).forEach(t => {
+    const st = normStatus(b.status || "draft");
+    btnPublish.textContent = (st === "published") ? "Publicera igen" : "Publicera";
+
+    const chk = validateForPublish(b);
+    if(!chk.ok){
+      btnPublish.disabled = true;
+      btnPublish.title = "Kan inte publicera: " + chk.reasons.join(" ");
+      return;
+    }
+    btnPublish.disabled = false;
+    btnPublish.title = (st === "published")
+      ? "Publicera igen: uppdaterar verifiedAt/verifiedBy."
+      : "Publicera: status=published + verifiedAt/verifiedBy.";
+  }
+
+  function setModePill(){
+    if(STATE.locked){
+      elMode.textContent = "Läge: Låst (fail-closed)";
+      elMode.className = "pill bad";
+      return;
+    }
+    if(isSystemAdmin){
+      elMode.textContent = "Läge: Steward (read-only)";
+      elMode.className = "pill warn";
+      return;
+    }
+    elMode.textContent = "Läge: Editor";
+    elMode.className = "pill ok";
+  }
+
+  function applyLockFromState(){
+    STATE.locked = (STATE.lockReasons.length > 0);
+    showLockBox(STATE.lockReasons);
+    setModePill();
+    setDirty(STATE.dirty);
+  }
+
+  // ------------------------------
+  // Rendering
+  // ------------------------------
+  function blockMatches(b, q){
+    if(!q) return true;
+    const hay = (String(b.title||"") + " " + String(b.module||"") + " " + String(b.area||"") + " " + String(b.step||"")).toLowerCase();
+    return hay.includes(q.toLowerCase());
+  }
+
+  function computeVisible(){
+    const q = String(qBlocks.value || "").trim();
+    const fs = String(filterStatus.value || "all");
+    const arr = STATE.all.slice();
+
+    let out = arr;
+    if(fs === "draft" || fs === "published"){
+      out = out.filter(b => normStatus(b.status) === fs);
+    }
+    if(q) out = out.filter(b => blockMatches(b, q));
+
+    // sort: draft first, newest first within status
+    out.sort((a,b) => {
+      const sa = normStatus(a.status), sb = normStatus(b.status);
+      if(sa !== sb) return (sa === "draft") ? -1 : 1;
+      return Number(b.updatedAt||0) - Number(a.updatedAt||0);
+    });
+
+    STATE.visible = out;
+  }
+
+  function renderBlockList(){
+    computeVisible();
+    clear(blockList);
+
+    countBlocks.textContent = `${STATE.visible.length} st`;
+
+    if(STATE.visible.length === 0){
+      const d = document.createElement("div");
+      d.className = "muted2";
+      d.textContent = "Inga block (eller inget matchar filter/sök).";
+      blockList.appendChild(d);
+      return;
+    }
+
+    STATE.visible.slice(0, 400).forEach(b => {
       const row = document.createElement("div");
-      row.className = "rowItem" + (String(t.id) === String(STATE.selectedTrainingId) ? " active" : "");
+      row.className = "rowItem" + (String(b.blockId) === String(STATE.selectedId) ? " active" : "");
       row.setAttribute("role","button");
       row.setAttribute("tabindex","0");
 
@@ -722,28 +937,20 @@ POLICY (LÅST):
       const left = document.createElement("div");
       const title = document.createElement("div");
       title.className = "rowTitle";
-      title.textContent = t.title || "—";
+      title.textContent = b.title || "—";
+
       const sub = document.createElement("div");
       sub.className = "tiny";
-      sub.textContent = `${t.module || "—"} • ${t.area || "—"}`;
+      sub.textContent = `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"}`;
+
       left.appendChild(title);
       left.appendChild(sub);
 
       const right = document.createElement("div");
+      const st = normStatus(b.status);
       const p = document.createElement("span");
-      const st = normStatus(t.status || "draft");
-
-      if(st === "verified"){
-        p.className = "pill ok";
-        p.textContent = "Verifierad";
-      }else if(st === "published"){
-        p.className = "pill ok";
-        p.textContent = "Publicerad";
-      }else{
-        p.className = "pill warn";
-        p.textContent = "Utkast";
-      }
-
+      p.className = "pill " + (st === "published" ? "ok" : "warn");
+      p.textContent = (st === "published") ? "Publicerad" : "Utkast";
       right.appendChild(p);
 
       top.appendChild(left);
@@ -751,634 +958,618 @@ POLICY (LÅST):
 
       const meta = document.createElement("div");
       meta.className = "tiny";
-      meta.style.marginTop = "6px";
-
-      const vb = (typeof t.verifiedBy === "string" && t.verifiedBy.trim()) ? t.verifiedBy.trim() : "";
-      const va = Number.isFinite(Number(t.verifiedAt)) ? Number(t.verifiedAt) : 0;
-      const vtxt = (st === "verified" && (vb || va))
-        ? ` • verified${vb ? " by " + vb : ""}${va ? " @ " + new Date(va).toLocaleString("sv-SE") : ""}`
-        : "";
-
-      meta.textContent = `${(Array.isArray(t.blocks)?t.blocks.length:0)} block • id: ${t.id}${vtxt}`;
+      const nItems = Array.isArray(b.items) ? b.items.length : 0;
+      meta.textContent = `${nItems} items • id: ${b.blockId}`;
 
       row.appendChild(top);
       row.appendChild(meta);
 
       function openIt(){
         if(STATE.dirty){
-          if(!confirm("Du har osparade ändringar. Byta utbildning ändå?")) return;
+          if(!confirm("Du har osparade ändringar. Byta block ändå?")) return;
         }
-        selectTraining(t.id);
+        selectBlock(b.blockId);
       }
       row.addEventListener("click", openIt);
       row.addEventListener("keydown", (e) => {
         if(e.key === "Enter" || e.key === " "){ e.preventDefault(); openIt(); }
       });
 
-      trainingRows.appendChild(row);
+      blockList.appendChild(row);
     });
-  }
-
-  function updateBlockActions(){
-    const t = STATE.editTraining;
-    btnAddBlock.disabled = !t;
-
-    const hasBlocks = !!(t && Array.isArray(t.blocks) && t.blocks.length > 0);
-    btnEdit.disabled = !hasBlocks;
-
-    const blocks = (t && Array.isArray(t.blocks)) ? t.blocks : [];
-    const i = STATE.selectedBlockIndex;
-    const ok = (t && i >= 0 && i < blocks.length);
-
-    btnDeleteBlock.disabled = !ok;
-    btnMoveUp.disabled = !(ok && i > 0);
-    btnMoveDown.disabled = !(ok && i < blocks.length - 1);
-
-    updateVerifyButton();
   }
 
   function hideEditor(){
     editorWrap.style.display = "none";
     panelHint.textContent = "Välj ett block i listan.";
-    blockIndexTag.textContent = "—";
+    blockTag.textContent = "—";
+
+    moduleInp.value = "";
+    areaInp.value = "";
+    stepInp.value = "";
+    titleInp.value = "";
+    statusInp.value = "";
+
+    clear(itemRows);
+    const d = document.createElement("div");
+    d.className = "muted2";
+    d.textContent = "Välj ett block.";
+    itemRows.appendChild(d);
+
+    itemsSummary.textContent = "—";
+    itemEditor.style.display = "none";
     debugPre.textContent = "{}";
-    taskWrap.style.display = "none";
-    questionWrap.style.display = "none";
-    textHint.textContent = "Dokument: längre text (upp till 2000 tecken). Övriga block: rekommenderat kortare.";
+
+    btnItemUp.disabled = true;
+    btnItemDown.disabled = true;
+    btnItemDelete.disabled = true;
+    btnAddItem.disabled = true;
+    btnEdit.disabled = true;
+
+    STATE.selectedItemIndex = -1;
   }
 
-  function showEditorForIndex(index){
-    const t = STATE.editTraining;
-    if(!t) { hideEditor(); return; }
-    const blocks = Array.isArray(t.blocks) ? t.blocks : [];
-    if(index < 0 || index >= blocks.length){ hideEditor(); return; }
+  function renderItems(){
+    clear(itemRows);
 
-    const b = normalizeBlock(blocks[index]);
-    blocks[index] = b;
-
-    editorWrap.style.display = "block";
-    panelHint.textContent = "Redigera och spara när du är klar.";
-    blockIndexTag.textContent = `#${index + 1} • ${kindLabel(b.kind)}`;
-
-    kindSel.value = b.kind;
-    titleInp.value = b.title || "";
-    textInp.value = b.text || "";
-
-    const isDoc = (b.kind === "document");
-    textInp.maxLength = isDoc ? 2000 : 240;
-    textHint.textContent = isDoc
-      ? "Dokument: lång text (upp till 2000 tecken). Ingen svarstyp/alternativ/correct."
-      : "Text för info/task/question/both (max 240 tecken).";
-
-    const showTask = (b.kind === "task" || b.kind === "both");
-    const showQuestion = (b.kind === "question" || b.kind === "both");
-
-    taskWrap.style.display = showTask ? "block" : "none";
-    questionWrap.style.display = showQuestion ? "block" : "none";
-
-    taskAnswerSel.value = (b.taskAnswer === "scale") ? "scale" : "checkbox";
-    scaleMinInp.value = String(clampInt(b.scaleMin,1,10,1));
-    scaleMaxInp.value = String(clampInt(b.scaleMax,1,10,5));
-    scaleMinLabelInp.value = b.scaleMinLabel || "";
-    scaleMaxLabelInp.value = b.scaleMaxLabel || "";
-    scaleHint.textContent = (taskAnswerSel.value === "scale") ? "Skala aktiv." : "Skala används bara när svarstyp = Skala.";
-
-    questionAnswerSel.value = (b.kind === "both") ? "text" : ((b.questionAnswer === "choice") ? "choice" : "text");
-    questionAnswerSel.disabled = (b.kind === "both");
-    optionsInp.value = (Array.isArray(b.options) ? b.options : []).join("\n");
-    optionsInp.disabled = (questionAnswerSel.value !== "choice");
-    optionsHint.textContent = (questionAnswerSel.value === "choice")
-      ? "Alternativ aktiva."
-      : "Alternativ används bara när svarstyp = Kryss (val).";
-
-    if(isDoc){
-      taskWrap.style.display = "none";
-      questionWrap.style.display = "none";
-    }
-
-    debugPre.textContent = JSON.stringify(b, null, 2);
-    updateBlockActions();
-  }
-
-  function applyEditorToState(){
-    const t = STATE.editTraining;
-    if(!t) return;
-    const blocks = Array.isArray(t.blocks) ? t.blocks : [];
-    const i = STATE.selectedBlockIndex;
-    if(i < 0 || i >= blocks.length) return;
-
-    const cur = normalizeBlock(blocks[i]);
-
-    const kind = String(kindSel.value || "info").trim();
-    cur.kind = (kind === "info" || kind === "task" || kind === "question" || kind === "both" || kind === "document") ? kind : "info";
-
-    cur.title = String(titleInp.value || "").slice(0,80);
-
-    const isDoc = (cur.kind === "document");
-    const maxText = isDoc ? 2000 : 240;
-    cur.text = String(textInp.value || "").slice(0, maxText);
-
-    if(cur.kind === "task" || cur.kind === "both"){
-      cur.taskAnswer = (taskAnswerSel.value === "scale") ? "scale" : "checkbox";
-      cur.scaleMin = clampInt(scaleMinInp.value, 1, 10, 1);
-      cur.scaleMax = clampInt(scaleMaxInp.value, 1, 10, 5);
-      if(cur.scaleMax < cur.scaleMin) cur.scaleMax = cur.scaleMin;
-      cur.scaleMinLabel = String(scaleMinLabelInp.value || "").slice(0,40);
-      cur.scaleMaxLabel = String(scaleMaxLabelInp.value || "").slice(0,40);
-    }else{
-      cur.taskAnswer = "checkbox";
-      cur.scaleMin = 1;
-      cur.scaleMax = 5;
-      cur.scaleMinLabel = "";
-      cur.scaleMaxLabel = "";
-    }
-
-    if(cur.kind === "question"){
-      cur.questionAnswer = (questionAnswerSel.value === "choice") ? "choice" : "text";
-      if(cur.questionAnswer === "choice"){
-        const lines = String(optionsInp.value || "").split("\n").map(s => s.trim()).filter(Boolean);
-        const out = [];
-        lines.forEach(x => { if(!out.includes(x)) out.push(x); });
-        cur.options = out.slice(0,10).map(x => x.slice(0,40));
-      }else{
-        cur.options = [];
-      }
-    }else if(cur.kind === "both"){
-      cur.questionAnswer = "text";
-      cur.options = [];
-    }else{
-      cur.questionAnswer = "text";
-      cur.options = [];
-    }
-
-    if(cur.kind === "document"){
-      cur.taskAnswer = "checkbox";
-      cur.scaleMin = 1;
-      cur.scaleMax = 5;
-      cur.scaleMinLabel = "";
-      cur.scaleMaxLabel = "";
-      cur.questionAnswer = "text";
-      cur.options = [];
-    }
-
-    blocks[i] = normalizeBlock(cur);
-    debugPre.textContent = JSON.stringify(blocks[i], null, 2);
-
-    updateVerifyButton();
-  }
-
-  function markDirty(){
-    setDirty(true);
-    setSelectionPill();
-  }
-
-  // PATCH v1.4: uppdatera aktiv blockrad (tag + titel) utan full re-render (förhindrar cursor-hop)
-  function updateActiveBlockRowUI(){
-    try{
-      const i = STATE.selectedBlockIndex;
-      const t = STATE.editTraining;
-      if(!t) return;
-      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
-      if(i < 0 || i >= blocks.length) return;
-
-      const b = normalizeBlock(blocks[i]);
-      const row = blockRows.querySelector(`.blockRow[data-idx="${i}"]`);
-      if(!row) return;
-
-      const tagEl = row.querySelector('[data-part="tag"]');
-      const titleEl = row.querySelector('[data-part="title"]');
-      if(tagEl) tagEl.textContent = kindLabel(b.kind);
-      if(titleEl) titleEl.textContent = b.title ? b.title : "Namnlöst block";
-    }catch{}
-  }
-
-  function renderBlocks(){
-    clear(blockRows);
-
-    const t = STATE.editTraining;
-    if(!t){
-      blocksSummary.textContent = "Välj en utbildning…";
+    const b = STATE.edit;
+    if(!b){
       const d = document.createElement("div");
       d.className = "muted2";
-      d.textContent = "Välj en utbildning till vänster.";
-      blockRows.appendChild(d);
-      btnAddBlock.disabled = true;
-      hideEditor();
-      btnMoveUp.disabled = true;
-      btnMoveDown.disabled = true;
-      btnDeleteBlock.disabled = true;
-      updateVerifyButton();
-      updateBlockActions();
+      d.textContent = "Välj ett block.";
+      itemRows.appendChild(d);
+      itemsSummary.textContent = "—";
+      btnAddItem.disabled = true;
+      btnItemUp.disabled = true;
+      btnItemDown.disabled = true;
+      btnItemDelete.disabled = true;
+      itemEditor.style.display = "none";
       return;
     }
 
-    const blocks = Array.isArray(t.blocks) ? t.blocks : [];
-    blocksSummary.textContent = `${blocks.length} block`;
+    const items = Array.isArray(b.items) ? b.items : [];
+    itemsSummary.textContent = `${items.length} items`;
 
-    if(blocks.length === 0){
+    btnAddItem.disabled = (STATE.locked || isSystemAdmin) ? true : false;
+
+    if(items.length === 0){
       const d = document.createElement("div");
       d.className = "muted2";
-      d.textContent = "Inga block i denna utbildning.";
-      blockRows.appendChild(d);
-      updateBlockActions();
-      hideEditor();
+      d.textContent = "Inga items. Lägg till minst 1 innan publicering.";
+      itemRows.appendChild(d);
+      STATE.selectedItemIndex = -1;
+      btnItemUp.disabled = true;
+      btnItemDown.disabled = true;
+      btnItemDelete.disabled = true;
+      itemEditor.style.display = "none";
       return;
     }
 
-    blocks.forEach((bRaw, idx) => {
-      const b = normalizeBlock(bRaw);
+    items.forEach((itRaw, idx) => {
+      const it = normalizeItem(itRaw);
+      items[idx] = it;
 
       const row = document.createElement("div");
-      row.className = "blockRow" + (idx === STATE.selectedBlockIndex ? " active" : "");
+      row.className = "itemRow" + (idx === STATE.selectedItemIndex ? " active" : "");
       row.setAttribute("role","button");
       row.setAttribute("tabindex","0");
-      row.setAttribute("data-idx", String(idx)); // PATCH v1.4
+      row.setAttribute("data-idx", String(idx));
 
-      const titleRow = document.createElement("div");
-      titleRow.className = "blockTitle";
+      const top = document.createElement("div");
+      top.className = "itemTop";
+
+      const left = document.createElement("div");
+
+      const title = document.createElement("div");
+      title.className = "itemTitle";
 
       const tag = document.createElement("span");
       tag.className = "tag";
-      tag.setAttribute("data-part","tag"); // PATCH v1.4
-      tag.textContent = kindLabel(b.kind);
+      tag.textContent = itemKindLabel(it);
 
       const tt = document.createElement("span");
-      tt.setAttribute("data-part","title"); // PATCH v1.4
-      tt.textContent = b.title ? b.title : "Namnlöst block";
-
-      titleRow.appendChild(tag);
-      titleRow.appendChild(tt);
+      const short = String(it.text || "").trim();
+      tt.textContent = short ? (short.length > 64 ? short.slice(0,64) + "…" : short) : "(tom text)";
+      title.appendChild(tag);
+      title.appendChild(tt);
 
       const meta = document.createElement("div");
-      meta.className = "tiny";
+      meta.className = "tiny itemMeta";
       meta.textContent = `#${idx + 1}`;
 
-      row.appendChild(titleRow);
-      row.appendChild(meta);
+      left.appendChild(title);
+      left.appendChild(meta);
 
-      function openBlock(){
-        STATE.selectedBlockIndex = idx;
-        renderBlocks();
-        showEditorForIndex(idx);
+      top.appendChild(left);
+      row.appendChild(top);
+
+      function openItem(){
+        STATE.selectedItemIndex = idx;
+        renderItems();
+        showItemEditor(idx);
+        updateItemActions();
       }
-      row.addEventListener("click", openBlock);
+      row.addEventListener("click", openItem);
       row.addEventListener("keydown", (e) => {
-        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); openBlock(); }
+        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); openItem(); }
       });
 
-      blockRows.appendChild(row);
+      itemRows.appendChild(row);
     });
 
-    updateBlockActions();
-    if(STATE.selectedBlockIndex < 0) hideEditor();
-    else showEditorForIndex(STATE.selectedBlockIndex);
+    updateItemActions();
+    if(STATE.selectedItemIndex >= 0) showItemEditor(STATE.selectedItemIndex);
+    else itemEditor.style.display = "none";
   }
 
-  function selectTraining(id){
-    const found = STATE.visible.find(x => String(x.id) === String(id));
-    if(!found){
-      setMsg("err", "Kunde inte hitta utbildning (fail-closed).");
-      return;
-    }
-    STATE.selectedTrainingId = String(found.id);
-    STATE.editTraining = JSON.parse(JSON.stringify(normalizeTraining(found)));
-    STATE.selectedBlockIndex = -1;
+  function updateItemActions(){
+    const b = STATE.edit;
+    const canWrite = (!STATE.locked && !isSystemAdmin);
 
+    const items = (b && Array.isArray(b.items)) ? b.items : [];
+    const i = STATE.selectedItemIndex;
+    const ok = (b && i >= 0 && i < items.length);
+
+    btnItemDelete.disabled = !(canWrite && ok);
+    btnItemUp.disabled = !(canWrite && ok && i > 0);
+    btnItemDown.disabled = !(canWrite && ok && i < items.length - 1);
+  }
+
+  function showEditor(){
+    const b = STATE.edit;
+    if(!b){ hideEditor(); return; }
+
+    editorWrap.style.display = "block";
+    panelHint.textContent = (isSystemAdmin || STATE.locked)
+      ? "Steward/låst läge: du kan läsa men inte spara/publicera."
+      : "Redigera och spara när du är klar.";
+    blockTag.textContent = b.blockId ? ("id: " + b.blockId) : "—";
+
+    moduleInp.value = b.module || "";
+    areaInp.value = b.area || "";
+    stepInp.value = b.step || "";
+    titleInp.value = b.title || "";
+    statusInp.value = blockStatusLabel(b.status);
+
+    renderItems();
     setSelectionPill();
-    setDirty(false);
+    setDirty(STATE.dirty);
+  }
+
+  function selectBlock(blockId){
+    const found = STATE.all.find(x => String(x.blockId) === String(blockId));
+    if(!found){
+      setMsg("err", "Kunde inte hitta block (fail-closed).");
+      return;
+    }
+    STATE.selectedId = String(found.blockId);
+    STATE.edit = JSON.parse(JSON.stringify(normalizeBlock(found)));
+    STATE.selectedItemIndex = -1;
     setMsg("", "");
-
-    renderTrainings();
-    renderBlocks();
-  }
-
-  function validateTrainingReady(t){
-    const out = { ok:false, reasons:[] };
-
-    if(!t || typeof t !== "object"){
-      out.reasons.push("Saknar utbildning (korrupt state).");
-      return out;
-    }
-
-    const st = normStatus(t.status || "");
-    if(!isAllowedEditStatus(st)){
-      out.reasons.push("Utbildningen måste vara publicerad eller verifierad för att verifieras här.");
-    }
-
-    const title = String(t.title || "").trim();
-    if(!title) out.reasons.push("Titel saknas.");
-
-    const blocks = Array.isArray(t.blocks) ? t.blocks : [];
-    if(blocks.length === 0){
-      out.reasons.push("Minst 1 block krävs.");
-      out.ok = (out.reasons.length === 0);
-      return out;
-    }
-
-    for(let i=0;i<blocks.length;i++){
-      const b = normalizeBlock(blocks[i]);
-      const k = String(b.kind || "").trim();
-      const bt = String(b.title || "").trim();
-      const tx = String(b.text || "").trim();
-
-      if(!bt) out.reasons.push(`Block #${i+1}: Titel saknas.`);
-      if(!tx) out.reasons.push(`Block #${i+1}: Text saknas.`);
-
-      if(k === "question"){
-        const qa = String(b.questionAnswer || "text");
-        if(qa === "choice"){
-          const opts = Array.isArray(b.options) ? b.options : [];
-          if(opts.length < 2) out.reasons.push(`Block #${i+1}: Fråga med val kräver minst 2 alternativ.`);
-        }
-      }
-
-      if(k === "task" || k === "both"){
-        const ta = String(b.taskAnswer || "checkbox");
-        if(ta === "scale"){
-          const mn = clampInt(b.scaleMin, 1, 10, 1);
-          const mx = clampInt(b.scaleMax, 1, 10, 5);
-          if(mx < mn) out.reasons.push(`Block #${i+1}: Skala max kan inte vara mindre än min.`);
-        }
-      }
-
-      if(String(b.text || "") === "Okänd blocktyp"){
-        out.reasons.push(`Block #${i+1}: Okänd blocktyp (fail-closed).`);
-      }
-    }
-
-    out.ok = (out.reasons.length === 0);
-    return out;
-  }
-
-  function updateVerifyButton(){
-    const t = STATE.editTraining;
-    if(!t){
-      btnVerify.disabled = true;
-      btnVerify.textContent = "Verifiera";
-      btnVerify.title = "Välj en utbildning först.";
-      return;
-    }
-
-    if(STATE.dirty){
-      btnVerify.disabled = true;
-      btnVerify.textContent = "Verifiera";
-      btnVerify.title = "Spara först (osparade ändringar).";
-      return;
-    }
-
-    const st = normStatus(t.status || "");
-    btnVerify.textContent = (st === "verified") ? "Verifiera igen" : "Verifiera";
-
-    const chk = validateTrainingReady(t);
-    if(!chk.ok){
-      btnVerify.disabled = true;
-      btnVerify.title = "Kan inte verifiera: " + chk.reasons.join(" ");
-      return;
-    }
-
-    btnVerify.disabled = false;
-    btnVerify.title = (st === "verified")
-      ? "Verifiera igen: uppdaterar verifiedAt/verifiedBy."
-      : "Verifiera: markerar utbildningen som Verified.";
+    setDirty(false);
+    setSelectionPill();
+    renderBlockList();
+    showEditor();
   }
 
   function enterEdit(){
-    const t = STATE.editTraining;
-    if(!t){
-      setMsg("warn","Välj en utbildning först.");
+    if(!STATE.edit){
+      setMsg("warn", "Välj ett block först.");
       return;
     }
-    const blocks = Array.isArray(t.blocks) ? t.blocks : [];
-    if(blocks.length === 0){
-      setMsg("warn","Inga block att redigera. Lägg till minst 1 block.");
-      return;
-    }
-    if(STATE.selectedBlockIndex < 0 || STATE.selectedBlockIndex >= blocks.length){
-      STATE.selectedBlockIndex = 0;
-      renderBlocks();
-      showEditorForIndex(0);
-    }else{
-      showEditorForIndex(STATE.selectedBlockIndex);
-    }
-    const panel = $("#editorPanel");
-    if(panel && panel.scrollIntoView){
-      panel.scrollIntoView({ behavior: "smooth", block: "start" });
+    if(Array.isArray(STATE.edit.items) && STATE.edit.items.length > 0 && STATE.selectedItemIndex < 0){
+      STATE.selectedItemIndex = 0;
+      renderItems();
+      showItemEditor(0);
     }
     try{ titleInp.focus(); }catch{}
     setMsg("", "");
   }
-  btnEdit.addEventListener("click", () => { enterEdit(); });
 
-  kindSel.addEventListener("change", () => {
-    applyEditorToState();
-    markDirty();
-    // kind kan ändra tag/sektioner → full re-render OK här
-    renderBlocks();
-    showEditorForIndex(STATE.selectedBlockIndex);
-  });
+  btnEdit.addEventListener("click", () => enterEdit());
 
-  // PATCH v1.4: inga fulla re-renders vid input → stabil cursor/fokus
-  titleInp.addEventListener("input", () => { applyEditorToState(); markDirty(); updateActiveBlockRowUI(); });
-  textInp.addEventListener("input", () => { applyEditorToState(); markDirty(); });
-
-  taskAnswerSel.addEventListener("change", () => { applyEditorToState(); markDirty(); showEditorForIndex(STATE.selectedBlockIndex); });
-  scaleMinInp.addEventListener("change", () => { applyEditorToState(); markDirty(); showEditorForIndex(STATE.selectedBlockIndex); });
-  scaleMaxInp.addEventListener("change", () => { applyEditorToState(); markDirty(); showEditorForIndex(STATE.selectedBlockIndex); });
-  scaleMinLabelInp.addEventListener("input", () => { applyEditorToState(); markDirty(); });
-  scaleMaxLabelInp.addEventListener("input", () => { applyEditorToState(); markDirty(); });
-
-  questionAnswerSel.addEventListener("change", () => { applyEditorToState(); markDirty(); showEditorForIndex(STATE.selectedBlockIndex); });
-  optionsInp.addEventListener("input", () => { applyEditorToState(); markDirty(); updateActiveBlockRowUI(); });
-
-  btnMoveUp.addEventListener("click", () => {
-    const t = STATE.editTraining; if(!t) return;
-    const arr = t.blocks || []; const i = STATE.selectedBlockIndex; if(i <= 0) return;
-    const tmp = arr[i-1]; arr[i-1] = arr[i]; arr[i] = tmp;
-    STATE.selectedBlockIndex = i - 1; markDirty(); renderBlocks();
-  });
-
-  btnMoveDown.addEventListener("click", () => {
-    const t = STATE.editTraining; if(!t) return;
-    const arr = t.blocks || []; const i = STATE.selectedBlockIndex; if(i < 0 || i >= arr.length - 1) return;
-    const tmp = arr[i+1]; arr[i+1] = arr[i]; arr[i] = tmp;
-    STATE.selectedBlockIndex = i + 1; markDirty(); renderBlocks();
-  });
-
-  btnDeleteBlock.addEventListener("click", () => {
-    const t = STATE.editTraining; if(!t) return;
-    const arr = t.blocks || []; const i = STATE.selectedBlockIndex; if(i < 0 || i >= arr.length) return;
-    if(!confirm("Ta bort block?")) return;
-    arr.splice(i, 1);
-    STATE.selectedBlockIndex = Math.min(i, arr.length - 1);
-    markDirty(); renderBlocks();
-  });
-
-  btnAddBlock.addEventListener("click", () => {
-    const t = STATE.editTraining; if(!t) return;
-    const k = String(addKind.value || "info").trim();
-    if(!(k==="info"||k==="task"||k==="question"||k==="both"||k==="document")){ setMsg("err","Ogiltig blocktyp."); return; }
-
-    t.blocks = Array.isArray(t.blocks) ? t.blocks : [];
-    const seed = { kind:k, title:"", text:"", taskAnswer:"checkbox", questionAnswer:"text", scaleMin:1, scaleMax:5, options:[] };
-
-    t.blocks.push(normalizeBlock(seed));
-    STATE.selectedBlockIndex = t.blocks.length - 1;
-    markDirty(); renderBlocks();
-  });
-
-  function saveEdits(){
-    const t = STATE.editTraining;
-    if(!t){ return; }
-
-    const editedBlocks = (Array.isArray(t.blocks) ? t.blocks : []).map(normalizeBlock);
-
-    const nextAll = STATE.allTrainings.slice();
-    const idx = nextAll.findIndex(x => String(x.id) === String(t.id));
-    if(idx < 0){ setMsg("err","Kunde inte spara: utbildningen finns inte (fail-closed)."); return; }
-
-    const original = normalizeTraining(nextAll[idx]);
-    if(!isAllowedEditStatus(original.status)){
-      setMsg("err","Kunde inte spara: utbildningen är inte publicerad/verifierad längre (fail-closed).");
-      return;
-    }
-
-    nextAll[idx] = {
-      ...nextAll[idx],
-      blocks: editedBlocks,
-      updatedAt: Date.now(),
-      version: Number.isFinite(Number(nextAll[idx].version))
-        ? (Number(nextAll[idx].version) + 1)
-        : (Number.isFinite(Number(original.version)) ? (Number(original.version) + 1) : 1)
-    };
-
-    const res = saveArray(TRAININGS_KEY, nextAll);
-    if(!res.ok){ setMsg("err", res.err || "Kunde inte spara."); return; }
-
-    STATE.allTrainings = nextAll.map(normalizeTraining);
-    STATE.visible = STATE.allTrainings.filter(x => isAllowedEditStatus(x.status));
-
-    const keep = STATE.visible.find(x => String(x.id) === String(t.id));
-    if(!keep){
-      setMsg("warn","Sparat, men utbildningen syns inte längre här (status ändrad).");
-      STATE.editTraining = null;
-      STATE.selectedTrainingId = "";
-      STATE.selectedBlockIndex = -1;
-      setDirty(false);
-      renderTrainings();
-      renderBlocks();
-      return;
-    }
-
-    STATE.editTraining = JSON.parse(JSON.stringify(normalizeTraining(keep)));
-    setDirty(false);
-    setSelectionPill();
-    renderTrainings();
-    renderBlocks();
-    setMsg("ok", `Sparat: ${editedBlocks.length} block`);
+  // ------------------------------
+  // Item editor
+  // ------------------------------
+  function hideItemEditor(){
+    itemEditor.style.display = "none";
+    qWrap.style.display = "none";
+    tWrap.style.display = "none";
+    dWrap.style.display = "none";
+    itemKindInp.value = "";
+    itemTextInp.value = "";
+    qOptionsInp.value = "";
+    debugPre.textContent = "{}";
   }
 
-  btnSave.addEventListener("click", () => { setMsg("", ""); if(!STATE.dirty) return; saveEdits(); });
+  function showItemEditor(index){
+    const b = STATE.edit;
+    if(!b){ hideItemEditor(); return; }
+    const items = Array.isArray(b.items) ? b.items : [];
+    if(index < 0 || index >= items.length){ hideItemEditor(); return; }
 
-  function verifyTraining(){
-    const t = STATE.editTraining;
-    if(!t){ setMsg("err","Fail-closed: ingen vald utbildning."); return; }
+    const it = normalizeItem(items[index]);
+    items[index] = it;
 
-    if(STATE.dirty){
-      setMsg("warn","Spara först (osparade ändringar).");
-      return;
+    itemEditor.style.display = "block";
+    itemKindInp.value = itemKindLabel(it);
+
+    const isDoc = (it.kind === "document");
+    itemTextInp.maxLength = isDoc ? 2000 : 240;
+    itemTextInp.value = String(it.text || "");
+
+    qWrap.style.display = (it.kind === "question") ? "block" : "none";
+    tWrap.style.display = (it.kind === "task") ? "block" : "none";
+    dWrap.style.display = (it.kind === "document") ? "block" : "none";
+
+    if(it.kind === "question"){
+      qAnswerSel.value = (it.answerType === "choice") ? "choice" : "text";
+      qOptionsInp.disabled = (qAnswerSel.value !== "choice");
+      qOptionsInp.value = (Array.isArray(it.options) ? it.options : []).join("\n");
+      qReqInp.checked = (it.requiresAnswer !== false);
+      qHint.textContent = (qAnswerSel.value === "choice") ? "Val kräver minst 2 alternativ." : "Text-fråga (inga alternativ).";
     }
 
-    applyEditorToState();
+    if(it.kind === "task"){
+      tAnswerSel.value = (it.answerType === "scale") ? "scale" : "checkbox";
+      const scale = it.scale || { min:1, max:5, minLabel:"", maxLabel:"" };
+      tMinInp.value = String(clampInt(scale.min, 1, 10, 1));
+      tMaxInp.value = String(clampInt(scale.max, 1, 10, 5));
+      tMinLabelInp.value = String(scale.minLabel || "");
+      tMaxLabelInp.value = String(scale.maxLabel || "");
+      tReqInp.checked = (it.requiresDone !== false);
+      tHint.textContent = (tAnswerSel.value === "scale") ? "Skala aktiv." : "Checkbox aktiv (skala ignoreras).";
+    }
 
-    const chk = validateTrainingReady(t);
+    if(it.kind === "document"){
+      dSignInp.checked = (it.requiresSign !== false);
+    }
+
+    debugPre.textContent = JSON.stringify(it, null, 2);
+
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    // read-only guard
+    itemTextInp.disabled = !canWrite;
+    qAnswerSel.disabled = !canWrite;
+    qOptionsInp.disabled = !canWrite || (qAnswerSel.value !== "choice");
+    qReqInp.disabled = !canWrite;
+
+    tAnswerSel.disabled = !canWrite;
+    tMinInp.disabled = !canWrite || (tAnswerSel.value !== "scale");
+    tMaxInp.disabled = !canWrite || (tAnswerSel.value !== "scale");
+    tMinLabelInp.disabled = !canWrite || (tAnswerSel.value !== "scale");
+    tMaxLabelInp.disabled = !canWrite || (tAnswerSel.value !== "scale");
+    tReqInp.disabled = !canWrite;
+
+    dSignInp.disabled = !canWrite;
+  }
+
+  function applyEditorToBlock(){
+    const b = STATE.edit;
+    if(!b) return;
+
+    b.module = normText(moduleInp.value, 60);
+    b.area   = normText(areaInp.value, 60);
+    b.step   = normText(stepInp.value, 60);
+    b.title  = normText(titleInp.value, 80);
+
+    statusInp.value = blockStatusLabel(b.status);
+    setSelectionPill();
+  }
+
+  function applyItemEditorToState(){
+    const b = STATE.edit;
+    if(!b) return;
+    const items = Array.isArray(b.items) ? b.items : [];
+    const i = STATE.selectedItemIndex;
+    if(i < 0 || i >= items.length) return;
+
+    let it = normalizeItem(items[i]);
+
+    it.text = String(itemTextInp.value || "").slice(0, it.kind === "document" ? 2000 : 240);
+
+    if(it.kind === "question"){
+      it.answerType = (qAnswerSel.value === "choice") ? "choice" : "text";
+      it.requiresAnswer = !!qReqInp.checked;
+
+      if(it.answerType === "choice"){
+        const lines = String(qOptionsInp.value || "").split("\n").map(s => s.trim()).filter(Boolean).slice(0, 20);
+        const uniq = [];
+        lines.forEach(x => { const s = x.slice(0,60); if(s && !uniq.includes(s)) uniq.push(s); });
+        it.options = uniq.slice(0,10);
+      }else{
+        it.options = [];
+      }
+    }
+
+    if(it.kind === "task"){
+      it.answerType = (tAnswerSel.value === "scale") ? "scale" : "checkbox";
+      it.requiresDone = !!tReqInp.checked;
+
+      if(it.answerType === "scale"){
+        const mn = clampInt(tMinInp.value, 1, 10, 1);
+        const mx0 = clampInt(tMaxInp.value, 1, 10, 5);
+        const mx = (mx0 < mn) ? mn : mx0;
+        it.scale = {
+          min: mn,
+          max: mx,
+          minLabel: String(tMinLabelInp.value || "").slice(0,40),
+          maxLabel: String(tMaxLabelInp.value || "").slice(0,40)
+        };
+      }else{
+        it.scale = null;
+      }
+    }
+
+    if(it.kind === "document"){
+      it.requiresSign = !!dSignInp.checked;
+    }
+
+    items[i] = normalizeItem(it);
+    debugPre.textContent = JSON.stringify(items[i], null, 2);
+  }
+
+  function markDirty(){
+    setDirty(true);
+  }
+
+  // Block fields change
+  function onBlockFieldChange(){
+    applyEditorToBlock();
+    markDirty();
+    renderBlockList(); // small list; safe redraw; prevents stale titles in list
+  }
+  moduleInp.addEventListener("input", onBlockFieldChange);
+  areaInp.addEventListener("input", onBlockFieldChange);
+  stepInp.addEventListener("input", onBlockFieldChange);
+  titleInp.addEventListener("input", onBlockFieldChange);
+
+  // Item editor change
+  itemTextInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); renderItems(); updatePublishButton(); });
+
+  qAnswerSel.addEventListener("change", () => {
+    applyItemEditorToState();
+    // enable/disable options based on answer type
+    qOptionsInp.disabled = (STATE.locked || isSystemAdmin) ? true : (qAnswerSel.value !== "choice");
+    showItemEditor(STATE.selectedItemIndex);
+    markDirty();
+    renderItems();
+    updatePublishButton();
+  });
+  qOptionsInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); renderItems(); updatePublishButton(); });
+  qReqInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); updatePublishButton(); });
+
+  tAnswerSel.addEventListener("change", () => {
+    applyItemEditorToState();
+    showItemEditor(STATE.selectedItemIndex);
+    markDirty();
+    renderItems();
+    updatePublishButton();
+  });
+  tMinInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); updatePublishButton(); });
+  tMaxInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); updatePublishButton(); });
+  tMinLabelInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); });
+  tMaxLabelInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); });
+  tReqInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); });
+
+  dSignInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); });
+
+  // Item list actions
+  btnItemUp.addEventListener("click", () => {
+    const b = STATE.edit; if(!b) return;
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    if(!canWrite) return;
+
+    const items = b.items || [];
+    const i = STATE.selectedItemIndex;
+    if(i <= 0) return;
+    const tmp = items[i-1]; items[i-1] = items[i]; items[i] = tmp;
+    STATE.selectedItemIndex = i - 1;
+    markDirty();
+    renderItems();
+  });
+
+  btnItemDown.addEventListener("click", () => {
+    const b = STATE.edit; if(!b) return;
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    if(!canWrite) return;
+
+    const items = b.items || [];
+    const i = STATE.selectedItemIndex;
+    if(i < 0 || i >= items.length - 1) return;
+    const tmp = items[i+1]; items[i+1] = items[i]; items[i] = tmp;
+    STATE.selectedItemIndex = i + 1;
+    markDirty();
+    renderItems();
+  });
+
+  btnItemDelete.addEventListener("click", () => {
+    const b = STATE.edit; if(!b) return;
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    if(!canWrite) return;
+
+    const items = b.items || [];
+    const i = STATE.selectedItemIndex;
+    if(i < 0 || i >= items.length) return;
+    if(!confirm("Ta bort item?")) return;
+
+    items.splice(i, 1);
+    STATE.selectedItemIndex = Math.min(i, items.length - 1);
+    markDirty();
+    renderItems();
+  });
+
+  btnAddItem.addEventListener("click", () => {
+    const b = STATE.edit; if(!b) return;
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    if(!canWrite) return;
+
+    b.items = Array.isArray(b.items) ? b.items : [];
+    const v = String(addItemKind.value || "document");
+
+    let it;
+    if(v === "document"){
+      it = { kind:"document", text:"", requiresSign:true };
+    }else if(v === "question_text"){
+      it = { kind:"question", questionId: genId("q"), text:"", answerType:"text", options:[], requiresAnswer:true };
+    }else if(v === "question_choice"){
+      it = { kind:"question", questionId: genId("q"), text:"", answerType:"choice", options:["Alternativ 1","Alternativ 2"], requiresAnswer:true };
+    }else if(v === "task_checkbox"){
+      it = { kind:"task", taskId: genId("t"), text:"", answerType:"checkbox", scale:null, requiresDone:true };
+    }else if(v === "task_scale"){
+      it = { kind:"task", taskId: genId("t"), text:"", answerType:"scale", scale:{ min:1, max:5, minLabel:"", maxLabel:"" }, requiresDone:true };
+    }else{
+      it = { kind:"document", text:"", requiresSign:true };
+    }
+
+    b.items.push(normalizeItem(it));
+    STATE.selectedItemIndex = b.items.length - 1;
+    markDirty();
+    renderItems();
+    showItemEditor(STATE.selectedItemIndex);
+    try{ itemTextInp.focus(); }catch{}
+  });
+
+  // ------------------------------
+  // Save/Publish
+  // ------------------------------
+  function syncEditBackToAll(){
+    const edit = STATE.edit;
+    if(!edit) return { ok:false, err:"Ingen vald block." };
+
+    // re-load bank to avoid writing over corruption introduced after load
+    const st = loadBlocksState();
+    if(st.corrupt) return { ok:false, err:`Fail-closed: ${BLOCKS_KEY} är korrupt.` };
+
+    const all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
+    const idx = all.findIndex(x => String(x.blockId) === String(edit.blockId));
+    if(idx < 0) return { ok:false, err:"Fail-closed: block finns inte i bank." };
+
+    all[idx] = normalizeBlock(edit);
+    const res = saveBlocks(all);
+    if(!res.ok) return { ok:false, err: res.err || "Kunde inte spara." };
+
+    STATE.all = all;
+    return { ok:true };
+  }
+
+  function saveEdits(){
+    if(STATE.locked){ setMsg("err","Låst (fail-closed)."); return; }
+    if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte spara."); return; }
+    if(!STATE.edit) return;
+
+    applyEditorToBlock();
+    applyItemEditorToState();
+
+    STATE.edit.updatedAt = Date.now();
+
+    const res = syncEditBackToAll();
+    if(!res.ok){ setMsg("err", res.err); return; }
+
+    setDirty(false);
+    renderBlockList();
+    showEditor();
+    setMsg("ok","Sparat.");
+  }
+
+  function publishBlock(){
+    if(STATE.locked){ setMsg("err","Låst (fail-closed)."); return; }
+    if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte publicera."); return; }
+    if(!STATE.edit){ setMsg("err","Välj ett block först."); return; }
+    if(STATE.dirty){ setMsg("warn","Spara först (osparade ändringar)."); return; }
+
+    applyEditorToBlock();
+    applyItemEditorToState();
+
+    const chk = validateForPublish(STATE.edit);
     if(!chk.ok){
-      setMsg("err", "Kan inte verifiera: " + chk.reasons.join(" "));
-      return;
-    }
-
-    const nextAll = STATE.allTrainings.slice();
-    const idx = nextAll.findIndex(x => String(x.id) === String(t.id));
-    if(idx < 0){ setMsg("err","Fail-closed: utbildningen finns inte i storage."); return; }
-
-    const original = normalizeTraining(nextAll[idx]);
-    if(!isAllowedEditStatus(original.status)){
-      setMsg("err","Fail-closed: utbildningen är inte publicerad/verifierad längre.");
+      setMsg("err","Kan inte publicera: " + chk.reasons.join(" "));
       return;
     }
 
     const now = Date.now();
-    const by = String(auth.empNo || "").trim();
+    STATE.edit.status = "published";
+    STATE.edit.verifiedAt = now;
+    STATE.edit.verifiedBy = String(empNo || "");
+    STATE.edit.updatedAt = now;
 
-    nextAll[idx] = {
-      ...nextAll[idx],
-      status: "verified",
-      verifiedAt: now,
-      verifiedBy: by || "",
-      updatedAt: now,
-      version: Number.isFinite(Number(nextAll[idx].version))
-        ? (Number(nextAll[idx].version) + 1)
-        : (Number.isFinite(Number(original.version)) ? (Number(original.version) + 1) : 1)
-    };
-
-    const res = saveArray(TRAININGS_KEY, nextAll);
-    if(!res.ok){ setMsg("err", res.err || "Kunde inte verifiera (save fail)."); return; }
-
-    STATE.allTrainings = nextAll.map(normalizeTraining);
-    STATE.visible = STATE.allTrainings.filter(x => isAllowedEditStatus(x.status));
-
-    const keep = STATE.visible.find(x => String(x.id) === String(t.id));
-    if(!keep){
-      setMsg("warn","Verifierat, men utbildningen syns inte längre här (ovanlig status).");
-      STATE.editTraining = null;
-      STATE.selectedTrainingId = "";
-      STATE.selectedBlockIndex = -1;
-      setDirty(false);
-      renderTrainings();
-      renderBlocks();
-      return;
-    }
-
-    STATE.editTraining = JSON.parse(JSON.stringify(normalizeTraining(keep)));
-    STATE.selectedTrainingId = String(keep.id);
-    STATE.selectedBlockIndex = -1;
+    const res = syncEditBackToAll();
+    if(!res.ok){ setMsg("err", res.err); return; }
 
     setDirty(false);
-    setSelectionPill();
-    renderTrainings();
-    renderBlocks();
-    setMsg("ok", "Verifierad: status=verified (uppdaterad).");
+    renderBlockList();
+    showEditor();
+    setMsg("ok","Publicerad: status=published.");
   }
 
-  btnVerify.addEventListener("click", () => { setMsg("", ""); verifyTraining(); });
+  btnSave.addEventListener("click", () => { setMsg("", ""); if(!STATE.dirty) return; saveEdits(); });
+  btnPublish.addEventListener("click", () => { setMsg("", ""); publishBlock(); });
 
-  qTrain.addEventListener("input", renderTrainings);
+  // ------------------------------
+  // List filters
+  // ------------------------------
+  qBlocks.addEventListener("input", renderBlockList);
+  filterStatus.addEventListener("change", renderBlockList);
 
+  // ------------------------------
+  // Init
+  // ------------------------------
   function init(){
-    setDirty(false);
     setMsg("", "");
+    setDirty(false);
 
-    const read = safeParseArray(TRAININGS_KEY);
-    if(!read.ok){
-      setMsg("err", read.err || "Kunde inte läsa utbildningar (fail-closed).");
-      STATE.allTrainings = [];
-      STATE.visible = [];
-      renderTrainings();
-      renderBlocks();
-      return;
+    // Lock checks:
+    const lockReasons = [];
+
+    // 1) localStorage write probe (only matters if not SYSTEM_ADMIN)
+    if(!isSystemAdmin){
+      try{
+        const t = "__probe__";
+        localStorage.setItem(t, "1");
+        localStorage.removeItem(t);
+      }catch{
+        lockReasons.push("localStorage är blockerad (kan inte spara/publicera).");
+      }
     }
 
-    STATE.allTrainings = (read.value || []).map(normalizeTraining);
-    STATE.visible = STATE.allTrainings.filter(t => isAllowedEditStatus(t.status));
+    // 2) block-bank corruption gate
+    const st = loadBlocksState();
+    if(st.corrupt){
+      lockReasons.push(`${BLOCKS_KEY} är korrupt (JSON/shape). Åtgärda eller rensa nyckeln innan redigering.`);
+    }
 
-    renderTrainings();
+    STATE.lockReasons = lockReasons;
+    applyLockFromState();
 
-    if(STATE.visible.length){
-      selectTraining(STATE.visible[0].id);
-      setMsg("ok","Laddad första utbildning (publicerad/verifierad).");
+    // Load blocks (empty ok)
+    if(!st.corrupt){
+      STATE.all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
     }else{
-      setMsg("warn","Inga publicerade/verifierade utbildningar ännu.");
-      renderBlocks();
+      STATE.all = [];
     }
+
+    renderBlockList();
+
+    if(STATE.all.length){
+      // auto-select first visible
+      computeVisible();
+      if(STATE.visible.length){
+        selectBlock(STATE.visible[0].blockId);
+        setMsg("ok", "Laddad första block.");
+      }else{
+        hideEditor();
+        setMsg("warn", "Inga block matchar filter.");
+      }
+    }else{
+      hideEditor();
+      setMsg(st.missing ? "warn" : "warn", "Inga block ännu. Skapa i “Skapa block”.");
+    }
+
+    // Disable write actions if locked or system_admin
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    btnSave.disabled = true;
+    btnPublish.disabled = true;
+    btnAddItem.disabled = !canWrite;
   }
 
   init();
@@ -1387,31 +1578,36 @@ POLICY (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- PATCH v1.4: Slutar re-rendera blocklistan vid titel/text/options-input → ingen cursor/fokus-hop.
-- PATCH v1.4: Blockrader får data-idx + data-part så aktiv rad kan uppdateras utan redraw.
-- Inga nya storage-keys; inga datamodelländringar; auth/reads/writes oförändrat (AO-057).
+- Bytte datakälla: admin/packages-block.html arbetar nu mot Block-bank AO-0XX_BLOCKS_V1 (inte AO-057).
+- Lade till lista + editor för block-metadata + items (document/question/task).
+- Implementerade Publicera (draft→published) med hård validering + verifiedAt/verifiedBy.
+- Fail-closed vid korrupt block-bank: låser Save/Publish och visar lockbox.
+- SYSTEM_ADMIN hanteras som steward (read-only) på denna sida.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Öppna sidan → välj utbildning → klicka “Redigera” → börja skriva i Titel.
-2) Verifiera att cursor INTE hoppar/att fokus stannar kvar medan du skriver.
-3) Ändra Titel → se att titeln i blocklistan uppdateras direkt utan att panelen “blinkar”.
-4) Spara → status OK + “Sparat”.
+1) Logga in som ADMIN/MANAGER → öppna admin/tasks.html → skapa ett block.
+2) Gå till admin/packages-block.html → blocket syns i listan (Utkast).
+3) Öppna block → redigera rubrik / item-text → klicka Spara → ladda om → ändringar kvar.
+4) Klicka Publicera → block visar “Publicerad” + verifiedAt/verifiedBy uppdateras.
+5) (Fail-closed) Sätt AO-0XX_BLOCKS_V1 = "not-json" i DevTools → reload → lockbox + Save/Publish disabled.
+6) (Steward) Logga in som SYSTEM_ADMIN → sidan öppnas men Save/Publish/Add item är disabled.
 ============================================================ -->
 
 <!-- ============================================================
 Risk / edge cases
-- Kind-ändring gör fortfarande full re-render (avsiktligt) eftersom tag/sektioner ändras.
-- Om någon annan flik ändrar AO-057 samtidigt finns ingen realtids-sync (UI-only).
+- Om någon annan flik ändrar AO-0XX_BLOCKS_V1 samtidigt: ingen realtids-sync (UI-only).
+- Vid korrupt bank krävs manuell rensning/åtgärd för att låsa upp (avsiktligt fail-closed).
 ============================================================ -->
 
 <!-- ============================================================
 QA-check (P0/P1/P2)
-P0: UI-only, inga nya keys, XSS-safe (textContent) — OK
-P0: Fail-closed auth via HRApp.requireAuth allowRoles ADMIN — OK
-P1: Regression: endast rendering/input-hantering; dataflöde oförändrat — OK
-P2: UX: stabil editor vid typing — OK
+P0: UI-only, XSS-safe (textContent), inga osäkra innerHTML — OK
+P0: Fail-closed vid korrupt AO-0XX_BLOCKS_V1 — OK
+P0: Inga nya storage-keys — OK
+P1: Publish-guard: title + items>=1 + choice>=2 + scale min/max — OK
+P2: SYSTEM_ADMIN steward-läge (read-only) — OK
 ============================================================ -->
 
 </body>
