@@ -1,797 +1,2208 @@
+<!-- ============================================================
+AO-TRAININGS-EXPORT-BLOCKBANK-01 | FIL-ID: admin/trainings.html
 Projekt: HR-System
-Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
-
-NYTT i denna patch:
-- Robust import: om AO-0XX_BLOCKS_V1 är tom/saknas försöker sidan hitta legacy-block i localStorage
-- Import-knapp (opt-in) som migrerar hittade blocks -> AO-0XX_BLOCKS_V1 (ENDA write-key)
-- Inga nya storage-keys, endast AO-0XX_BLOCKS_V1 skrivs
-NYTT i BLOCK 2/5:
-- Kopplar sidan till Block-bank: AO-0XX_BLOCKS_V1 (source of truth för block)
-- Lista/öppna block (draft/published)
-- Redigera block-metadata + items (document/question/task)
-- Publicera (draft → published) med hård validering (fail-closed)
-- Fail-closed vid korrupt block-bank (låser Save/Publish)
+Syfte: ADMIN – Skapa/Redigera utbildningar (återanvändbart innehåll) + AI-stöd
+UI-flow (enkelt): “Vad → vilken → vem → hur ofta” (den här sidan bygger “Vad/vilken” = modul/område + utbildning)
 
 POLICY (LÅST):
-- UI-only • Fail-closed
-@@ -187,17 +189,6 @@
-    .itemTop{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
-    .itemTitle{ font-weight: 950; line-height:1.2; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .itemMeta{ margin-top:6px; }
+- UI-only • Fail-closed • localStorage-first (data), sessionStorage först (auth) • fallback localStorage
+- XSS-escape på all rendering från storage (använd textContent, aldrig osäker innerHTML)
+- Inga nya storage-keys/datamodell
+- Keys:
+  * Läser/Skriver: AO-057_TRAININGS_V1 (utbildningar)
+  * Läser/Skriver: AO-0XX_BLOCKS_V1 (endast export till Block-bank)
+  * Auth: AO-001_LOGIN_V1 (indirekt via HRApp)
+- ADMIN-only (SYSTEM_ADMIN hanteras ej här enligt önskemål)
+- Ingen “vem/vilka” / inga assignments här (det kommer i egen sida senare)
+- Publish fail-closed: status=published kräver blocks.length > 0
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – Admin • Utbildningar</title>
 
-    .importCard{
-      margin-top:10px;
-      border:1px solid rgba(245,158,11,.35);
-      background: rgba(254,243,199,.22);
-      border-radius: var(--r14);
-      padding:10px 12px;
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <style>
+    .muted2{ color: var(--muted); font-size:.92rem; line-height:1.35; }
+    .pill{
+      display:inline-flex; align-items:center; gap:6px; padding:4px 10px;
+      border:1px solid var(--line); border-radius:999px; background:#fff;
+      font-size:.88rem; color: var(--muted); white-space:nowrap;
     }
-    .importCard .title{ font-weight:950; }
-    .importCard .tiny{ margin-top:6px; }
-    .importActions{ margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; }
+    .pill.ok{ background: rgba(167,243,208,.18); border-color: rgba(16,185,129,.28); color:#065f46; }
+    .pill.warn{ background: rgba(254,243,199,.65); border-color: rgba(245,158,11,.30); color:#7c2d12; }
+    .pill.bad{ background: rgba(254,242,242,.9); border-color: rgba(239,68,68,.30); color:#7f1d1d; }
+    .tiny{ font-size:.88rem; color: var(--muted); line-height:1.25; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: .92rem; color: var(--muted); }
+
+    .grid{
+      display:grid;
+      grid-template-columns: 380px 1fr;
+      gap: 14px;
+      align-items:start;
+    }
+    @media (max-width: 980px){ .grid{ grid-template-columns: 1fr; } }
+
+    .sideCard{ position: sticky; top: 10px; }
+    @media (max-width: 980px){ .sideCard{ position: static; } }
+
+    .searchRow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    input[type="text"], textarea, select, input[type="number"]{ width:100%; margin-top:6px; }
+    textarea{ min-height: 84px; resize: vertical; }
+
+    .listBox{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      overflow:hidden;
+    }
+    .listHead{
+      padding:10px;
+      border-bottom:1px solid var(--line);
+      background: rgba(250,250,250,.92);
+      display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;
+    }
+    .miniBtn{
+      border: 1px solid var(--line);
+      background: #fff;
+      border-radius: 12px;
+      padding: 8px 10px;
+      cursor:pointer;
+      user-select:none;
+      font-weight: 900;
+      font-size: 13px;
+      line-height: 1;
+      text-decoration: none;
+      color: inherit;
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:6px;
+    }
+    .miniBtn:hover{ background:#fafafa; }
+    .miniBtn:disabled{ opacity:.55; cursor:not-allowed; }
+    .miniBtn.danger{ border-color: rgba(239,68,68,.35); }
+    .miniBtn.danger:hover{ background: rgba(254,242,242,.8); }
+
+    .rows{
+      padding:10px;
+      display:flex;
+      flex-direction:column;
+      gap:8px;
+    }
+    .rowItem{
+      border:1px solid var(--line);
+      border-radius: 14px;
+      padding:10px;
+      background:#fff;
+      cursor:pointer;
+      box-shadow: var(--shadow-soft);
+      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+    }
+    .rowItem:hover{
+      transform: translateY(-1px);
+      box-shadow: 0 8px 22px rgba(17,17,17,.10);
+      filter: brightness(1.02);
+    }
+    .rowItem.active{ outline: 2px solid rgba(59,130,246,.35); }
+    .rowTop{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
+    .rowTitle{ font-weight: 950; line-height: 1.2; }
+    .rowMeta{ margin-top:6px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    .tag{
+      display:inline-flex; align-items:center; gap:6px; padding:2px 8px;
+      border:1px solid var(--line); border-radius:999px; background: rgba(250,250,250,.92);
+      font-size:.85rem; color: var(--muted); white-space: nowrap;
+    }
+
+    .msg{
+      margin-top:10px;
+      padding:10px 12px;
+      border-radius: var(--r14);
+      border:1px solid var(--line);
+      background:#fff;
+      display:none;
+    }
+    .msg.ok{ border-color: rgba(16,185,129,.30); background: rgba(167,243,208,.14); color:#065f46; display:block; }
+    .msg.err{ border-color: rgba(239,68,68,.30); background: rgba(254,242,242,.85); color:#7f1d1d; display:block; }
+    .msg.warn{ border-color: rgba(245,158,11,.30); background: rgba(254,243,199,.35); color:#7c2d12; display:block; }
+
+    .sectionTitle{
+      display:flex; align-items:center; justify-content:space-between; gap:10px;
+      margin: 6px 0 10px;
+    }
+    .sectionTitle h2{ margin:0; font-size: 1.02rem; font-weight: 950; }
+    label{ display:block; font-weight: 900; }
+
+    .row2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      align-items:end;
+    }
+    @media (max-width: 980px){ .row2{ grid-template-columns: 1fr; } }
+
+    .row3{
+      display:grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 10px;
+      align-items:end;
+    }
+    @media (max-width: 980px){ .row3{ grid-template-columns: 1fr; } }
+
+    .subCard{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(250,250,250,.6);
+      padding:10px;
+      margin-top:10px;
+    }
+    .subCard h3{ margin:0 0 6px; font-size: .98rem; font-weight: 950; }
+
+    .blocksWrap{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      overflow:hidden;
+    }
+    .blocksHead{
+      padding: 10px;
+      border-bottom:1px solid var(--line);
+      background: rgba(250,250,250,.92);
+      display:flex;
+      gap:10px;
+      align-items:center;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+    .blocksList{
+      padding: 10px;
+      display:flex;
+      flex-direction: column;
+      gap:10px;
+    }
+    .blockCard{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      padding: 10px;
+      box-shadow: var(--shadow-soft);
+    }
+    .blockTop{
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+    .blockTitle{
+      font-weight: 950;
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+      line-height:1.2;
+    }
+    .blockActions{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+    }
+    .blockBody{
+      margin-top:10px;
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+      align-items:start;
+    }
+    @media (max-width: 980px){ .blockBody{ grid-template-columns: 1fr; } }
+    .orderBtns{ display:flex; gap:6px; align-items:center; }
+
+    .footerRow{
+      margin-top: 12px;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:space-between;
+    }
+    .footerRow .left{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+
+    details{ margin-top:10px; }
+    details > summary{ cursor:pointer; font-weight:900; color: var(--muted); }
+    pre{
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: rgba(17,17,17,.04);
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      padding: 10px;
+      overflow:auto;
+    }
   </style>
 </head>
 
-@@ -242,18 +233,6 @@ <h1 class="tight">Block-editor (Block-bank)</h1>
-      </div>
+<body>
+<header class="top">
+  <div class="brand">
+    <strong>HR-System</strong>
+    <span class="muted">• Admin • Utbildningar</span>
+  </div>
 
-      <div id="lockBox" class="lockbox" style="display:none;"></div>
+  <nav class="nav" aria-label="Meny">
+    <a href="./home.html">Hem</a>
+    <a href="./tasks.html">Uppgifter</a>
+    <a href="./questions.html">Frågor</a>
+    <a href="./docs.html">Dokument</a>
+    <a href="./reports.html">Felrapporter</a>
+    <a href="./answers.html">Svar</a>
+    <a href="./trainings.html" aria-current="page">Utbildningar</a>
+    <a href="./integrations.html">Integrationer</a>
+    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+  </nav>
+</header>
 
-      <div id="importBox" class="importCard" style="display:none;">
-        <div class="title">Import behövs (block hittades inte i Block-bank)</div>
-        <div class="tiny" id="importHint">—</div>
-        <div class="importActions">
-          <button class="btn" id="btnImport" type="button">Importera hittade block</button>
-          <button class="btn secondary" id="btnImportRefresh" type="button">Sök igen</button>
-        </div>
-        <div class="tiny" style="margin-top:8px;">
-          Import skriver <strong>endast</strong> till <span class="mono">AO-0XX_BLOCKS_V1</span>. Inga andra keys ändras.
-        </div>
+<main class="container">
+  <div class="row space-between wrap" style="align-items:flex-start;">
+    <div>
+      <h1 class="tight">Utbildningar</h1>
+      <p class="muted2">Skapa/Redigera återanvändbart innehåll. Den här sidan hanterar <strong>Modul</strong> + <strong>Område</strong> + <strong>Utbildning</strong> + <strong>Block</strong>. Tilldelning (vem/vilka) kommer i separat sida.</p>
+      <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+        <span class="pill" id="whoPill">Inloggad: —</span>
+        <span class="pill" id="statePill">Status: —</span>
+        <span class="pill" id="savePill">Sparat: —</span>
       </div>
     </div>
 
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
-@@ -402,7 +381,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
+      <button class="btn secondary" id="btnNew" type="button">+ Ny utbildning</button>
+      <button class="btn secondary" id="btnExportBlockBank" type="button" title="Exporterar hela utbildningen (alla block) till Block-bank som ett utkast" disabled>Exportera till Block-bank</button>
+      <button class="btn" id="btnSave" type="button">Spara</button>
+    </div>
+  </div>
 
-                <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
-                  <input id="qReqInp" type="checkbox" />
-                  <span>Kräver svar</span>
-                  <span>Krver svar</span>
-                </label>
+  <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
 
-                <div class="tiny" id="qHint" style="margin-top:6px;">Val kräver minst 2 alternativ.</div>
-@@ -442,7 +421,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
+  <div class="grid" style="margin-top:12px;">
+    <!-- LEFT: list -->
+    <section class="card sideCard" aria-label="Lista">
+      <div class="sectionTitle">
+        <h2>Översikt</h2>
+        <div class="tiny">Välj en utbildning för att redigera.</div>
+      </div>
 
-                <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
-                  <input id="tReqInp" type="checkbox" />
-                  <span>Kräver klar (done)</span>
-                  <span>Krver klar (done)</span>
-                </label>
+      <div class="searchRow">
+        <label style="flex:1; margin:0;">
+          Sök
+          <input id="q" type="text" placeholder="Sök titel, modul, område…" autocomplete="off" />
+        </label>
+        <label style="min-width: 160px; margin:0;">
+          Filter status
+          <select id="filterStatus">
+            <option value="">Alla</option>
+            <option value="draft">Utkast</option>
+            <option value="published">Publicerad</option>
+          </select>
+        </label>
+      </div>
 
-                <div class="tiny" id="tHint" style="margin-top:6px;">Skala kräver min/max och text.</div>
-@@ -457,9 +436,14 @@ <h3 style="margin-top:0;">Item-editor</h3>
-              </div>
-
-              <details style="margin-top:12px;">
-                <summary class="tiny" style="cursor:pointer; font-weight:900; color: var(--muted);">Debug (valt)</summary>
-                <summary class="tiny" style="cursor:pointer; font-weight:900; color: var(--muted);">Debug (valt item)</summary>
-                <pre id="debugPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
-              </details>
-
-              <details style="margin-top:10px;">
-                <summary class="tiny" style="cursor:pointer; font-weight:900; color: var(--muted);">Debug (block raw)</summary>
-                <pre id="debugBlockPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
-              </details>
-            </div>
+      <div class="listBox" style="margin-top:10px;">
+        <div class="listHead">
+          <div class="tiny"><span id="countText">—</span></div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="miniBtn" id="btnClone" type="button" disabled title="Kopiera vald utbildning">Kopiera</button>
+            <button class="miniBtn danger" id="btnDelete" type="button" disabled title="Ta bort vald utbildning">Ta bort</button>
           </div>
         </div>
-@@ -479,7 +463,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
+        <div class="rows" id="listRows">
+          <div class="muted2">Laddar…</div>
+        </div>
+      </div>
+
+      <div class="tiny" style="margin-top:10px;">
+        Tips: Område-förslag byggs från tidigare skapade utbildningar inom vald modul.
+      </div>
+    </section>
+
+    <!-- RIGHT: editor -->
+    <section class="card" aria-label="Editor">
+      <div class="sectionTitle">
+        <h2>Skapa / Redigera</h2>
+        <div class="tiny">Ordning: <strong>Modul → Område → Rubrik → Beskrivning/Mål → Block</strong></div>
+      </div>
+
+      <!-- 1) Modul/Område -->
+      <section class="subCard" aria-label="Modul och område">
+        <h3>1) Välj modul och område</h3>
+
+        <div class="row2">
+          <label>
+            Modul <span class="tiny">(obligatoriskt)</span>
+            <select id="moduleSel"></select>
+          </label>
+
+          <label>
+            Område <span class="tiny">(obligatoriskt)</span>
+            <select id="areaSel"></select>
+            <div class="tiny" id="areaHint">—</div>
+          </label>
+        </div>
+
+        <div id="areaNewWrap" style="display:none; margin-top:10px;">
+          <label>
+            Nytt område <span class="tiny">(skapas inom vald modul)</span>
+            <input id="areaInp" type="text" placeholder="T.ex. Hygien, Ergonomi…" maxlength="60" autocomplete="off" />
+          </label>
+        </div>
+      </section>
+
+      <!-- 2) Grundinfo -->
+      <section class="subCard" aria-label="Grundinfo">
+        <h3>2) Rubrik, status, beskrivning</h3>
+
+        <div class="row3">
+          <label style="grid-column: 1 / span 2;">
+            Rubrik <span class="tiny">(obligatoriskt)</span>
+            <input id="titleInp" type="text" placeholder="T.ex. Steg 1 – Grundhygien" maxlength="90" autocomplete="off" />
+          </label>
+
+          <label>
+            Status <span class="tiny">(publish kräver block)</span>
+            <select id="statusSel">
+              <option value="draft">Utkast</option>
+              <option value="published">Publicerad</option>
+            </select>
+            <div class="tiny" id="publishHint">—</div>
+          </label>
+        </div>
+
+        <div style="margin-top:10px;">
+          <label>
+            Beskrivning <span class="tiny">(kort, max 240)</span>
+            <textarea id="descInp" maxlength="240" placeholder="Syfte + innehåll i kort form…"></textarea>
+          </label>
+        </div>
+      </section>
+
+      <!-- 3) Mål -->
+      <section class="subCard" aria-label="Mål">
+        <h3>3) Mål</h3>
+        <div class="tiny">Skriv ett mål per rad (enkelt att redigera).</div>
+        <label style="margin-top:8px;">
+          Mål (rad per mål)
+          <textarea id="goalsInp" maxlength="900" placeholder="Förstå…&#10;Kunna…&#10;Identifiera…"></textarea>
+        </label>
+      </section>
+
+      <!-- 4) AI -->
+      <section class="subCard" aria-label="AI">
+        <h3>4) AI – skapa block</h3>
+        <div class="tiny">AI fyller <strong>beskrivning</strong>, <strong>mål</strong> (om tomt) och <strong>block</strong>. Du kan alltid redigera efteråt.</div>
+
+        <div class="row3" style="margin-top:8px;">
+          <label>
+            AI-läge <span class="tiny">(default: Utbildning)</span>
+            <select id="aiMode">
+              <option value="training" selected>Utbildning</option>
+              <option value="document">Dokument</option>
+            </select>
+          </label>
+
+          <label>
+            Antal block <span class="tiny">(1–12)</span>
+            <input id="aiBlockCount" type="number" min="1" max="12" step="1" inputmode="numeric" />
+          </label>
+
+          <label>
+            AI-topic (valfritt)
+            <input id="aiTopic" type="text" maxlength="90" placeholder="Lämna tomt → använder rubriken" autocomplete="off" />
+          </label>
+        </div>
+
+        <div class="row space-between wrap" style="margin-top:10px;">
+          <div class="row wrap" style="align-items:center;">
+            <button class="btn secondary" id="btnAiTest" type="button">Testa worker</button>
+            <button class="btn" id="btnAiGenerate" type="button">Skapa med AI</button>
+          </div>
+          <div class="tiny" id="aiStatus">—</div>
+        </div>
+
+        <details>
+          <summary>AI-inställning (endpoint)</summary>
+          <div class="tiny" style="margin-top:8px;">
+            Default: <span class="mono" id="aiDefault">—</span><br/>
+            Du kan override via URL: <span class="mono">?ai=https://din-worker.workers.dev</span>
+          </div>
+        </details>
+      </section>
+
+      <!-- 5) Block -->
+      <section class="subCard" aria-label="Block">
+        <h3>5) Block</h3>
+
+        <div class="blocksWrap" style="margin-top:8px;">
+          <div class="blocksHead">
+            <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+              <label style="margin:0; min-width: 260px;">
+                Lägg till block
+                <select id="addKind">
+                  <option value="info">Information</option>
+                  <option value="task">Uppgift</option>
+                  <option value="question">Fråga</option>
+                  <option value="both">Uppgift + Fråga</option>
+                  <option value="document">Dokument</option>
+                </select>
+              </label>
+              <button class="miniBtn" id="btnAddBlock" type="button">+ Lägg till</button>
+              <button class="miniBtn" id="btnAddDefaults" type="button" title="Lägg till standarduppsättning">+ Standard</button>
+            </div>
+
+            <div class="tiny">
+              <span id="blocksInfo">—</span>
+            </div>
+          </div>
+
+          <div class="blocksList" id="blocksList" aria-live="polite"></div>
+        </div>
+
+        <div class="tiny" style="margin-top:8px;">
+          Publish-regel: <strong>Publicerad</strong> kräver minst 1 block.
+        </div>
+      </section>
+
+      <div class="footerRow">
+        <div class="left">
+          <button class="miniBtn danger" id="btnRevert" type="button">Ångra osparat</button>
+        </div>
+        <div class="left">
+          <button class="btn secondary" id="btnSaveDraft" type="button">Spara som utkast</button>
+          <button class="btn" id="btnSavePublish" type="button">Spara & publicera</button>
+        </div>
+      </div>
+
+      <details id="debugDetails">
+        <summary>Visa sparad data (debug)</summary>
+        <div class="tiny">Visar exakt objekt som skrivs till storage (för felsök).</div>
+        <pre id="debugPre">{}</pre>
+      </details>
+    </section>
+  </div>
+</main>
+
+<!-- AO-002 CORE (LÅST): config före app -->
+<script src="../UI/UI-04-CONFIG.js"></script>
+<script src="../UI/UI-03-APP.js"></script>
+
+<script>
+/* ============================================================
+AO-TRAININGS-EXPORT-BLOCKBANK-01 | admin/trainings.html
+PATCH:
+- Export: hela utbildningen (alla block) → Block-bank (AO-0XX_BLOCKS_V1) som draft
+- Fail-closed: export stoppas om Block-bank är korrupt
+- Inga nya keys, ingen datamodell-ändring (endast ny post i befintlig block-bank)
+============================================================ */
+(function(){
   "use strict";
 
-  const SESSION_KEY = "AO-001_LOGIN_V1";
-  const BLOCKS_KEY  = "AO-0XX_BLOCKS_V1"; // Source of truth (read/write)
-  const BLOCKS_KEY  = "AO-0XX_BLOCKS_V1";
+  const SESSION_KEY   = "AO-001_LOGIN_V1";
+  const TRAININGS_KEY = "AO-057_TRAININGS_V1";
+  const BLOCKS_KEY    = "AO-0XX_BLOCKS_V1";
+
+  const MODULES = [
+    "Regelhantering",
+    "Policy",
+    "Ansvarsområden",
+    "Kompetenskartläggning",
+    "Utbildning",
+    "Mål & uppföljning",
+    "Utvecklingssamtal",
+    "Action Planning",
+    "CAPA / Root cause",
+    "Benchmarks / Heatmaps",
+    "Onboarding",
+    "Kommunikation",
+    "Arbetsmiljö / Säkerhet",
+    "Kvalitet/Miljö",
+    "Driftplanering"
+  ];
+
+  const DEFAULT_AI_ORIGIN = "https://hrsystem.andersmenyit.workers.dev";
 
   const $ = (s) => document.querySelector(s);
+  const elMsg = $("#msgBox");
+  const elWho = $("#whoPill");
+  const elState = $("#statePill");
+  const elSave = $("#savePill");
 
-@@ -490,11 +474,6 @@ <h3 style="margin-top:0;">Item-editor</h3>
-  const elSel = $("#selPill");
-  const lockBox = $("#lockBox");
-
-  const importBox = $("#importBox");
-  const importHint = $("#importHint");
-  const btnImport = $("#btnImport");
-  const btnImportRefresh = $("#btnImportRefresh");
-
-  const qBlocks = $("#qBlocks");
+  const qInp = $("#q");
   const filterStatus = $("#filterStatus");
-  const countBlocks = $("#countBlocks");
-@@ -546,7 +525,9 @@ <h3 style="margin-top:0;">Item-editor</h3>
-  const dSignInp = $("#dSignInp");
+  const listRows = $("#listRows");
+  const countText = $("#countText");
+  const btnClone = $("#btnClone");
+  const btnDelete = $("#btnDelete");
+
+  const btnNew = $("#btnNew");
+  const btnSave = $("#btnSave");
+  const btnExportBlockBank = $("#btnExportBlockBank");
+
+  const moduleSel = $("#moduleSel");
+  const areaSel = $("#areaSel");
+  const areaInp = $("#areaInp");
+  const areaHint = $("#areaHint");
+  const areaNewWrap = $("#areaNewWrap");
+
+  const titleInp = $("#titleInp");
+  const statusSel = $("#statusSel");
+  const publishHint = $("#publishHint");
+  const descInp = $("#descInp");
+  const goalsInp = $("#goalsInp");
+
+  const aiMode = $("#aiMode");
+  const aiBlockCount = $("#aiBlockCount");
+  const aiTopic = $("#aiTopic");
+  const btnAiTest = $("#btnAiTest");
+  const btnAiGenerate = $("#btnAiGenerate");
+  const aiStatus = $("#aiStatus");
+  const aiDefault = $("#aiDefault");
+
+  const addKind = $("#addKind");
+  const btnAddBlock = $("#btnAddBlock");
+  const btnAddDefaults = $("#btnAddDefaults");
+  const blocksList = $("#blocksList");
+  const blocksInfo = $("#blocksInfo");
+
+  const btnRevert = $("#btnRevert");
+  const btnSaveDraft = $("#btnSaveDraft");
+  const btnSavePublish = $("#btnSavePublish");
 
   const debugPre = $("#debugPre");
-  const debugBlockPre = $("#debugBlockPre");
 
-  const isText = (v) => (typeof v === "string");
-  const clampInt = (n, lo, hi, def) => {
-    const x = Number(n);
-    if(!Number.isFinite(x)) return def;
-@@ -596,20 +577,13 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    lockBox.appendChild(ul);
+  function setMsg(kind, text){
+    elMsg.className = "msg" + (kind ? " " + kind : "");
+    elMsg.textContent = text || "";
+    elMsg.style.display = text ? "block" : "none";
   }
 
-  function showImportBox(on, hintText){
-    importBox.style.display = on ? "block" : "none";
-    importHint.textContent = hintText || "—";
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-    btnImport.disabled = !canWrite || !STATE.importCandidate || !STATE.importCandidate.blocks || !STATE.importCandidate.blocks.length;
-    btnImportRefresh.disabled = false;
-  }
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
 
-  // ------------------------------
-  // Auth (HRApp)
-  // ------------------------------
+  function doLogout(){
+    if (window.HRApp && typeof window.HRApp.logout === "function") { window.HRApp.logout(); return; }
+    try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
+    try{ localStorage.removeItem(SESSION_KEY); }catch{}
+    redirectLogin();
+  }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
   if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
     redirectLogin(); return;
   }
-  // allow ADMIN/MANAGER/SYSTEM_ADMIN to access page; SYSTEM_ADMIN is read-only
-  const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN","MANAGER","SYSTEM_ADMIN"] });
+  const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN"] });
   if(!session) return;
 
-@@ -640,12 +614,18 @@ <h3 style="margin-top:0;">Item-editor</h3>
-  function loadBlocksState(){
-    const raw = safeGetLocalRaw(BLOCKS_KEY);
+  const auth = window.HRApp.getAuth(session);
+  if(!auth || !auth.role || String(auth.role) !== "ADMIN"){
+    redirectLogin(); return;
+  }
 
-    // Missing key: ok (empty list)
-    if(raw === null) return { ok:true, missing:true, corrupt:false, blocks:[] };
+  const empNo = String((session.auth && session.auth.empNo) || "").trim();
+  elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ADMIN`;
+
+  function safeParseArray(key){
+    try{
+      const raw = localStorage.getItem(key);
+      if(raw == null) return { ok:true, value: [] };
+      const v = JSON.parse(raw);
+      if(!Array.isArray(v)) return { ok:false, err: key + " är inte en array." };
+      return { ok:true, value: v };
+    }catch{
+      return { ok:false, err: key + " är korrupt JSON." };
+    }
+  }
+
+  function saveArray(key, arr){
+    try{
+      localStorage.setItem(key, JSON.stringify(arr));
+      return { ok:true };
+    }catch{
+      return { ok:false, err:"Kunde inte spara (localStorage fullt/blockerat)." };
+    }
+  }
+
+  // Block-bank (AO-0XX_BLOCKS_V1) kan vara:
+  // 1) array: [...]
+  // 2) wrapper: { blocks:[...], ...meta }
+  // PATCH: bevara formatet när vi sparar (för kompat med packages-block.html)
+  function loadBlockBank(){
+    let raw = null;
+    try{ raw = localStorage.getItem(BLOCKS_KEY); }catch{ raw = null; }
+
+    if(raw === null){
+      // Default: wrapper (vanligt i övriga AO). Inga nya keys, bara format på samma key.
+      return { ok:true, missing:true, corrupt:false, mode:"wrapper", root:{ blocks:[] }, blocks:[] };
+    }
 
     let parsed;
     try{ parsed = JSON.parse(raw); }
-    catch{ return { ok:false, missing:false, corrupt:true, blocks:[] }; }
+    catch{ return { ok:false, missing:false, corrupt:true, mode:"unknown", root:null, blocks:[] }; }
 
-    // Back-compat: vissa versioner kan ha wrapper { blocks: [...] }
+    // wrapper
     if(parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.blocks)){
-      parsed = parsed.blocks;
+      return { ok:true, missing:false, corrupt:false, mode:"wrapper", root: parsed, blocks: parsed.blocks };
     }
 
-    if(!Array.isArray(parsed)) return { ok:false, missing:false, corrupt:true, blocks:[] };
+    // array
+    if(Array.isArray(parsed)){
+      return { ok:true, missing:false, corrupt:false, mode:"array", root:null, blocks: parsed };
+    }
 
-    return { ok:true, missing:false, corrupt:false, blocks: parsed };
-@@ -705,56 +685,119 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    return "Item";
+    return { ok:false, missing:false, corrupt:true, mode:"unknown", root:null, blocks:[] };
   }
 
-  // ------------------------------
-  // Back-compat import (kritisk fix)
-  // - Om gamla blocks saknar .items men har t.ex. questions/tasks/documents/content eller rawText
-  // - Så konverteras de till nya items[] här.
-  // ------------------------------
-  function parseLegacyLinesToItems(text){
-    const out = [];
-    const lines = String(text || "").split("\n").map(s => s.trim()).filter(Boolean).slice(0, 500);
-
-    for(const line of lines){
-      const up = line.toUpperCase();
-
-      if(up.startsWith("DOC:")){
-        const t = line.slice(4).trim();
-        out.push({ kind:"document", text: t, requiresSign: true });
-        continue;
+  function saveBlockBank(bankState){
+    try{
+      const mode = String(bankState?.mode || "array");
+      const blocks = Array.isArray(bankState?.blocks) ? bankState.blocks : [];
+      if(mode === "wrapper"){
+        const root = (bankState && bankState.root && typeof bankState.root === "object" && !Array.isArray(bankState.root))
+          ? bankState.root
+          : { blocks:[] };
+        const next = { ...root, blocks };
+        localStorage.setItem(BLOCKS_KEY, JSON.stringify(next));
+        return { ok:true };
       }
-      if(up.startsWith("QT:")){
-        const t = line.slice(3).trim();
-        out.push({ kind:"question", questionId: genId("q"), text: t, answerType:"text", options:[], requiresAnswer:true });
-        continue;
-      }
-      if(up.startsWith("QC:")){
-        // QC: fråga | opt1 | opt2 ...
-        const rest = line.slice(3).trim();
-        const parts = rest.split("|").map(s => s.trim()).filter(Boolean);
-        const qText = String(parts[0] || "").trim();
-        const opts = parts.slice(1).map(s => s.slice(0,60)).filter(Boolean);
-        const uniq = [];
-        for(const o of opts){ if(o && !uniq.includes(o)) uniq.push(o); }
-        out.push({ kind:"question", questionId: genId("q"), text: qText, answerType:"choice", options: uniq.slice(0,10), requiresAnswer:true });
-        continue;
-      }
-      if(up.startsWith("TC:")){
-        const t = line.slice(3).trim();
-        out.push({ kind:"task", taskId: genId("t"), text: t, answerType:"checkbox", scale:null, requiresDone:true });
-        continue;
-      }
-      if(up.startsWith("TS:")){
-        // TS: text | min=1 max=5 | labelMin=... | labelMax=...
-        const parts = line.slice(3).split("|").map(s => s.trim()).filter(Boolean);
-        const t = String(parts[0] || "").trim();
-        let mn = 1, mx = 5, minLabel = "", maxLabel = "";
-        for(const p of parts.slice(1)){
-          const m1 = p.match(/min\s*=\s*(\d+)/i); if(m1) mn = clampInt(m1[1], 1, 10, 1);
-          const m2 = p.match(/max\s*=\s*(\d+)/i); if(m2) mx = clampInt(m2[1], 1, 10, 5);
-          const m3 = p.match(/labelmin\s*=\s*(.+)$/i); if(m3) minLabel = String(m3[1]||"").slice(0,40);
-          const m4 = p.match(/labelmax\s*=\s*(.+)$/i); if(m4) maxLabel = String(m4[1]||"").slice(0,40);
-        }
-        if(mx < mn) mx = mn;
-        out.push({ kind:"task", taskId: genId("t"), text: t, answerType:"scale", scale:{min:mn,max:mx,minLabel,maxLabel}, requiresDone:true });
-        continue;
-      }
+      localStorage.setItem(BLOCKS_KEY, JSON.stringify(blocks));
+      return { ok:true };
+    }catch{
+      return { ok:false, err:"Kunde inte spara Block-bank (localStorage fullt/blockerat)." };
     }
+  }
 
+  function genId(prefix){
+    try{
+      if(window.crypto && typeof window.crypto.randomUUID === "function"){
+        return (prefix || "id") + "_" + window.crypto.randomUUID();
+      }
+    }catch{}
+    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
+  }
+
+  function clampInt(n, lo, hi, def){
+    const x = Number(n);
+    if(!Number.isFinite(x)) return def;
+    const xi = Math.trunc(x);
+    if(xi < lo) return lo;
+    if(xi > hi) return hi;
+    return xi;
+  }
+
+  function now(){ return Date.now(); }
+
+  function fmtShort(ts){
+    try{
+      if(!ts) return "—";
+      const d = new Date(ts);
+      if(Number.isNaN(d.getTime())) return "—";
+      return d.toLocaleDateString("sv-SE");
+    }catch{ return "—"; }
+  }
+
+  function dedupeStrings(arr){
+    const out = [];
+    (Array.isArray(arr) ? arr : []).forEach(x => {
+      const s = String(x || "").trim();
+      if(!s) return;
+      if(!out.includes(s)) out.push(s);
+    });
     return out;
   }
 
-  function normalizeItem(raw){
-    const it = (raw && typeof raw === "object") ? raw : {};
-    const kind = String(it.kind || "").trim();
-    // Back-compat: vissa gamla versioner kan ha "type" istället för "kind"
-    const kind = String(it.kind || it.type || "").trim();
+  function normalizeOptions(raw){
+    const arr = Array.isArray(raw) ? raw : [];
+    return arr.slice(0,10).map(x => String(x||"").trim().slice(0,40));
+  }
 
-    if(kind === "document"){
-      return {
-        kind: "document",
-        text: String(it.text || "").slice(0, 2000),
-        requiresSign: !!it.requiresSign
-        text: String(it.text || it.body || "").slice(0, 2000),
-        requiresSign: !!(it.requiresSign ?? it.requires_signature ?? it.sign ?? true)
-      };
-    }
+  function normalizeCorrectOptions(raw, options){
+    const opts = Array.isArray(options) ? options : [];
+    const set = new Set(opts.map(x => String(x || "").trim()));
+    const cleaned = dedupeStrings(Array.isArray(raw) ? raw : []).slice(0, 20);
+    const filtered = cleaned.filter(v => set.has(v));
+    return filtered.slice(0,2);
+  }
 
-    if(kind === "question"){
-      const answerType = (it.answerType === "choice") ? "choice" : "text";
-      const answerType = (String(it.answerType || it.answer_type || it.mode || "").toLowerCase() === "choice") ? "choice" : "text";
-      const options = Array.isArray(it.options)
-        ? it.options.slice(0,10).map(x => String(x||"").trim().slice(0,60)).filter(Boolean)
-        : [];
-        : (Array.isArray(it.choices)
-            ? it.choices.slice(0,10).map(x => String(x||"").trim().slice(0,60)).filter(Boolean)
-            : []);
-      return {
-        kind: "question",
-        questionId: String(it.questionId || genId("q")),
-        text: String(it.text || "").slice(0, 240),
-        questionId: String(it.questionId || it.id || genId("q")),
-        text: String(it.text || it.question || it.prompt || "").slice(0, 240),
-        answerType,
-        options: (answerType === "choice") ? options : [],
-        requiresAnswer: (it.requiresAnswer !== false)
-        requiresAnswer: (it.requiresAnswer !== false && it.required !== false)
-      };
-    }
+  function isObj(x){ return !!x && typeof x === "object" && !Array.isArray(x); }
 
-    if(kind === "task"){
-      const answerType = (it.answerType === "scale") ? "scale" : "checkbox";
-      const answerType = (String(it.answerType || it.answer_type || it.mode || "").toLowerCase() === "scale") ? "scale" : "checkbox";
-      const scaleIn = it.scale || it.range || {};
-      const scale = (answerType === "scale")
-        ? {
-            min: clampInt(it?.scale?.min, 1, 10, 1),
-            max: clampInt(it?.scale?.max, 1, 10, 5),
-            minLabel: String(it?.scale?.minLabel || "").slice(0,40),
-            maxLabel: String(it?.scale?.maxLabel || "").slice(0,40)
-            min: clampInt(scaleIn.min, 1, 10, 1),
-            max: clampInt(scaleIn.max, 1, 10, 5),
-            minLabel: String(scaleIn.minLabel || scaleIn.min_label || "").slice(0,40),
-            maxLabel: String(scaleIn.maxLabel || scaleIn.max_label || "").slice(0,40)
-          }
-        : null;
+  function normalizeKind(k){
+    const kind0 = String(k || "").trim();
+    if(kind0 === "info" || kind0 === "task" || kind0 === "question" || kind0 === "both" || kind0 === "document") return kind0;
+    return "info";
+  }
 
-      if(scale && scale.max < scale.min) scale.max = scale.min;
-
-      return {
-        kind: "task",
-        taskId: String(it.taskId || genId("t")),
-        text: String(it.text || "").slice(0, 240),
-        taskId: String(it.taskId || it.id || genId("t")),
-        text: String(it.text || it.task || it.prompt || "").slice(0, 240),
-        answerType,
-        scale,
-        requiresDone: (it.requiresDone !== false)
-        requiresDone: (it.requiresDone !== false && it.required !== false)
-      };
-    }
-
-    // fail-closed: unknown -> safe placeholder item (still editable)
-    return {
-      kind: "document",
-      text: "Okänd item-typ (normaliserad till dokument).",
-@@ -764,13 +807,67 @@ <h3 style="margin-top:0;">Item-editor</h3>
-
+  // --- data model normalization (backward tolerant) ---
+  // KOMPAT: block får alias-fält + items[]
   function normalizeBlock(raw){
-    const b = (raw && typeof raw === "object") ? raw : {};
-    const items = Array.isArray(b.items) ? b.items.map(normalizeItem).slice(0, 200) : [];
+    const b = isObj(raw) ? raw : {};
 
-    // 1) Nya formen: b.items[]
-    let itemsRaw = Array.isArray(b.items) ? b.items : null;
+    const blockId = String(b.blockId || b.id || "").trim() || genId("blk");
+    const kind = normalizeKind(b.kind || b.type || "info");
+    const maxText = (kind === "document") ? 2000 : 240;
 
-    // 2) Legacy: separat arrays
-    if(!itemsRaw){
-      const legacy = [];
+    const title = String(b.title || "").slice(0,80);
+    const text = String(b.text || b.description || "").slice(0, maxText);
 
-      // documents
-      if(Array.isArray(b.documents)){
-        b.documents.forEach(d => legacy.push({ kind:"document", text: d?.text ?? d?.body ?? "", requiresSign: !!(d?.requiresSign ?? true) }));
-      }
-      // questions
-      if(Array.isArray(b.questions)){
-        b.questions.forEach(q => legacy.push({
-          kind:"question",
-          questionId: q?.questionId ?? q?.id,
-          text: q?.text ?? q?.question ?? q?.prompt ?? "",
-          answerType: (q?.answerType === "choice" || q?.mode === "choice") ? "choice" : "text",
-          options: q?.options ?? q?.choices ?? [],
-          requiresAnswer: (q?.requiresAnswer !== false && q?.required !== false)
-        }));
-      }
-      // tasks
-      if(Array.isArray(b.tasks)){
-        b.tasks.forEach(t => legacy.push({
-          kind:"task",
-          taskId: t?.taskId ?? t?.id,
-          text: t?.text ?? t?.task ?? t?.prompt ?? "",
-          answerType: (t?.answerType === "scale" || t?.mode === "scale") ? "scale" : "checkbox",
-          scale: t?.scale ?? t?.range ?? null,
-          requiresDone: (t?.requiresDone !== false && t?.required !== false)
-        }));
-      }
+    const taskAnswer = (b.taskAnswer === "scale" || b.taskAnswer === "checkbox") ? b.taskAnswer : "checkbox";
 
-      // content[] (vanlig legacy)
-      if(Array.isArray(b.content)){
-        b.content.forEach(x => legacy.push(x));
-      }
-
-      if(legacy.length) itemsRaw = legacy;
+    let questionAnswer = (b.questionAnswer === "choice" || b.questionAnswer === "text") ? b.questionAnswer : "";
+    if(kind === "both"){
+      questionAnswer = "text";
+    }else if(kind === "question"){
+      questionAnswer = questionAnswer || "choice";
+    }else{
+      questionAnswer = questionAnswer || "text";
     }
 
-    // 3) Legacy: rawText/itemsText/lines som text (DOC:/QT:/QC:/TC:/TS:)
-    if(!itemsRaw){
-      const txt = (b.rawText || b.itemsText || b.linesText || b.bodyText || b.blockText || "");
-      if(isText(txt) && String(txt).trim()){
-        const parsed = parseLegacyLinesToItems(txt);
-        if(parsed.length) itemsRaw = parsed;
-      }
+    const scaleMin = clampInt(b.scaleMin, 1, 10, 1);
+    const scaleMax0 = clampInt(b.scaleMax, 1, 10, 5);
+    const scaleMax = (scaleMax0 < scaleMin) ? scaleMin : scaleMax0;
+
+    const options0 = normalizeOptions(b.options);
+    let correctOptions = [];
+    if(kind === "question" && questionAnswer === "choice"){
+      correctOptions = normalizeCorrectOptions(b.correctOptions, options0);
+    }else{
+      correctOptions = [];
+    }
+    const finalOptions = (kind === "question" && questionAnswer === "choice") ? options0 : [];
+    if(kind === "question" && questionAnswer !== "choice"){
+      correctOptions = [];
     }
 
-    // 4) Default
-    const items = Array.isArray(itemsRaw) ? itemsRaw.map(normalizeItem).slice(0, 200) : [];
+    const items = [];
+    if(kind === "both"){
+      items.push({
+        id: blockId + ":task",
+        kind: "task",
+        type: "task",
+        title,
+        text,
+        description: text,
+        taskAnswer,
+        scaleMin,
+        scaleMax,
+        scaleMinLabel: String(b.scaleMinLabel || "").slice(0,40),
+        scaleMaxLabel: String(b.scaleMaxLabel || "").slice(0,40)
+      });
+      items.push({
+        id: blockId + ":question",
+        kind: "question",
+        type: "question",
+        title,
+        text,
+        description: text,
+        questionAnswer: "text",
+        options: [],
+        correctOptions: []
+      });
+    }else if(kind === "task"){
+      items.push({
+        id: blockId + ":task",
+        kind: "task",
+        type: "task",
+        title,
+        text,
+        description: text,
+        taskAnswer,
+        scaleMin,
+        scaleMax,
+        scaleMinLabel: String(b.scaleMinLabel || "").slice(0,40),
+        scaleMaxLabel: String(b.scaleMaxLabel || "").slice(0,40)
+      });
+    }else if(kind === "question"){
+      items.push({
+        id: blockId + ":question",
+        kind: "question",
+        type: "question",
+        title,
+        text,
+        description: text,
+        questionAnswer,
+        options: finalOptions,
+        correctOptions
+      });
+    }else{
+      items.push({
+        id: blockId + ":" + kind,
+        kind,
+        type: kind,
+        title,
+        text,
+        description: text
+      });
+    }
 
     return {
-      blockId: String(b.blockId || genId("blk")),
-      title: String(b.title || "").slice(0, 80),
-      module: String(b.module || "").slice(0, 60),
-      area: String(b.area || "").slice(0, 60),
-      step: String(b.step || "").slice(0, 60),
-      blockId: String(b.blockId || b.id || genId("blk")),
-      title: String(b.title || b.name || "").slice(0, 80),
-      module: String(b.module || b.mod || "").slice(0, 60),
-      area: String(b.area || b.domain || "").slice(0, 60),
-      step: String(b.step || b.stage || "").slice(0, 60),
-      status: normStatus(b.status || "draft"),
-      createdAt: Number.isFinite(Number(b.createdAt)) ? Number(b.createdAt) : Date.now(),
-      updatedAt: Number.isFinite(Number(b.updatedAt)) ? Number(b.updatedAt) : Date.now(),
-@@ -818,117 +915,6 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    return { ok: reasons.length === 0, reasons };
+      blockId,
+      kind,
+      title,
+      text,
+      id: blockId,
+      type: kind,
+      description: text,
+      taskAnswer,
+      questionAnswer,
+      scaleMin,
+      scaleMax,
+      scaleMinLabel: String(b.scaleMinLabel || "").slice(0,40),
+      scaleMaxLabel: String(b.scaleMaxLabel || "").slice(0,40),
+      options: finalOptions,
+      correctOptions,
+      items
+    };
   }
 
-  // ------------------------------
-  // Legacy discovery (READ-ONLY scanning)
-  // ------------------------------
-  function looksLikeItemsArray(v){
-    if(!Array.isArray(v) || v.length < 1) return false;
-    // at least one item with kind
-    return v.some(it => it && typeof it === "object" && typeof it.kind === "string");
+  function normalizeTraining(raw){
+    const t = isObj(raw) ? raw : {};
+    const id = String(t.id || "").trim() || genId("trn");
+    const module = String(t.module || "").trim();
+    const area = String(t.area || "").trim();
+    const title = String(t.title || "").trim();
+    const status = (String(t.status || "draft") === "published") ? "published" : "draft";
+    const description = String(t.description || "").trim().slice(0,240);
+
+    const goalsArr = Array.isArray(t.goals) ? t.goals : [];
+    const goals = goalsArr.map(g => String(g||"").trim()).filter(Boolean).slice(0,20);
+
+    const blocksArr = Array.isArray(t.blocks) ? t.blocks : (Array.isArray(t.items) ? t.items : []);
+    const blocks = blocksArr.map(normalizeBlock);
+
+    const version = Number.isFinite(Number(t.version)) ? Number(t.version) : 1;
+    const createdAt = Number.isFinite(Number(t.createdAt)) ? Number(t.createdAt) : now();
+    const updatedAt = Number.isFinite(Number(t.updatedAt)) ? Number(t.updatedAt) : createdAt;
+
+    const ai = (t.ai && typeof t.ai === "object") ? t.ai : {};
+    const outAi = {
+      lastTopic: String(ai.lastTopic || "").slice(0,90),
+      lastRunAt: Number.isFinite(Number(ai.lastRunAt)) ? Number(ai.lastRunAt) : 0,
+      lastSource: String(ai.lastSource || "")
+    };
+
+    const safeStatus = (status === "published" && blocks.length === 0) ? "draft" : status;
+
+    return { id, module, area, title, status: safeStatus, description, goals, blocks, items: blocks, version, createdAt, updatedAt, ai: outAi };
   }
 
-  function scoreCandidateBlocks(arr){
-    if(!Array.isArray(arr) || arr.length < 1) return 0;
-    let score = 0;
-    for(const b of arr){
-      if(!b || typeof b !== "object") continue;
-      if(typeof b.blockId === "string") score += 4;
-      if(typeof b.title === "string" && b.title.trim()) score += 2;
-      if(typeof b.module === "string" && b.module.trim()) score += 1;
-      if(Array.isArray(b.items) && looksLikeItemsArray(b.items)) score += 6;
-      if(typeof b.status === "string") score += 1;
-    }
-    // prefer more blocks
-    score += Math.min(50, arr.length * 2);
-    return score;
+  function serializeGoalsFromTextarea(){
+    const lines = String(goalsInp.value || "").split("\n").map(s => s.trim()).filter(Boolean);
+    const out = [];
+    lines.forEach(x => { if(!out.includes(x)) out.push(x); });
+    return out.slice(0,20);
   }
 
-  function extractBlocksFromAny(parsed){
-    // Accept either:
-    // - array of blocks
-    // - object with .blocks or .items-ish structures
-    if(Array.isArray(parsed)){
-      // could be blocks array directly
-      const s = scoreCandidateBlocks(parsed);
-      return (s >= 10) ? parsed : null;
-    }
-
-    if(parsed && typeof parsed === "object"){
-      // common wrappers
-      const cands = [];
-      if(Array.isArray(parsed.blocks)) cands.push(parsed.blocks);
-      if(Array.isArray(parsed.items)) cands.push(parsed.items);
-      if(Array.isArray(parsed.data)) cands.push(parsed.data);
-      if(parsed.bank && Array.isArray(parsed.bank.blocks)) cands.push(parsed.bank.blocks);
-
-      // also search shallow: properties that are arrays
-      for(const k of Object.keys(parsed)){
-        const v = parsed[k];
-        if(Array.isArray(v) && v.length) cands.push(v);
-      }
-
-      let best = null;
-      let bestScore = 0;
-      for(const c of cands){
-        const sc = scoreCandidateBlocks(c);
-        if(sc > bestScore){
-          bestScore = sc;
-          best = c;
-        }
-      }
-      return (bestScore >= 10) ? best : null;
-    }
-
-    return null;
+  function writeGoalsToTextarea(goals){
+    const arr = Array.isArray(goals) ? goals : [];
+    goalsInp.value = arr.map(x => String(x||"").trim()).filter(Boolean).slice(0,20).join("\n");
   }
 
-  function findLegacyBlockBank(){
-    // Scan localStorage keys, parse JSON, score candidates
-    let best = { key:"", score:0, blocks:[] };
-    const keys = [];
-    try{
-      for(let i=0; i<localStorage.length; i++){
-        const k = localStorage.key(i);
-        if(k) keys.push(k);
-      }
-    }catch{
-      return null;
-    }
-
-    // Prioritize likely keys first (cheap heuristic)
-    keys.sort((a,b) => {
-      const A = a.toUpperCase(), B = b.toUpperCase();
-      const pa = (A.includes("BLOCK") ? -3 : 0) + (A.includes("TASK") ? -1 : 0) + (A.includes("TRAIN") ? -1 : 0);
-      const pb = (B.includes("BLOCK") ? -3 : 0) + (B.includes("TASK") ? -1 : 0) + (B.includes("TRAIN") ? -1 : 0);
-      return pa - pb;
-    });
-
-    for(const k of keys){
-      // skip auth/session keys
-      if(k === SESSION_KEY) continue;
-
-      const raw = safeGetLocalRaw(k);
-      if(!raw || raw.length < 2) continue;
-      if(raw[0] !== "{" && raw[0] !== "[") continue;
-
-      let parsed;
-      try{ parsed = JSON.parse(raw); }catch{ continue; }
-
-      const blocks = extractBlocksFromAny(parsed);
-      if(!blocks) continue;
-
-      const sc = scoreCandidateBlocks(blocks);
-      if(sc > best.score){
-        best = { key:k, score:sc, blocks: blocks };
-      }
-    }
-
-    if(best.score >= 10 && Array.isArray(best.blocks) && best.blocks.length){
-      return best;
-    }
-    return null;
+  function summarizeSavePill(t){
+    const blocks = Array.isArray(t.blocks) ? t.blocks.length : 0;
+    const goals = Array.isArray(t.goals) ? t.goals.length : 0;
+    const s = (t.status === "published") ? "Publicerad" : "Utkast";
+    elSave.textContent = `Sparat: ${blocks} block • ${goals} mål • ${s} • v${t.version}`;
+    elSave.className = "pill " + (blocks > 0 ? "ok" : "warn");
   }
 
-  // ------------------------------
-  // State
-  // ------------------------------
-@@ -938,10 +924,10 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    all: [],
-    visible: [],
+  const STATE = {
+    items: [],
     selectedId: "",
     edit: null,
-    edit: null,          // normalized block (working copy)
-    rawSelected: null,   // raw block from storage for debug
-    selectedItemIndex: -1,
-    dirty: false,
-    importCandidate: null
+    snapshot: null,
     dirty: false
   };
 
   function setDirty(on){
-@@ -1043,6 +1029,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    }
-    if(q) out = out.filter(b => blockMatches(b, q));
-
-    // sort: draft first, newest first within status
-    out.sort((a,b) => {
-      const sa = normStatus(a.status), sb = normStatus(b.status);
-      if(sa !== sb) return (sa === "draft") ? -1 : 1;
-@@ -1140,6 +1127,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    itemsSummary.textContent = "—";
-    itemEditor.style.display = "none";
-    debugPre.textContent = "{}";
-    debugBlockPre.textContent = "{}";
-
-    btnItemUp.disabled = true;
-    btnItemDown.disabled = true;
-@@ -1176,7 +1164,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    if(items.length === 0){
-      const d = document.createElement("div");
-      d.className = "muted2";
-      d.textContent = "Inga items. Lägg till minst 1 innan publicering.";
-      d.textContent = "Inga items. (Om du förväntar dig frågor här: öppna Debug (block raw) för att se var de ligger i storage.)";
-      itemRows.appendChild(d);
-      STATE.selectedItemIndex = -1;
-      btnItemUp.disabled = true;
-@@ -1272,19 +1260,36 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    titleInp.value = b.title || "";
-    statusInp.value = blockStatusLabel(b.status);
-
-    // Debug raw
-    try{
-      debugBlockPre.textContent = JSON.stringify(STATE.rawSelected ?? {}, null, 2);
-    }catch{
-      debugBlockPre.textContent = "{}";
-    }
-
-    renderItems();
-    setSelectionPill();
-    setDirty(STATE.dirty);
+    STATE.dirty = !!on;
+    elState.textContent = STATE.dirty ? "Status: Osparade ändringar" : "Status: OK";
+    elState.className = "pill " + (STATE.dirty ? "warn" : "ok");
+    btnRevert.disabled = !STATE.dirty;
   }
 
-  function selectBlock(blockId){
-    const foundRaw = (function(){
-      const st = loadBlocksState();
-      if(st.corrupt) return null;
-      const arr = Array.isArray(st.blocks) ? st.blocks : [];
-      return arr.find(x => String(x?.blockId ?? x?.id ?? "") === String(blockId)) || null;
-    })();
-
-    const found = STATE.all.find(x => String(x.blockId) === String(blockId));
-    if(!found){
-      setMsg("err", "Kunde inte hitta block (fail-closed).");
-      return;
-    }
-    STATE.selectedId = String(found.blockId);
-    STATE.edit = JSON.parse(JSON.stringify(normalizeBlock(found)));
-    STATE.rawSelected = foundRaw;
-
-    // Viktigt: edit blir normaliserad kopia
-    STATE.edit = JSON.parse(JSON.stringify(normalizeBlock(foundRaw || found)));
-    STATE.selectedItemIndex = -1;
-    setMsg("", "");
-    setDirty(false);
-@@ -1369,6 +1374,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    debugPre.textContent = JSON.stringify(it, null, 2);
-
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-    // read-only guard
-    itemTextInp.disabled = !canWrite;
-    qAnswerSel.disabled = !canWrite;
-    qOptionsInp.disabled = !canWrite || (qAnswerSel.value !== "choice");
-@@ -1405,6 +1411,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    if(i < 0 || i >= items.length) return;
-
-    let it = normalizeItem(items[i]);
-
-    it.text = String(itemTextInp.value || "").slice(0, it.kind === "document" ? 2000 : 240);
-
-    if(it.kind === "question"){
-@@ -1448,20 +1455,20 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    debugPre.textContent = JSON.stringify(items[i], null, 2);
+  function setSelected(id){
+    STATE.selectedId = String(id||"");
+    btnClone.disabled = !STATE.selectedId;
+    btnDelete.disabled = !STATE.selectedId;
   }
 
-  function markDirty(){
-    setDirty(true);
-  }
-  function markDirty(){ setDirty(true); }
-
-  // Block fields change
-  function onBlockFieldChange(){
-    applyEditorToBlock();
-    markDirty();
-    renderBlockList();
-    renderBlockList(); // prevents stale titles in list
-  }
-  moduleInp.addEventListener("input", onBlockFieldChange);
-  areaInp.addEventListener("input", onBlockFieldChange);
-  stepInp.addEventListener("input", onBlockFieldChange);
-  titleInp.addEventListener("input", onBlockFieldChange);
-
-  // Item editor change
-  itemTextInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); renderItems(); updatePublishButton(); });
-
-  qAnswerSel.addEventListener("change", () => {
-@@ -1490,6 +1497,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
-
-  dSignInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); });
-
-  // Item list actions
-  btnItemUp.addEventListener("click", () => {
-    const b = STATE.edit; if(!b) return;
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-@@ -1572,6 +1580,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    const edit = STATE.edit;
-    if(!edit) return { ok:false, err:"Ingen vald block." };
-
-    // re-load bank to avoid writing over corruption introduced after load
-    const st = loadBlocksState();
-    if(st.corrupt) return { ok:false, err:`Fail-closed: ${BLOCKS_KEY} är korrupt.` };
-
-@@ -1645,101 +1654,28 @@ <h3 style="margin-top:0;">Item-editor</h3>
-  qBlocks.addEventListener("input", renderBlockList);
-  filterStatus.addEventListener("change", renderBlockList);
-
-  // ------------------------------
-  // Import flow
-  // ------------------------------
-  function refreshImportCandidate(){
-    STATE.importCandidate = findLegacyBlockBank();
-    if(!STATE.importCandidate){
-      showImportBox(true, "Jag hittar inga block-liknande strukturer i localStorage. Skapa ett block i “Skapa block” och kom tillbaka hit.");
-      return;
-    }
-
-    const c = STATE.importCandidate;
-    showImportBox(true, `Jag hittade troliga block i nyckeln: ${c.key} • ${c.blocks.length} st (score ${c.score}). Klicka Importera för att kopiera till Block-bank.`);
+  function updateExportBtn(){
+    const blocks = (STATE.edit && Array.isArray(STATE.edit.blocks)) ? STATE.edit.blocks.length : 0;
+    btnExportBlockBank.disabled = (blocks === 0);
   }
 
-  function importBlocksIntoBank(){
-    if(STATE.locked){ setMsg("err","Låst (fail-closed)."); return; }
-    if(isSystemAdmin){ setMsg("warn","Steward-läge: kan inte importera."); return; }
+  function rebuildAreaSuggestions(){
+    const mod = String(moduleSel.value || "").trim();
+    const areas = new Set();
+    STATE.items.forEach(t => {
+      if(!t) return;
+      if(String(t.module||"") !== mod) return;
+      const a = String(t.area||"").trim();
+      if(a) areas.add(a);
+    });
+    const sorted = Array.from(areas).sort((a,b) => a.localeCompare(b, "sv"));
 
-    const c = STATE.importCandidate;
-    if(!c || !Array.isArray(c.blocks) || !c.blocks.length){
-      setMsg("warn","Ingen importkandidat hittad. Klicka “Sök igen”.");
-      refreshImportCandidate();
-      return;
-    }
+    while(areaSel.firstChild) areaSel.removeChild(areaSel.firstChild);
 
-    // Normalize candidate blocks and write ONLY to BLOCKS_KEY
-    const normalized = c.blocks.map(normalizeBlock);
+    const ph = document.createElement("option");
+    ph.value = "";
+    ph.textContent = "Välj område…";
+    areaSel.appendChild(ph);
 
-    // If bank already has blocks, do safe merge by blockId (keep bank wins)
-    const st = loadBlocksState();
-    if(st.corrupt){ setMsg("err", `Fail-closed: ${BLOCKS_KEY} är korrupt.`); return; }
-
-    const existing = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
-    const map = new Map();
-    existing.forEach(b => map.set(String(b.blockId), b));
-
-    let added = 0;
-    normalized.forEach(b => {
-      const id = String(b.blockId);
-      if(!map.has(id)){
-        map.set(id, b);
-        added++;
-      }
+    sorted.slice(0,200).forEach(a => {
+      const opt = document.createElement("option");
+      opt.value = a;
+      opt.textContent = a;
+      areaSel.appendChild(opt);
     });
 
-    const merged = Array.from(map.values());
-    merged.sort((a,b) => Number(b.updatedAt||0) - Number(a.updatedAt||0));
+    const addNew = document.createElement("option");
+    addNew.value = "__new__";
+    addNew.textContent = "+ Skapa nytt område…";
+    areaSel.appendChild(addNew);
 
-    const res = saveBlocks(merged);
-    if(!res.ok){ setMsg("err", res.err || "Kunde inte importera."); return; }
+    areaHint.textContent = sorted.length
+      ? `Sparade i "${mod}": ${sorted.slice(0,6).join(", ")}${sorted.length>6 ? "…" : ""}`
+      : `Inga sparade områden ännu för "${mod}".`;
 
-    setMsg("ok", `Import klar: +${added} nya block in i ${BLOCKS_KEY}.`);
-    showImportBox(false, "");
+    syncAreaUIFromEdit();
+  }
 
-    // Reload from bank
-    STATE.all = merged;
-    renderBlockList();
-    if(STATE.all.length){
-      computeVisible();
-      if(STATE.visible.length) selectBlock(STATE.visible[0].blockId);
-      else hideEditor();
+  function syncAreaUIFromEdit(){
+    const t = STATE.edit;
+    if(!t) return;
+
+    const cur = String(t.area || "").trim();
+    const hasCur = Array.from(areaSel.options).some(o => o.value === cur);
+
+    if(cur && hasCur){
+      areaSel.value = cur;
+      areaNewWrap.style.display = "none";
+      areaInp.value = "";
+    }else if(cur){
+      areaSel.value = "__new__";
+      areaNewWrap.style.display = "block";
+      areaInp.value = cur;
     }else{
-      hideEditor();
+      areaSel.value = "";
+      areaNewWrap.style.display = "none";
+      areaInp.value = "";
     }
   }
 
-  btnImport.addEventListener("click", () => {
-    if(!confirm("Importera hittade block till Block-bank (AO-0XX_BLOCKS_V1)? Inga andra keys ändras.")) return;
-    importBlocksIntoBank();
-  });
+  function readAreaFromUI(){
+    const sel = String(areaSel.value || "");
+    if(sel === "__new__"){
+      return String(areaInp.value || "").trim();
+    }
+    return String(sel || "").trim();
+  }
 
-  btnImportRefresh.addEventListener("click", () => {
-    setMsg("", "");
-    refreshImportCandidate();
-  });
+  function renderModuleOptions(){
+    moduleSel.innerHTML = "";
+    MODULES.forEach(m => {
+      const opt = document.createElement("option");
+      opt.value = m;
+      opt.textContent = m;
+      moduleSel.appendChild(opt);
+    });
+  }
 
-  // ------------------------------
-  // Init
-  // ------------------------------
-  function init(){
+  function kindLabel(kind){
+    if(kind === "info") return "Information";
+    if(kind === "task") return "Uppgift";
+    if(kind === "question") return "Fråga";
+    if(kind === "both") return "Uppgift + Fråga";
+    if(kind === "document") return "Dokument";
+    return "Block";
+  }
+
+  function updatePublishHint(){
+    const blocks = (STATE.edit && Array.isArray(STATE.edit.blocks)) ? STATE.edit.blocks.length : 0;
+
+    if(blocks === 0){
+      publishHint.textContent = "Publish kräver minst 1 block.";
+      if(statusSel.value === "published"){
+        statusSel.value = "draft";
+        if(STATE.edit) STATE.edit.status = "draft";
+      }
+    }else{
+      publishHint.textContent = "OK att publicera.";
+    }
+
+    btnSavePublish.disabled = (blocks === 0);
+    blocksInfo.textContent = (blocks === 0) ? "0 block (lägg till eller använd AI)" : (blocks + " block");
+
+    updateExportBtn();
+  }
+
+  function makeBlockCard(block, index){
+    const card = document.createElement("div");
+    card.className = "blockCard";
+
+    const top = document.createElement("div");
+    top.className = "blockTop";
+
+    const left = document.createElement("div");
+    const titleRow = document.createElement("div");
+    titleRow.className = "blockTitle";
+
+    const tag = document.createElement("span");
+    tag.className = "tag";
+    tag.textContent = kindLabel(block.kind);
+
+    const t = document.createElement("span");
+    t.textContent = block.title ? block.title : "Namnlöst block";
+
+    titleRow.appendChild(tag);
+    titleRow.appendChild(t);
+
+    const meta = document.createElement("div");
+    meta.className = "tiny";
+    meta.textContent = `#${index + 1} • blockId: ${String(block.blockId||"—")}`;
+
+    left.appendChild(titleRow);
+    left.appendChild(meta);
+
+    const actions = document.createElement("div");
+    actions.className = "blockActions";
+
+    const orderBtns = document.createElement("div");
+    orderBtns.className = "orderBtns";
+
+    const up = document.createElement("button");
+    up.className = "miniBtn";
+    up.type = "button";
+    up.textContent = "↑";
+    up.title = "Flytta upp";
+    up.disabled = (index === 0);
+    up.addEventListener("click", () => {
+      setMsg("", "");
+      if(index === 0) return;
+      const arr = STATE.edit.blocks;
+      const tmp = arr[index-1];
+      arr[index-1] = arr[index];
+      arr[index] = tmp;
+      setDirty(true);
+      renderBlocks();
+    });
+
+    const down = document.createElement("button");
+    down.className = "miniBtn";
+    down.type = "button";
+    down.textContent = "↓";
+    down.title = "Flytta ner";
+    down.disabled = (index === (STATE.edit.blocks.length - 1));
+    down.addEventListener("click", () => {
+      setMsg("", "");
+      const arr = STATE.edit.blocks;
+      if(index >= arr.length - 1) return;
+      const tmp = arr[index+1];
+      arr[index+1] = arr[index];
+      arr[index] = tmp;
+      setDirty(true);
+      renderBlocks();
+    });
+
+    orderBtns.appendChild(up);
+    orderBtns.appendChild(down);
+
+    const del = document.createElement("button");
+    del.className = "miniBtn danger";
+    del.type = "button";
+    del.textContent = "Ta bort";
+    del.addEventListener("click", () => {
+      setMsg("", "");
+      if(!confirm("Ta bort block?")) return;
+      STATE.edit.blocks.splice(index, 1);
+      setDirty(true);
+      renderBlocks();
+    });
+
+    actions.appendChild(orderBtns);
+    actions.appendChild(del);
+
+    top.appendChild(left);
+    top.appendChild(actions);
+
+    const body = document.createElement("div");
+    body.className = "blockBody";
+
+    const col1 = document.createElement("div");
+    const col2 = document.createElement("div");
+
+    const lblTitle = document.createElement("label");
+    lblTitle.textContent = "Titel";
+    const inTitle = document.createElement("input");
+    inTitle.type = "text";
+    inTitle.maxLength = 80;
+    inTitle.value = block.title || "";
+    inTitle.addEventListener("input", () => {
+      block.title = String(inTitle.value || "").slice(0,80);
+      block.description = String(block.text || "").slice(0, (block.kind==="document")?2000:240);
+      setDirty(true);
+      t.textContent = block.title ? block.title : "Namnlöst block";
+      block.items = normalizeBlock(block).items;
+      updateExportBtn();
+    });
+    lblTitle.appendChild(inTitle);
+
+    const lblText = document.createElement("label");
+    lblText.textContent = (block.kind === "document") ? "Text (dokument)" : ((block.kind === "info") ? "Text (info)" : "Text");
+    const inText = document.createElement("textarea");
+    inText.maxLength = (block.kind === "document") ? 2000 : 240;
+    inText.value = block.text || "";
+    inText.addEventListener("input", () => {
+      const cap = (block.kind === "document") ? 2000 : 240;
+      block.text = String(inText.value || "").slice(0,cap);
+      block.description = block.text; // alias
+      setDirty(true);
+      block.items = normalizeBlock(block).items;
+      updateExportBtn();
+    });
+    lblText.appendChild(inText);
+
+    col1.appendChild(lblTitle);
+    col1.appendChild(lblText);
+
+    const ansWrap = document.createElement("div");
+    const ansLbl = document.createElement("div");
+    ansLbl.style.fontWeight = "950";
+    ansLbl.textContent = "Konfiguration";
+    ansWrap.appendChild(ansLbl);
+
+    const hint = document.createElement("div");
+    hint.className = "tiny";
+    hint.style.marginTop = "6px";
+
+    if(block.kind === "info" || block.kind === "document"){
+      hint.textContent = (block.kind === "document")
+        ? "Dokument har ingen svarstyp (längre text)."
+        : "Information har ingen svarstyp.";
+      ansWrap.appendChild(hint);
+    }else{
+      if(block.kind === "task" || block.kind === "both"){
+        const lbl = document.createElement("label");
+        lbl.textContent = "Uppgift – svarstyp";
+        const sel = document.createElement("select");
+        const o1 = document.createElement("option"); o1.value = "checkbox"; o1.textContent = "Checkbox";
+        const o2 = document.createElement("option"); o2.value = "scale"; o2.textContent = "Skala";
+        sel.appendChild(o1); sel.appendChild(o2);
+        sel.value = (block.taskAnswer === "scale") ? "scale" : "checkbox";
+        sel.addEventListener("change", () => {
+          block.taskAnswer = (sel.value === "scale") ? "scale" : "checkbox";
+          setDirty(true);
+          renderBlocks();
+        });
+        lbl.appendChild(sel);
+        ansWrap.appendChild(lbl);
+
+        const sc = document.createElement("div");
+        sc.className = "subCard";
+        sc.style.marginTop = "10px";
+        const h = document.createElement("h3"); h.textContent = "Skala";
+        const ht = document.createElement("div"); ht.className = "tiny"; ht.textContent = "Gäller bara om svarstyp = Skala.";
+        sc.appendChild(h); sc.appendChild(ht);
+
+        const r = document.createElement("div");
+        r.className = "row2";
+        const l1 = document.createElement("label");
+        l1.textContent = "Min (1–10)";
+        const i1 = document.createElement("input");
+        i1.type = "number"; i1.min = "1"; i1.max = "10"; i1.step = "1";
+        i1.value = String(clampInt(block.scaleMin, 1, 10, 1));
+        i1.addEventListener("change", () => {
+          block.scaleMin = clampInt(i1.value, 1, 10, 1);
+          if(block.scaleMax < block.scaleMin) block.scaleMax = block.scaleMin;
+          setDirty(true);
+          renderBlocks();
+        });
+        l1.appendChild(i1);
+
+        const l2 = document.createElement("label");
+        l2.textContent = "Max (1–10)";
+        const i2 = document.createElement("input");
+        i2.type = "number"; i2.min = "1"; i2.max = "10"; i2.step = "1";
+        i2.value = String(clampInt(block.scaleMax, 1, 10, 5));
+        i2.addEventListener("change", () => {
+          block.scaleMax = clampInt(i2.value, 1, 10, 5);
+          if(block.scaleMax < block.scaleMin) block.scaleMin = block.scaleMax;
+          setDirty(true);
+          renderBlocks();
+        });
+        l2.appendChild(i2);
+
+        r.appendChild(l1);
+        r.appendChild(l2);
+
+        sc.appendChild(r);
+
+        if(block.taskAnswer !== "scale"){
+          sc.style.opacity = "0.55";
+        }
+        ansWrap.appendChild(sc);
+      }
+
+      if(block.kind === "question"){
+        const lbl = document.createElement("label");
+        lbl.textContent = "Fråga – svarstyp";
+        const sel = document.createElement("select");
+        const o1 = document.createElement("option"); o1.value = "text"; o1.textContent = "Text";
+        const o2 = document.createElement("option"); o2.value = "choice"; o2.textContent = "Kryss (val)";
+        sel.appendChild(o1); sel.appendChild(o2);
+        sel.value = (block.questionAnswer === "choice") ? "choice" : "text";
+        sel.addEventListener("change", () => {
+          block.questionAnswer = (sel.value === "choice") ? "choice" : "text";
+          if(block.questionAnswer !== "choice"){
+            block.options = [];
+            block.correctOptions = [];
+          }else{
+            if(!Array.isArray(block.options) || block.options.length === 0){
+              block.options = ["", "", ""];
+            }
+            if(!Array.isArray(block.correctOptions)) block.correctOptions = [];
+          }
+          setDirty(true);
+          renderBlocks();
+        });
+        lbl.appendChild(sel);
+        ansWrap.appendChild(lbl);
+
+        const opt = document.createElement("div");
+        opt.className = "subCard";
+        opt.style.marginTop = "10px";
+        const h = document.createElement("h3"); h.textContent = "Val (Kryss)";
+        const ht = document.createElement("div"); ht.className = "tiny"; ht.textContent = "Max 10 alternativ. Ett per rad.";
+        opt.appendChild(h); opt.appendChild(ht);
+
+        const optArea = document.createElement("textarea");
+        optArea.maxLength = 500;
+        optArea.value = (Array.isArray(block.options) ? block.options : []).join("\n");
+        optArea.placeholder = "Skriv ett alternativ per rad…";
+        optArea.addEventListener("input", () => {
+          const lines = String(optArea.value || "").split("\n").map(s => s.trim());
+          const cleaned = lines.filter(v => v.length > 0).slice(0,10).map(x => x.slice(0,40));
+          block.options = cleaned;
+          if(Array.isArray(block.correctOptions)){
+            block.correctOptions = normalizeCorrectOptions(block.correctOptions, block.options);
+          }else{
+            block.correctOptions = [];
+          }
+          setDirty(true);
+          block.items = normalizeBlock(block).items;
+          updateExportBtn();
+        });
+        opt.appendChild(optArea);
+
+        const corr = document.createElement("div");
+        corr.className = "subCard";
+        corr.style.marginTop = "10px";
+        const ch = document.createElement("h3"); ch.textContent = "Rätt svar";
+        const cht = document.createElement("div");
+        cht.className = "tiny";
+        cht.textContent = "Markera max 2 korrekta. Kräver att alternativet finns i listan ovan.";
+        corr.appendChild(ch);
+        corr.appendChild(cht);
+
+        const corrHint = document.createElement("div");
+        corrHint.className = "tiny";
+        corrHint.style.marginTop = "8px";
+        corrHint.style.display = "none";
+        corr.appendChild(corrHint);
+
+        const optsNow = Array.isArray(block.options) ? block.options : [];
+        const current = Array.isArray(block.correctOptions) ? block.correctOptions.slice() : [];
+        const safeCurrent = normalizeCorrectOptions(current, optsNow);
+        block.correctOptions = safeCurrent;
+
+        const list = document.createElement("div");
+        list.style.display = "flex";
+        list.style.flexDirection = "column";
+        list.style.gap = "6px";
+        list.style.marginTop = "8px";
+
+        if(optsNow.length === 0){
+          const e = document.createElement("div");
+          e.className = "tiny";
+          e.textContent = "Inga alternativ ännu. Lägg till alternativ för att kunna markera rätt svar.";
+          list.appendChild(e);
+        }else{
+          optsNow.slice(0,10).forEach((optVal) => {
+            const row = document.createElement("label");
+            row.style.display = "flex";
+            row.style.alignItems = "center";
+            row.style.gap = "8px";
+            row.style.fontWeight = "800";
+
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.checked = block.correctOptions.includes(optVal);
+
+            const txt = document.createElement("span");
+            txt.textContent = optVal;
+
+            cb.addEventListener("change", () => {
+              let next = Array.isArray(block.correctOptions) ? block.correctOptions.slice() : [];
+              next = normalizeCorrectOptions(next, optsNow);
+
+              if(cb.checked){
+                if(next.includes(optVal)){
+                }else{
+                  if(next.length >= 2){
+                    cb.checked = false;
+                    corrHint.style.display = "block";
+                    corrHint.textContent = "Max 2 rätta svar. Avmarkera ett först.";
+                    return;
+                  }
+                  next.push(optVal);
+                }
+              }else{
+                next = next.filter(v => v !== optVal);
+              }
+
+              corrHint.style.display = "none";
+              block.correctOptions = normalizeCorrectOptions(next, optsNow);
+              setDirty(true);
+              block.items = normalizeBlock(block).items;
+              updateExportBtn();
+            });
+
+            row.appendChild(cb);
+            row.appendChild(txt);
+            list.appendChild(row);
+          });
+        }
+
+        corr.appendChild(list);
+
+        if(block.questionAnswer !== "choice"){
+          opt.style.opacity = "0.55";
+          corr.style.opacity = "0.55";
+          corr.style.pointerEvents = "none";
+        }
+
+        ansWrap.appendChild(opt);
+        ansWrap.appendChild(corr);
+      }
+
+      if(block.kind === "both"){
+        hint.textContent = "Kombiblock: uppgift (checkbox/skala) + fråga (text).";
+        ansWrap.appendChild(hint);
+      }
+    }
+
+    col2.appendChild(ansWrap);
+
+    body.appendChild(col1);
+    body.appendChild(col2);
+
+    card.appendChild(top);
+    card.appendChild(body);
+
+    return card;
+  }
+
+  function renderBlocks(){
+    while(blocksList.firstChild) blocksList.removeChild(blocksList.firstChild);
+    const arr = (STATE.edit && Array.isArray(STATE.edit.blocks)) ? STATE.edit.blocks : [];
+    if(arr.length === 0){
+      const empty = document.createElement("div");
+      empty.className = "muted2";
+      empty.style.padding = "6px 2px";
+      empty.textContent = "Inga block ännu. Lägg till block eller kör AI.";
+      blocksList.appendChild(empty);
+      blocksInfo.textContent = "0 block (lägg till eller använd AI)";
+      updatePublishHint();
+      return;
+    }
+
+    arr.forEach((b, idx) => blocksList.appendChild(makeBlockCard(b, idx)));
+    updatePublishHint();
+  }
+
+  function rowMatches(t, q, status){
+    if(status && String(t.status) !== status) return false;
+    if(!q) return true;
+    const hay = (String(t.title||"") + " " + String(t.module||"") + " " + String(t.area||"")).toLowerCase();
+    return hay.includes(q.toLowerCase());
+  }
+
+  function renderList(){
+    const q = String(qInp.value || "").trim();
+    const st = String(filterStatus.value || "").trim();
+
+    const items = STATE.items.slice().sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+    const filtered = items.filter(t => rowMatches(t, q, st));
+
+    countText.textContent = `${filtered.length} st`;
+
+    listRows.innerHTML = "";
+    if(filtered.length === 0){
+      const d = document.createElement("div");
+      d.className = "muted2";
+      d.textContent = "Inget matchar filtret.";
+      listRows.appendChild(d);
+      return;
+    }
+
+    filtered.slice(0,200).forEach(t => {
+      const row = document.createElement("div");
+      row.className = "rowItem" + (String(t.id) === String(STATE.selectedId) ? " active" : "");
+      row.setAttribute("role", "button");
+      row.setAttribute("tabindex", "0");
+
+      const top = document.createElement("div");
+      top.className = "rowTop";
+
+      const left = document.createElement("div");
+      const title = document.createElement("div");
+      title.className = "rowTitle";
+      title.textContent = t.title || "—";
+      const sub = document.createElement("div");
+      sub.className = "tiny";
+      sub.textContent = `${t.module || "—"} • ${t.area || "—"}`;
+      left.appendChild(title);
+      left.appendChild(sub);
+
+      const right = document.createElement("div");
+      const p1 = document.createElement("span");
+      p1.className = "pill " + (t.status === "published" ? "ok" : "warn");
+      p1.textContent = (t.status === "published") ? "Publicerad" : "Utkast";
+      right.appendChild(p1);
+
+      top.appendChild(left);
+      top.appendChild(right);
+
+      const meta = document.createElement("div");
+      meta.className = "rowMeta";
+      const blocks = document.createElement("span");
+      blocks.className = "tag";
+      blocks.textContent = `${(Array.isArray(t.blocks)?t.blocks.length:0)} block`;
+      const ver = document.createElement("span");
+      ver.className = "tag";
+      ver.textContent = `v${t.version || 1}`;
+      const upd = document.createElement("span");
+      upd.className = "tag";
+      upd.textContent = `Uppdaterad: ${fmtShort(t.updatedAt)}`;
+      meta.appendChild(blocks);
+      meta.appendChild(ver);
+      meta.appendChild(upd);
+
+      row.appendChild(top);
+      row.appendChild(meta);
+
+      function openIt(){
+        if(STATE.dirty){
+          if(!confirm("Du har osparade ändringar. Byta utbildning ändå?")) return;
+        }
+        loadForEdit(t.id);
+      }
+      row.addEventListener("click", openIt);
+      row.addEventListener("keydown", (e) => {
+        if(e.key === "Enter" || e.key === " "){
+          e.preventDefault();
+          openIt();
+        }
+      });
+
+      listRows.appendChild(row);
+    });
+  }
+
+  function syncEditorUI(){
+    const t = STATE.edit;
+    if(!t) return;
+
+    moduleSel.value = t.module || MODULES[0];
+    rebuildAreaSuggestions();
+
+    titleInp.value = t.title || "";
+    statusSel.value = t.status || "draft";
+    descInp.value = t.description || "";
+    writeGoalsToTextarea(t.goals || []);
+    aiBlockCount.value = String(clampInt(aiBlockCount.value, 1, 12, 7));
+    aiTopic.value = t.ai && t.ai.lastTopic ? t.ai.lastTopic : "";
+
+    renderBlocks();
+
+    debugPre.textContent = JSON.stringify(t, null, 2);
+
+    summarizeSavePill(t);
+    setDirty(false);
+    updateExportBtn();
+  }
+
+  function loadForEdit(id){
+    const found = STATE.items.find(x => String(x.id) === String(id));
+    if(!found){
+      setMsg("err", "Kunde inte hitta utbildningen (fail-closed).");
+      return;
+    }
+    const t = normalizeTraining(found);
+    STATE.selectedId = t.id;
+    STATE.edit = JSON.parse(JSON.stringify(t));
+    STATE.snapshot = JSON.parse(JSON.stringify(t));
+    setSelected(t.id);
+    syncEditorUI();
+    renderList();
     setMsg("", "");
+  }
+
+  function newTraining(){
+    if(STATE.dirty){
+      if(!confirm("Du har osparade ändringar. Skapa ny ändå?")) return;
+    }
+    const t = normalizeTraining({
+      id: genId("trn"),
+      module: MODULES[0],
+      area: "",
+      title: "",
+      status: "draft",
+      description: "",
+      goals: [],
+      blocks: [],
+      version: 1,
+      createdAt: now(),
+      updatedAt: now(),
+      ai: { lastTopic:"", lastRunAt:0, lastSource:"" }
+    });
+    STATE.selectedId = t.id;
+    STATE.edit = JSON.parse(JSON.stringify(t));
+    STATE.snapshot = JSON.parse(JSON.stringify(t));
+    setSelected(t.id);
+
+    rebuildAreaSuggestions();
+
+    syncEditorUI();
+    renderList();
+    setMsg("ok", "Ny utbildning skapad (inte sparad än).");
+  }
+
+  function hydrateFromInputs(){
+    const t = STATE.edit;
+
+    t.module = String(moduleSel.value || "").trim();
+    t.area = readAreaFromUI();
+    t.title = String(titleInp.value || "").trim();
+    t.description = String(descInp.value || "").trim().slice(0,240);
+    t.goals = serializeGoalsFromTextarea();
+
+    const desired = (String(statusSel.value) === "published") ? "published" : "draft";
+    if(desired === "published" && (!Array.isArray(t.blocks) || t.blocks.length === 0)){
+      t.status = "draft";
+      statusSel.value = "draft";
+    }else{
+      t.status = desired;
+    }
+
+    t.blocks = (Array.isArray(t.blocks) ? t.blocks : []).map(normalizeBlock);
+    t.items = t.blocks; // kompat
+
+    updatePublishHint();
+    debugPre.textContent = JSON.stringify(t, null, 2);
+  }
+
+  function validateForSave(desiredStatus){
+    const t = STATE.edit;
+
+    if(!t.module || !MODULES.includes(t.module)) return { ok:false, err:"Modul krävs (ogiltigt val)." };
+    if(!t.area || t.area.length < 2) return { ok:false, err:"Område krävs (minst 2 tecken)." };
+    if(!t.title || t.title.length < 2) return { ok:false, err:"Rubrik krävs (minst 2 tecken)." };
+
+    if(desiredStatus === "published"){
+      if(!Array.isArray(t.blocks) || t.blocks.length === 0) return { ok:false, err:"Kan inte publicera utan block (fail-closed)." };
+    }
+
+    return { ok:true };
+  }
+
+  function upsertAndSave(){
+    const t = normalizeTraining(STATE.edit);
+    const existing = STATE.items.find(x => String(x.id) === String(t.id));
+    if(existing){
+      const prev = normalizeTraining(existing);
+      t.createdAt = prev.createdAt;
+      t.version = clampInt((prev.version || 1) + 1, 1, 9999, (prev.version||1) + 1);
+    }else{
+      t.version = 1;
+      t.createdAt = now();
+    }
+    t.updatedAt = now();
+
+    if(t.status === "published" && t.blocks.length === 0){
+      t.status = "draft";
+    }
+
+    const next = STATE.items.slice();
+    const idx = next.findIndex(x => String(x.id) === String(t.id));
+    if(idx >= 0) next[idx] = t;
+    else next.push(t);
+
+    const res = saveArray(TRAININGS_KEY, next);
+    if(!res.ok){
+      setMsg("err", res.err || "Kunde inte spara (fail-closed).");
+      return { ok:false };
+    }
+
+    STATE.items = next.map(normalizeTraining);
+    STATE.edit = JSON.parse(JSON.stringify(t));
+    STATE.snapshot = JSON.parse(JSON.stringify(t));
+    STATE.selectedId = t.id;
+    setSelected(t.id);
+
+    summarizeSavePill(t);
     setDirty(false);
 
-    // Lock checks:
-    const lockReasons = [];
+    rebuildAreaSuggestions();
 
-    // 1) localStorage write probe (only matters if not SYSTEM_ADMIN)
-    if(!isSystemAdmin){
-      try{
-        const t = "__probe__";
-        localStorage.setItem(t, "1");
-        localStorage.removeItem(t);
-      }catch{
-        lockReasons.push("localStorage är blockerad (kan inte spara/publicera/importera).");
-        lockReasons.push("localStorage är blockerad (kan inte spara/publicera).");
+    renderList();
+    debugPre.textContent = JSON.stringify(t, null, 2);
+
+    setMsg("ok", `Sparat: ${t.blocks.length} block • ${t.goals.length} mål • ${(t.status==="published")?"Publicerad":"Utkast"} • v${t.version}`);
+    updateExportBtn();
+    return { ok:true };
+  }
+
+  // ------------------------------
+  // Export: Training -> Block-bank block
+  // ------------------------------
+  function pickTextForItem(block, item, fallback){
+    const itText = String(item?.text || item?.description || "").trim();
+    if(itText) return itText;
+    const a = String(block?.text || "").trim();
+    if(a) return a;
+    const b = String(block?.title || "").trim();
+    if(b) return b;
+    return String(fallback || "").trim();
+  }
+
+  function convertTrainingBlockToBankItems(tb){
+    const b = normalizeBlock(tb);
+    const out = [];
+
+    // tb.items är kompat-läge: kan vara 1 (info/task/question/document) eller 2 (both)
+    const srcItems = Array.isArray(b.items) ? b.items : [];
+
+    srcItems.forEach((it) => {
+      const k = String(it?.kind || it?.type || "").trim();
+
+      if(k === "task"){
+        const at = (String(it?.taskAnswer || b.taskAnswer || "checkbox") === "scale") ? "scale" : "checkbox";
+        const item = {
+          kind: "task",
+          taskId: String(it?.id || (String(b.blockId) + ":task") || genId("t")),
+          text: pickTextForItem(b, it, "Uppgift"),
+          answerType: at,
+          requiresDone: true
+        };
+        if(at === "scale"){
+          item.scale = {
+            min: clampInt(it?.scaleMin ?? b.scaleMin, 1, 10, 1),
+            max: clampInt(it?.scaleMax ?? b.scaleMax, 1, 10, 5),
+            minLabel: String(it?.scaleMinLabel ?? b.scaleMinLabel ?? "").slice(0,40),
+            maxLabel: String(it?.scaleMaxLabel ?? b.scaleMaxLabel ?? "").slice(0,40)
+          };
+          if(item.scale.max < item.scale.min) item.scale.max = item.scale.min;
+        }
+        out.push(item);
+        return;
       }
+
+      if(k === "question"){
+        const qa = String(it?.questionAnswer || b.questionAnswer || "text");
+        const answerType = (qa === "choice") ? "choice" : "text";
+        const options = (answerType === "choice") ? normalizeOptions(it?.options ?? b.options) : [];
+        const item = {
+          kind: "question",
+          questionId: String(it?.id || (String(b.blockId) + ":question") || genId("q")),
+          text: pickTextForItem(b, it, "Fråga"),
+          answerType,
+          options,
+          requiresAnswer: true
+        };
+        out.push(item);
+        return;
+      }
+
+      // info/document -> document item i block-bank
+      const srcKind = (String(it?.kind || it?.type || b.kind || "") === "document") ? "document" : "info";
+      out.push({
+        kind: "document",
+        text: pickTextForItem(b, it, srcKind === "document" ? "Dokument" : "Information"),
+        requiresSign: (srcKind === "document") ? true : false
+      });
+    });
+
+    // fail-closed: om inget blev konverterat -> tomt (publish i block-bank stoppar ändå)
+    return out;
+  }
+
+  function exportCurrentTrainingToBlockBank(){
+    setMsg("", "");
+    hydrateFromInputs();
+
+    if(!STATE.edit){ setMsg("err","Ingen utbildning vald (fail-closed)."); return; }
+
+    const v = validateForSave("draft");
+    if(!v.ok){ setMsg("err", v.err); return; }
+
+    const t = normalizeTraining(STATE.edit);
+    const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+    if(blocks.length === 0){
+      setMsg("err", "Export kräver minst 1 block (fail-closed).");
+      return;
     }
 
-    // 2) block-bank corruption gate
-    const st = loadBlocksState();
-    if(st.corrupt){
-      lockReasons.push(`${BLOCKS_KEY} är korrupt (JSON/shape). Åtgärda eller rensa nyckeln innan redigering.`);
-@@ -1748,6 +1684,7 @@ <h3 style="margin-top:0;">Item-editor</h3>
-    STATE.lockReasons = lockReasons;
-    applyLockFromState();
+    const bank = loadBlockBank();
+    if(!bank.ok || bank.corrupt){
+      setMsg("err", "Fail-closed: Block-bank (AO-0XX_BLOCKS_V1) är korrupt. Export stoppad.");
+      return;
+    }
 
-    // Load blocks (empty ok)
-    if(!st.corrupt){
-      STATE.all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
+    const items = [];
+    blocks.forEach(tb => {
+      convertTrainingBlockToBankItems(tb).forEach(x => items.push(x));
+    });
+
+    const newBlockId = genId("blk");
+    const newBlock = {
+      blockId: newBlockId,
+      title: String(t.title || "").slice(0,80),
+      module: String(t.module || "").slice(0,60),
+      area: String(t.area || "").slice(0,60),
+      step: "Steg 1",
+      status: "draft",
+      createdAt: now(),
+      updatedAt: now(),
+      createdBy: empNo || "",
+      verifiedAt: null,
+      verifiedBy: "",
+      items: items.slice(0,200)
+    };
+
+    const nextBlocks = (Array.isArray(bank.blocks) ? bank.blocks : []).slice();
+    nextBlocks.push(newBlock);
+
+    const saved = saveBlockBank({ mode: bank.mode, root: bank.root, blocks: nextBlocks });
+    if(!saved.ok){
+      setMsg("err", saved.err || "Kunde inte spara till Block-bank.");
+      return;
+    }
+
+    setMsg("ok", `Export klar → Block-bank (utkast). blockId=${newBlockId}. Öppna: admin/packages-block.html`);
+  }
+
+  // ------------------------------
+  // UI events
+  // ------------------------------
+  qInp.addEventListener("input", () => renderList());
+  filterStatus.addEventListener("change", () => renderList());
+
+  btnNew.addEventListener("click", () => { setMsg("", ""); newTraining(); });
+  btnSave.addEventListener("click", () => {
+    setMsg("", "");
+    hydrateFromInputs();
+    const v = validateForSave(STATE.edit.status);
+    if(!v.ok){ setMsg("err", v.err); return; }
+    upsertAndSave();
+  });
+
+  btnExportBlockBank.addEventListener("click", () => {
+    if(btnExportBlockBank.disabled) return;
+    if(!confirm("Exportera hela utbildningen (alla block) till Block-bank som ett utkast?")) return;
+    exportCurrentTrainingToBlockBank();
+  });
+
+  btnRevert.addEventListener("click", () => {
+    setMsg("", "");
+    if(!STATE.dirty) return;
+    if(!confirm("Återställa osparade ändringar?")) return;
+    if(!STATE.snapshot){ setMsg("err", "Ingen snapshot (fail-closed)."); return; }
+    STATE.edit = JSON.parse(JSON.stringify(STATE.snapshot));
+    syncEditorUI();
+    setMsg("ok", "Återställt.");
+  });
+
+  btnSaveDraft.addEventListener("click", () => {
+    setMsg("", "");
+    hydrateFromInputs();
+    STATE.edit.status = "draft";
+    statusSel.value = "draft";
+    const v = validateForSave("draft");
+    if(!v.ok){ setMsg("err", v.err); return; }
+    upsertAndSave();
+  });
+
+  btnSavePublish.addEventListener("click", () => {
+    setMsg("", "");
+    hydrateFromInputs();
+    STATE.edit.status = "published";
+    statusSel.value = "published";
+    const v = validateForSave("published");
+    if(!v.ok){ setMsg("err", v.err); return; }
+    upsertAndSave();
+  });
+
+  btnClone.addEventListener("click", () => {
+    setMsg("", "");
+    if(!STATE.selectedId){ return; }
+    const src = STATE.items.find(x => String(x.id) === String(STATE.selectedId));
+    if(!src){ setMsg("err","Kunde inte kopiera (saknas)."); return; }
+    const t = normalizeTraining(src);
+    const copy = normalizeTraining({
+      ...t,
+      id: genId("trn"),
+      title: (t.title ? (t.title + " (kopia)") : "Kopia"),
+      status: "draft",
+      version: 1,
+      createdAt: now(),
+      updatedAt: now()
+    });
+    STATE.edit = JSON.parse(JSON.stringify(copy));
+    STATE.snapshot = JSON.parse(JSON.stringify(copy));
+    STATE.selectedId = copy.id;
+    setSelected(copy.id);
+    syncEditorUI();
+    renderList();
+    setMsg("ok", "Kopia skapad (inte sparad än).");
+  });
+
+  btnDelete.addEventListener("click", () => {
+    setMsg("", "");
+    if(!STATE.selectedId) return;
+    const t = STATE.items.find(x => String(x.id) === String(STATE.selectedId));
+    if(!t) return;
+    if(!confirm(`Ta bort "${t.title || "utbildning"}"?`)) return;
+
+    const next = STATE.items.filter(x => String(x.id) !== String(STATE.selectedId));
+    const res = saveArray(TRAININGS_KEY, next);
+    if(!res.ok){ setMsg("err", res.err || "Kunde inte ta bort."); return; }
+
+    STATE.items = next.map(normalizeTraining);
+    STATE.selectedId = "";
+    setSelected("");
+    newTraining();
+    renderList();
+    setMsg("ok", "Borttagen.");
+  });
+
+  moduleSel.addEventListener("change", () => {
+    hydrateFromInputs();
+    setDirty(true);
+    rebuildAreaSuggestions();
+  });
+
+  areaSel.addEventListener("change", () => {
+    const v = String(areaSel.value || "");
+    if(v === "__new__"){
+      areaNewWrap.style.display = "block";
+      areaInp.focus();
     }else{
-@@ -1756,22 +1693,18 @@ <h3 style="margin-top:0;">Item-editor</h3>
+      areaNewWrap.style.display = "none";
+      areaInp.value = "";
+    }
+    hydrateFromInputs();
+    setDirty(true);
+  });
 
-    renderBlockList();
+  areaInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
 
-    // If bank is empty -> show import helper (read-only scanning)
-    if(STATE.all.length === 0){
-      // show import box only if not locked; even in locked you can still see hint
-      refreshImportCandidate();
-      hideEditor();
-      setMsg(st.missing ? "warn" : "warn", "Block-bank är tom. Om du har block skapade i en annan nyckel: använd Import.");
-    }else{
-      showImportBox(false, "");
-    if(STATE.all.length){
-      computeVisible();
-      if(STATE.visible.length){
-        selectBlock(STATE.visible[0].blockId);
-        setMsg("ok", "Block-bank laddad.");
-        setMsg("ok", "Laddad första block.");
+  titleInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
+  descInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
+  goalsInp.addEventListener("input", () => { hydrateFromInputs(); setDirty(true); });
+
+  statusSel.addEventListener("change", () => {
+    hydrateFromInputs();
+    updatePublishHint();
+    setDirty(true);
+  });
+
+  btnAddBlock.addEventListener("click", () => {
+    setMsg("", "");
+    const k = normalizeKind(String(addKind.value||"").trim());
+    if(!STATE.edit) return;
+
+    const base = {
+      blockId: genId("blk"),
+      kind: k,
+      title: "",
+      text: "",
+      taskAnswer: "checkbox",
+      questionAnswer: "text",
+      scaleMin: 1,
+      scaleMax: 5,
+      options: [],
+      correctOptions: []
+    };
+
+    if(k === "question"){
+      base.questionAnswer = "choice";
+      base.options = ["", "", ""];
+      base.correctOptions = [];
+    }
+    if(k === "both"){
+      base.questionAnswer = "text";
+      base.options = [];
+      base.correctOptions = [];
+    }
+    if(k === "document"){
+      base.questionAnswer = "text";
+      base.options = [];
+      base.correctOptions = [];
+    }
+
+    STATE.edit.blocks.push(normalizeBlock(base));
+    STATE.edit.items = STATE.edit.blocks;
+    setDirty(true);
+    renderBlocks();
+  });
+
+  btnAddDefaults.addEventListener("click", () => {
+    setMsg("", "");
+    if(!STATE.edit) return;
+    if(STATE.edit.blocks.length > 0){
+      if(!confirm("Lägga till standardblock efter befintliga block?")) return;
+    }
+    STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"info", title:"Information", text:"Kort info om utbildningen och vad som förväntas." }));
+    STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"task", title:"Uppgift", text:"Gör uppgiften och markera när du är klar.", taskAnswer:"checkbox" }));
+    STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"question", title:"Fråga", text:"Svara kort.", questionAnswer:"choice", options:["", "", ""], correctOptions:[] }));
+    STATE.edit.items = STATE.edit.blocks;
+    setDirty(true);
+    renderBlocks();
+  });
+
+  function getAiOrigin(){
+    try{
+      const u = new URL(window.location.href);
+      const p = String(u.searchParams.get("ai") || "").trim();
+      if(p){
+        if(p.startsWith("https://")) return p.replace(/\/+$/,"");
+      }
+    }catch{}
+    return DEFAULT_AI_ORIGIN;
+  }
+
+  function aiUrl(path){
+    const origin = getAiOrigin();
+    aiDefault.textContent = origin;
+    try{
+      return new URL(path, origin).toString();
+    }catch{
+      return origin + path;
+    }
+  }
+
+  async function aiTest(){
+    const url = aiUrl("/health");
+    aiStatus.textContent = "Testar worker…";
+    try{
+      const r = await fetch(url, { method:"GET", cache:"no-store" });
+      const txt = await r.text();
+      if(!r.ok){
+        aiStatus.textContent = `Worker fel: HTTP ${r.status}`;
+        setMsg("err", "Worker svarade med fel (se AI-status).");
+        return;
+      }
+      aiStatus.textContent = `Worker OK: ${txt.slice(0,120)}`;
+      setMsg("ok", "Worker verkar igång.");
+    }catch{
+      aiStatus.textContent = "Worker kunde inte nås.";
+      setMsg("err", "Kunde inte nå worker (nät / url).");
+    }
+  }
+
+  function coerceAiTraining(json){
+    const root = (json && typeof json === "object") ? json : {};
+    const pack = (root.training && typeof root.training === "object") ? root.training
+               : (root.result && typeof root.result === "object") ? root.result
+               : root;
+
+    const out = {};
+    if(typeof pack.description === "string") out.description = pack.description;
+    if(Array.isArray(pack.goals)) out.goals = pack.goals;
+    if(Array.isArray(pack.blocks)) out.blocks = pack.blocks;
+    if(!out.blocks && Array.isArray(pack.items)) out.blocks = pack.items;
+    return out;
+  }
+
+  function toDocumentBlock(raw){
+    const b = isObj(raw) ? raw : {};
+    const title = String(b.title || "").trim().slice(0,80);
+    let text =
+      (typeof b.text === "string" && b.text) ? b.text :
+      (typeof b.description === "string" && b.description) ? b.description :
+      "";
+
+    if(!text){
+      const parts = [];
+      if(typeof b.text === "string") parts.push(b.text);
+      if(typeof b.description === "string") parts.push(b.description);
+      text = parts.filter(Boolean).join("\n\n");
+    }
+
+    return normalizeBlock({
+      blockId: String(b.blockId || b.id || "").trim() || genId("blk"),
+      kind: "document",
+      title,
+      text: String(text || "").slice(0,2000)
+    });
+  }
+
+  async function aiGenerate(){
+    setMsg("", "");
+    hydrateFromInputs();
+
+    const t = STATE.edit;
+    const v = validateForSave("draft");
+    if(!v.ok){ setMsg("err", v.err); return; }
+
+    const count = clampInt(aiBlockCount.value, 1, 12, 7);
+    const topic = String(aiTopic.value || "").trim() || t.title;
+
+    if(!topic || topic.length < 2){
+      setMsg("err", "Rubrik krävs innan AI (fail-closed).");
+      return;
+    }
+
+    const mode = (String(aiMode.value || "training") === "document") ? "document" : "training";
+
+    const url = aiUrl("/ai-generate");
+    btnAiGenerate.disabled = true;
+    btnAiTest.disabled = true;
+    aiStatus.textContent = "Skapar med AI…";
+
+    const payload = {
+      mode,
+      language: "sv",
+      topic,
+      module: t.module,
+      area: t.area,
+      blockCount: count,
+      schema: (mode === "document")
+        ? { blocks: { allowedKinds: ["document"], maxText: 2000 } }
+        : { blocks: { allowedKinds: ["info","task","question","both"], maxText: 240 } }
+    };
+
+    try{
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify(payload)
+      });
+
+      const text = await r.text();
+      let json = null;
+      try{ json = JSON.parse(text); }catch{ json = { ok:false, error:"Bad JSON", details:text.slice(0,400) }; }
+
+      if(!r.ok || (json && json.ok === false)){
+        const msg = (json && (json.error || json.message)) ? String(json.error || json.message) : ("HTTP " + r.status);
+        aiStatus.textContent = "AI-fel.";
+        setMsg("err", "AI/Worker fel: " + msg);
+        return;
+      }
+
+      const res = coerceAiTraining(json);
+
+      if(typeof res.description === "string" && !t.description){
+        t.description = String(res.description).trim().slice(0,240);
+        descInp.value = t.description;
+      }
+
+      if(Array.isArray(res.goals) && res.goals.length){
+        if(!Array.isArray(t.goals) || t.goals.length === 0){
+          t.goals = res.goals.map(x => String(x||"").trim()).filter(Boolean).slice(0,20);
+          writeGoalsToTextarea(t.goals);
+        }
+      }
+
+      if(Array.isArray(res.blocks) && res.blocks.length){
+        if(mode === "document"){
+          t.blocks = res.blocks.slice(0,12).map(toDocumentBlock);
+        }else{
+          t.blocks = res.blocks.map(x => normalizeBlock(x)).slice(0,12);
+        }
+        t.items = t.blocks; // kompat
       }else{
-        hideEditor();
-        setMsg("warn", "Inga block matchar filter.");
+        aiStatus.textContent = "AI gav inga block.";
+        setMsg("warn", "AI gav inga block. Testa igen eller lägg till manuellt.");
       }
+
+      t.ai = t.ai || { lastTopic:"", lastRunAt:0, lastSource:"" };
+      t.ai.lastTopic = topic;
+      t.ai.lastRunAt = now();
+      t.ai.lastSource = "worker";
+
+      aiStatus.textContent = `AI OK: ${Array.isArray(t.blocks)?t.blocks.length:0} block`;
+      setDirty(true);
+      renderBlocks();
+      debugPre.textContent = JSON.stringify(t, null, 2);
+
+    }catch(e){
+      aiStatus.textContent = "AI kunde inte köras.";
+      setMsg("err", "Kunde inte nå AI/Worker (nät / endpoint).");
+    }finally{
+      btnAiGenerate.disabled = false;
+      btnAiTest.disabled = false;
+    }
+  }
+
+  btnAiTest.addEventListener("click", aiTest);
+  btnAiGenerate.addEventListener("click", aiGenerate);
+
+  function init(){
+    setMsg("", "");
+
+    renderModuleOptions();
+    aiDefault.textContent = getAiOrigin();
+
+    const read = safeParseArray(TRAININGS_KEY);
+    if(!read.ok){
+      setMsg("err", read.err || "Kunde inte läsa utbildningar (fail-closed).");
+      STATE.items = [];
     }else{
-      hideEditor();
-      setMsg(st.missing ? "warn" : "warn", "Inga block ännu. Skapa i “Skapa block”.");
+      STATE.items = (read.value || []).map(normalizeTraining);
     }
 
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-@@ -1786,20 +1719,25 @@ <h3 style="margin-top:0;">Item-editor</h3>
+    aiBlockCount.value = "7";
+
+    if(STATE.items.length){
+      const sorted = STATE.items.slice().sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+      loadForEdit(sorted[0].id);
+      setMsg("ok", "Laddad senaste utbildning.");
+    }else{
+      newTraining();
+      setMsg("ok", "Inga utbildningar ännu. Skapa din första.");
+    }
+
+    rebuildAreaSuggestions();
+
+    renderList();
+    updatePublishHint();
+    updateExportBtn();
+  }
+
+  init();
+
+})();
+</script>
 
 <!-- ============================================================
-Ändringslogg (≤ 8 rader)
-- Lagt till import-flöde: om AO-0XX_BLOCKS_V1 är tom/saknas → sök legacy blockbank i localStorage (read-only).
-- Import (opt-in): kopierar normaliserade block till AO-0XX_BLOCKS_V1 (endast denna key skrivs).
-- Visar tydlig import-box med hittad key + antal block.
-- Behåller fail-closed, XSS-safe, och SYSTEM_ADMIN read-only.
-- FIX: Back-compat import av items från legacy-former (questions/tasks/documents/content + rawText/itemsText).
-- FIX: Back-compat om AO-0XX_BLOCKS_V1 är wrapper {blocks:[...]} istället för array.
-- Lagt till Debug (block raw) för att se exakt hur blocket ligger i storage.
-- Inga nya storage-keys, fortsatt XSS-safe rendering.
+Ändringslogg (AO-TRAININGS-EXPORT-BLOCKBANK-01) ≤ 8 rader
+- PATCH: Block-bank sparas i samma format som den redan ligger (wrapper {blocks:[]} eller array) för kompat med packages-block
+- PATCH: Unika taskId/questionId per item (blockId:task / blockId:question) för att undvika krockar
+- PATCH: Item-text prioriterar item.text/description före block.text (bättre mappning)
+- Oförändrat: AO-057_TRAININGS_V1 logik, publish-regel, XSS, ADMIN-only, fail-closed
+Test:
+- Skapa 2–12 block i en utbildning → Export → öppna admin/packages-block.html och verifiera att ett nytt draft-block finns med items
 ============================================================ -->
-
-<!-- ============================================================
-Testnoteringar (exakta klicksteg)
-1) Logga in som ADMIN/MANAGER → öppna admin/tasks.html → skapa ett block.
-2) Öppna admin/packages-block.html:
-   - Om Block-bank tom: import-box visas med hittad key → klicka Importera → block syns i listan.
-3) Öppna block → redigera rubrik/item → Spara → reload → ändringar kvar.
-1) Logga in som ADMIN/MANAGER → öppna admin/tasks.html → skapa ett block med QT/QC/TC (frågor + uppgifter).
-2) Öppna admin/packages-block.html → välj block → Items ska nu synas.
-3) Om Items fortfarande saknas: öppna “Debug (block raw)” och se om frågorna ligger i annan nyckel/struktur.
-4) Publicera → status=published + verifiedAt/verifiedBy.
-5) Logga in som SYSTEM_ADMIN → import/spara/publicera disabled.
-============================================================ -->
-
-<!-- ============================================================
-Risk / edge cases
-- Om tasks.html sparat en helt annan struktur än de vanligaste legacy-fälten, krävs en ny importregel.
-- Ingen realtids-sync mellan flikar (UI-only).
-============================================================ -->
-
 </body>
+</html>
