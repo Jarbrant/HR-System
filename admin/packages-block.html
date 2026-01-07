@@ -3,12 +3,10 @@ AO-BLOCK-PIPELINE-01 (MASTER) | BLOCK 2/5 | FIL-ID: admin/packages-block.html
 Projekt: HR-System
 Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
 
-NYTT i BLOCK 2/5:
-- Kopplar sidan till Block-bank: AO-0XX_BLOCKS_V1 (source of truth för block)
-- Lista/öppna block (draft/published)
-- Redigera block-metadata + items (document/question/task)
-- Publicera (draft → published) med hård validering (fail-closed)
-- Fail-closed vid korrupt block-bank (låser Save/Publish)
+NYTT i denna patch:
+- Robust import: om AO-0XX_BLOCKS_V1 är tom/saknas försöker sidan hitta legacy-block i localStorage
+- Import-knapp (opt-in) som migrerar hittade blocks -> AO-0XX_BLOCKS_V1 (ENDA write-key)
+- Inga nya storage-keys, endast AO-0XX_BLOCKS_V1 skrivs
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -189,6 +187,17 @@ POLICY (LÅST):
     .itemTop{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
     .itemTitle{ font-weight: 950; line-height:1.2; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     .itemMeta{ margin-top:6px; }
+
+    .importCard{
+      margin-top:10px;
+      border:1px solid rgba(245,158,11,.35);
+      background: rgba(254,243,199,.22);
+      border-radius: var(--r14);
+      padding:10px 12px;
+    }
+    .importCard .title{ font-weight:950; }
+    .importCard .tiny{ margin-top:6px; }
+    .importActions{ margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; }
   </style>
 </head>
 
@@ -233,6 +242,18 @@ POLICY (LÅST):
       </div>
 
       <div id="lockBox" class="lockbox" style="display:none;"></div>
+
+      <div id="importBox" class="importCard" style="display:none;">
+        <div class="title">Import behövs (block hittades inte i Block-bank)</div>
+        <div class="tiny" id="importHint">—</div>
+        <div class="importActions">
+          <button class="btn" id="btnImport" type="button">Importera hittade block</button>
+          <button class="btn secondary" id="btnImportRefresh" type="button">Sök igen</button>
+        </div>
+        <div class="tiny" style="margin-top:8px;">
+          Import skriver <strong>endast</strong> till <span class="mono">AO-0XX_BLOCKS_V1</span>. Inga andra keys ändras.
+        </div>
+      </div>
     </div>
 
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
@@ -381,7 +402,7 @@ POLICY (LÅST):
 
                 <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
                   <input id="qReqInp" type="checkbox" />
-                  <span>Krver svar</span>
+                  <span>Kräver svar</span>
                 </label>
 
                 <div class="tiny" id="qHint" style="margin-top:6px;">Val kräver minst 2 alternativ.</div>
@@ -421,7 +442,7 @@ POLICY (LÅST):
 
                 <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
                   <input id="tReqInp" type="checkbox" />
-                  <span>Krver klar (done)</span>
+                  <span>Kräver klar (done)</span>
                 </label>
 
                 <div class="tiny" id="tHint" style="margin-top:6px;">Skala kräver min/max och text.</div>
@@ -458,7 +479,7 @@ POLICY (LÅST):
   "use strict";
 
   const SESSION_KEY = "AO-001_LOGIN_V1";
-  const BLOCKS_KEY  = "AO-0XX_BLOCKS_V1";
+  const BLOCKS_KEY  = "AO-0XX_BLOCKS_V1"; // Source of truth (read/write)
 
   const $ = (s) => document.querySelector(s);
 
@@ -468,6 +489,11 @@ POLICY (LÅST):
   const elState = $("#statePill");
   const elSel = $("#selPill");
   const lockBox = $("#lockBox");
+
+  const importBox = $("#importBox");
+  const importHint = $("#importHint");
+  const btnImport = $("#btnImport");
+  const btnImportRefresh = $("#btnImportRefresh");
 
   const qBlocks = $("#qBlocks");
   const filterStatus = $("#filterStatus");
@@ -521,7 +547,6 @@ POLICY (LÅST):
 
   const debugPre = $("#debugPre");
 
-  const isText = (v) => (typeof v === "string");
   const clampInt = (n, lo, hi, def) => {
     const x = Number(n);
     if(!Number.isFinite(x)) return def;
@@ -571,13 +596,20 @@ POLICY (LÅST):
     lockBox.appendChild(ul);
   }
 
+  function showImportBox(on, hintText){
+    importBox.style.display = on ? "block" : "none";
+    importHint.textContent = hintText || "—";
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    btnImport.disabled = !canWrite || !STATE.importCandidate || !STATE.importCandidate.blocks || !STATE.importCandidate.blocks.length;
+    btnImportRefresh.disabled = false;
+  }
+
   // ------------------------------
   // Auth (HRApp)
   // ------------------------------
   if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
     redirectLogin(); return;
   }
-  // allow ADMIN/MANAGER/SYSTEM_ADMIN to access page; SYSTEM_ADMIN is read-only
   const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN","MANAGER","SYSTEM_ADMIN"] });
   if(!session) return;
 
@@ -608,7 +640,6 @@ POLICY (LÅST):
   function loadBlocksState(){
     const raw = safeGetLocalRaw(BLOCKS_KEY);
 
-    // Missing key: ok (empty list)
     if(raw === null) return { ok:true, missing:true, corrupt:false, blocks:[] };
 
     let parsed;
@@ -724,7 +755,6 @@ POLICY (LÅST):
       };
     }
 
-    // fail-closed: unknown -> safe placeholder item (still editable)
     return {
       kind: "document",
       text: "Okänd item-typ (normaliserad till dokument).",
@@ -789,6 +819,117 @@ POLICY (LÅST):
   }
 
   // ------------------------------
+  // Legacy discovery (READ-ONLY scanning)
+  // ------------------------------
+  function looksLikeItemsArray(v){
+    if(!Array.isArray(v) || v.length < 1) return false;
+    // at least one item with kind
+    return v.some(it => it && typeof it === "object" && typeof it.kind === "string");
+  }
+
+  function scoreCandidateBlocks(arr){
+    if(!Array.isArray(arr) || arr.length < 1) return 0;
+    let score = 0;
+    for(const b of arr){
+      if(!b || typeof b !== "object") continue;
+      if(typeof b.blockId === "string") score += 4;
+      if(typeof b.title === "string" && b.title.trim()) score += 2;
+      if(typeof b.module === "string" && b.module.trim()) score += 1;
+      if(Array.isArray(b.items) && looksLikeItemsArray(b.items)) score += 6;
+      if(typeof b.status === "string") score += 1;
+    }
+    // prefer more blocks
+    score += Math.min(50, arr.length * 2);
+    return score;
+  }
+
+  function extractBlocksFromAny(parsed){
+    // Accept either:
+    // - array of blocks
+    // - object with .blocks or .items-ish structures
+    if(Array.isArray(parsed)){
+      // could be blocks array directly
+      const s = scoreCandidateBlocks(parsed);
+      return (s >= 10) ? parsed : null;
+    }
+
+    if(parsed && typeof parsed === "object"){
+      // common wrappers
+      const cands = [];
+      if(Array.isArray(parsed.blocks)) cands.push(parsed.blocks);
+      if(Array.isArray(parsed.items)) cands.push(parsed.items);
+      if(Array.isArray(parsed.data)) cands.push(parsed.data);
+      if(parsed.bank && Array.isArray(parsed.bank.blocks)) cands.push(parsed.bank.blocks);
+
+      // also search shallow: properties that are arrays
+      for(const k of Object.keys(parsed)){
+        const v = parsed[k];
+        if(Array.isArray(v) && v.length) cands.push(v);
+      }
+
+      let best = null;
+      let bestScore = 0;
+      for(const c of cands){
+        const sc = scoreCandidateBlocks(c);
+        if(sc > bestScore){
+          bestScore = sc;
+          best = c;
+        }
+      }
+      return (bestScore >= 10) ? best : null;
+    }
+
+    return null;
+  }
+
+  function findLegacyBlockBank(){
+    // Scan localStorage keys, parse JSON, score candidates
+    let best = { key:"", score:0, blocks:[] };
+    const keys = [];
+    try{
+      for(let i=0; i<localStorage.length; i++){
+        const k = localStorage.key(i);
+        if(k) keys.push(k);
+      }
+    }catch{
+      return null;
+    }
+
+    // Prioritize likely keys first (cheap heuristic)
+    keys.sort((a,b) => {
+      const A = a.toUpperCase(), B = b.toUpperCase();
+      const pa = (A.includes("BLOCK") ? -3 : 0) + (A.includes("TASK") ? -1 : 0) + (A.includes("TRAIN") ? -1 : 0);
+      const pb = (B.includes("BLOCK") ? -3 : 0) + (B.includes("TASK") ? -1 : 0) + (B.includes("TRAIN") ? -1 : 0);
+      return pa - pb;
+    });
+
+    for(const k of keys){
+      // skip auth/session keys
+      if(k === SESSION_KEY) continue;
+
+      const raw = safeGetLocalRaw(k);
+      if(!raw || raw.length < 2) continue;
+      if(raw[0] !== "{" && raw[0] !== "[") continue;
+
+      let parsed;
+      try{ parsed = JSON.parse(raw); }catch{ continue; }
+
+      const blocks = extractBlocksFromAny(parsed);
+      if(!blocks) continue;
+
+      const sc = scoreCandidateBlocks(blocks);
+      if(sc > best.score){
+        best = { key:k, score:sc, blocks: blocks };
+      }
+    }
+
+    if(best.score >= 10 && Array.isArray(best.blocks) && best.blocks.length){
+      return best;
+    }
+    return null;
+  }
+
+  // ------------------------------
   // State
   // ------------------------------
   const STATE = {
@@ -797,9 +938,10 @@ POLICY (LÅST):
     all: [],
     visible: [],
     selectedId: "",
-    edit: null,          // normalized block (working copy)
+    edit: null,
     selectedItemIndex: -1,
-    dirty: false
+    dirty: false,
+    importCandidate: null
   };
 
   function setDirty(on){
@@ -901,7 +1043,6 @@ POLICY (LÅST):
     }
     if(q) out = out.filter(b => blockMatches(b, q));
 
-    // sort: draft first, newest first within status
     out.sort((a,b) => {
       const sa = normStatus(a.status), sb = normStatus(b.status);
       if(sa !== sb) return (sa === "draft") ? -1 : 1;
@@ -1228,7 +1369,6 @@ POLICY (LÅST):
     debugPre.textContent = JSON.stringify(it, null, 2);
 
     const canWrite = (!STATE.locked && !isSystemAdmin);
-    // read-only guard
     itemTextInp.disabled = !canWrite;
     qAnswerSel.disabled = !canWrite;
     qOptionsInp.disabled = !canWrite || (qAnswerSel.value !== "choice");
@@ -1265,7 +1405,6 @@ POLICY (LÅST):
     if(i < 0 || i >= items.length) return;
 
     let it = normalizeItem(items[i]);
-
     it.text = String(itemTextInp.value || "").slice(0, it.kind === "document" ? 2000 : 240);
 
     if(it.kind === "question"){
@@ -1313,23 +1452,20 @@ POLICY (LÅST):
     setDirty(true);
   }
 
-  // Block fields change
   function onBlockFieldChange(){
     applyEditorToBlock();
     markDirty();
-    renderBlockList(); // small list; safe redraw; prevents stale titles in list
+    renderBlockList();
   }
   moduleInp.addEventListener("input", onBlockFieldChange);
   areaInp.addEventListener("input", onBlockFieldChange);
   stepInp.addEventListener("input", onBlockFieldChange);
   titleInp.addEventListener("input", onBlockFieldChange);
 
-  // Item editor change
   itemTextInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); renderItems(); updatePublishButton(); });
 
   qAnswerSel.addEventListener("change", () => {
     applyItemEditorToState();
-    // enable/disable options based on answer type
     qOptionsInp.disabled = (STATE.locked || isSystemAdmin) ? true : (qAnswerSel.value !== "choice");
     showItemEditor(STATE.selectedItemIndex);
     markDirty();
@@ -1354,7 +1490,6 @@ POLICY (LÅST):
 
   dSignInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); });
 
-  // Item list actions
   btnItemUp.addEventListener("click", () => {
     const b = STATE.edit; if(!b) return;
     const canWrite = (!STATE.locked && !isSystemAdmin);
@@ -1437,7 +1572,6 @@ POLICY (LÅST):
     const edit = STATE.edit;
     if(!edit) return { ok:false, err:"Ingen vald block." };
 
-    // re-load bank to avoid writing over corruption introduced after load
     const st = loadBlocksState();
     if(st.corrupt) return { ok:false, err:`Fail-closed: ${BLOCKS_KEY} är korrupt.` };
 
@@ -1512,27 +1646,100 @@ POLICY (LÅST):
   filterStatus.addEventListener("change", renderBlockList);
 
   // ------------------------------
+  // Import flow
+  // ------------------------------
+  function refreshImportCandidate(){
+    STATE.importCandidate = findLegacyBlockBank();
+    if(!STATE.importCandidate){
+      showImportBox(true, "Jag hittar inga block-liknande strukturer i localStorage. Skapa ett block i “Skapa block” och kom tillbaka hit.");
+      return;
+    }
+
+    const c = STATE.importCandidate;
+    showImportBox(true, `Jag hittade troliga block i nyckeln: ${c.key} • ${c.blocks.length} st (score ${c.score}). Klicka Importera för att kopiera till Block-bank.`);
+  }
+
+  function importBlocksIntoBank(){
+    if(STATE.locked){ setMsg("err","Låst (fail-closed)."); return; }
+    if(isSystemAdmin){ setMsg("warn","Steward-läge: kan inte importera."); return; }
+
+    const c = STATE.importCandidate;
+    if(!c || !Array.isArray(c.blocks) || !c.blocks.length){
+      setMsg("warn","Ingen importkandidat hittad. Klicka “Sök igen”.");
+      refreshImportCandidate();
+      return;
+    }
+
+    // Normalize candidate blocks and write ONLY to BLOCKS_KEY
+    const normalized = c.blocks.map(normalizeBlock);
+
+    // If bank already has blocks, do safe merge by blockId (keep bank wins)
+    const st = loadBlocksState();
+    if(st.corrupt){ setMsg("err", `Fail-closed: ${BLOCKS_KEY} är korrupt.`); return; }
+
+    const existing = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
+    const map = new Map();
+    existing.forEach(b => map.set(String(b.blockId), b));
+
+    let added = 0;
+    normalized.forEach(b => {
+      const id = String(b.blockId);
+      if(!map.has(id)){
+        map.set(id, b);
+        added++;
+      }
+    });
+
+    const merged = Array.from(map.values());
+    merged.sort((a,b) => Number(b.updatedAt||0) - Number(a.updatedAt||0));
+
+    const res = saveBlocks(merged);
+    if(!res.ok){ setMsg("err", res.err || "Kunde inte importera."); return; }
+
+    setMsg("ok", `Import klar: +${added} nya block in i ${BLOCKS_KEY}.`);
+    showImportBox(false, "");
+
+    // Reload from bank
+    STATE.all = merged;
+    renderBlockList();
+    if(STATE.all.length){
+      computeVisible();
+      if(STATE.visible.length) selectBlock(STATE.visible[0].blockId);
+      else hideEditor();
+    }else{
+      hideEditor();
+    }
+  }
+
+  btnImport.addEventListener("click", () => {
+    if(!confirm("Importera hittade block till Block-bank (AO-0XX_BLOCKS_V1)? Inga andra keys ändras.")) return;
+    importBlocksIntoBank();
+  });
+
+  btnImportRefresh.addEventListener("click", () => {
+    setMsg("", "");
+    refreshImportCandidate();
+  });
+
+  // ------------------------------
   // Init
   // ------------------------------
   function init(){
     setMsg("", "");
     setDirty(false);
 
-    // Lock checks:
     const lockReasons = [];
 
-    // 1) localStorage write probe (only matters if not SYSTEM_ADMIN)
     if(!isSystemAdmin){
       try{
         const t = "__probe__";
         localStorage.setItem(t, "1");
         localStorage.removeItem(t);
       }catch{
-        lockReasons.push("localStorage är blockerad (kan inte spara/publicera).");
+        lockReasons.push("localStorage är blockerad (kan inte spara/publicera/importera).");
       }
     }
 
-    // 2) block-bank corruption gate
     const st = loadBlocksState();
     if(st.corrupt){
       lockReasons.push(`${BLOCKS_KEY} är korrupt (JSON/shape). Åtgärda eller rensa nyckeln innan redigering.`);
@@ -1541,7 +1748,6 @@ POLICY (LÅST):
     STATE.lockReasons = lockReasons;
     applyLockFromState();
 
-    // Load blocks (empty ok)
     if(!st.corrupt){
       STATE.all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
     }else{
@@ -1550,22 +1756,24 @@ POLICY (LÅST):
 
     renderBlockList();
 
-    if(STATE.all.length){
-      // auto-select first visible
+    // If bank is empty -> show import helper (read-only scanning)
+    if(STATE.all.length === 0){
+      // show import box only if not locked; even in locked you can still see hint
+      refreshImportCandidate();
+      hideEditor();
+      setMsg(st.missing ? "warn" : "warn", "Block-bank är tom. Om du har block skapade i en annan nyckel: använd Import.");
+    }else{
+      showImportBox(false, "");
       computeVisible();
       if(STATE.visible.length){
         selectBlock(STATE.visible[0].blockId);
-        setMsg("ok", "Laddad första block.");
+        setMsg("ok", "Block-bank laddad.");
       }else{
         hideEditor();
         setMsg("warn", "Inga block matchar filter.");
       }
-    }else{
-      hideEditor();
-      setMsg(st.missing ? "warn" : "warn", "Inga block ännu. Skapa i “Skapa block”.");
     }
 
-    // Disable write actions if locked or system_admin
     const canWrite = (!STATE.locked && !isSystemAdmin);
     btnSave.disabled = true;
     btnPublish.disabled = true;
@@ -1578,37 +1786,20 @@ POLICY (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- Bytte datakälla: admin/packages-block.html arbetar nu mot Block-bank AO-0XX_BLOCKS_V1 (inte AO-057).
-- Lade till lista + editor för block-metadata + items (document/question/task).
-- Implementerade Publicera (draft→published) med hård validering + verifiedAt/verifiedBy.
-- Fail-closed vid korrupt block-bank: låser Save/Publish och visar lockbox.
-- SYSTEM_ADMIN hanteras som steward (read-only) på denna sida.
+- Lagt till import-flöde: om AO-0XX_BLOCKS_V1 är tom/saknas → sök legacy blockbank i localStorage (read-only).
+- Import (opt-in): kopierar normaliserade block till AO-0XX_BLOCKS_V1 (endast denna key skrivs).
+- Visar tydlig import-box med hittad key + antal block.
+- Behåller fail-closed, XSS-safe, och SYSTEM_ADMIN read-only.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
 1) Logga in som ADMIN/MANAGER → öppna admin/tasks.html → skapa ett block.
-2) Gå till admin/packages-block.html → blocket syns i listan (Utkast).
-3) Öppna block → redigera rubrik / item-text → klicka Spara → ladda om → ändringar kvar.
-4) Klicka Publicera → block visar “Publicerad” + verifiedAt/verifiedBy uppdateras.
-5) (Fail-closed) Sätt AO-0XX_BLOCKS_V1 = "not-json" i DevTools → reload → lockbox + Save/Publish disabled.
-6) (Steward) Logga in som SYSTEM_ADMIN → sidan öppnas men Save/Publish/Add item är disabled.
+2) Öppna admin/packages-block.html:
+   - Om Block-bank tom: import-box visas med hittad key → klicka Importera → block syns i listan.
+3) Öppna block → redigera rubrik/item → Spara → reload → ändringar kvar.
+4) Publicera → status=published + verifiedAt/verifiedBy.
+5) Logga in som SYSTEM_ADMIN → import/spara/publicera disabled.
 ============================================================ -->
-
-<!-- ============================================================
-Risk / edge cases
-- Om någon annan flik ändrar AO-0XX_BLOCKS_V1 samtidigt: ingen realtids-sync (UI-only).
-- Vid korrupt bank krävs manuell rensning/åtgärd för att låsa upp (avsiktligt fail-closed).
-============================================================ -->
-
-<!-- ============================================================
-QA-check (P0/P1/P2)
-P0: UI-only, XSS-safe (textContent), inga osäkra innerHTML — OK
-P0: Fail-closed vid korrupt AO-0XX_BLOCKS_V1 — OK
-P0: Inga nya storage-keys — OK
-P1: Publish-guard: title + items>=1 + choice>=2 + scale min/max — OK
-P2: SYSTEM_ADMIN steward-läge (read-only) — OK
-============================================================ -->
-
 </body>
 </html>
