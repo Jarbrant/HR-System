@@ -1,10 +1,12 @@
 <!-- ============================================================
-AO-008/22 + AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.8) | FIL-ID: employee/tasks.html
+AO-008/22 + AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.9) | FIL-ID: employee/tasks.html
 Projekt: HR-System
 Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only
 
-Senaste sanning: v1.7 + kompat-läsning för AO-012_QUESTIONS_V1 (array eller wrapper),
-samt tydligare tom-läge-diagnostik för “Frågor”.
+PATCH v1.9:
+- Tar bort “dubbelt Klart” i Task-detalj: status-pill i detaljvyn bort (status finns i dropdown).
+- Nytt: Datumfilter (tasks): välj dag → visa vad som blev klart den dagen (status=done + updatedAt inom vald dag).
+- Ingen papperskorg/ta-bort UI på denna sida (read-only delete).
 
 POLICY (LÅST):
 - UI-only (GitHub Pages) • Ingen backend
@@ -186,6 +188,19 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
       background: rgba(254,242,242,.9) !important;
     }
 
+    .dateRow{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:flex-end;
+      margin-top:10px;
+    }
+    .dateRow label{ flex: 1; min-width: 220px; }
+    .dateRow .miniBtn{
+      height: 40px;
+      align-self:flex-end;
+    }
+
     @media (max-width: 980px){
       .seg button{ padding: 10px 14px; }
     }
@@ -256,6 +271,15 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
           </label>
         </div>
 
+        <!-- v1.9: datumfilter för “vad blev gjort den dagen” -->
+        <div id="doneDateWrap" class="dateRow" style="display:none;">
+          <label>
+            Dag (visa “Klara” för vald dag)
+            <input id="doneDate" type="date" />
+          </label>
+          <button id="btnClearDoneDate" type="button" class="secondary miniBtn">Rensa datum</button>
+        </div>
+
         <div id="list"></div>
 
         <div class="smallnote" id="tipLine">Tips: Klicka på ett kort för att öppna.</div>
@@ -272,7 +296,7 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
           <h2 class="tight" id="dTitle">—</h2>
 
           <div class="meta">
-            <span class="pill" id="dStatusPill">—</span>
+            <!-- v1.9: dStatusPill borttaget för att undvika “dubbelt Klart” -->
             <span class="pill" id="dDates">—</span>
           </div>
 
@@ -357,11 +381,11 @@ Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
 
 <script>
 /* ============================================================
-AO-008/22 + AO-EMP-TASKS-QA-01 | employee/tasks.html – PROD v1.8
-AUTOPATCH v1.8:
-- Kompat-läsning av AO-012_QUESTIONS_V1: accepterar array eller wrapper {questions/items/blocks}.
-- Tydligare tom-läge-diagnostik för frågor (hittade N, synliga M).
-- Inga nya keys. Ingen innerHTML från storage.
+AO-008/22 + AO-EMP-TASKS-QA-01 | employee/tasks.html – PROD v1.9
+
+AUTOPATCH v1.9:
+- Task-detalj: bort med status-pill (undvik “dubbelt Klart”).
+- Nytt datumfilter (tasks): välj dag → visa vad som blev klart (status=done + updatedAt inom dagen).
 
 GUARD:
 - EMPLOYEE-only
@@ -696,6 +720,25 @@ XSS:
     if(e) return `t.o.m. ${e}`;
     return "—";
   }
+  function fmtDateTime(ts){
+    const n = Number(ts);
+    if(!Number.isFinite(n) || n <= 0) return "—";
+    try{ return new Date(n).toLocaleString("sv-SE"); }catch{ return "—"; }
+  }
+  function dayRangeFromInput(dateStr){
+    // dateStr = "YYYY-MM-DD" (local)
+    const s = String(dateStr || "").trim();
+    if(!s) return null;
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+    if(!m) return null;
+    const y = Number(m[1]), mo = Number(m[2]) - 1, d = Number(m[3]);
+    if(!Number.isFinite(y) || !Number.isFinite(mo) || !Number.isFinite(d)) return null;
+    const start = new Date(y, mo, d, 0,0,0,0).getTime();
+    const end   = new Date(y, mo, d+1, 0,0,0,0).getTime();
+    if(!Number.isFinite(start) || !Number.isFinite(end)) return null;
+    return { start, end };
+  }
+
   function pill(text){
     const s = document.createElement("span");
     s.className = "pill";
@@ -815,14 +858,7 @@ XSS:
     if(Array.isArray(raw)) return { ok:true, arr: raw, shape:"array", total: raw.length };
 
     if(raw && typeof raw === "object" && !Array.isArray(raw)){
-      // tillåt vanliga wrappers som vi sett i andra delar (items/blocks)
-      const cands = [
-        raw.questions,
-        raw.items,
-        raw.blocks,
-        raw.list,
-        raw.data
-      ];
+      const cands = [raw.questions, raw.items, raw.blocks, raw.list, raw.data];
       for(const c of cands){
         if(Array.isArray(c)) return { ok:true, arr: c, shape:"wrapper", total: c.length };
       }
@@ -880,8 +916,6 @@ XSS:
       if(!orgIndex.byId.has(scope)) return false;
       return isInScope(viewerScopeId, scope, orgIndex);
     }
-
-    // global ok
     return true;
   }
 
@@ -892,13 +926,11 @@ XSS:
 
     const answers = readAnswersArray();
 
-    // 1) Primär: questionId match
     if(id){
       const hit = answers.find(a => answerEmp(a) === myEmp && answerQid(a) === id);
       if(hit) return hit;
     }
 
-    // 2) Fallback: title-match (legacy)
     const tKey = normKey(title);
     if(tKey){
       const hit2 = answers.find(a =>
@@ -1021,11 +1053,23 @@ XSS:
     }
   }
 
+  function updateDoneDateUI(){
+    const wrap = $("#doneDateWrap");
+    if(mode === MODE.TASKS){
+      wrap.style.display = "flex";
+    }else{
+      wrap.style.display = "none";
+      $("#doneDate").value = "";
+    }
+  }
+
   function setMode(next){
     mode = next;
     $("#tabTasks").setAttribute("aria-pressed", String(mode === MODE.TASKS));
     $("#tabQuestions").setAttribute("aria-pressed", String(mode === MODE.QUESTIONS));
     setHashForMode(mode);
+
+    updateDoneDateUI();
 
     const filterEl = $("#filter");
     clearChildren(filterEl);
@@ -1035,7 +1079,7 @@ XSS:
       filterEl.appendChild(new Option("Pågår", "progress"));
       filterEl.appendChild(new Option("Klara", "done"));
       filterEl.appendChild(new Option("Alla", "all"));
-      $("#tipLine").textContent = "Tips: Klicka på en uppgift för att uppdatera status/kommentar.";
+      $("#tipLine").textContent = "Tips: Välj ev. dag för att se vad som blev klart, och klicka på en uppgift för att öppna.";
     }else{
       filterEl.appendChild(new Option("Ej svarade", "open", true, true));
       filterEl.appendChild(new Option("Svarade", "done"));
@@ -1119,10 +1163,10 @@ XSS:
 
     const mine = computeMineVisibleTasks();
 
-    const done = mine.filter(x => (normalizeStatus(x?.status) || "open") === "done").length;
-    const prog = mine.filter(x => (normalizeStatus(x?.status) || "open") === "progress").length;
-    const open = mine.filter(x => (normalizeStatus(x?.status) || "open") === "open").length;
-    setKpis("Öppna: " + open, "Pågår: " + prog, "Klara: " + done);
+    const doneTotal = mine.filter(x => (normalizeStatus(x?.status) || "open") === "done").length;
+    const progTotal = mine.filter(x => (normalizeStatus(x?.status) || "open") === "progress").length;
+    const openTotal = mine.filter(x => (normalizeStatus(x?.status) || "open") === "open").length;
+    setKpis("Öppna: " + openTotal, "Pågår: " + progTotal, "Klara: " + doneTotal);
 
     let items = mine;
 
@@ -1137,8 +1181,25 @@ XSS:
       });
     }
 
+    // v1.9: datumfilter för “vad blev gjort den dagen”
+    const dateStr = String($("#doneDate").value || "").trim();
+    const range = dayRangeFromInput(dateStr);
+    if(range){
+      items = items.filter(x => {
+        const st = normalizeStatus(x?.status) || "open";
+        if(st !== "done") return false;
+        const ts = Number(x?.updatedAt);
+        if(!Number.isFinite(ts) || ts <= 0) return false;
+        return ts >= range.start && ts < range.end;
+      });
+    }
+
     if(items.length === 0){
-      listEl.appendChild(emptyBox("Inga uppgifter att visa.\n\nOBS: Den här sidan läser endast AO-014_TASKS_V1.\nOm dina onboarding-block inte publiceras dit kommer listan bli tom."));
+      if(range){
+        listEl.appendChild(emptyBox("Inga uppgifter markerade som KLARA den valda dagen.\n\nTips: Om uppgiften blev klar men saknar updatedAt kan den inte sorteras på dag (fail-closed)."));
+      }else{
+        listEl.appendChild(emptyBox("Inga uppgifter att visa.\n\nOBS: Den här sidan läser endast AO-014_TASKS_V1.\nOm dina onboarding-block inte publiceras dit kommer listan bli tom."));
+      }
       return { items: mine };
     }
 
@@ -1147,7 +1208,13 @@ XSS:
       const dates = dateLabel(x || {});
       const prio = String(x?.prio || "normal");
 
+      const pillsArr = [statusLabel(st), "Prio: " + prio, "Datum: " + dates];
       const lines = [{ label:"Text:", value: String(x?.text || "—") }];
+
+      if(range && st === "done"){
+        lines.push({ label:"Klart:", value: fmtDateTime(x?.updatedAt) });
+      }
+
       if(x?.adminNote) lines.push({ label:"Admin:", value: String(x.adminNote) });
       if(x?.employeeComment){
         lines.push({ label:"Din kommentar:", value: sanitizeText(String(x.employeeComment), MAX_COMMENT_LEN) });
@@ -1156,7 +1223,7 @@ XSS:
       listEl.appendChild(
         makeItemCardBase(
           String(x?.title || "Uppgift"),
-          [statusLabel(st), "Prio: " + prio, "Datum: " + dates],
+          pillsArr,
           lines,
           String(x?.id || "")
         )
@@ -1274,9 +1341,6 @@ XSS:
     $("#dText").textContent = String(task.text || "—");
     $("#dDates").textContent = "Datum: " + dateLabel(task);
 
-    const st = normalizeStatus(task.status) || "open";
-    $("#dStatusPill").textContent = statusLabel(st);
-
     if(task.adminNote){
       $("#dAdminNoteWrap").style.display = "block";
       $("#dAdminNote").textContent = String(task.adminNote);
@@ -1285,6 +1349,7 @@ XSS:
       $("#dAdminNote").textContent = "";
     }
 
+    const st = normalizeStatus(task.status) || "open";
     $("#dStatus").value = st;
     $("#dComment").value = String(task.employeeComment || "");
 
@@ -1555,6 +1620,12 @@ XSS:
   $("#filter").addEventListener("change", render);
   $("#search").addEventListener("input", render);
 
+  $("#doneDate").addEventListener("change", render);
+  $("#btnClearDoneDate").addEventListener("click", () => {
+    $("#doneDate").value = "";
+    render();
+  });
+
   function initFromHash(){
     const h = String(window.location.hash || "").toLowerCase();
     if(h === "#questions") setMode(MODE_OBJ.QUESTIONS);
@@ -1569,11 +1640,12 @@ XSS:
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- v1.8: Kompat-läsning AO-012_QUESTIONS_V1 (array eller wrapper: questions/items/blocks).
-- v1.8: Tydligare tom-läge-diagnostik för frågor (hittade N, synliga M).
+- v1.9: Task-detalj: tog bort status-pill för att undvika “dubbelt Klart”.
+- v1.9: Lade till datumfilter (tasks) för att se vad som blev klart den dagen (status=done + updatedAt i dagspann).
 - Oförändrad fail-closed, oförändrade keys, inga innerHTML från storage.
 Testnoteringar:
-- Logga in som EMPLOYEE, öppna Gör → Frågor, verifiera diagnosrad vid tomt, skapa frågor och se att de listas.
+- Logga in som EMPLOYEE. Markera en uppgift Klar → välj dagens datum → se den i listan och öppna detalj.
+- Verifiera att datumfilter inte påverkar Frågor-läget.
 ============================================================ -->
 </body>
 </html>
