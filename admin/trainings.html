@@ -340,7 +340,6 @@ POLICY (LÅST):
             <select id="moduleSel"></select>
           </label>
 
-          <!-- PATCH (A): Endast 1 område-kontroll (dropdown) + "nytt område" vid behov -->
           <label>
             Område <span class="tiny">(obligatoriskt)</span>
             <select id="areaSel"></select>
@@ -500,6 +499,8 @@ Syfte:
 - AI-läge: Utbildning (default) eller Dokument (endast document-block)
 - Stöd för document-block (kind="document") med längre text (max 2000)
 - Behåller AO-TRAININGS-CHOICE-UPGRADE-01: choice default + correctOptions
+PATCH (BLOCK-ID):
+- Varje block får blockId (persist i AO-057_TRAININGS_V1)
 Policy:
 - UI-only • Fail-closed • XSS-escape • inga nya storage-keys
 Keys (LÅST):
@@ -509,11 +510,9 @@ Keys (LÅST):
 (function(){
   "use strict";
 
-  // --- LÅSTA keys ---
   const SESSION_KEY  = "AO-001_LOGIN_V1";
   const TRAININGS_KEY = "AO-057_TRAININGS_V1";
 
-  // --- LÅSTA moduler (fast lista) ---
   const MODULES = [
     "Regelhantering",
     "Policy",
@@ -532,10 +531,8 @@ Keys (LÅST):
     "Driftplanering"
   ];
 
-  // --- AI Worker default ---
   const DEFAULT_AI_ORIGIN = "https://hrsystem.andersmenyit.workers.dev";
 
-  // --- DOM helpers ---
   const $ = (s) => document.querySelector(s);
   const elMsg = $("#msgBox");
   const elWho = $("#whoPill");
@@ -553,8 +550,6 @@ Keys (LÅST):
   const btnSave = $("#btnSave");
 
   const moduleSel = $("#moduleSel");
-
-  // PATCH (A): area dropdown + optional new input
   const areaSel = $("#areaSel");
   const areaInp = $("#areaInp");
   const areaHint = $("#areaHint");
@@ -602,7 +597,6 @@ Keys (LÅST):
   }
   $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
-  // --- CORE auth guard (ADMIN-only) ---
   if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
     redirectLogin(); return;
   }
@@ -617,7 +611,6 @@ Keys (LÅST):
   const empNo = String((session.auth && session.auth.empNo) || "").trim();
   elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ADMIN`;
 
-  // --- storage ---
   function safeParseArray(key){
     try{
       const raw = localStorage.getItem(key);
@@ -668,7 +661,6 @@ Keys (LÅST):
     }catch{ return "—"; }
   }
 
-  // --- local helpers ---
   function dedupeStrings(arr){
     const out = [];
     (Array.isArray(arr) ? arr : []).forEach(x => {
@@ -693,19 +685,21 @@ Keys (LÅST):
   }
 
   // --- data model normalization (backward tolerant) ---
+  // PATCH (BLOCK-ID): säkerställ blockId alltid
   function normalizeBlock(raw){
     const b = (raw && typeof raw === "object") ? raw : {};
-    const kind0 = String(b.kind || "info").trim();
+    const blockId = String(b.blockId || "").trim() || genId("blk");
 
+    const kind0 = String(b.kind || "info").trim();
     const okKind =
       (kind0 === "info" || kind0 === "task" || kind0 === "question" || kind0 === "both" || kind0 === "document");
     const kind = okKind ? kind0 : "info";
 
     const maxText = (kind === "document") ? 2000 : 240;
 
-    // document: fail-closed, inga task/question-fält krävs
     if(kind === "document"){
       return {
+        blockId,
         kind: "document",
         title: String(b.title || "").slice(0,80),
         text: String(b.text || b.description || "").slice(0,maxText),
@@ -722,9 +716,6 @@ Keys (LÅST):
 
     const taskAnswer = (b.taskAnswer === "scale" || b.taskAnswer === "checkbox") ? b.taskAnswer : "checkbox";
 
-    // Default rules:
-    // - question: default questionAnswer="choice" if missing/invalid
-    // - both: questionAnswer fixed to "text" (existing behavior)
     let questionAnswer = (b.questionAnswer === "choice" || b.questionAnswer === "text") ? b.questionAnswer : "";
     if(kind === "both"){
       questionAnswer = "text";
@@ -743,8 +734,6 @@ Keys (LÅST):
     let correctOptions = [];
     if(kind === "question" && questionAnswer === "choice"){
       correctOptions = normalizeCorrectOptions(b.correctOptions, options0);
-    }else if(kind === "both"){
-      correctOptions = [];
     }else{
       correctOptions = [];
     }
@@ -755,6 +744,7 @@ Keys (LÅST):
     }
 
     return {
+      blockId,
       kind,
       title: String(b.title || "").slice(0,80),
       text: String(b.text || b.description || "").slice(0,maxText),
@@ -820,7 +810,6 @@ Keys (LÅST):
     elSave.className = "pill " + (blocks > 0 ? "ok" : "warn");
   }
 
-  // --- app state ---
   const STATE = {
     items: [],
     selectedId: "",
@@ -842,7 +831,6 @@ Keys (LÅST):
     btnDelete.disabled = !STATE.selectedId;
   }
 
-  // PATCH (A): build dropdown options per module, plus "Skapa nytt område…"
   function rebuildAreaSuggestions(){
     const mod = String(moduleSel.value || "").trim();
     const areas = new Set();
@@ -973,7 +961,8 @@ Keys (LÅST):
 
     const meta = document.createElement("div");
     meta.className = "tiny";
-    meta.textContent = `#${index + 1}`;
+    // PATCH (BLOCK-ID): visa id för felsök (lugn, liten)
+    meta.textContent = `#${index + 1} • blockId: ${String(block.blockId||"—")}`;
 
     left.appendChild(titleRow);
     left.appendChild(meta);
@@ -1254,7 +1243,6 @@ Keys (LÅST):
 
               if(cb.checked){
                 if(next.includes(optVal)){
-                  // nothing
                 }else{
                   if(next.length >= 2){
                     cb.checked = false;
@@ -1309,7 +1297,7 @@ Keys (LÅST):
   }
 
   function renderBlocks(){
-    clearBlocksUI();
+    while(blocksList.firstChild) blocksList.removeChild(blocksList.firstChild);
     const arr = (STATE.edit && Array.isArray(STATE.edit.blocks)) ? STATE.edit.blocks : [];
     if(arr.length === 0){
       const empty = document.createElement("div");
@@ -1326,7 +1314,6 @@ Keys (LÅST):
     updatePublishHint();
   }
 
-  // --- list rendering ---
   function rowMatches(t, q, status){
     if(status && String(t.status) !== status) return false;
     if(!q) return true;
@@ -1421,7 +1408,6 @@ Keys (LÅST):
     if(!t) return;
 
     moduleSel.value = t.module || MODULES[0];
-
     rebuildAreaSuggestions();
 
     titleInp.value = t.title || "";
@@ -1502,6 +1488,7 @@ Keys (LÅST):
       t.status = desired;
     }
 
+    // PATCH (BLOCK-ID): normalize behåller blockId; lägger om saknas
     t.blocks = (Array.isArray(t.blocks) ? t.blocks : []).map(normalizeBlock);
 
     updatePublishHint();
@@ -1568,7 +1555,6 @@ Keys (LÅST):
     return { ok:true };
   }
 
-  // --- UI events ---
   qInp.addEventListener("input", () => renderList());
   filterStatus.addEventListener("change", () => renderList());
 
@@ -1695,6 +1681,8 @@ Keys (LÅST):
     }
 
     const base = {
+      // PATCH (BLOCK-ID): ge blockId direkt vid skapande
+      blockId: genId("blk"),
       kind: k,
       title: "",
       text: "",
@@ -1733,14 +1721,13 @@ Keys (LÅST):
     if(STATE.edit.blocks.length > 0){
       if(!confirm("Lägga till standardblock efter befintliga block?")) return;
     }
-    STATE.edit.blocks.push(normalizeBlock({ kind:"info", title:"Information", text:"Kort info om utbildningen och vad som förväntas." }));
-    STATE.edit.blocks.push(normalizeBlock({ kind:"task", title:"Uppgift", text:"Gör uppgiften och markera när du är klar.", taskAnswer:"checkbox" }));
-    STATE.edit.blocks.push(normalizeBlock({ kind:"question", title:"Fråga", text:"Svara kort.", questionAnswer:"choice", options:["", "", ""], correctOptions:[] }));
+    STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"info", title:"Information", text:"Kort info om utbildningen och vad som förväntas." }));
+    STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"task", title:"Uppgift", text:"Gör uppgiften och markera när du är klar.", taskAnswer:"checkbox" }));
+    STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"question", title:"Fråga", text:"Svara kort.", questionAnswer:"choice", options:["", "", ""], correctOptions:[] }));
     setDirty(true);
     renderBlocks();
   });
 
-  // --- AI ---
   function getAiOrigin(){
     try{
       const u = new URL(window.location.href);
@@ -1803,7 +1790,6 @@ Keys (LÅST):
       (typeof b.description === "string" && b.description) ? b.description :
       "";
 
-    // fail-closed: om modellen skickar task/question-fält, ignoreras (konvertera utan blandning)
     if(!text){
       const parts = [];
       if(typeof b.text === "string") parts.push(b.text);
@@ -1812,6 +1798,7 @@ Keys (LÅST):
     }
 
     return normalizeBlock({
+      blockId: String(b.blockId || "").trim() || genId("blk"),
       kind: "document",
       title,
       text: String(text || "").slice(0,2000)
@@ -1887,10 +1874,10 @@ Keys (LÅST):
 
       if(Array.isArray(res.blocks) && res.blocks.length){
         if(mode === "document"){
-          // fail-closed: endast document-block. Konvertera allt till document.
           t.blocks = res.blocks.slice(0,12).map(toDocumentBlock);
         }else{
-          t.blocks = res.blocks.map(normalizeBlock).slice(0,12);
+          // PATCH (BLOCK-ID): normalisera + blockId
+          t.blocks = res.blocks.map(x => normalizeBlock(x)).slice(0,12);
         }
       }else{
         aiStatus.textContent = "AI gav inga block.";
@@ -1919,7 +1906,6 @@ Keys (LÅST):
   btnAiTest.addEventListener("click", aiTest);
   btnAiGenerate.addEventListener("click", aiGenerate);
 
-  // --- init ---
   function init(){
     setMsg("", "");
 
@@ -1958,12 +1944,10 @@ Keys (LÅST):
 
 <!-- ============================================================
 Ändringslogg (AO-TRAININGS-AI-DOCMODE-01) ≤ 8 rader
-- AI-läge: Utbildning (default) / Dokument (nytt) i AI-sektionen
-- Ny blocktyp: kind="document" (normalize/render/edit) med text max 2000
-- AI-payload skickar mode=training|document + schema (fail-closed)
-- Dokumentläge: AI-resultat konverteras strikt till document-block (ingen blandning)
-- Block UI: "Dokument" kan även läggas till manuellt (dropdown)
-- Oförändrat: publish kräver blocks.length > 0 (document räknas)
+- PATCH: Varje block får blockId (persist i AO-057_TRAININGS_V1) + bakåtkompatibel normalize
+- Nya block får blockId direkt vid skapande (+ Standard + AI)
+- Debug: visar blockId per blockrad (liten text)
+- Oförändrat: inga nya storage-keys, publish-regel och XSS-regler
 ============================================================ -->
 </body>
 </html>
