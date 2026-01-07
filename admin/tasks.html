@@ -178,6 +178,16 @@ EXPLICIT AO-UNDANTAG (tillåtet här):
     .hintbox strong{ color:#111; }
     .hintbox ul{ margin:8px 0 0; padding-left: 18px; }
     .hintbox li{ margin: 4px 0; }
+
+    .warnline{
+      margin-top: 10px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(255,255,255,.82);
+      color: var(--muted);
+    }
+    .warnline strong{ color:#111; }
   </style>
 </head>
 
@@ -220,6 +230,7 @@ EXPLICIT AO-UNDANTAG (tillåtet här):
     </div>
 
     <div id="lockBox" class="lockbox" style="display:none;"></div>
+    <div id="bankWarn" class="warnline" style="display:none;"></div>
 
     <section class="panel" aria-label="Skapa block">
       <div class="panel-title">Skapa block</div>
@@ -327,8 +338,8 @@ T: Kontrollera att din station är ren (checkbox)
 
 <script>
 /* ============================================================
-AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.1
-P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
+AO-TASKS-TO-BLOCKS-01 | admin/tasks.html (BLOCK-CREATE) – AUTOPATCH v2.0.2
+MASTER-alignment: "missing block-bank" varning (tillåtet), strikt korruptionslås, validering + XSS-safe UI
 ============================================================ */
 (function(){
   "use strict";
@@ -380,7 +391,7 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
   }
 
   // ------------------------------------------------------------
-  // Lockbox (NO innerHTML) — policy
+  // UI helpers (NO innerHTML for dynamic content)
   // ------------------------------------------------------------
   function clearNode(node){
     while(node && node.firstChild) node.removeChild(node.firstChild);
@@ -408,6 +419,21 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
       ul.appendChild(li);
     }
     box.appendChild(ul);
+  }
+
+  function showBankWarn(text){
+    const el = $("#bankWarn");
+    if(!text){
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.style.display = "block";
+    el.textContent = "";
+    const strong = document.createElement("strong");
+    strong.textContent = "Obs:";
+    el.appendChild(strong);
+    el.appendChild(document.createTextNode(" " + String(text)));
   }
 
   // ------------------------------------------------------------
@@ -530,14 +556,15 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
 
   // ------------------------------------------------------------
   // Block store (strict corruption detection)
+  // MASTER: missing key => allow empty list + show warning (non-blocking)
   // ------------------------------------------------------------
   function loadBlocksState(){
     const raw = safeGetLocalRaw(BLOCKS_KEY);
 
-    // Missing key: allowed (empty list, no lock)
-    if(raw === null) return { ok:true, missing:true, corrupt:false, blocks:[] };
+    if(raw === null){
+      return { ok:true, missing:true, corrupt:false, blocks:[] };
+    }
 
-    // Present but unreadable => corrupt (lock)
     let parsed;
     try{
       parsed = JSON.parse(raw);
@@ -563,10 +590,17 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
     // "Fråga | opt1 | opt2"
     const parts = String(text || "").split("|").map(x => normalizeLine(x, 60)).filter(Boolean);
     if(parts.length < 3) return { ok:false, question:"", options:[] }; // require question + 2 options
-    const question = parts[0];
-    const options = parts.slice(1).filter(Boolean).slice(0, 10);
+
+    const question = clampText(parts[0], 240);
+    const optionsRaw = parts.slice(1).filter(Boolean).slice(0, 10);
+
     const uniq = [];
-    options.forEach(o => { if(!uniq.includes(o)) uniq.push(o); });
+    optionsRaw.forEach(o => {
+      const v = clampText(String(o || "").trim(), 60);
+      if(!v) return;
+      if(!uniq.includes(v)) uniq.push(v);
+    });
+
     if(uniq.length < 2) return { ok:false, question, options:[] };
     return { ok:true, question, options: uniq };
   }
@@ -578,11 +612,15 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
     const rest = normalizeLine(parts.slice(1).join("|") || "", 240);
     const m = first.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
     if(!m) return { ok:false };
+
     let mn = Number(m[1]), mx = Number(m[2]);
     if(!Number.isFinite(mn) || !Number.isFinite(mx)) return { ok:false };
+
+    // Clamp policy: keep within 1..10, but preserve ordering
     mn = Math.max(1, Math.min(10, Math.trunc(mn)));
     mx = Math.max(1, Math.min(10, Math.trunc(mx)));
     if(mx < mn) mx = mn;
+
     if(!rest) return { ok:false };
     return { ok:true, min: mn, max: mx, text: rest };
   }
@@ -620,7 +658,7 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
         items.push({
           kind: "question",
           questionId: genId("q"),
-          text: clampText(parsed.question, 240),
+          text: parsed.question,
           answerType: "choice",
           options: parsed.options,
           requiresAnswer: true
@@ -649,7 +687,7 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
         items.push({
           kind: "task",
           taskId: genId("t"),
-          text: clampText(parsed.text, 240),
+          text: parsed.text,
           answerType: "scale",
           scale: { min: parsed.min, max: parsed.max, minLabel:"", maxLabel:"" },
           requiresDone: true
@@ -671,7 +709,6 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
         return;
       }
 
-      // Default: fail-closed
       bad("Okänt prefix. Använd D:, Q:, QC:, T: eller TS:.");
     });
 
@@ -681,6 +718,7 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
 
   function validateBlockDraft(block){
     const reasons = [];
+
     const title = String(block?.title || "").trim();
     if(!title) reasons.push("Rubrik saknas.");
 
@@ -688,21 +726,37 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
     if(items.length === 0) reasons.push("Minst 1 item krävs.");
 
     items.forEach((it, i) => {
-      if(!it || typeof it !== "object") reasons.push(`Item #${i+1}: korrupt.`);
+      if(!it || typeof it !== "object"){ reasons.push(`Item #${i+1}: korrupt.`); return; }
       const k = String(it.kind || "");
       if(k !== "document" && k !== "question" && k !== "task") reasons.push(`Item #${i+1}: okänd kind.`);
-      if(k === "document" && !String(it.text||"").trim()) reasons.push(`Item #${i+1}: dokument saknar text.`);
-      if(k === "question" && !String(it.text||"").trim()) reasons.push(`Item #${i+1}: fråga saknar text.`);
-      if(k === "question" && it.answerType === "choice"){
-        const opts = Array.isArray(it.options) ? it.options : [];
-        if(opts.length < 2) reasons.push(`Item #${i+1}: QC kräver minst 2 alternativ.`);
+
+      if(k === "document"){
+        if(!String(it.text||"").trim()) reasons.push(`Item #${i+1}: dokument saknar text.`);
       }
-      if(k === "task" && !String(it.text||"").trim()) reasons.push(`Item #${i+1}: uppgift saknar text.`);
-      if(k === "task" && it.answerType === "scale"){
-        const mn = Number(it?.scale?.min);
-        const mx = Number(it?.scale?.max);
-        if(!Number.isFinite(mn) || !Number.isFinite(mx)) reasons.push(`Item #${i+1}: skala saknar min/max.`);
-        if(Number.isFinite(mn) && Number.isFinite(mx) && mx < mn) reasons.push(`Item #${i+1}: skala max < min.`);
+
+      if(k === "question"){
+        if(!String(it.text||"").trim()) reasons.push(`Item #${i+1}: fråga saknar text.`);
+        const at = String(it.answerType || "");
+        if(at !== "text" && at !== "choice") reasons.push(`Item #${i+1}: ogiltig answerType.`);
+        if(at === "choice"){
+          const opts = Array.isArray(it.options) ? it.options : [];
+          const cleaned = opts.map(x => String(x||"").trim()).filter(Boolean);
+          const uniq = [];
+          cleaned.forEach(o => { if(!uniq.includes(o)) uniq.push(o); });
+          if(uniq.length < 2) reasons.push(`Item #${i+1}: QC kräver minst 2 alternativ.`);
+        }
+      }
+
+      if(k === "task"){
+        if(!String(it.text||"").trim()) reasons.push(`Item #${i+1}: uppgift saknar text.`);
+        const at = String(it.answerType || "");
+        if(at !== "checkbox" && at !== "scale") reasons.push(`Item #${i+1}: ogiltig answerType.`);
+        if(at === "scale"){
+          const mn = Number(it?.scale?.min);
+          const mx = Number(it?.scale?.max);
+          if(!Number.isFinite(mn) || !Number.isFinite(mx)) reasons.push(`Item #${i+1}: skala saknar min/max.`);
+          if(Number.isFinite(mn) && Number.isFinite(mx) && mx < mn) reasons.push(`Item #${i+1}: skala max < min.`);
+        }
       }
     });
 
@@ -716,7 +770,6 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
   function seedTemplatesIfEmpty(){
     const raw = safeGetLocalRaw(TEMPLATES_KEY);
     if(raw !== null){
-      // Finns redan: om den är korrupt eller annan shape — rör inte automatiskt
       const parsed = safeParseJson(raw, null);
       if(Array.isArray(parsed) && parsed.length) return;
       if(raw !== null && !Array.isArray(parsed)) return;
@@ -770,7 +823,7 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
 
   function renderTemplateSelect(){
     const sel = $("#tplSelect");
-    sel.innerHTML = "";
+    sel.textContent = "";
 
     const tpls = loadTemplates();
     const opt0 = document.createElement("option");
@@ -935,6 +988,13 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
     lockReasons.push(`${BLOCKS_KEY} är korrupt (JSON/shape). Åtgärda eller rensa nyckeln innan skapande.`);
   }
 
+  // MASTER: missing key is OK, but show a warning (non-blocking)
+  if(bankState.missing){
+    showBankWarn(`Block-bank (${BLOCKS_KEY}) saknas ännu. Det är OK — den skapas vid första blocket.`);
+  }else{
+    showBankWarn("");
+  }
+
   showLockBox(lockReasons);
 
   const canCreate = (lockReasons.length === 0);
@@ -995,6 +1055,9 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
     if(!saveBlocksFailClosed(all)) return;
 
     setMsg("ok", `Block skapat: ${block.blockId}. Nästa steg: Block-editor (redigera/verifiera).`);
+
+    // Small UX improvement within scope: clear content field to avoid accidental duplicates
+    $("#itemsInp").value = "";
   });
 
   $("#btnClear").addEventListener("click", () => {
@@ -1015,25 +1078,27 @@ P0-fix: ingen innerHTML, strikt korrupt block-bank => lås skapa (fail-closed)
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- P0: Tog bort innerHTML helt (lockbox byggs med createElement + textContent).
-- P0: Införde strikt korruptionsdetektion för AO-0XX_BLOCKS_V1 → låser skapande (fail-closed).
-- Justerat document-item till kontrakt (tog bort extra fält).
-- Förbättrat id-generator: crypto.getRandomValues när tillgängligt.
+- MASTER: Visar icke-blockerande varning när AO-0XX_BLOCKS_V1 saknas (skapas vid första block).
+- P0: Fortsatt strikt korruptionslås för AO-0XX_BLOCKS_V1 (fail-closed).
+- P1: Skärpt QC-validering (trim/uniq) och renderTemplateSelect utan innerHTML (defensivt).
+- P2: Efter lyckad skapning rensas endast Innehåll för att minska oavsiktliga dubletter.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-A) Normal
-1) Logga in som ADMIN eller MANAGER → öppna admin/tasks.html.
-2) Fyll Modul/Område/Steg + Rubrik + minst 1 rad (t.ex. "D: ...") → klicka Skapa blockId.
-3) Devtools → Application → localStorage → kontrollera AO-0XX_BLOCKS_V1: nytt block med status "draft" och items[].
+A) Normal (ny bank)
+1) Devtools → Application → localStorage: säkerställ att AO-0XX_BLOCKS_V1 INTE finns.
+2) Logga in som ADMIN eller MANAGER → öppna admin/tasks.html.
+3) Se varning: “Block-bank saknas… skapas vid första blocket.”
+4) Fyll Rubrik + minst 1 rad (t.ex. "D: Läs…") → klicka Skapa blockId.
+5) Devtools → localStorage → kontrollera AO-0XX_BLOCKS_V1: array med nytt block (status "draft").
 
 B) Fail-closed korrupt block-bank
 1) Devtools → localStorage → sätt AO-0XX_BLOCKS_V1 till "not-json" (eller {"x":1}).
-2) Ladda om sidan → se lockbox + "Skapa blockId" disabled.
+2) Ladda om sidan → se lockbox + “Skapa blockId” disabled.
 
 C) Prefix-validering
-1) Skriv en rad utan prefix → klicka Skapa → får fel “Okänt prefix…”.
+1) Skriv en rad utan prefix → klicka Skapa → får fel “Okänt prefix…” (ingen write).
 ============================================================ -->
 
 <!-- ============================================================
@@ -1047,8 +1112,8 @@ QA-check (P0/P1/P2)
 P0: UI-only, auth fail-closed (redirect) — OK
 P0: Ingen osäker innerHTML för storage-data — OK
 P0: Korrupt block-bank låser create (fail-closed) — OK
-P1: Parser + validering för D/Q/QC/T/TS — OK
-P2: Mallar seedas endast när safe — OK
+P1: Parser + validering för D/Q/QC/T/TS + QC uniq>=2 — OK
+P2: Missing bank varning utan blockering — OK
 ============================================================ -->
 
 </body>
