@@ -1,7 +1,12 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-UI-01 (PROD PATCH v1.6) | FIL-ID: admin/onboard-plans.html
+AO-ONBOARD-PLANS-UI-01 (PROD PATCH v1.7) | FIL-ID: admin/onboard-plans.html
 Projekt: HR-System
 Syfte: ADMIN – Skapa/Redigera Onboarding Plans + Tidsaxel (↑↓) UI-only
+
+PATCH v1.7 (BLOCK 3/5 – AO-BLOCK-PIPELINE-01):
+- NYTT: Stöd för “Block-bank” (read-only) → plan-item kan referera blockId (utan duplicering av block-content).
+- Bakåtkompatibelt: befintliga training-baserade planer (trainingId + ev snapshot) fungerar oförändrat.
+- Fail-closed: om plan innehåller blockId men block-bank saknas/korrupt blockeras Spara/Verifiera.
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -9,26 +14,13 @@ POLICY (LÅST):
 - localStorage för data
 - XSS-escape på all rendering från storage (textContent)
 - Inga känsliga persondata
-- Inga nya storage-keys (endast AO-060/061 från AO-1; denna sida skriver endast AO-060)
+- Inga nya storage-keys (denna sida skriver endast AO-060)
 - Hel-filsleverans
 
 Keys (LÅST):
 - Läser: AO-001_LOGIN_V1 (via HRApp), AO-057_TRAININGS_V1, AO-060_PLANS_V1
+- Läser (read-only, om finns): Block-bank (auto-detekterar känd nyckel, skriver aldrig)
 - Skriver: AO-060_PLANS_V1
-
-PATCH v1.6 (2026-01-06):
-- NYTT: Snapshot av training-innehåll (module/area/title + blocks inkl questionAnswer/options) sparas per plan-item i AO-060 (ingen UI-öppning här).
-- Bakåtkompatibelt: om snapshot saknas i befintliga planer ignoreras det och sidan fungerar.
-- Fail-closed schema-guard harden: snapshot valideras och kapas (storleksgränser) vid save.
-
-Ändringslogg (v1.5):
-- FIX (1): ↑/↓ är nu konsekvent: flyttar endast inom samma dagOffset (day-grupp) och påverkar ordning deterministiskt.
-- FIX (1): Auto-sort respekterar dayOffset (alltid) + manuell ordning inom dayOffset (order).
-- UX (2): Tydliga varningar vid dedupe av dubletter i plan (trainingId) och om inga published/verified trainings finns.
-- UX (2): Varning om plan innehåller trainingId som inte är allowed (published/verified + blocks>0) – utan write.
-
-Oförändrat:
-- Inga nya keys, writes endast AO-060 vid Spara
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -71,7 +63,7 @@ Oförändrat:
     .col { flex: 1; min-width: 320px; }
     .colRight { flex: 1; min-width: 320px; }
 
-    /* Vänsterkolumnen som stack: Trainings (top) + Befintliga planer (under) */
+    /* Vänsterkolumnen som stack */
     .colStack { display:flex; flex-direction:column; gap: var(--gap); }
     .grid2 { display:grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
     .grid3 { display:grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--gap); }
@@ -98,9 +90,9 @@ Oförändrat:
     button:disabled { opacity: 0.55; cursor: not-allowed; }
 
     .list { display:flex; flex-direction:column; gap: 8px; overflow:auto; padding-right: 4px; }
-    .list.trainings { max-height: 60vh; }
-    /* “Befintliga planer” ska vara kortare (~halv höjd) */
-    .list.plans { max-height: 28vh; }
+    .list.trainings { max-height: 46vh; }
+    .list.blocks { max-height: 46vh; }
+    .list.plans { max-height: 24vh; }
 
     .item { border: 1px solid rgba(0,0,0,0.10); border-radius: 10px; padding: 10px; }
     .itemRow { display:flex; align-items:center; justify-content:space-between; gap: 10px; }
@@ -108,6 +100,7 @@ Oförändrat:
     .pill.draft { background:#fff7e6; }
     .pill.active { background:#eaffea; }
     .pill.archived { background:#f2f2f2; }
+    .pill.published { background:#eef6ff; }
 
     .error { border-left: 4px solid #b00020; padding: 10px; background: #fff5f7; border-radius: 8px; }
     .ok { border-left: 4px solid #0b7a0b; padding: 10px; background: #f4fff4; border-radius: 8px; }
@@ -117,7 +110,7 @@ Oförändrat:
     .smallbtn {
       padding: 6px 10px;
       font-size: 12px;
-      min-width: 44px; /* gör knapparna tydliga/touch-vänliga */
+      min-width: 44px;
       border-color: rgba(0,0,0,0.28);
       background: #f3f3f3;
     }
@@ -138,8 +131,9 @@ Oförändrat:
       .grid2 { grid-template-columns: 1fr; }
       .timelineRow { grid-template-columns: 1fr; }
       .rightActions { justify-content:flex-start; }
-      .list.trainings { max-height: 45vh; }
-      .list.plans { max-height: 26vh; }
+      .list.trainings { max-height: 38vh; }
+      .list.blocks { max-height: 38vh; }
+      .list.plans { max-height: 22vh; }
     }
   </style>
 </head>
@@ -150,7 +144,6 @@ Oförändrat:
   </noscript>
 
   <div class="topbar">
-    <!-- Snabblänkar högst upp -->
     <div class="nav" aria-label="Snabblänkar">
       <a href="../admin/home.html">Admin • Home</a>
       <a href="../admin/trainings.html">Admin • Trainings</a>
@@ -173,7 +166,6 @@ Oförändrat:
   <div id="statusBox" class="card" aria-live="polite"></div>
 
   <div class="row" style="margin-top:12px;">
-    <!-- LEFT STACK (perfekt align) -->
     <div class="col colStack" aria-label="Vänsterkolumn">
       <!-- Trainings -->
       <div class="card" aria-label="Tillgängliga utbildningar">
@@ -200,6 +192,34 @@ Oförändrat:
         <div id="trainingsBox" class="list trainings" role="list"></div>
         <div class="footerNote muted">
           Fail-closed: om trainings saknas/korrupt blockeras tillägg.
+        </div>
+      </div>
+
+      <!-- Blocks (Block-bank) -->
+      <div class="card" aria-label="Tillgängliga block (Block-bank)">
+        <div class="splitHeader">
+          <h2>Tillgängliga block</h2>
+          <div class="muted" id="blocksMeta">Block-bank: —</div>
+        </div>
+
+        <div class="grid3" style="margin-bottom:10px;">
+          <div>
+            <label for="filterBlockModule">Modul</label>
+            <select id="filterBlockModule"></select>
+          </div>
+          <div>
+            <label for="filterBlockArea">Område</label>
+            <select id="filterBlockArea"></select>
+          </div>
+          <div>
+            <label for="searchBlockTitle">Sök titel</label>
+            <input id="searchBlockTitle" type="search" placeholder="Sök…" />
+          </div>
+        </div>
+
+        <div id="blocksBox" class="list blocks" role="list"></div>
+        <div class="footerNote muted">
+          Fail-closed: om block-bank saknas/korrupt blockeras block-tillägg. Planer med blockId kan inte sparas utan block-bank.
         </div>
       </div>
 
@@ -246,7 +266,7 @@ Oförändrat:
     </div>
   </div>
 
-  <!-- CORE (MÅSTE LADDAS FÖRE SIDANS SCRIPT) -->
+  <!-- CORE -->
   <script src="../UI/UI-04-CONFIG.js"></script>
   <script src="../UI/UI-03-APP.js"></script>
 
@@ -313,12 +333,26 @@ Oförändrat:
   const TRAININGS_KEY = "AO-057_TRAININGS_V1";
   const PLANS_KEY = "AO-060_PLANS_V1";
 
+  // Block-bank (read-only; auto-detektera första som finns och är OK)
+  const BLOCKS_KEY_CANDIDATES = [
+    "AO-062_BLOCKS_V1",
+    "AO-057_BLOCKS_V1",
+    "AO-058_BLOCKS_V1",
+    "AO-0XX_BLOCKS_V1" // placeholder (om ni faktiskt använder det)
+  ];
+
   // ============================
   // STATE
   // ============================
   let trainingsOk = false;
-  let trainings = []; // allowed trainings (published/verified) with blocks>0
-  let trainingSnapshotsById = Object.create(null); // { [trainingId]: {id,module,area,title,blocks[]} }
+  let trainings = []; // allowed trainings
+  let trainingSnapshotsById = Object.create(null);
+
+  let blocksOk = false;
+  let blocksKeyUsed = "";
+  let blocks = []; // allowed blocks (published)
+  let blocksById = Object.create(null);
+
   let plansOk = true;
   let plans = [];
   let currentPlan = null;
@@ -336,10 +370,18 @@ Oförändrat:
   // DOM
   // ============================
   const statusBox = document.getElementById("statusBox");
+
   const filterModule = document.getElementById("filterModule");
   const filterArea = document.getElementById("filterArea");
   const searchTitle = document.getElementById("searchTitle");
   const trainingsBox = document.getElementById("trainingsBox");
+
+  const blocksMeta = document.getElementById("blocksMeta");
+  const filterBlockModule = document.getElementById("filterBlockModule");
+  const filterBlockArea = document.getElementById("filterBlockArea");
+  const searchBlockTitle = document.getElementById("searchBlockTitle");
+  const blocksBox = document.getElementById("blocksBox");
+
   const plansList = document.getElementById("plansList");
   const timelineBox = document.getElementById("timelineBox");
 
@@ -352,7 +394,7 @@ Oförändrat:
   const btnVerifyPlan = document.getElementById("btnVerifyPlan");
 
   // ============================
-  // HELPERS (fail-closed)
+  // HELPERS
   // ============================
   function setStatus(type, msg) {
     statusBox.className = "card " + (type || "");
@@ -369,11 +411,8 @@ Oförändrat:
       if (raw === null) return { ok: true, missing: true, data: null };
 
       let parsed = null;
-      if (window.HRApp && typeof window.HRApp.safeJsonParse === "function") {
-        parsed = window.HRApp.safeJsonParse(raw);
-      } else {
-        parsed = safeJsonParseFallback(raw);
-      }
+      if (window.HRApp && typeof window.HRApp.safeJsonParse === "function") parsed = window.HRApp.safeJsonParse(raw);
+      else parsed = safeJsonParseFallback(raw);
 
       if (parsed === null) return { ok: false, error: "CORRUPT_JSON" };
       return { ok: true, missing: false, data: parsed };
@@ -414,8 +453,17 @@ Oförändrat:
     return s === "draft" || s === "active" || s === "archived";
   }
 
+  function getItemKind(it){
+    if (!it || typeof it !== "object") return "unknown";
+    const hasBlock = !!normStr(it.blockId);
+    const hasTraining = !!normStr(it.trainingId);
+    if (hasBlock && !hasTraining) return "block";
+    if (hasTraining && !hasBlock) return "training";
+    return "unknown";
+  }
+
   // ============================
-  // SNAPSHOT NORMALIZATION (AO-057 -> AO-060 items.trainingSnapshot)
+  // SNAPSHOT (legacy; kept)
   // ============================
   function clampInt(v, lo, hi, def){
     const n = Number(v);
@@ -456,13 +504,11 @@ Oförändrat:
       kind,
       title,
       text,
-
       taskAnswer,
       scaleMin,
       scaleMax,
       scaleMinLabel: normStr(b.scaleMinLabel).slice(0, 40),
       scaleMaxLabel: normStr(b.scaleMaxLabel).slice(0, 40),
-
       questionAnswer,
       options: (questionAnswer === "choice") ? options : []
     };
@@ -495,8 +541,6 @@ Oförändrat:
     const title = normStr(t && t.title).slice(0, 80);
     const blocksIn = Array.isArray(t && t.blocks) ? t.blocks : [];
     const blocks = blocksIn.slice(0, 80).map(normalizeBlockForSnapshot);
-
-    // hard cap for safety (avoid huge payloads)
     return { id, module, area, title, blocks };
   }
 
@@ -516,7 +560,82 @@ Oförändrat:
   }
 
   // ============================
-  // SCHEMA GUARD (AO-060)
+  // BLOCK-BANK parsing (read-only)
+  // ============================
+  function sanitizeBlocksArray(input){
+    // Expect array of blocks: {blockId,title,module,area,step,status,items[]...}
+    if (!Array.isArray(input)) return { ok:false, error:"BLOCKS_NOT_ARRAY" };
+    const out = [];
+    for (let i = 0; i < input.length; i++){
+      const b = input[i];
+      if (!isPlainObject(b)) continue;
+
+      const blockId = normStr(b.blockId);
+      const title = normStr(b.title).slice(0, 80);
+      const module = normStr(b.module).slice(0, 60);
+      const area = normStr(b.area).slice(0, 60);
+      const step = normStr(b.step).slice(0, 60);
+      const status = normStr(b.status);
+
+      if (!blockId || !title) continue;
+      if (status !== "draft" && status !== "published") continue;
+
+      out.push({ blockId, title, module, area, step, status });
+    }
+    return { ok:true, data: out };
+  }
+
+  function loadBlocks(){
+    blocksOk = false;
+    blocksKeyUsed = "";
+    blocks = [];
+    blocksById = Object.create(null);
+
+    for (let k = 0; k < BLOCKS_KEY_CANDIDATES.length; k++){
+      const key = BLOCKS_KEY_CANDIDATES[k];
+      const res = safeParseLocalStorage(key);
+      if (!res.ok) {
+        // corrupt in this key -> treat as hard stop only if key exists (not missing)
+        // but we don't know if it exists unless missing=false. res.ok=false implies read error/corrupt -> hard stop.
+        blocksOk = false;
+        blocksKeyUsed = key;
+        return { ok:false, error: "Block-bank korrupt/oläsbar (" + key + ")" };
+      }
+      if (res.missing) continue;
+
+      const cleaned = sanitizeBlocksArray(res.data);
+      if (!cleaned.ok) {
+        blocksOk = false;
+        blocksKeyUsed = key;
+        return { ok:false, error: "Block-bank fel format (" + key + ")" };
+      }
+
+      blocksKeyUsed = key;
+      // Only published blocks are allowed for plans (policy)
+      const allowed = cleaned.data.filter(b => b.status === "published");
+      blocks = allowed;
+      blocksOk = true;
+
+      for (let i = 0; i < allowed.length; i++){
+        blocksById[allowed[i].blockId] = allowed[i];
+      }
+      return { ok:true };
+    }
+
+    // none found
+    blocksOk = false;
+    blocksKeyUsed = "";
+    return { ok:false, error:"Block-bank saknas (ingen key hittad)" };
+  }
+
+  function buildBlocksIndexById(){
+    const map = Object.create(null);
+    for (let i = 0; i < blocks.length; i++) map[blocks[i].blockId] = blocks[i];
+    return map;
+  }
+
+  // ============================
+  // SCHEMA GUARD (AO-060) – now supports trainingId OR blockId (exactly one)
   // ============================
   function sanitizePlansArray(input) {
     if (!Array.isArray(input)) return { ok:false, error:"PLANS_NOT_ARRAY" };
@@ -546,30 +665,37 @@ Oförändrat:
         if (!isPlainObject(it)) return { ok:false, error:"ITEM_NOT_OBJECT" };
 
         const trainingId = normStr(it.trainingId);
+        const blockId = normStr(it.blockId);
         const dayOffset = toInt(it.dayOffset);
         const order = toInt(it.order);
         const gateRequired = it.gateRequired;
 
-        if (!trainingId) return { ok:false, error:"ITEM_MISSING_TRAININGID" };
+        const kind = (blockId && !trainingId) ? "block" : ((trainingId && !blockId) ? "training" : "bad");
+        if (kind === "bad") return { ok:false, error:"ITEM_BAD_REF (require trainingId XOR blockId)" };
+
         if (dayOffset === null || dayOffset < 0) return { ok:false, error:"ITEM_BAD_DAYOFFSET" };
         if (order === null || order < 1) return { ok:false, error:"ITEM_BAD_ORDER" };
         if (typeof gateRequired !== "boolean") return { ok:false, error:"ITEM_BAD_GATEREQUIRED" };
 
-        // OPTIONAL: trainingSnapshot (backwards compatible)
+        // OPTIONAL: trainingSnapshot (legacy only; ignore for block items)
         let trainingSnapshot = null;
-        if (it.trainingSnapshot !== undefined) {
+        if (kind === "training" && it.trainingSnapshot !== undefined) {
           const snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
           if (snap) trainingSnapshot = snap;
-          else trainingSnapshot = null; // fail-closed: drop invalid snapshot silently (still allows plan)
+          else trainingSnapshot = null;
         }
 
         const outItem = {
-          trainingId: trainingId,
           dayOffset: dayOffset,
           order: order,
           gateRequired: gateRequired === true
         };
-        if (trainingSnapshot) outItem.trainingSnapshot = trainingSnapshot;
+        if (kind === "training") {
+          outItem.trainingId = trainingId;
+          if (trainingSnapshot) outItem.trainingSnapshot = trainingSnapshot;
+        } else {
+          outItem.blockId = blockId;
+        }
 
         itemsOut.push(outItem);
       }
@@ -588,29 +714,35 @@ Oförändrat:
   }
 
   // ============================
-  // ORDER MODEL (v1.5)
+  // ORDER MODEL
   // ============================
   function normalizeItemFields(it){
     const trainingId = normStr(it && it.trainingId);
+    const blockId = normStr(it && it.blockId);
     const dayOffset = toInt(it && it.dayOffset);
     const order = toInt(it && it.order);
     const gateRequired = (it && typeof it.gateRequired === "boolean") ? it.gateRequired : true;
 
-    // Optional snapshot (keep if valid, else drop)
+    const kind = (blockId && !trainingId) ? "block" : ((trainingId && !blockId) ? "training" : "bad");
+    if (kind === "bad") return null;
+
     let trainingSnapshot = null;
-    if (it && it.trainingSnapshot !== undefined) {
+    if (kind === "training" && it && it.trainingSnapshot !== undefined) {
       const snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
       if (snap) trainingSnapshot = snap;
     }
 
-    if (!trainingId) return null;
     const out = {
-      trainingId,
       dayOffset: (dayOffset === null || dayOffset < 0) ? 0 : dayOffset,
       order: (order === null || order < 1) ? null : order,
       gateRequired: gateRequired === true
     };
-    if (trainingSnapshot) out.trainingSnapshot = trainingSnapshot;
+    if (kind === "training") {
+      out.trainingId = trainingId;
+      if (trainingSnapshot) out.trainingSnapshot = trainingSnapshot;
+    } else {
+      out.blockId = blockId;
+    }
     return out;
   }
 
@@ -640,14 +772,18 @@ Oförändrat:
     });
 
     return withIdx.map((x, i) => {
-      const out = {
-        trainingId: String(x.it.trainingId),
+      const base = {
         dayOffset: Number(toInt(x.it.dayOffset) ?? 0),
         order: i + 1,
         gateRequired: x.it.gateRequired === true
       };
-      if (x.it.trainingSnapshot) out.trainingSnapshot = x.it.trainingSnapshot;
-      return out;
+      if (normStr(x.it.trainingId)) {
+        base.trainingId = String(x.it.trainingId);
+        if (x.it.trainingSnapshot) base.trainingSnapshot = x.it.trainingSnapshot;
+      } else if (normStr(x.it.blockId)) {
+        base.blockId = String(x.it.blockId);
+      }
+      return base;
     });
   }
 
@@ -680,17 +816,15 @@ Oförändrat:
       const title = normStr(t.title);
       const status = normStr(t.status);
 
-      const blocks = t.blocks;
-      const hasBlocks = Array.isArray(blocks) && blocks.length > 0;
+      const blocks0 = t.blocks;
+      const hasBlocks = Array.isArray(blocks0) && blocks0.length > 0;
 
       if (!id || !module || !area || !title) continue;
       if (!isAllowedTrainingStatusForPlans(status)) continue;
       if (!hasBlocks) continue;
 
-      // list-item uses only meta
       out.push({ id, module, area, title });
 
-      // snapshot cached for save
       const snap = buildTrainingSnapshot(t);
       if (snap && snap.id) trainingSnapshotsById[snap.id] = snap;
     }
@@ -732,9 +866,9 @@ Oförändrat:
   }
 
   // ============================
-  // UI: Filters
+  // UI: Filters (trainings)
   // ============================
-  function populateFilters() {
+  function populateTrainingFilters() {
     function opt(el, value, text) {
       const o = document.createElement("option");
       o.value = value;
@@ -764,6 +898,42 @@ Oförändrat:
       if (m && t.module !== m) return false;
       if (a && t.area !== a) return false;
       if (q && !t.title.toLowerCase().includes(q)) return false;
+      return true;
+    };
+  }
+
+  // ============================
+  // UI: Filters (blocks)
+  // ============================
+  function populateBlockFilters(){
+    function opt(el, value, text){
+      const o = document.createElement("option");
+      o.value = value;
+      o.textContent = text;
+      el.appendChild(o);
+    }
+
+    clearNode(filterBlockModule);
+    clearNode(filterBlockArea);
+
+    opt(filterBlockModule, "", "Alla moduler");
+    opt(filterBlockArea, "", "Alla områden");
+
+    const modules = Array.from(new Set(blocks.map(b => normStr(b.module)))).filter(Boolean).sort();
+    const areas = Array.from(new Set(blocks.map(b => normStr(b.area)))).filter(Boolean).sort();
+
+    for (const m of modules) opt(filterBlockModule, m, m);
+    for (const a of areas) opt(filterBlockArea, a, a);
+  }
+
+  function getBlockFilterFn(){
+    const m = normStr(filterBlockModule.value);
+    const a = normStr(filterBlockArea.value);
+    const q = normStr(searchBlockTitle.value).toLowerCase();
+    return function(b){
+      if (m && b.module !== m) return false;
+      if (a && b.area !== a) return false;
+      if (q && !b.title.toLowerCase().includes(q)) return false;
       return true;
     };
   }
@@ -828,7 +998,7 @@ Oförändrat:
         if (!currentPlan) { setStatus("error", "Ingen plan vald. Skapa eller välj en plan först."); return; }
         if (!trainingsOk) { setStatus("error", "AO-057 saknas/korrupt. Tillägg blockeras (fail-closed)."); return; }
         if (!plansOk) { setStatus("error", "AO-060 är korrupt. Ändringar blockeras (fail-closed)."); return; }
-        addItemToCurrentPlan(t.id);
+        addTrainingToCurrentPlan(t.id);
       });
 
       right.appendChild(btn);
@@ -838,6 +1008,88 @@ Oförändrat:
       card.appendChild(top);
 
       trainingsBox.appendChild(card);
+    }
+  }
+
+  // ============================
+  // UI: Render blocks list
+  // ============================
+  function renderBlocksList(){
+    clearNode(blocksBox);
+
+    if (!blocksOk) {
+      const w = document.createElement("div");
+      w.className = "warn";
+      w.textContent = "Block-bank saknas/korrupt. Block kan inte läggas till. (Read-only)";
+      blocksBox.appendChild(w);
+      return;
+    }
+
+    if (blocks.length === 0) {
+      const d = document.createElement("div");
+      d.className = "muted";
+      d.textContent = "Inga published blocks i block-bank ännu.";
+      blocksBox.appendChild(d);
+      return;
+    }
+
+    const fn = getBlockFilterFn();
+    const filtered = blocks.filter(fn);
+
+    if (filtered.length === 0) {
+      const d = document.createElement("div");
+      d.className = "muted";
+      d.textContent = "Inga matchande blocks.";
+      blocksBox.appendChild(d);
+      return;
+    }
+
+    for (const b of filtered){
+      const card = document.createElement("div");
+      card.className = "item";
+      card.setAttribute("role", "listitem");
+
+      const top = document.createElement("div");
+      top.className = "itemRow";
+
+      const left = document.createElement("div");
+      const line1 = document.createElement("div");
+      line1.className = "muted";
+      const metaParts = [];
+      if (b.module) metaParts.push(b.module);
+      if (b.area) metaParts.push(b.area);
+      if (b.step) metaParts.push(b.step);
+      line1.textContent = metaParts.length ? metaParts.join(" • ") : "—";
+      const line2 = document.createElement("div");
+      line2.textContent = b.title;
+      const line3 = document.createElement("div");
+      line3.className = "muted";
+      line3.textContent = "blockId: " + b.blockId;
+
+      left.appendChild(line1);
+      left.appendChild(line2);
+      left.appendChild(line3);
+
+      const right = document.createElement("div");
+      const btn = document.createElement("button");
+      btn.className = "smallbtn";
+      btn.textContent = "+ Lägg till i plan";
+      btn.disabled = !currentPlan || !plansOk || !blocksOk;
+
+      btn.addEventListener("click", function(){
+        if (!currentPlan) { setStatus("error", "Ingen plan vald. Skapa eller välj en plan först."); return; }
+        if (!plansOk) { setStatus("error", "AO-060 är korrupt. Ändringar blockeras (fail-closed)."); return; }
+        if (!blocksOk) { setStatus("error", "Block-bank saknas/korrupt. Tillägg blockeras (fail-closed)."); return; }
+        addBlockToCurrentPlan(b.blockId);
+      });
+
+      right.appendChild(btn);
+
+      top.appendChild(left);
+      top.appendChild(right);
+
+      card.appendChild(top);
+      blocksBox.appendChild(card);
     }
   }
 
@@ -937,13 +1189,24 @@ Oförändrat:
       itemsOut.push(n);
     }
 
-    // dedupe by trainingId (UI-safe)
-    const seen = new Set();
+    // dedupe by trainingId or blockId
+    const seenT = new Set();
+    const seenB = new Set();
     const deduped = [];
     let dedupeDropped = 0;
+
     for (const it of itemsOut) {
-      if (seen.has(it.trainingId)) { dedupeDropped++; continue; }
-      seen.add(it.trainingId);
+      const kind = getItemKind(it);
+      if (kind === "training") {
+        if (seenT.has(it.trainingId)) { dedupeDropped++; continue; }
+        seenT.add(it.trainingId);
+      } else if (kind === "block") {
+        if (seenB.has(it.blockId)) { dedupeDropped++; continue; }
+        seenB.add(it.blockId);
+      } else {
+        dedupeDropped++;
+        continue;
+      }
       deduped.push(it);
     }
 
@@ -1013,7 +1276,7 @@ Oförändrat:
     if (norm.meta && norm.meta.dedupeDropped > 0) {
       warnOnce(
         "dedupe:" + String(currentPlan.id) + ":" + String(norm.meta.dedupeDropped),
-        "Plan innehöll dubletter (trainingId). UI har ignorerat " + String(norm.meta.dedupeDropped) + " st. (Ingen write förrän du sparar)"
+        "Plan innehöll dubletter/ogiltiga items. UI har ignorerat " + String(norm.meta.dedupeDropped) + " st. (Ingen write förrän du sparar)"
       );
     }
 
@@ -1026,34 +1289,63 @@ Oförändrat:
       setStatus("ok", "Plan laddad: " + (currentPlan.title || "(utan titel)"));
     }
 
+    // Allowed-reference warnings (read-only)
     if (trainingsOk) {
       const idxById = buildTrainingIndexById();
-      let unknown = 0;
+      let unknownT = 0;
       for (let i = 0; i < currentPlan.items.length; i++) {
+        if (getItemKind(currentPlan.items[i]) !== "training") continue;
         const tid = String(currentPlan.items[i].trainingId || "");
-        if (!idxById[tid]) unknown++;
+        if (!idxById[tid]) unknownT++;
       }
-      if (unknown > 0) {
+      if (unknownT > 0) {
         warnOnce(
-          "unknownTraining:" + String(currentPlan.id) + ":" + String(unknown),
-          "Varning: Planen innehåller " + String(unknown) + " item(s) som inte är allowed (inte published/verified eller blocks=0). Spara blockeras tills det är fixat."
+          "unknownTraining:" + String(currentPlan.id) + ":" + String(unknownT),
+          "Varning: Planen innehåller " + String(unknownT) + " training item(s) som inte är allowed. Spara blockeras tills det är fixat."
+        );
+      }
+    }
+
+    // Block warnings: if plan has blockId but blocksOk=false => save must be blocked (fail-closed)
+    let hasBlockItems = false;
+    for (let i = 0; i < currentPlan.items.length; i++){
+      if (getItemKind(currentPlan.items[i]) === "block") { hasBlockItems = true; break; }
+    }
+    if (hasBlockItems && !blocksOk) {
+      warnOnce(
+        "blockNeedBank:" + String(currentPlan.id),
+        "Varning: Planen innehåller blockId men block-bank saknas/korrupt. Spara/Verifiera blockeras (fail-closed)."
+      );
+    } else if (hasBlockItems && blocksOk) {
+      const idxB = buildBlocksIndexById();
+      let unknownB = 0;
+      for (let i = 0; i < currentPlan.items.length; i++){
+        if (getItemKind(currentPlan.items[i]) !== "block") continue;
+        const bid = String(currentPlan.items[i].blockId || "");
+        if (!idxB[bid]) unknownB++;
+      }
+      if (unknownB > 0) {
+        warnOnce(
+          "unknownBlock:" + String(currentPlan.id) + ":" + String(unknownB),
+          "Varning: Planen innehåller " + String(unknownB) + " block item(s) som inte finns som published i block-bank. Spara blockeras (fail-closed)."
         );
       }
     }
 
     syncPlanFormFromState();
     renderTrainingsList();
+    renderBlocksList();
     renderTimeline();
   }
 
   // ============================
-  // Timeline editing
+  // Timeline editing (add/remove/move)
   // ============================
-  function addItemToCurrentPlan(trainingId) {
+  function addTrainingToCurrentPlan(trainingId) {
     if (!currentPlan) return;
 
     for (let i = 0; i < currentPlan.items.length; i++) {
-      if (currentPlan.items[i].trainingId === trainingId) {
+      if (getItemKind(currentPlan.items[i]) === "training" && currentPlan.items[i].trainingId === trainingId) {
         setStatus("warn", "Dubblett: training finns redan i plan. (Inget tillagt)");
         return;
       }
@@ -1065,7 +1357,6 @@ Oförändrat:
       return;
     }
 
-    // snapshot cached from AO-057
     const snap = trainingSnapshotsById[trainingId] ? sanitizeSnapshotForStorage(trainingSnapshotsById[trainingId]) : null;
 
     const item = {
@@ -1082,6 +1373,34 @@ Oförändrat:
     setStatus("ok", "Tillagd i plan.");
     renderTimeline();
     renderTrainingsList();
+  }
+
+  function addBlockToCurrentPlan(blockId){
+    if (!currentPlan) return;
+
+    for (let i = 0; i < currentPlan.items.length; i++){
+      if (getItemKind(currentPlan.items[i]) === "block" && currentPlan.items[i].blockId === blockId){
+        setStatus("warn", "Dubblett: block finns redan i plan. (Inget tillagt)");
+        return;
+      }
+    }
+
+    if (!blocksOk) { setStatus("error", "Block-bank saknas/korrupt. Tillägg blockeras (fail-closed)."); return; }
+    if (!blocksById[blockId]) { setStatus("error", "BlockId finns inte som published i block-bank. (fail-closed)"); return; }
+
+    const item = {
+      blockId: String(blockId),
+      dayOffset: 0,
+      order: currentPlan.items.length + 1,
+      gateRequired: true
+    };
+
+    currentPlan.items.push(item);
+
+    autoSortAndRenumber();
+    setStatus("ok", "Block tillagt i plan.");
+    renderTimeline();
+    renderBlocksList();
   }
 
   function moveItem(index, dir) {
@@ -1118,6 +1437,7 @@ Oförändrat:
     autoSortAndRenumber();
     renderTimeline();
     renderTrainingsList();
+    renderBlocksList();
   }
 
   function renderTimeline() {
@@ -1133,19 +1453,23 @@ Oförändrat:
 
     autoSortAndRenumber();
 
-    const idxById = buildTrainingIndexById();
+    const idxTraining = trainingsOk ? buildTrainingIndexById() : Object.create(null);
+    const idxBlock = blocksOk ? buildBlocksIndexById() : Object.create(null);
 
     if (currentPlan.items.length === 0) {
       const d = document.createElement("div");
       d.className = "muted";
-      d.textContent = "Tidsaxeln är tom. Lägg till utbildningar från vänster.";
+      d.textContent = "Tidsaxeln är tom. Lägg till utbildningar eller block från vänster.";
       timelineBox.appendChild(d);
       return;
     }
 
     for (let i = 0; i < currentPlan.items.length; i++) {
       const it = currentPlan.items[i];
-      const t = idxById[it.trainingId] || null;
+      const kind = getItemKind(it);
+
+      const t = (kind === "training") ? (idxTraining[it.trainingId] || null) : null;
+      const b = (kind === "block") ? (idxBlock[it.blockId] || null) : null;
 
       const card = document.createElement("div");
       card.className = "item";
@@ -1185,13 +1509,31 @@ Oförändrat:
 
       const line1 = document.createElement("div");
       line1.className = "muted";
-      line1.textContent = t ? (t.module + " • " + t.area) : "Okänd trainingId (fail-closed vid spara)";
 
       const line2 = document.createElement("div");
-      line2.textContent = t ? t.title : ("trainingId: " + it.trainingId);
-
       const line3 = document.createElement("div");
       line3.className = "muted";
+
+      if (kind === "training") {
+        line1.textContent = t ? (t.module + " • " + t.area) : "Okänd trainingId (fail-closed vid spara)";
+        line2.textContent = t ? t.title : ("trainingId: " + it.trainingId);
+      } else if (kind === "block") {
+        if (b) {
+          const parts = [];
+          if (b.module) parts.push(b.module);
+          if (b.area) parts.push(b.area);
+          if (b.step) parts.push(b.step);
+          line1.textContent = parts.length ? parts.join(" • ") : "Block";
+          line2.textContent = b.title;
+        } else {
+          line1.textContent = "Okänd blockId (fail-closed vid spara)";
+          line2.textContent = "blockId: " + it.blockId;
+        }
+      } else {
+        line1.textContent = "Ogiltigt item (fail-closed vid spara)";
+        line2.textContent = "—";
+      }
+
       line3.textContent = "dag: " + String(it.dayOffset) + " • order: " + String(it.order);
 
       const gateWrap = document.createElement("div");
@@ -1262,7 +1604,7 @@ Oförändrat:
   // ============================
   function validateCurrentPlanBeforeSave(setActiveOnVerify) {
     if (!currentPlan) return { ok:false, error:"Ingen plan vald" };
-    if (!trainingsOk) return { ok:false, error:"AO-057 saknas/korrupt — tillägg/spar blockeras (fail-closed)" };
+    if (!trainingsOk) return { ok:false, error:"AO-057 saknas/korrupt — spar blockeras (fail-closed)" };
     if (!plansOk) return { ok:false, error:"AO-060 korrupt — spar blockeras (fail-closed)" };
 
     syncStateFromForm();
@@ -1278,19 +1620,42 @@ Oförändrat:
 
     autoSortAndRenumber();
 
-    const idxById = buildTrainingIndexById();
-    const seenTraining = new Set();
+    const idxTraining = buildTrainingIndexById();
+    const idxBlock = blocksOk ? buildBlocksIndexById() : Object.create(null);
+
+    const seenT = new Set();
+    const seenB = new Set();
     const seenOrder = new Set();
+
+    // If plan contains blocks, block-bank must be OK
+    let planHasBlocks = false;
+    for (let i = 0; i < currentPlan.items.length; i++){
+      if (getItemKind(currentPlan.items[i]) === "block") { planHasBlocks = true; break; }
+    }
+    if (planHasBlocks && !blocksOk) {
+      return { ok:false, error:"Plan innehåller blockId men block-bank saknas/korrupt. (fail-closed)" };
+    }
 
     for (let i = 0; i < currentPlan.items.length; i++) {
       const it = currentPlan.items[i];
-      const trainingId = normStr(it.trainingId);
-      if (!trainingId) return { ok:false, error:"Item saknar trainingId" };
+      const kind = getItemKind(it);
+      if (kind === "unknown") return { ok:false, error:"Item har ogiltig referens (trainingId XOR blockId krävs)" };
 
-      if (!idxById[trainingId]) return { ok:false, error:"Item refererar trainingId som ej är allowed (published/verified + blocks>0): " + trainingId };
+      if (kind === "training") {
+        const trainingId = normStr(it.trainingId);
+        if (!trainingId) return { ok:false, error:"Training-item saknar trainingId" };
+        if (!idxTraining[trainingId]) return { ok:false, error:"Item refererar trainingId som ej är allowed: " + trainingId };
+        if (seenT.has(trainingId)) return { ok:false, error:"Dubblett trainingId i plan" };
+        seenT.add(trainingId);
+      }
 
-      if (seenTraining.has(trainingId)) return { ok:false, error:"Dubblett trainingId i plan" };
-      seenTraining.add(trainingId);
+      if (kind === "block") {
+        const blockId = normStr(it.blockId);
+        if (!blockId) return { ok:false, error:"Block-item saknar blockId" };
+        if (!idxBlock[blockId]) return { ok:false, error:"Item refererar blockId som ej finns som published i block-bank: " + blockId };
+        if (seenB.has(blockId)) return { ok:false, error:"Dubblett blockId i plan" };
+        seenB.add(blockId);
+      }
 
       const dayOffset = toInt(it.dayOffset);
       if (dayOffset === null || dayOffset < 0) return { ok:false, error:"dayOffset måste vara heltal ≥ 0" };
@@ -1301,8 +1666,6 @@ Oförändrat:
       seenOrder.add(order);
 
       if (typeof it.gateRequired !== "boolean") return { ok:false, error:"gateRequired måste vara boolean" };
-
-      // Snapshot is optional; if present, it must be valid after sanitize (drop invalid later)
     }
 
     return { ok:true };
@@ -1357,18 +1720,26 @@ Oförändrat:
       createdAt: Number(createdAt),
       updatedAt: Number(now),
       items: currentPlan.items.map(it => {
+        const kind = getItemKind(it);
         const outIt = {
-          trainingId: String(it.trainingId),
           dayOffset: Number(toInt(it.dayOffset) ?? 0),
           order: Number(toInt(it.order) ?? 1),
           gateRequired: it.gateRequired === true
         };
 
-        // Ensure snapshot exists & is valid; if missing but training exists in cache, attach now.
-        let snap = null;
-        if (it.trainingSnapshot) snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
-        if (!snap && trainingSnapshotsById[outIt.trainingId]) snap = sanitizeSnapshotForStorage(trainingSnapshotsById[outIt.trainingId]);
-        if (snap) outIt.trainingSnapshot = snap;
+        if (kind === "training") {
+          outIt.trainingId = String(it.trainingId);
+
+          // Legacy snapshot behavior kept (if present or cached)
+          let snap = null;
+          if (it.trainingSnapshot) snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
+          if (!snap && trainingSnapshotsById[outIt.trainingId]) snap = sanitizeSnapshotForStorage(trainingSnapshotsById[outIt.trainingId]);
+          if (snap) outIt.trainingSnapshot = snap;
+
+        } else if (kind === "block") {
+          outIt.blockId = String(it.blockId);
+          // IMPORTANT: No block-content snapshot here (AO-BLOCK-PIPELINE-01)
+        }
 
         return outIt;
       })
@@ -1417,6 +1788,7 @@ Oförändrat:
     syncPlanFormFromState();
     renderTimeline();
     renderTrainingsList();
+    renderBlocksList();
   }
 
   // ============================
@@ -1437,21 +1809,37 @@ Oförändrat:
   filterArea.addEventListener("change", renderTrainingsList);
   searchTitle.addEventListener("input", renderTrainingsList);
 
+  filterBlockModule.addEventListener("change", renderBlocksList);
+  filterBlockArea.addEventListener("change", renderBlocksList);
+  searchBlockTitle.addEventListener("input", renderBlocksList);
+
   // ============================
   // INIT
   // ============================
   (function init(){
     const tRes = loadTrainings();
     const pRes = loadPlans();
+    const bRes = loadBlocks();
+
+    // blocks meta text (always safe)
+    if (blocksOk) {
+      blocksMeta.textContent = "Block-bank: OK (" + blocksKeyUsed + ") • published: " + String(blocks.length);
+    } else {
+      blocksMeta.textContent = "Block-bank: saknas/ej OK";
+    }
 
     if (!tRes.ok && !pRes.ok) setStatus("error", (tRes.error || "") + " • " + (pRes.error || ""));
     else if (!pRes.ok) setStatus("error", pRes.error);
     else if (!tRes.ok) setStatus("warn", tRes.error + " (Tillägg blockeras)");
     else if (trainingsOk && trainings.length === 0) setStatus("warn", "AO-057 OK, men inga published/verified trainings med blocks>0 finns ännu.");
+    else if (!blocksOk) setStatus("ok", "Redo. (Block-bank ej hittad – endast trainings kan planeras)");
     else setStatus("ok", "Redo.");
 
-    if (trainingsOk) populateFilters();
+    if (trainingsOk) populateTrainingFilters();
+    if (blocksOk) populateBlockFilters();
+
     renderTrainingsList();
+    renderBlocksList();
     renderPlansList();
 
     if (plansOk && plans.length > 0) {
@@ -1476,32 +1864,32 @@ Oförändrat:
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- PATCH v1.6: Snapshot av training (module/area/title + blocks inkl questionAnswer/options) sparas per plan-item i AO-060.
-- Backwards compatible: befintliga planer utan snapshot fungerar.
-- Schema-guard: snapshot valideras och kapas; invalid snapshot droppas (fail-closed) men plan sparas.
+- PATCH v1.7: Stöd för block-bank (read-only) och plan-item som refererar blockId (ingen duplicering).
+- Backwards compatible: training-planer fortsätter fungera (trainingId + ev snapshot).
+- Fail-closed: Planer som innehåller blockId kan inte sparas/verifieras om block-bank saknas/korrupt.
+- Schema-guard: AO-060 items kräver nu trainingId XOR blockId (exakt en).
 - Inga nya storage-keys; writes endast AO-060_PLANS_V1.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Gå till trainings.html → gör en choice-fråga med 3 alternativ i ett block → publicera/verifiera.
-2) Gå till onboard-plans.html → skapa/välj plan → “+ Lägg till i plan” på training → Spara.
-3) DevTools → Application → LocalStorage → AO-060_PLANS_V1 → hitta item → kontrollera att trainingSnapshot.blocks[?].options finns.
-4) Ladda om sidan → plan kvar → items kvar → inga fel.
+1) Bas regression: öppna sidan → välj plan → lägg till training → Spara → ladda om → kvar.
+2) Block-path: skapa/ha published block i block-bank (t.ex. AO-062_BLOCKS_V1) → öppna sidan → “Tillgängliga block” visar lista → + Lägg till i plan → Spara → kontrollera AO-060 item har blockId.
+3) Fail-closed: ta bort/korrupta block-bank → öppna plan som innehåller blockId → Spara ska blockeras med tydligt fel.
 ============================================================ -->
 
 <!-- ============================================================
 Risk / edge cases
-- AO-060 kan bli större (snapshot). Vi kapar blocks (80) och options (10) + textlängder för att undvika storage-bloat.
-- Om AO-057 saknas/korrupt vid save: fail-closed stoppar save (som tidigare).
+- Om ni använder annan block-bank key än kandidaterna: listan blir tom (read-only). Lägg då till rätt key i candidates.
+- Om äldre AO-060 innehåller items med både trainingId+blockId (korrupt): schema-guard stoppar write (fail-closed).
 ============================================================ -->
 
 <!-- ============================================================
 QA-check (P0/P1/P2)
 P0: UI-only, inga nya keys, writes endast AO-060 — OK
-P0: Fail-closed guards kvar; invalid snapshot droppas — OK
-P1: Regression: rendering opåverkad; timeline/filters samma — OK
-P2: Data: snapshot skapar redundans men är begränsad/cappad — OK
+P0: Fail-closed: blockId i plan kräver block-bank OK — OK
+P1: Regression: training-flödet oförändrat + snapshot kvar — OK
+P2: UX: block-lista kan vara tom om key ej hittas — OK
 ============================================================ -->
 </body>
 </html>
