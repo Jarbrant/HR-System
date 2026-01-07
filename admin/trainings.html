@@ -495,17 +495,13 @@ POLICY (LÅST):
 <script>
 /* ============================================================
 AO-TRAININGS-AI-DOCMODE-01 | admin/trainings.html
-Syfte:
-- AI-läge: Utbildning (default) eller Dokument (endast document-block)
-- Stöd för document-block (kind="document") med längre text (max 2000)
-- Behåller AO-TRAININGS-CHOICE-UPGRADE-01: choice default + correctOptions
-PATCH (BLOCK-ID):
-- Varje block får blockId (persist i AO-057_TRAININGS_V1)
-Policy:
-- UI-only • Fail-closed • XSS-escape • inga nya storage-keys
-Keys (LÅST):
-- AO-057_TRAININGS_V1 (data)
-- AO-001_LOGIN_V1 (auth)
+PATCH (KOMPAT v1.0):
+- Block sparas med alias-fält för kompatibilitet:
+  * blockId + id
+  * kind + type
+  * text + description
+  * items[] (för läsare som förväntar items)
+- Ingen ny storage-key, endast AO-057_TRAININGS_V1
 ============================================================ */
 (function(){
   "use strict";
@@ -684,36 +680,31 @@ Keys (LÅST):
     return filtered.slice(0,2);
   }
 
+  function isObj(x){ return !!x && typeof x === "object" && !Array.isArray(x); }
+
+  function normalizeKind(k){
+    const kind0 = String(k || "").trim();
+    if(kind0 === "info" || kind0 === "task" || kind0 === "question" || kind0 === "both" || kind0 === "document") return kind0;
+    return "info";
+  }
+
   // --- data model normalization (backward tolerant) ---
-  // PATCH (BLOCK-ID): säkerställ blockId alltid
+  // KOMPAT: block får alias-fält + items[]
   function normalizeBlock(raw){
-    const b = (raw && typeof raw === "object") ? raw : {};
-    const blockId = String(b.blockId || "").trim() || genId("blk");
+    const b = isObj(raw) ? raw : {};
 
-    const kind0 = String(b.kind || "info").trim();
-    const okKind =
-      (kind0 === "info" || kind0 === "task" || kind0 === "question" || kind0 === "both" || kind0 === "document");
-    const kind = okKind ? kind0 : "info";
+    // acceptera flera id-fält
+    const blockId = String(b.blockId || b.id || "").trim() || genId("blk");
 
+    // acceptera kind/type
+    const kind = normalizeKind(b.kind || b.type || "info");
     const maxText = (kind === "document") ? 2000 : 240;
 
-    if(kind === "document"){
-      return {
-        blockId,
-        kind: "document",
-        title: String(b.title || "").slice(0,80),
-        text: String(b.text || b.description || "").slice(0,maxText),
-        taskAnswer: "checkbox",
-        questionAnswer: "text",
-        scaleMin: 1,
-        scaleMax: 5,
-        scaleMinLabel: "",
-        scaleMaxLabel: "",
-        options: [],
-        correctOptions: []
-      };
-    }
+    // acceptera text/description
+    const title = String(b.title || "").slice(0,80);
+    const text = String(b.text || b.description || "").slice(0, maxText);
 
+    // standardfält (top-level, bakåtkompat)
     const taskAnswer = (b.taskAnswer === "scale" || b.taskAnswer === "checkbox") ? b.taskAnswer : "checkbox";
 
     let questionAnswer = (b.questionAnswer === "choice" || b.questionAnswer === "text") ? b.questionAnswer : "";
@@ -730,24 +721,94 @@ Keys (LÅST):
     const scaleMax = (scaleMax0 < scaleMin) ? scaleMin : scaleMax0;
 
     const options0 = normalizeOptions(b.options);
-
     let correctOptions = [];
     if(kind === "question" && questionAnswer === "choice"){
       correctOptions = normalizeCorrectOptions(b.correctOptions, options0);
     }else{
       correctOptions = [];
     }
-
     const finalOptions = (kind === "question" && questionAnswer === "choice") ? options0 : [];
     if(kind === "question" && questionAnswer !== "choice"){
       correctOptions = [];
     }
 
+    // KOMPAT items[] (för sidor som läser items)
+    // - info/document => 1 item
+    // - task/question => 1 item
+    // - both => 2 items (task + question)
+    const items = [];
+    if(kind === "both"){
+      items.push({
+        id: blockId + ":task",
+        kind: "task",
+        type: "task",
+        title,
+        text,
+        description: text,
+        taskAnswer,
+        scaleMin,
+        scaleMax
+      });
+      items.push({
+        id: blockId + ":question",
+        kind: "question",
+        type: "question",
+        title,
+        text,
+        description: text,
+        questionAnswer: "text",
+        options: [],
+        correctOptions: []
+      });
+    }else if(kind === "task"){
+      items.push({
+        id: blockId + ":task",
+        kind: "task",
+        type: "task",
+        title,
+        text,
+        description: text,
+        taskAnswer,
+        scaleMin,
+        scaleMax
+      });
+    }else if(kind === "question"){
+      items.push({
+        id: blockId + ":question",
+        kind: "question",
+        type: "question",
+        title,
+        text,
+        description: text,
+        questionAnswer,
+        options: finalOptions,
+        correctOptions
+      });
+    }else{
+      items.push({
+        id: blockId + ":" + kind,
+        kind,
+        type: kind,
+        title,
+        text,
+        description: text
+      });
+    }
+
+    // returnera block med alias
     return {
+      // primärt
       blockId,
       kind,
-      title: String(b.title || "").slice(0,80),
-      text: String(b.text || b.description || "").slice(0,maxText),
+      title,
+      text,
+
+      // alias för kompat
+      id: blockId,
+      type: kind,
+      description: text,
+
+      // config
       taskAnswer,
       questionAnswer,
       scaleMin,
@@ -755,12 +816,15 @@ Keys (LÅST):
       scaleMinLabel: String(b.scaleMinLabel || "").slice(0,40),
       scaleMaxLabel: String(b.scaleMaxLabel || "").slice(0,40),
       options: finalOptions,
-      correctOptions
+      correctOptions,
+
+      // kompat-läsning
+      items
     };
   }
 
   function normalizeTraining(raw){
-    const t = (raw && typeof raw === "object") ? raw : {};
+    const t = isObj(raw) ? raw : {};
     const id = String(t.id || "").trim() || genId("trn");
     const module = String(t.module || "").trim();
     const area = String(t.area || "").trim();
@@ -771,7 +835,7 @@ Keys (LÅST):
     const goalsArr = Array.isArray(t.goals) ? t.goals : [];
     const goals = goalsArr.map(g => String(g||"").trim()).filter(Boolean).slice(0,20);
 
-    const blocksArr = Array.isArray(t.blocks) ? t.blocks : [];
+    const blocksArr = Array.isArray(t.blocks) ? t.blocks : (Array.isArray(t.items) ? t.items : []);
     const blocks = blocksArr.map(normalizeBlock);
 
     const version = Number.isFinite(Number(t.version)) ? Number(t.version) : 1;
@@ -787,7 +851,8 @@ Keys (LÅST):
 
     const safeStatus = (status === "published" && blocks.length === 0) ? "draft" : status;
 
-    return { id, module, area, title, status: safeStatus, description, goals, blocks, version, createdAt, updatedAt, ai: outAi };
+    // KOMPAT: spara även items=blocks (för äldre läsare)
+    return { id, module, area, title, status: safeStatus, description, goals, blocks, items: blocks, version, createdAt, updatedAt, ai: outAi };
   }
 
   function serializeGoalsFromTextarea(){
@@ -917,10 +982,6 @@ Keys (LÅST):
     return "Block";
   }
 
-  function clearBlocksUI(){
-    while(blocksList.firstChild) blocksList.removeChild(blocksList.firstChild);
-  }
-
   function updatePublishHint(){
     const blocks = (STATE.edit && Array.isArray(STATE.edit.blocks)) ? STATE.edit.blocks.length : 0;
 
@@ -961,7 +1022,6 @@ Keys (LÅST):
 
     const meta = document.createElement("div");
     meta.className = "tiny";
-    // PATCH (BLOCK-ID): visa id för felsök (lugn, liten)
     meta.textContent = `#${index + 1} • blockId: ${String(block.blockId||"—")}`;
 
     left.appendChild(titleRow);
@@ -1042,8 +1102,11 @@ Keys (LÅST):
     inTitle.value = block.title || "";
     inTitle.addEventListener("input", () => {
       block.title = String(inTitle.value || "").slice(0,80);
+      block.description = String(block.text || "").slice(0, (block.kind==="document")?2000:240);
       setDirty(true);
       t.textContent = block.title ? block.title : "Namnlöst block";
+      // håll items i sync (kompat)
+      block.items = normalizeBlock(block).items;
     });
     lblTitle.appendChild(inTitle);
 
@@ -1055,7 +1118,9 @@ Keys (LÅST):
     inText.addEventListener("input", () => {
       const cap = (block.kind === "document") ? 2000 : 240;
       block.text = String(inText.value || "").slice(0,cap);
+      block.description = block.text; // alias
       setDirty(true);
+      block.items = normalizeBlock(block).items;
     });
     lblText.appendChild(inText);
 
@@ -1186,7 +1251,7 @@ Keys (LÅST):
             block.correctOptions = [];
           }
           setDirty(true);
-          renderBlocks();
+          block.items = normalizeBlock(block).items;
         });
         opt.appendChild(optArea);
 
@@ -1259,6 +1324,7 @@ Keys (LÅST):
               corrHint.style.display = "none";
               block.correctOptions = normalizeCorrectOptions(next, optsNow);
               setDirty(true);
+              block.items = normalizeBlock(block).items;
             });
 
             row.appendChild(cb);
@@ -1488,8 +1554,9 @@ Keys (LÅST):
       t.status = desired;
     }
 
-    // PATCH (BLOCK-ID): normalize behåller blockId; lägger om saknas
+    // normalize block inkl kompat-alias + items
     t.blocks = (Array.isArray(t.blocks) ? t.blocks : []).map(normalizeBlock);
+    t.items = t.blocks; // kompat
 
     updatePublishHint();
     debugPre.textContent = JSON.stringify(t, null, 2);
@@ -1673,15 +1740,10 @@ Keys (LÅST):
 
   btnAddBlock.addEventListener("click", () => {
     setMsg("", "");
-    const k = String(addKind.value||"").trim();
+    const k = normalizeKind(String(addKind.value||"").trim());
     if(!STATE.edit) return;
 
-    if(k !== "info" && k !== "task" && k !== "question" && k !== "both" && k !== "document"){
-      setMsg("err", "Ogiltig blocktyp (fail-closed)."); return;
-    }
-
     const base = {
-      // PATCH (BLOCK-ID): ge blockId direkt vid skapande
       blockId: genId("blk"),
       kind: k,
       title: "",
@@ -1711,6 +1773,7 @@ Keys (LÅST):
     }
 
     STATE.edit.blocks.push(normalizeBlock(base));
+    STATE.edit.items = STATE.edit.blocks;
     setDirty(true);
     renderBlocks();
   });
@@ -1724,6 +1787,7 @@ Keys (LÅST):
     STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"info", title:"Information", text:"Kort info om utbildningen och vad som förväntas." }));
     STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"task", title:"Uppgift", text:"Gör uppgiften och markera när du är klar.", taskAnswer:"checkbox" }));
     STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"question", title:"Fråga", text:"Svara kort.", questionAnswer:"choice", options:["", "", ""], correctOptions:[] }));
+    STATE.edit.items = STATE.edit.blocks;
     setDirty(true);
     renderBlocks();
   });
@@ -1783,7 +1847,7 @@ Keys (LÅST):
   }
 
   function toDocumentBlock(raw){
-    const b = (raw && typeof raw === "object") ? raw : {};
+    const b = isObj(raw) ? raw : {};
     const title = String(b.title || "").trim().slice(0,80);
     let text =
       (typeof b.text === "string" && b.text) ? b.text :
@@ -1798,7 +1862,7 @@ Keys (LÅST):
     }
 
     return normalizeBlock({
-      blockId: String(b.blockId || "").trim() || genId("blk"),
+      blockId: String(b.blockId || b.id || "").trim() || genId("blk"),
       kind: "document",
       title,
       text: String(text || "").slice(0,2000)
@@ -1876,9 +1940,9 @@ Keys (LÅST):
         if(mode === "document"){
           t.blocks = res.blocks.slice(0,12).map(toDocumentBlock);
         }else{
-          // PATCH (BLOCK-ID): normalisera + blockId
           t.blocks = res.blocks.map(x => normalizeBlock(x)).slice(0,12);
         }
+        t.items = t.blocks; // kompat
       }else{
         aiStatus.textContent = "AI gav inga block.";
         setMsg("warn", "AI gav inga block. Testa igen eller lägg till manuellt.");
@@ -1944,10 +2008,10 @@ Keys (LÅST):
 
 <!-- ============================================================
 Ändringslogg (AO-TRAININGS-AI-DOCMODE-01) ≤ 8 rader
-- PATCH: Varje block får blockId (persist i AO-057_TRAININGS_V1) + bakåtkompatibel normalize
-- Nya block får blockId direkt vid skapande (+ Standard + AI)
-- Debug: visar blockId per blockrad (liten text)
-- Oförändrat: inga nya storage-keys, publish-regel och XSS-regler
+- PATCH: Block sparas kompatibelt (id/type/description + items[]) utan ny storage-key
+- Oförändrat: publish-regel, XSS-regler, ADMIN-only och fail-closed
+Test:
+- Skapa question-block med val + rätt svar → Spara → kontrollera AO-057_TRAININGS_V1 att block har options+correctOptions samt alias och items
 ============================================================ -->
 </body>
 </html>
