@@ -1,469 +1,647 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-ASSIGN-01 (3/5) | FIL-ID: admin/onboard-plan-assignments.html
-Projekt: HR-System (GitHub Pages / localStorage-first)
-Syfte: ADMIN – Koppla Plan (active) → Medarbetare via startdatum (timestamp 00:00 lokal tid). UI-only.
+AO-008/22 + AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.9) | FIL-ID: employee/tasks.html
+Projekt: HR-System
+Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only
+
+DESIGN-PATCH v1.9 (MASTER DESIGN-SPEC v1.0 – tillämpad på denna sida):
+- Maxbredd 1100 + padding 16 (wrap)
+- Topbar: vänster innehåll + höger “Min sida” (neutral) + “Logga ut” (röd)
+- Hover: endast skugga/border (ingen lift/translate/scale)
+- Tiles: stripe (6px) + bas-skugga + färgskugga (page color id)
+- Form-controls: padding/radius/border + fokus-outline (konstant)
 
 POLICY (LÅST):
-- UI-only • Fail-closed
-- sessionStorage först (auth) • fallback localStorage (auth) via AO-002 (HRApp)
-- localStorage för data
-- XSS-escape på all rendering från storage (textContent; ingen osäker innerHTML)
-- Inga känsliga persondata (endast empNo)
-- Inga ändringar av befintliga keys/datamodeller utanför denna AO
-- Hel-filsleverans
+- UI-only (GitHub Pages) • Ingen backend
+- Fail-closed • sessionStorage först (session) • fallback localStorage
+- Ingen känslig persondata (endast empNo)
+- Inga nya storage-keys • Datamodell ändras inte
+- XSS-escape på all rendering (textContent, ingen osäker innerHTML)
 
-Keys (LÅST):
-- Läser: AO-001_LOGIN_V1 (via HRApp), AO-060_PLANS_V1, AO-020_ROLE_ASSIGNMENTS_V2
-- Skriver: AO-061_PLAN_ASSIGNMENTS_V1
-- Skriver INTE: AO-057_TRAININGS_V1, AO-060_PLANS_V1
+Beroenden (LÅSTA):
+- AO-001_LOGIN_V1 (sessionStorage/localStorage) – session
+- AO-020_ORG_V1 (localStorage) – org-träd
+- AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) – empNo → scopeId
+- AO-014_TASKS_V1 (localStorage)
+- AO-012_QUESTIONS_V1 (localStorage) [READ]
+- AO-013_ANSWERS_V1 (localStorage) [WRITE]
 
-Extra lås (beslut):
-- AO-020_ROLE_ASSIGNMENTS_V2: object-only + hardening (Object.create(null) + block __proto__/constructor/prototype) -> fail-closed vid brott.
+Tillåten mutation (tasks, enda fält employee får ändra):
+- status (open→progress→done)
+- employeeComment (string)
+- updatedAt (timestamp)
+- updatedBy (empNo)
 
-Senaste sanning: 2026-01-07 (PATCH v1.3)
-Ändringslogg (PATCH v1.3):
-- MASTER DESIGN-SPEC v1.0: max-width 1100 + padding 16, topbar-semantik (Min sida neutral + Logga ut röd)
-- UX: klick på rad → förifyller formulär (empNo+plan+datum) för snabb “uppdatera”
-- UX: visar “Nuvarande startdatum” om koppling redan finns
-- Oförändrat: keys, read/write, hardening, auth-guard, fail-closed, XSS-safe, inga nya storage-keys
+Tillåten mutation (answers, employee får skriva/uppdatera sin egen):
+- answerText (string)
+- signed (bool)
+- signedAt (timestamp)
+- updatedAt (timestamp)
+- updatedBy (empNo)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Admin • Koppla onboardingplan</title>
+  <title>HR-System – Medarbetare • Gör</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
-
-  <!-- CORE (LÅST ordning: CONFIG före APP) -->
-  <script src="../UI/UI-04-CONFIG.js"></script>
   <script src="../UI/UI-03-APP.js"></script>
 
   <style>
     /* ============================================================
-       MASTER DESIGN-SPEC v1.0 (LÅST) – page-level alignment
-       - max-width 1100, padding 16
-       - topbar: Min sida neutral + Logga ut röd (höger)
-       - no lift on hover (only shadow/border)
-    ============================================================ */
-    .wrap{ max-width:1100px; margin:0 auto; padding:16px; }
-    main.container{ max-width:none; padding:0; } /* vi styr med .wrap */
+       MASTER DESIGN-SPEC v1.0 (LÅST) – Lokalt applicerad
+       Page color id: EMPLOYEE / Gör = BLUE (fast ID för sidan)
+       ============================================================ */
+    :root{
+      --wrap-max: 1100px;
+      --wrap-pad: 16px;
 
-    /* Topbar actions (semantik) */
-    .nav .spacer{ margin-left:auto; }
-    .nav a.topAction{
-      border:1px solid rgba(0,0,0,.10);
-      border-radius: 10px;
-      padding: 8px 10px;
-      background: rgba(255,255,255,.92);
-      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 10px 24px rgba(0,0,0,.06);
-      text-decoration:none;
-    }
-    .nav a.topAction:hover{
-      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 10px 24px rgba(0,0,0,.08);
-    }
-    .nav a.topAction:focus{
-      outline: 3px solid rgba(11,95,255,.18);
-      outline-offset: 2px;
-    }
-    .nav a.topAction.me{
-      color:#111;
-      background: rgba(17,24,39,.06); /* neutral/mörkgrå-ton */
-      border-color: rgba(17,24,39,.18);
-    }
-    .nav a.topAction.logout{
-      color:#7f1d1d; /* rödtonad */
-      background: rgba(239,68,68,.12);
-      border-color: rgba(239,68,68,.28);
+      /* Page color (RGB) */
+      --page-r: 59;  --page-g: 130; --page-b: 246;
+
+      /* Tile base */
+      --tile-radius: 12px;
+      --tile-border: 1px solid rgba(0,0,0,.08);
+      --tile-shadow-1: 0 1px 0 rgba(0,0,0,.03);
+      --tile-shadow-2: 0 10px 24px rgba(0,0,0,.06);
+      --tile-shadow-2-hover: 0 10px 24px rgba(0,0,0,.08);
+
+      /* Accent shadow model */
+      --accent-shadow: 0 10px 24px rgba(var(--page-r),var(--page-g),var(--page-b), .15);
+      --accent-shadow-hover: 0 10px 24px rgba(var(--page-r),var(--page-g),var(--page-b), .24);
+
+      /* Stripe */
+      --stripe-h: 6px;
+      --stripe: rgba(var(--page-r),var(--page-g),var(--page-b), .75);
+
+      /* Form controls */
+      --ctl-pad: 10px 12px;
+      --ctl-radius: 10px;
+      --ctl-border: 1px solid rgba(0,0,0,.12);
+      --ctl-focus: 3px solid rgba(11,95,255,.18);
+      --ctl-focus-off: 2px;
     }
 
-    /* =========================
-       UI (layout-only) v1.3
-       - ändrar inte storage keys/IDs
-       ========================= */
-    .pageHead{
+    /* Wrap (max-width 1100 + padding 16) */
+    .wrap{
+      max-width: var(--wrap-max);
+      margin: 0 auto;
+      padding: var(--wrap-pad);
+    }
+    /* Säkerställ även om .container kommer från global css */
+    main.container{
+      max-width: var(--wrap-max);
+      margin: 0 auto;
+      padding: var(--wrap-pad);
+    }
+
+    /* ---------------- Topbar (vänster + höger actions) ---------------- */
+    header.top{
+      /* behåll global grund men säkerställ layout */
+    }
+    .topWrap{
+      max-width: var(--wrap-max);
+      margin: 0 auto;
+      padding: 10px var(--wrap-pad);
       display:flex;
-      align-items:flex-end;
-      justify-content:space-between;
+      align-items:center;
+      gap:10px;
+    }
+    .topLeft{
+      display:flex;
+      align-items:center;
       gap:12px;
-      flex-wrap:wrap;
-      margin-bottom: 12px;
+      min-width: 0;
+      flex: 1 1 auto;
     }
-    .pageHead h1{ margin:0; }
-    .pageHead .sub{
-      margin-top:6px;
-      color: var(--muted);
-      line-height:1.35;
-    }
-
-    .shell{
-      display:grid;
-      grid-template-columns: 1fr;
-      gap: 12px;
-    }
-
-    .card2{
-      background: rgba(255,255,255,.92);
-      border: 1px solid rgba(0,0,0,.08);
-      border-radius: 12px;
-      box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 10px 24px rgba(0,0,0,.06);
-      overflow:hidden;
-    }
-    .card2 .hd{
-      padding: 12px 14px;
-      border-bottom: 1px solid rgba(0,0,0,.08);
-      display:flex;
-      gap:10px;
-      align-items:center;
-      justify-content:space-between;
-      flex-wrap:wrap;
-      background: rgba(17,24,39,.02);
-    }
-    .card2 .hd .title{
-      font-weight: 900;
-      color:#111;
+    .topRight{
       display:flex;
       align-items:center;
       gap:10px;
-    }
-    .card2 .hd .meta{
-      color: var(--muted);
-      font-size: .92rem;
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-    }
-    .card2 .bd{
-      padding: 12px 14px;
+      flex: 0 0 auto;
     }
 
-    .who{
+    .navLinks{
       display:flex;
-      gap:10px;
+      gap:10px; /* Top/nav gap 10 */
       flex-wrap:wrap;
       align-items:center;
-      color: var(--muted);
-      font-size:.95rem;
+      min-width: 0;
     }
-    .who strong{ color:#111; }
 
-    .pill{
+    /* Topbar buttons/links: hover endast skugga/border */
+    .navBtn{
       display:inline-flex;
       align-items:center;
-      padding: 4px 10px;
-      border: 1px solid rgba(0,0,0,.10);
+      gap:8px;
+      padding: 8px 10px;
+      border: 1px solid rgba(0,0,0,.12);
       border-radius: 999px;
-      background:#fff;
-      font-size:.85rem;
-      color: var(--muted);
-      gap:6px;
+      background: #fff;
+      text-decoration:none;
+      color:#111;
+      font-weight: 800;
+      line-height: 1;
+      box-shadow: 0 1px 0 rgba(0,0,0,.02);
+      transition: box-shadow .15s ease, border-color .15s ease;
       white-space:nowrap;
     }
-
-    .lockbox{
-      margin-top: 10px;
-      padding: 10px 12px;
-      border: 1px dashed rgba(0,0,0,.14);
-      border-radius: 12px;
-      background:#fff;
-      color: var(--muted);
+    .navBtn:hover{
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover);
+      border-color: rgba(0,0,0,.16);
     }
-    .lockbox strong{ color:#111; }
+    .navBtn:focus{
+      outline: var(--ctl-focus);
+      outline-offset: var(--ctl-focus-off);
+    }
+    .navBtn[aria-current="page"]{
+      border-color: rgba(var(--page-r),var(--page-g),var(--page-b), .35);
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2), 0 0 0 2px rgba(var(--page-r),var(--page-g),var(--page-b), .10);
+    }
 
-    .grid2{
+    /* Semantik: Min sida neutral, Logga ut röd */
+    .navMy{
+      background: rgba(17,24,39,.06);
+      border-color: rgba(17,24,39,.18);
+      color: rgba(17,24,39,.95);
+    }
+    .navMy:hover{
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover);
+      border-color: rgba(17,24,39,.26);
+    }
+
+    .navLogout{
+      background: rgba(239,68,68,.10);
+      border-color: rgba(239,68,68,.26);
+      color: rgba(153,27,27,.98);
+      font-weight: 900;
+    }
+    .navLogout:hover{
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover);
+      border-color: rgba(239,68,68,.34);
+    }
+
+    @media (max-width: 920px){
+      .topWrap{ flex-wrap:wrap; align-items:flex-start; }
+      .topRight{ width:100%; justify-content:flex-end; }
+      .navLinks{ width:100%; }
+    }
+
+    /* ---------------- Page layout ---------------- */
+    .layout{
       display:grid;
       grid-template-columns: 1fr 1fr;
       gap: 12px;
-      align-items:end;
+      align-items:start;
     }
-    @media (max-width: 860px){
-      .grid2{ grid-template-columns: 1fr; }
+    @media (max-width: 980px){
+      .layout{ grid-template-columns: 1fr; }
     }
 
-    /* Form-controls (konstant) */
-    label{ font-size: 12px; opacity:.86; }
-    input[type="date"], select{
-      padding: 10px 12px;
-      border-radius: 10px;
+    /* ---------------- Tiles / Panels (stripe + shadow) ---------------- */
+    .panel{
+      position: relative;
+      border: var(--tile-border);
+      border-radius: var(--tile-radius);
+      background:#fff;
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2), var(--accent-shadow);
+      overflow:hidden;
+      transition: box-shadow .15s ease, border-color .15s ease;
+    }
+    .panel::before{
+      content:"";
+      position:absolute;
+      left:0; right:0; top:0;
+      height: var(--stripe-h);
+      background: var(--stripe);
+    }
+    .panel:hover{
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover), var(--accent-shadow-hover);
+      border-color: rgba(0,0,0,.12);
+    }
+    /* inga “lift” / transform */
+
+    .panel.list{ min-height: 320px; }
+    .panel.detail{ min-height: 420px; }
+
+    .panel-title{
+      padding: 12px 12px 8px;
+      margin-top: var(--stripe-h);
+      font-weight: 950;
+      color:#111;
+    }
+
+    /* ---------------- Segmented buttons ---------------- */
+    .seg{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin: 2px 12px 10px;
+    }
+    .seg button{
       border: 1px solid rgba(0,0,0,.12);
       background:#fff;
+      border-radius: 999px;
+      padding: 8px 12px;
+      cursor:pointer;
+      font-weight: 900;
+      transition: box-shadow .15s ease, border-color .15s ease;
     }
-    input[type="date"]:focus, select:focus{
-      outline: 3px solid rgba(11,95,255,.18);
-      outline-offset: 2px;
+    .seg button:hover{
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover);
+      border-color: rgba(0,0,0,.16);
     }
+    .seg button:focus{
+      outline: var(--ctl-focus);
+      outline-offset: var(--ctl-focus-off);
+    }
+    .seg button[aria-pressed="true"]{
+      border-color: rgba(var(--page-r),var(--page-g),var(--page-b), .35);
+      box-shadow: 0 0 0 2px rgba(var(--page-r),var(--page-g),var(--page-b), .10);
+    }
+
+    /* ---------------- KPI pills ---------------- */
+    .kpis{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin: 0 12px 10px;
+    }
+    .kpi{
+      display:flex;
+      gap:8px;
+      align-items:center;
+      padding: 6px 10px;
+      border: 1px solid rgba(0,0,0,.12);
+      border-radius: 999px;
+      background:#fff;
+      font-size:.95rem;
+      color:#111;
+      box-shadow: 0 1px 0 rgba(0,0,0,.02);
+    }
+
+    /* ---------------- List item tiles (stripe + shadow) ---------------- */
+    .item{
+      position: relative;
+      border: var(--tile-border);
+      border-radius: var(--tile-radius);
+      padding: 12px;
+      background:#fff;
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2), var(--accent-shadow);
+      transition: box-shadow .15s ease, border-color .15s ease;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      margin: 10px 12px 0;
+      cursor:pointer;
+      overflow:hidden;
+      min-height: 92px; /* lane-tile min-höjd */
+    }
+    .item::before{
+      content:"";
+      position:absolute;
+      left:0; right:0; top:0;
+      height: var(--stripe-h);
+      background: var(--stripe);
+    }
+    .item:hover{
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover), var(--accent-shadow-hover);
+      border-color: rgba(0,0,0,.12);
+    }
+    .item:focus{
+      outline: var(--ctl-focus);
+      outline-offset: var(--ctl-focus-off);
+    }
+
+    .item-title{ font-weight: 950; margin: 6px 0 0; color:#111; }
+    .meta{
+      color: rgba(17,24,39,.78);
+      font-size: 12px;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-top:6px;
+    }
+
+    .empty{
+      padding:18px;
+      border: 1px dashed rgba(0,0,0,.18);
+      border-radius: var(--tile-radius);
+      color: rgba(17,24,39,.72);
+      background:#fff;
+      text-align:center;
+      margin: 10px 12px 12px;
+      white-space:pre-wrap;
+    }
+
+    .smallnote{ font-size:.9rem; color: rgba(17,24,39,.72); margin: 8px 12px 12px; }
+
+    .detailbox{
+      margin: 10px 12px 12px;
+      border: var(--tile-border);
+      border-radius: var(--tile-radius);
+      background:#fff;
+      padding: 12px;
+      box-shadow: 0 1px 0 rgba(0,0,0,.02);
+    }
+
+    .btnrow{ display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+    textarea{ min-height: 120px; }
+
+    .muted2{ color: rgba(17,24,39,.82); font-size:.95rem; }
+
+    .lockbox{
+      margin: 10px 0;
+      padding: 10px 12px;
+      border: 1px dashed rgba(0,0,0,.18);
+      border-radius: var(--tile-radius);
+      background:#fff;
+      color: rgba(17,24,39,.72);
+      white-space:pre-wrap;
+      box-shadow: 0 1px 0 rgba(0,0,0,.02);
+    }
+    .lockbox strong{ color:#111; }
 
     .formRow{
       display:flex;
       gap:10px;
       flex-wrap:wrap;
       align-items:center;
-      justify-content:flex-end;
-      margin-top: 10px;
+      margin-top:10px;
     }
-    .helper{
-      margin-top:6px;
-      color: var(--muted);
-      font-size:.9rem;
-    }
-
-    .message{
-      margin-top: 10px;
-      padding: 10px 12px;
-      border: 1px solid rgba(0,0,0,.10);
-      border-radius: 12px;
-      background:#fff;
-      color:#111;
-    }
-    .message.ok{
-      border-color: rgba(16,185,129,.35);
-      background: rgba(167,243,208,.18);
-    }
-    .message.err{
-      border-color: rgba(239,68,68,.35);
-      background: rgba(254,202,202,.18);
-    }
-
-    .tableWrap{
-      overflow:auto;
-      border: 1px solid rgba(0,0,0,.08);
-      border-radius: 12px;
-      background:#fff;
-    }
-    table{
-      width:100%;
-      border-collapse: collapse;
-      min-width: 820px;
-    }
-    th, td{
-      padding: 10px 10px;
-      border-bottom: 1px solid rgba(0,0,0,.08);
-      vertical-align: top;
-      text-align:left;
-    }
-    th{
-      background: rgba(17,24,39,.04);
-      font-weight: 900;
-      font-size: .92rem;
-      color:#111;
-      white-space:nowrap;
-    }
-    tr:last-child td{ border-bottom: none; }
-
-    /* No-lift hover: only subtle bg (optional) */
-    tbody tr:hover{ background: rgba(17,24,39,.02); }
-
-    .muted2{ color: var(--muted); font-size:.92rem; }
-    .mini{ font-size:.88rem; color: var(--muted); }
-
-    .clickHint{
-      margin-top: 10px;
-      color: var(--muted);
-      font-size: .9rem;
-    }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-    .kpiRow{
+    .check{
       display:flex;
-      gap:10px;
-      flex-wrap:wrap;
+      gap:8px;
       align-items:center;
-      justify-content:flex-end;
+      padding: 8px 10px;
+      border: 1px solid rgba(0,0,0,.12);
+      border-radius: var(--tile-radius);
+      background:#fff;
+      box-shadow: 0 1px 0 rgba(0,0,0,.02);
     }
-    .kpiRow .pill strong{ color:#111; }
+    .danger{
+      border-color: rgba(239,68,68,.35) !important;
+      background: rgba(254,242,242,.9) !important;
+    }
+
+    /* ---------------- Form controls (konstant) ---------------- */
+    label{ font-size: 12px; opacity: .82; }
+    input[type="text"], select, textarea{
+      width: 100%;
+      padding: var(--ctl-pad);
+      border-radius: var(--ctl-radius);
+      border: var(--ctl-border);
+      background:#fff;
+      color:#111;
+      outline: none;
+      transition: box-shadow .15s ease, border-color .15s ease;
+    }
+    input[type="text"]:focus, select:focus, textarea:focus{
+      outline: var(--ctl-focus);
+      outline-offset: var(--ctl-focus-off);
+      border-color: rgba(11,95,255,.22);
+    }
+
+    /* Behåll responsivt – inga layoutförändrande hover */
+    @media (max-width: 980px){
+      .seg button{ padding: 10px 14px; }
+    }
   </style>
 </head>
 
 <body>
+
 <header class="top">
-  <div class="brand">
-    <strong>HR-System</strong>
-    <span class="muted">• ADMIN • Koppla onboardingplan</span>
+  <div class="topWrap">
+    <div class="topLeft">
+      <div class="brand" style="min-width:0;">
+        <strong>HR-System</strong>
+        <span class="muted">• Medarbetare • Gör</span>
+      </div>
+
+      <nav class="navLinks" aria-label="Meny">
+        <a class="navBtn" href="./tasks.html" aria-current="page">Gör</a>
+        <a class="navBtn" href="./tasks.html#questions">Frågor</a>
+        <a class="navBtn" href="./schedule.html">Schema</a>
+        <a class="navBtn" href="./docs.html">Dokument</a>
+        <a class="navBtn" href="./report.html">Rapportera fel</a>
+      </nav>
+    </div>
+
+    <div class="topRight">
+      <a class="navBtn navMy" href="./home.html">Min sida</a>
+      <a class="navBtn navLogout" href="#" id="navLogout">Logga ut</a>
+    </div>
   </div>
-
-  <!-- NAV: behåller befintliga länkar, men lägger topbar-semantik på höger -->
-  <nav class="nav" aria-label="Meny">
-    <a href="./home.html">Hem</a>
-    <a href="./onboard-plans.html">Planer</a>
-    <a href="./onboard-progress.html">Progress</a>
-    <a href="./onboard-plan-assignments.html" aria-current="page">Tilldelning</a>
-    <a href="./tasks.html">Skapa uppgift</a>
-    <a href="./tasks-list.html">Översikt</a>
-    <a href="./questions.html">Frågor</a>
-    <a href="./reports.html">Felrapporter</a>
-    <a href="./answers.html">Svar</a>
-
-    <span class="spacer" aria-hidden="true"></span>
-    <a class="topAction me" href="./home.html" title="Neutral (MASTER): Min sida">Min sida</a>
-    <a class="topAction logout" href="#" id="navLogout" title="Rödtonad (MASTER): Logga ut">Logga ut</a>
-  </nav>
 </header>
 
 <main class="container">
-  <div class="wrap">
-    <div class="pageHead">
-      <div>
-        <h1 class="tight">Koppla plan → medarbetare</h1>
-        <div class="sub">
-          Välj <strong>active</strong> plan + empNo och sätt startdatum.
-          Skriver endast till <span class="pill" title="Endast denna sida skriver."><strong>AO-061</strong></span>.
-        </div>
-      </div>
+  <h1 class="tight">Gör</h1>
+  <p class="muted">Här gör du dina uppgifter och svarar på frågor. Svar kan signeras (bekräftelse).</p>
 
-      <div class="who" aria-label="Inloggad info">
-        <span>Inloggad:</span>
-        <strong id="whoName">—</strong>
-        <span>• Roll</span>
-        <span id="whoRole">—</span>
-        <span class="pill" title="UI-only • Fail-closed • XSS-safe">Read/Write: endast AO-061</span>
+  <section class="card">
+    <div class="row space-between wrap" style="margin-bottom:10px;">
+      <div class="muted">
+        Hej <strong id="whoName">—</strong> • Anst.nr <span id="whoEmpNo">—</span> • Roll <span>employee</span>
+      </div>
+      <div class="row wrap">
+        <span class="pill" id="scopePill">scope: —</span>
       </div>
     </div>
 
-    <div class="shell">
-      <div id="lockBox" class="lockbox" style="display:none;"></div>
+    <div id="lockBox" class="lockbox" style="display:none;"></div>
 
-      <!-- Skapa koppling -->
-      <section class="card2" aria-label="Skapa koppling">
-        <div class="hd">
-          <div class="title">Skapa / uppdatera koppling</div>
-          <div class="meta">
-            <span class="pill" title="Källa för empNo">Källa: AO-020_ROLE_ASSIGNMENTS_V2</span>
-            <span class="pill" title="Källa för planer">Källa: AO-060_PLANS_V1</span>
-          </div>
+    <div class="layout">
+
+      <!-- LISTA -->
+      <section class="panel list" aria-label="Lista">
+        <div class="panel-title">Lista</div>
+
+        <div class="seg" role="group" aria-label="Välj typ">
+          <button type="button" id="tabTasks" aria-pressed="true">Uppgifter</button>
+          <button type="button" id="tabQuestions" aria-pressed="false">Frågor</button>
         </div>
 
-        <div class="bd">
-          <div class="grid2">
-            <label>
-              Medarbetare (empNo)
-              <select id="empSelect"></select>
-              <div class="helper">Alla empNo som finns i assignments-kartan.</div>
-            </label>
+        <div class="kpis" aria-label="Sammanfattning">
+          <div class="kpi" id="kpiA">—</div>
+          <div class="kpi" id="kpiB">—</div>
+          <div class="kpi" id="kpiC">—</div>
+        </div>
 
-            <label>
-              Plan (endast active)
-              <select id="planSelect"></select>
-              <div class="helper">Endast status <span class="pill">active</span> kan kopplas.</div>
-            </label>
+        <div class="row" style="gap:10px; margin: 0 12px 10px;">
+          <label style="flex:1; min-width: 220px;">
+            Visa
+            <select id="filter"></select>
+          </label>
 
-            <label>
-              Startdatum
-              <input id="startDate" type="date" />
-              <div class="helper">Sparas som <code class="mono">startDateTs</code> (00:00 lokal tid).</div>
-            </label>
+          <label style="flex:1; min-width: 220px;">
+            Sök
+            <input id="search" type="text" placeholder="t.ex. hygien" />
+          </label>
+        </div>
 
-            <div>
-              <div class="mini">Åtgärd</div>
-              <div class="formRow">
-                <button id="btnAssign" type="button">Spara koppling</button>
-              </div>
+        <div id="list"></div>
 
-              <div class="kpiRow" style="margin-top:10px;">
-                <span class="pill" id="currentHint" style="display:none;" title="Visas när koppling redan finns.">
-                  <strong>Nuvarande:</strong> <span id="currentHintText">—</span>
-                </span>
-              </div>
+        <div class="smallnote" id="tipLine">Tips: Klicka på ett kort för att öppna.</div>
+      </section>
 
-              <p id="msg" class="message" aria-live="polite" style="display:none;"></p>
-            </div>
+      <!-- DETALJ -->
+      <section class="panel detail" aria-label="Detaljvy">
+        <div class="panel-title">Detalj</div>
+
+        <div id="detailEmpty" class="empty">Välj ett kort i listan.</div>
+
+        <!-- TASK DETAIL -->
+        <div id="detailTask" class="detailbox" style="display:none;">
+          <h2 class="tight" id="dTitle">—</h2>
+
+          <div class="meta">
+            <span class="pill" id="dStatusPill">—</span>
+            <span class="pill" id="dDates">—</span>
           </div>
 
-          <div class="clickHint">
-            Tips: klicka på en rad i listan nedan för att fylla formuläret och uppdatera startdatum snabbt.
+          <p class="muted2" style="margin-top:8px;">
+            <strong>Text:</strong> <span id="dText">—</span>
+          </p>
+
+          <p class="muted2" id="dAdminNoteWrap" style="display:none; margin-top:8px;">
+            <strong>Admin:</strong> <span id="dAdminNote">—</span>
+          </p>
+
+          <hr style="border:none; border-top:1px solid rgba(0,0,0,.08); margin:12px 0;" />
+
+          <label>
+            Status
+            <select id="dStatus">
+              <option value="open">Ej startad</option>
+              <option value="progress">Pågår</option>
+              <option value="done">Klar</option>
+            </select>
+          </label>
+
+          <label style="margin-top:10px;">
+            Kommentar (valfri)
+            <textarea id="dComment" placeholder="Skriv en kort kommentar..."></textarea>
+          </label>
+
+          <div class="btnrow">
+            <button id="btnSaveTask" type="button">Spara</button>
+            <button id="btnCloseDetailA" type="button" class="secondary">Stäng</button>
+          </div>
+
+          <p id="msgA" class="message" aria-live="polite"></p>
+        </div>
+
+        <!-- QUESTION DETAIL -->
+        <div id="detailQuestion" class="detailbox" style="display:none;">
+          <h2 class="tight" id="qTitle">—</h2>
+
+          <div class="meta">
+            <span class="pill" id="qStatePill">—</span>
+            <span class="pill" id="qMetaPill">—</span>
+          </div>
+
+          <p class="muted2" style="margin-top:8px;">
+            <strong>Fråga:</strong> <span id="qText">—</span>
+          </p>
+
+          <hr style="border:none; border-top:1px solid rgba(0,0,0,.08); margin:12px 0;" />
+
+          <label>
+            Svar
+            <textarea id="qAnswer" placeholder="Skriv ditt svar..."></textarea>
+          </label>
+
+          <div class="formRow">
+            <label class="check" id="signWrap">
+              <input type="checkbox" id="qSign" />
+              <span>Jag bekräftar mitt svar (signera)</span>
+            </label>
+
+            <span class="pill" id="qSignedPill">Signatur: —</span>
+          </div>
+
+          <div class="btnrow">
+            <button id="btnSaveAnswer" type="button">Spara svar</button>
+            <button id="btnSign" type="button" class="secondary">Signera</button>
+            <button id="btnCloseDetailB" type="button" class="secondary">Stäng</button>
+          </div>
+
+          <p id="msgB" class="message" aria-live="polite"></p>
+
+          <div class="smallnote">
+            Signering sparar endast: signed=true + signedAt + updatedBy (empNo). Inget namn.
           </div>
         </div>
       </section>
 
-      <!-- Befintliga kopplingar -->
-      <section class="card2" aria-label="Befintliga kopplingar">
-        <div class="hd">
-          <div class="title">Befintliga kopplingar</div>
-          <div class="meta">
-            <span id="listMeta" class="muted2"></span>
-          </div>
-        </div>
-
-        <div class="bd">
-          <div class="grid2" style="margin-bottom:10px;">
-            <label>
-              Filter: Medarbetare
-              <select id="filterEmp"></select>
-            </label>
-
-            <label>
-              Filter: Plan
-              <select id="filterPlan"></select>
-            </label>
-          </div>
-
-          <div class="tableWrap" role="region" aria-label="Plan-kopplingar tabell" tabindex="0">
-            <table aria-label="Plan-kopplingar">
-              <thead>
-                <tr>
-                  <th>Employee</th>
-                  <th>Plan</th>
-                  <th>Startdatum</th>
-                  <th>Status</th>
-                  <th style="text-align:right;">Åtgärd</th>
-                </tr>
-              </thead>
-              <tbody id="tbody">
-                <tr><td colspan="5" class="muted2">Laddar…</td></tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="helper">
-            Delete matchar alltid <code class="mono">{empNo, planId}</code> (inte <code class="mono">id</code>), eftersom id kan saknas i äldre data.
-          </div>
-        </div>
-      </section>
     </div>
-  </div>
+  </section>
 </main>
 
 <script>
 /* ============================================================
-AO-ONBOARD-PLANS-ASSIGN-01 (3/5) – admin/onboard-plan-assignments.html
-UI-only • Fail-closed • XSS-safe
+AO-008/22 + AO-EMP-TASKS-QA-01 | employee/tasks.html – PROD v1.9
+DESIGN: Master Design-Spec v1.0 applicerad (CSS endast).
+AUTOPATCH-LOGIK oförändrad:
+- Kompat-läsning av AO-012_QUESTIONS_V1: accepterar array eller wrapper {questions/items/blocks}.
+- Tydligare tom-läge-diagnostik för frågor (hittade N, synliga M).
+- Inga nya keys. Ingen innerHTML från storage.
 
-PATCH v1.1 (tidigare):
-- Tillåt SYSTEM_ADMIN också (allowRoles:["ADMIN","SYSTEM_ADMIN"])
-- Stöd för query params: ?planId=...&empNo=... -> förval i UI
+GUARD:
+- EMPLOYEE-only
+- Kräver: session(auth) + empNo + assignments(scopeId) + org
+- Fail-closed: tasks skrivbara endast om org+assignments+tasks-format OK.
+- Questions/Answers: avstängs om HARD_LOCK.
 
-PATCH v1.2 (tidigare):
-- Layout/CSS ombyggd (ingen ändring av keys, logik, IDs, kopplingar).
-
-PATCH v1.3 (NU):
-- MASTER DESIGN-SPEC v1.0: wrap 1100/padding 16 + topbar Min sida neutral + Logga ut röd
-- UX: klick på rad -> förifyll formulär (empNo/planId/startDate)
+XSS:
+- All rendering via textContent / DOM-bygg.
 ============================================================ */
 (function(){
   "use strict";
 
-  // -----------------------------
-  // STORAGE KEYS (LÅST)
-  // -----------------------------
-  const PLANS_KEY = "AO-060_PLANS_V1";
-  const ASG_KEY   = "AO-061_PLAN_ASSIGNMENTS_V1";
-  const EMP_SRC_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
+  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const ORG_KEY     = "AO-020_ORG_V1";
+  const ASG_V2_KEY  = "AO-020_ROLE_ASSIGNMENTS_V2";
+  const TASKS_KEY   = "AO-014_TASKS_V1";
+  const QUESTIONS_KEY = "AO-012_QUESTIONS_V1";
+  const ANSWERS_KEY   = "AO-013_ANSWERS_V1";
 
+  const MAX_CHAIN_GUARD = 200;
   const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+  const ALLOWED_STATUS = new Set(["open","progress","done"]);
+  const MAX_COMMENT_LEN = 500;
+  const MAX_ANSWER_LEN  = 4000;
 
-  const $ = (s) => document.querySelector(s);
+  const $  = (s) => document.querySelector(s);
 
-  function setMsg(kind, text){
-    const el = $("#msg");
-    if(!el) return;
-    el.className = "message" + (kind ? (" " + kind) : "");
-    el.textContent = text || "";
-    el.style.display = (text && String(text).trim()) ? "block" : "none";
+  function redirectLogin(){ window.location.replace("../UI/UI-01-SKELETON.html"); }
+
+  function doLogout(){
+    if(window.HRApp && typeof window.HRApp.logout === "function"){
+      try{ window.HRApp.logout(); return; }catch{}
+    }
+    try{ sessionStorage.removeItem(SESSION_KEY); }catch{}
+    try{ localStorage.removeItem(SESSION_KEY); }catch{}
+    redirectLogin();
   }
+  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+
+  function setMsg(elId, kind, text){
+    const m = $(elId);
+    m.className = "message" + (kind ? " " + kind : "");
+    m.textContent = text || "";
+  }
+  const setMsgA = (k,t)=>setMsg("#msgA",k,t);
+  const setMsgB = (k,t)=>setMsg("#msgB",k,t);
 
   function showLockBox(lines){
     const box = $("#lockBox");
-    if(!box) return;
     if(!lines || !lines.length){
       box.style.display = "none";
       box.textContent = "";
@@ -472,835 +650,1147 @@ PATCH v1.3 (NU):
     box.style.display = "block";
     box.textContent = "";
     const strong = document.createElement("strong");
-    strong.textContent = "Noteringar:";
+    strong.textContent = "Låst (fail-closed):";
     box.appendChild(strong);
-    const ul = document.createElement("ul");
-    ul.style.margin = "8px 0 0";
-    ul.style.paddingLeft = "18px";
-    lines.forEach(line => {
-      const li = document.createElement("li");
-      li.textContent = String(line || "");
-      ul.appendChild(li);
-    });
-    box.appendChild(ul);
+    box.appendChild(document.createTextNode("\n" + lines.join("\n")));
   }
 
-  function safeJsonParse(str){
-    if(typeof str !== "string" || !str) return { ok:true, value:null };
+  function readRawSession(){
+    try{ const s1 = sessionStorage.getItem(SESSION_KEY); if (s1) return s1; }catch{}
+    try{ const s2 = localStorage.getItem(SESSION_KEY); if (s2) return s2; }catch{}
+    return null;
+  }
+
+  function safeParseJson(raw, fallback){
     try{
-      return { ok:true, value: JSON.parse(str) };
-    }catch(e){
-      return { ok:false, value:null, err:e };
+      const v = JSON.parse(raw);
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+
+  function normalizeRole(role){ return String(role || "").trim().toLowerCase(); }
+
+  function pickEmpNoFromAuth(auth){
+    const candidates = [auth?.empNo, auth?.employeeNo, auth?.empno, auth?.userId, auth?.username, auth?.login, auth?.identifier];
+    for(const c of candidates){
+      const s = String(c || "").trim();
+      if(!s) continue;
+      const digits = s.replace(/[^\d]/g, "");
+      if(digits) return digits.slice(0, 10);
     }
+    return "";
   }
 
-  function readLocalRaw(key){
-    try{ return localStorage.getItem(String(key||"")); }catch{ return null; }
+  function getAccessCtx(){
+    if(window.HRApp && typeof window.HRApp.getCurrentAccess === "function"){
+      try{
+        const acc = window.HRApp.getCurrentAccess();
+        if(acc && acc.ok && acc.auth){
+          const role = normalizeRole(acc.auth.role);
+          const empNo = String(acc.empNo || pickEmpNoFromAuth(acc.auth) || "").trim();
+          return {
+            source: "HRApp",
+            role,
+            empNo,
+            displayName: acc.auth.displayName || "",
+            viewerScopeId: String(acc.scopeId || "").trim(),
+            auth: acc.auth
+          };
+        }
+      }catch{}
+    }
+
+    const raw = readRawSession();
+    if(!raw) return null;
+
+    const data = safeParseJson(raw, null);
+    if(!data?.auth?.isAuthed) return null;
+
+    const auth = data.auth;
+    if(auth.expiresAt && Number(auth.expiresAt) < Date.now()) return null;
+
+    const role = normalizeRole(auth.role);
+    const empNo = pickEmpNoFromAuth(auth);
+    if(!role || !empNo) return null;
+
+    return {
+      source: "fallback",
+      role,
+      empNo,
+      displayName: auth.displayName || "",
+      viewerScopeId: "",
+      auth
+    };
   }
 
-  function writeLocalFailClosed(key, value){
+  const access = getAccessCtx();
+  if(!access) { redirectLogin(); return; }
+  if(access.role !== "employee"){ redirectLogin(); return; }
+
+  $("#whoName").textContent = access.displayName || "—";
+  $("#whoEmpNo").textContent = access.empNo || "—";
+
+  function hasLocalKey(key){
+    try{ return localStorage.getItem(key) !== null; }catch{ return false; }
+  }
+
+  function safeParseLocal(key, fallback){
     try{
-      localStorage.setItem(String(key||""), JSON.stringify(value));
+      const v = JSON.parse(localStorage.getItem(key) || "null");
+      return (v === null || v === undefined) ? fallback : v;
+    }catch{ return fallback; }
+  }
+
+  function saveFailClosedLocal(key, value){
+    try{
+      localStorage.setItem(key, JSON.stringify(value));
       return { ok:true };
     }catch(e){
       return { ok:false, err:e };
     }
   }
 
-  function normalizeEmpNoDigitsOnly(v){
-    const s = String(v ?? "").trim();
-    const digits = s.replace(/[^\d]/g, "");
-    return digits;
-  }
+  function normalizeAssignmentsV2(raw){
+    if(!hasLocalKey(ASG_V2_KEY)){
+      return { ok:false, map: Object.create(null), issues: ["Assignments saknas (key finns inte)."] };
+    }
+    if(raw === null || raw === undefined){
+      return { ok:false, map: Object.create(null), issues: ["Assignments är korrupt (null/undefined)."] };
+    }
+    if(typeof raw !== "object" || Array.isArray(raw)){
+      return { ok:false, map: Object.create(null), issues: ["Assignments korrupt (förväntar objekt)."] };
+    }
 
-  function isISODate(s){
-    return /^\d{4}-\d{2}-\d{2}$/.test(String(s||""));
-  }
+    const out = Object.create(null);
+    let blocked = false;
 
-  function isPlainObject(v){
-    if(v === null || typeof v !== "object") return false;
-    if(Array.isArray(v)) return false;
-    const proto = Object.getPrototypeOf(v);
-    return proto === Object.prototype || proto === null;
-  }
-
-  function hasBlockedSpecialKeysShallow(obj){
-    if(!obj || typeof obj !== "object") return false;
-    try{
-      for(const k of Object.keys(obj)){
-        if(SPECIAL_KEYS.has(String(k))) return true;
+    for(const k of Object.keys(raw)){
+      const key = String(k);
+      if(SPECIAL_KEYS.has(key)){
+        blocked = true;
+        continue;
       }
-    }catch{
-      return true; // fail-closed
+      out[key] = raw[key];
+    }
+
+    if(blocked){
+      return { ok:false, map: out, issues: ["Assignments innehåller blockerade special-keys (__proto__/constructor/prototype)."] };
+    }
+
+    return { ok:true, map: out, issues: [] };
+  }
+
+  function normalizeOrgNodes(raw){
+    const arr = Array.isArray(raw) ? raw : [];
+    const out = [];
+    for(const n of arr){
+      const id = String(n?.id || "").trim();
+      const name = String(n?.name || "").trim();
+      const parentId = (n?.parentId === null || n?.parentId === undefined) ? null : String(n.parentId).trim();
+      if(!id || !name) continue;
+      out.push({ id, name, parentId });
+    }
+    return out;
+  }
+
+  function buildOrgIndex(nodes){
+    const byId = new Map();
+    for(const n of nodes){ if(!byId.has(n.id)) byId.set(n.id, n); }
+
+    const parentOf = new Map(nodes.map(n => [n.id, n.parentId]));
+    const children = new Map();
+    nodes.forEach(n => children.set(n.id, []));
+    nodes.forEach(n => {
+      if(n.parentId && children.has(n.parentId)) children.get(n.parentId).push(n.id);
+    });
+    return { byId, parentOf, children };
+  }
+
+  function validateOrgIntegrity(nodes, orgIndex){
+    const issues = [];
+    if(!Array.isArray(nodes) || nodes.length === 0){
+      return { ok:false, issues:["Org saknas/korrupt (tom eller fel format)."] };
+    }
+
+    const ids = new Set(nodes.map(n => n.id));
+    const rootIds = nodes.filter(n => n.parentId === null).map(n => n.id);
+
+    if(rootIds.length === 0) issues.push("Org saknar root (ingen nod med parentId=null).");
+    if(rootIds.length > 1) issues.push("Org har flera root-noder (förväntar exakt 1).");
+
+    for(const n of nodes){
+      if(n.parentId === null) continue;
+      if(!n.parentId || !ids.has(n.parentId)){
+        issues.push("Org har orphan-noder (parentId pekar på saknad nod).");
+        break;
+      }
+    }
+
+    let hasLoop = false;
+    for(const n of nodes){
+      let cur = n.id;
+      let steps = 0;
+      const seen = new Set([cur]);
+
+      while(steps < MAX_CHAIN_GUARD){
+        const p = orgIndex.parentOf.get(cur);
+        if(p === null) break;
+        if(!p || !orgIndex.byId.has(p)) break;
+        if(seen.has(p)){ hasLoop = true; break; }
+        seen.add(p);
+        cur = p;
+        steps++;
+      }
+      if(hasLoop || steps >= MAX_CHAIN_GUARD){ hasLoop = true; break; }
+    }
+    if(hasLoop) issues.push("Org har loop i parent-kedjan (återbesök upptäckt).");
+
+    return { ok: issues.length === 0, issues };
+  }
+
+  function isInScope(viewerScopeId, itemScopeId, orgIndex){
+    const v = String(viewerScopeId || "").trim();
+    const s = String(itemScopeId || "").trim();
+    if(!v || !s) return false;
+
+    if(!orgIndex.byId.has(v)) return false;
+    if(!orgIndex.byId.has(s)) return false;
+    if(v === s) return true;
+
+    let cur = s;
+    let steps = 0;
+    const seen = new Set([cur]);
+
+    while(steps < MAX_CHAIN_GUARD){
+      const p = orgIndex.parentOf.get(cur);
+      if(p === null) return false;
+      if(!p || !orgIndex.byId.has(p)) return false;
+      if(p === v) return true;
+
+      if(seen.has(p)) return false;
+      seen.add(p);
+
+      cur = p;
+      steps++;
     }
     return false;
   }
 
-  // KRAV: 00:00 lokal tid (inte Date.parse("YYYY-MM-DD") som kan bli UTC)
-  function isoDateToLocalMidnightTs(iso){
-    if(!isISODate(iso)) return null;
-    const parts = String(iso).split("-");
-    const y = Number(parts[0]);
-    const m = Number(parts[1]);
-    const d = Number(parts[2]);
-    if(!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
-    const dt = new Date(y, (m - 1), d, 0, 0, 0, 0);
-    const t = dt.getTime();
-    return Number.isFinite(t) && t > 0 ? t : null;
+  const lockReasons = [];
+
+  if(!hasLocalKey(ORG_KEY)) lockReasons.push("Org saknas (key finns inte).");
+  const orgRaw = safeParseLocal(ORG_KEY, null);
+  const orgNodes = normalizeOrgNodes(orgRaw);
+  const orgIndex = buildOrgIndex(orgNodes);
+  const orgIntegrity = validateOrgIntegrity(orgNodes, orgIndex);
+  if(!orgIntegrity.ok) lockReasons.push(...orgIntegrity.issues);
+
+  const asgParsed = safeParseLocal(ASG_V2_KEY, null);
+  const asgV2 = normalizeAssignmentsV2(asgParsed);
+  if(!asgV2.ok) lockReasons.push(...asgV2.issues);
+
+  let viewerScopeId = String(access.viewerScopeId || "").trim();
+  if(!viewerScopeId && asgV2.ok){
+    const rec = asgV2.map[String(access.empNo)] || null;
+    viewerScopeId = String(rec?.scopeId || "").trim();
   }
 
-  function formatDateLocal(ts){
-    const t = Number(ts);
-    if(!Number.isFinite(t) || t <= 0) return "—";
-    const d = new Date(t);
-    if(!Number.isFinite(d.getTime())) return "—";
-    const y = d.getFullYear();
-    const m = String(d.getMonth()+1).padStart(2,"0");
-    const day = String(d.getDate()).padStart(2,"0");
-    return `${y}-${m}-${day}`;
+  if(!viewerScopeId) lockReasons.push("Ditt viewerScopeId saknas (assignment saknar scopeId).");
+  if(viewerScopeId && !orgIndex.byId.has(viewerScopeId)) lockReasons.push("Ditt viewerScopeId finns inte i org.");
+
+  $("#scopePill").textContent = "scope: " + (viewerScopeId || "—");
+
+  const HARD_LOCK = lockReasons.length > 0;
+  showLockBox(lockReasons);
+
+  function normalizeStatus(s){
+    const v = String(s || "").trim().toLowerCase();
+    return ALLOWED_STATUS.has(v) ? v : "";
+  }
+  function sanitizeText(s, maxLen){
+    const v = String(s ?? "").trim();
+    if(!v) return "";
+    return v.length > maxLen ? v.slice(0, maxLen) : v;
   }
 
-  function localMidnightTsToISO(ts){
-    const t = Number(ts);
-    if(!Number.isFinite(t) || t <= 0) return "";
-    const d = new Date(t);
-    if(!Number.isFinite(d.getTime())) return "";
-    const y = d.getFullYear();
-    const m = String(d.getMonth()+1).padStart(2,"0");
-    const day = String(d.getDate()).padStart(2,"0");
-    return `${y}-${m}-${day}`;
+  function statusLabel(s){
+    if(s === "done") return "Klar";
+    if(s === "progress") return "Pågår";
+    return "Ej startad";
+  }
+  function dateLabel(task){
+    const s = String(task?.startDate || "").trim();
+    const e = String(task?.endDate || "").trim();
+    if(s && e) return `${s}–${e}`;
+    if(s) return `${s}`;
+    if(e) return `t.o.m. ${e}`;
+    return "—";
+  }
+  function pill(text){
+    const s = document.createElement("span");
+    s.className = "pill";
+    s.textContent = text;
+    return s;
+  }
+  function emptyBox(text){
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = text;
+    return d;
+  }
+  function clearChildren(el){
+    while(el && el.firstChild) el.removeChild(el.firstChild);
   }
 
-  function uuidLike(){
-    try{
-      if(window.crypto && crypto.getRandomValues){
-        const a = new Uint8Array(16);
-        crypto.getRandomValues(a);
-        a[6] = (a[6] & 0x0f) | 0x40;
-        a[8] = (a[8] & 0x3f) | 0x80;
-        const hex = Array.from(a).map(b => b.toString(16).padStart(2,"0")).join("");
-        return (
-          hex.slice(0,8)+"-"+hex.slice(8,12)+"-"+hex.slice(12,16)+"-"+hex.slice(16,20)+"-"+hex.slice(20)
+  function tasksExistsAndValid(){
+    if(!hasLocalKey(TASKS_KEY)) return { ok:false, reason:"Tasks saknas (key finns inte)." };
+    const raw = safeParseLocal(TASKS_KEY, null);
+    if(!Array.isArray(raw)) return { ok:false, reason:"Tasks är korrupt (förväntar array)." };
+    return { ok:true };
+  }
+
+  function loadAllTasks(){
+    const arr = safeParseLocal(TASKS_KEY, []);
+    return Array.isArray(arr) ? arr : [];
+  }
+
+  function safeSaveAllTasks(all){
+    const res = saveFailClosedLocal(TASKS_KEY, all);
+    if(!res.ok){
+      setMsgA("err", "Kunde inte spara (localStorage fullt eller blockerad).");
+      return false;
+    }
+    return true;
+  }
+
+  function isTaskCorrupt(t){
+    const id = String(t?.id || "").trim();
+    const empNo = String(t?.empNo || "").trim();
+    const scopeId = String(t?.scopeId || "").trim();
+    if(!id || !empNo || !scopeId) return true;
+    if(!orgIndex.byId.has(scopeId)) return true;
+    return false;
+  }
+
+  function canSeeTask(t){
+    if(HARD_LOCK) return false;
+    if(isTaskCorrupt(t)) return false;
+    if(String(t.empNo).trim() !== String(access.empNo).trim()) return false;
+    return isInScope(viewerScopeId, String(t.scopeId).trim(), orgIndex);
+  }
+
+  function computeMineVisibleTasks(){
+    const all = loadAllTasks();
+    return all
+      .filter(canSeeTask)
+      .slice()
+      .sort((a,b) => (Number(b?.createdAt) || 0) - (Number(a?.createdAt) || 0));
+  }
+
+  function isValidTransition(prev, next){
+    const p = normalizeStatus(prev) || "open";
+    const n = normalizeStatus(next) || "";
+    if(!n) return false;
+    if(p === n) return true;
+    if(p === "open" && n === "progress") return true;
+    if(p === "progress" && n === "done") return true;
+    return false;
+  }
+
+  function upsertTaskMutation(next){
+    const all = loadAllTasks();
+    const idx = all.findIndex(x => String(x?.id) === String(next.id));
+    if(idx < 0) return { ok:false, err:"Uppgift hittades inte." };
+
+    const cur = all[idx];
+
+    if(String(cur?.empNo||"").trim() !== String(access.empNo).trim()){
+      return { ok:false, err:"Åtkomst nekad (inte din uppgift)." };
+    }
+    if(String(cur?.scopeId||"").trim() !== String(next?.scopeId||"").trim()){
+      return { ok:false, err:"Policy-bugg: scopeId får inte ändras." };
+    }
+    if(!canSeeTask(cur)){
+      return { ok:false, err:"Åtkomst nekad (scope)." };
+    }
+
+    const patched = { ...cur };
+
+    const prevStatus = normalizeStatus(cur?.status) || "open";
+    const nextStatus = normalizeStatus(next?.status) || "";
+    if(!nextStatus) return { ok:false, err:"Ogiltig status (okänt värde)." };
+
+    if(prevStatus === "done" && nextStatus !== "done"){
+      return { ok:false, err:"DONE är slutläge (status kan inte ändras)." };
+    }
+    if(!isValidTransition(prevStatus, nextStatus)){
+      return { ok:false, err:"Ogiltig status-övergång (endast OPEN→PROGRESS→DONE)." };
+    }
+
+    patched.status = nextStatus;
+    patched.employeeComment = sanitizeText(next?.employeeComment || "", MAX_COMMENT_LEN);
+
+    patched.updatedAt = Date.now();
+    patched.updatedBy = String(access.empNo || "").trim();
+
+    all[idx] = patched;
+    if(!safeSaveAllTasks(all)){
+      return { ok:false, err:"Kunde inte spara (lagring)." };
+    }
+    return { ok:true };
+  }
+
+  function unwrapQuestions(raw){
+    if(Array.isArray(raw)) return { ok:true, arr: raw, shape:"array", total: raw.length };
+    if(raw && typeof raw === "object" && !Array.isArray(raw)){
+      const cands = [raw.questions, raw.items, raw.blocks, raw.list, raw.data];
+      for(const c of cands){
+        if(Array.isArray(c)) return { ok:true, arr: c, shape:"wrapper", total: c.length };
+      }
+    }
+    return { ok:false, arr: [], shape:"invalid", total: 0 };
+  }
+
+  function readQuestionsArray(){
+    if(!hasLocalKey(QUESTIONS_KEY)) return { ok:false, arr:[], reason:"Questions saknas (key finns inte).", meta:{ total:0, shape:"missing" } };
+    const raw = safeParseLocal(QUESTIONS_KEY, null);
+    const un = unwrapQuestions(raw);
+    if(!un.ok){
+      return { ok:false, arr:[], reason:"Questions är korrupt (förväntar array eller wrapper med questions/items/blocks).", meta:{ total:0, shape:"invalid" } };
+    }
+    return { ok:true, arr: un.arr, meta:{ total: un.total, shape: un.shape } };
+  }
+
+  function readAnswersArray(){
+    const raw = safeParseLocal(ANSWERS_KEY, []);
+    return Array.isArray(raw) ? raw : [];
+  }
+
+  function safeSaveAnswersArray(all){
+    const res = saveFailClosedLocal(ANSWERS_KEY, all);
+    if(!res.ok){
+      setMsgB("err", "Kunde inte spara svar (localStorage fullt eller blockerad).");
+      return false;
+    }
+    return true;
+  }
+
+  function qId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? "").trim(); }
+  function qTitle(q){ return String(q?.title ?? q?.name ?? "Fråga").trim(); }
+  function qText(q){ return String(q?.text ?? q?.question ?? q?.body ?? q?.title ?? "—").trim(); }
+  function qScope(q){ return String(q?.scopeId ?? q?.scope ?? q?.nodeId ?? "").trim(); }
+  function qEmp(q){ return String(q?.empNo ?? q?.employeeNo ?? q?.toEmpNo ?? q?.assignedTo ?? "").trim(); }
+
+  function answerEmp(a){ return String(a?.empNo ?? a?.employeeNo ?? "").trim(); }
+  function answerQid(a){ return String(a?.questionId ?? a?.qid ?? "").trim(); }
+  function normKey(s){ return String(s ?? "").toLowerCase().replace(/\s+/g," ").trim(); }
+
+  function canSeeQuestion(q){
+    if(HARD_LOCK) return false;
+
+    const id = qId(q);
+    const title = qTitle(q);
+    if(!id && !title) return false;
+
+    const targetEmp = qEmp(q);
+    if(targetEmp && targetEmp !== String(access.empNo).trim()) return false;
+
+    const scope = qScope(q);
+    if(scope){
+      if(!orgIndex.byId.has(scope)) return false;
+      return isInScope(viewerScopeId, scope, orgIndex);
+    }
+    return true;
+  }
+
+  function findMyAnswerForQuestion(q){
+    const myEmp = String(access.empNo).trim();
+    const id = qId(q);
+    const title = qTitle(q);
+    const answers = readAnswersArray();
+
+    if(id){
+      const hit = answers.find(a => answerEmp(a) === myEmp && answerQid(a) === id);
+      if(hit) return hit;
+    }
+
+    const tKey = normKey(title);
+    if(tKey){
+      const hit2 = answers.find(a =>
+        answerEmp(a) === myEmp &&
+        normKey(String(a?.questionTitle ?? a?.title ?? "")) === tKey &&
+        (!String(a?.questionId || "").trim() || !id)
+      );
+      if(hit2) return hit2;
+    }
+    return null;
+  }
+
+  function upsertMyAnswer(q, patch){
+    if(HARD_LOCK) return { ok:false, err:"Låst (fail-closed)." };
+
+    const myEmp = String(access.empNo).trim();
+    const id = qId(q);
+    const title = qTitle(q);
+
+    const answers = readAnswersArray();
+    let idx = -1;
+
+    if(id){
+      idx = answers.findIndex(a => answerEmp(a) === myEmp && answerQid(a) === id);
+    }
+
+    if(idx < 0){
+      const tKey = normKey(title);
+      if(tKey){
+        idx = answers.findIndex(a =>
+          answerEmp(a) === myEmp &&
+          normKey(String(a?.questionTitle ?? a?.title ?? "")) === tKey &&
+          (!String(a?.questionId || "").trim() || !id)
         );
       }
-    }catch{}
-    return (Math.random().toString(16).slice(2) + "_" + Date.now().toString(16));
-  }
-
-  function makePaId(){
-    return "pa_" + uuidLike();
-  }
-
-  // -----------------------------
-  // Query params (PATCH v1.1)
-  // -----------------------------
-  function getQuery(){
-    try{
-      const u = new URL(window.location.href);
-      const planId = String(u.searchParams.get("planId") || "").trim();
-      const empNo = normalizeEmpNoDigitsOnly(u.searchParams.get("empNo") || "");
-      return { planId, empNo };
-    }catch{
-      return { planId:"", empNo:"" };
     }
-  }
-  const qp = getQuery();
-  let queryAppliedOnce = false;
-
-  // -----------------------------
-  // AUTH GUARD (LÅST)
-  // -----------------------------
-  function mustAdminOrSysAdmin(){
-    if(!window.HRApp || typeof window.HRApp.requireAuth !== "function"){
-      setMsg("err", "CORE saknas (HRApp). Kan inte köra sidan. (fail-closed)");
-      return null;
-    }
-
-    let session = null;
-    try{
-      session = window.HRApp.requireAuth({ allowRoles:["ADMIN","SYSTEM_ADMIN"] });
-    }catch{
-      setMsg("err", "Auth-guard kraschade i CORE. (fail-closed)");
-      return null;
-    }
-    if(session === null) return null; // CORE kan redan ha redirectat
-
-    let auth = null;
-    try{
-      auth = window.HRApp.getAuth ? window.HRApp.getAuth(session) : null;
-    }catch{
-      try{ auth = window.HRApp.getAuth ? window.HRApp.getAuth() : null; }catch{ auth = null; }
-    }
-
-    const role = String(auth?.role || "").trim();
-    if(!auth || auth.isAuthed !== true || (role !== "ADMIN" && role !== "SYSTEM_ADMIN")){
-      setMsg("err", "Åtkomst nekad. ADMIN/SYSTEM_ADMIN krävs. (fail-closed)");
-      return null;
-    }
-    return { session, auth, role };
-  }
-
-  const access = mustAdminOrSysAdmin();
-  if(!access) return;
-
-  const whoNameEl = $("#whoName");
-  const whoRoleEl = $("#whoRole");
-  if(whoNameEl) whoNameEl.textContent = String(access.auth.empNo || "—");
-  if(whoRoleEl) whoRoleEl.textContent = String(access.role || "—");
-
-  const navLogout = $("#navLogout");
-  if(navLogout){
-    navLogout.addEventListener("click", (e) => {
-      e.preventDefault();
-      if(window.HRApp && typeof window.HRApp.logout === "function"){
-        window.HRApp.logout();
-        return;
-      }
-      try{ sessionStorage.removeItem("AO-001_LOGIN_V1"); }catch{}
-      try{ localStorage.removeItem("AO-001_LOGIN_V1"); }catch{}
-      window.location.replace("../UI/UI-01-SKELETON.html?err=logout");
-    });
-  }
-
-  // -----------------------------
-  // LOAD: EMPLOYEES (AssignmentsV2 object-only + hardening)
-  // -----------------------------
-  function normalizeAssignmentsV2ObjectOnly(raw){
-    if(raw === null || raw === undefined){
-      return { ok:true, map:Object.create(null), issues:[] };
-    }
-    if(typeof raw !== "object" || Array.isArray(raw)){
-      return { ok:false, map:Object.create(null), issues:["AO-020_ROLE_ASSIGNMENTS_V2 korrupt (förväntar objekt)."] };
-    }
-    if(!isPlainObject(raw)){
-      return { ok:false, map:Object.create(null), issues:["AO-020_ROLE_ASSIGNMENTS_V2 korrupt (ej plain object)."] };
-    }
-
-    const out = Object.create(null);
-    try{
-      for(const k of Object.keys(raw)){
-        const key = String(k);
-        if(SPECIAL_KEYS.has(key)){
-          return { ok:false, map:Object.create(null), issues:["AO-020_ROLE_ASSIGNMENTS_V2 innehåller blockerade special-keys. (fail-closed)"] };
-        }
-        const v = raw[key];
-        if(v && typeof v === "object" && !Array.isArray(v)){
-          if(hasBlockedSpecialKeysShallow(v)){
-            return { ok:false, map:Object.create(null), issues:["AO-020_ROLE_ASSIGNMENTS_V2 value innehåller blockerade special-keys (shallow). (fail-closed)"] };
-          }
-        }
-        out[key] = v;
-      }
-    }catch{
-      return { ok:false, map:Object.create(null), issues:["AO-020_ROLE_ASSIGNMENTS_V2 kunde inte läsas säkert. (fail-closed)"] };
-    }
-    return { ok:true, map:out, issues:[] };
-  }
-
-  function loadEmployeesFromAssignments(){
-    const rawStr = readLocalRaw(EMP_SRC_KEY);
-    if(rawStr === null){
-      return { ok:true, list:[], issues:["AO-020_ROLE_ASSIGNMENTS_V2 saknas (inga employees att välja)."] };
-    }
-    const parsed = safeJsonParse(rawStr);
-    if(!parsed.ok){
-      return { ok:false, list:[], issues:["AO-020_ROLE_ASSIGNMENTS_V2 korrupt (JSON-parse misslyckades)."] };
-    }
-    const norm = normalizeAssignmentsV2ObjectOnly(parsed.value);
-    if(!norm.ok){
-      return { ok:false, list:[], issues:norm.issues.slice() };
-    }
-
-    const keys = Object.keys(norm.map);
-    const seen = new Set();
-    const out = [];
-
-    for(const k of keys){
-      const empNo = normalizeEmpNoDigitsOnly(k);
-      if(!empNo) continue;
-      if(seen.has(empNo)) continue;
-      seen.add(empNo);
-      out.push({ empNo });
-    }
-
-    out.sort((a,b) => String(a.empNo).localeCompare(String(b.empNo), "sv"));
-    return { ok:true, list:out, issues: out.length ? [] : ["Inga giltiga empNo-nycklar hittades i AO-020_ROLE_ASSIGNMENTS_V2."] };
-  }
-
-  // -----------------------------
-  // LOAD: PLANS (AO-060) — read-only
-  // -----------------------------
-  function normalizePlan(p){
-    if(!p || typeof p !== "object") return null;
-    const id = String(p.id || "").trim();
-    const title = String(p.title || "").trim();
-    const status = String(p.status || "").trim();
-    const items = Array.isArray(p.items) ? p.items : null;
-    if(!id || !title || !items) return null;
-    if(status !== "draft" && status !== "active" && status !== "archived") return null;
-    return { id, title, status, itemsCount: items.length };
-  }
-
-  function loadPlans(){
-    const rawStr = readLocalRaw(PLANS_KEY);
-    if(rawStr === null){
-      return { ok:true, list:[], issues:["AO-060_PLANS_V1 saknas (inga planer att välja)."] };
-    }
-    const parsed = safeJsonParse(rawStr);
-    if(!parsed.ok){
-      return { ok:false, list:[], issues:["AO-060_PLANS_V1 korrupt (JSON-parse misslyckades)."] };
-    }
-    if(parsed.value === null || parsed.value === undefined){
-      return { ok:true, list:[], issues:["AO-060_PLANS_V1 är tom."] };
-    }
-    if(!Array.isArray(parsed.value)){
-      return { ok:false, list:[], issues:["AO-060_PLANS_V1 korrupt (förväntar array)."] };
-    }
-
-    const out = [];
-    let dropped = 0;
-    for(const row of parsed.value){
-      const n = normalizePlan(row);
-      if(n) out.push(n); else dropped++;
-    }
-
-    const issues = [];
-    if(dropped > 0) issues.push(`${dropped} plan(er) ignorerades pga ogiltigt format.`);
-
-    out.sort((a,b) => (a.title || "").localeCompare((b.title || ""), "sv"));
-    return { ok:true, list:out, issues };
-  }
-
-  // -----------------------------
-  // LOAD: ASSIGNMENTS (AO-061) — fail-closed vid korrupt
-  // -----------------------------
-  function normalizeAssignmentRow(row){
-    if(!row || typeof row !== "object") return null;
-
-    const empNo = normalizeEmpNoDigitsOnly(row.empNo);
-    const planId = String(row.planId || "").trim();
-    const startDateTs = Number(row.startDateTs);
-
-    if(!empNo || !planId || !Number.isFinite(startDateTs) || startDateTs <= 0) return null;
-
-    const createdAt = Number(row.createdAt);
-    const updatedAt = Number(row.updatedAt);
-
-    const c = Number.isFinite(createdAt) && createdAt > 0 ? createdAt : null;
-    const u = Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : null;
-
-    const createdAtNorm = c ?? u ?? Date.now();
-    const updatedAtNorm = u ?? c ?? createdAtNorm;
-
-    const id = String(row.id || "").trim();
-    const idNorm = id ? id : makePaId();
-
-    return {
-      id: idNorm,
-      empNo,
-      planId,
-      startDateTs,
-      createdAt: createdAtNorm,
-      updatedAt: updatedAtNorm
-    };
-  }
-
-  function loadAssignments(){
-    const rawStr = readLocalRaw(ASG_KEY);
-    if(rawStr === null){
-      return { ok:true, list:[], issues:[] };
-    }
-    const parsed = safeJsonParse(rawStr);
-    if(!parsed.ok){
-      return { ok:false, list:[], issues:["AO-061_PLAN_ASSIGNMENTS_V1 korrupt (JSON-parse misslyckades)."] };
-    }
-    if(parsed.value === null || parsed.value === undefined){
-      return { ok:true, list:[], issues:[] };
-    }
-    if(!Array.isArray(parsed.value)){
-      return { ok:false, list:[], issues:["AO-061_PLAN_ASSIGNMENTS_V1 korrupt (förväntar array)."] };
-    }
-
-    const out = [];
-    let dropped = 0;
-    for(const r of parsed.value){
-      const n = normalizeAssignmentRow(r);
-      if(n) out.push(n); else dropped++;
-    }
-
-    const issues = [];
-    if(dropped > 0) issues.push(`${dropped} koppling(ar) ignorerades pga ogiltigt format.`);
-
-    return { ok:true, list:out, issues };
-  }
-
-  // -----------------------------
-  // RENDER HELPERS
-  // -----------------------------
-  function fillSelect(sel, options, placeholder){
-    sel.textContent = "";
-    const opt0 = document.createElement("option");
-    opt0.value = "";
-    opt0.textContent = placeholder || "(Välj)";
-    sel.appendChild(opt0);
-
-    options.forEach(o => {
-      const opt = document.createElement("option");
-      opt.value = String(o.value);
-      opt.textContent = String(o.label);
-      sel.appendChild(opt);
-    });
-  }
-
-  function buildPlanIndex(plans){
-    const byId = new Map();
-    (plans || []).forEach(p => byId.set(p.id, p));
-    return byId;
-  }
-
-  function findExisting(empNo, planId){
-    const e = normalizeEmpNoDigitsOnly(empNo);
-    const p = String(planId || "").trim();
-    if(!e || !p) return null;
-    return assignments.find(r => r.empNo === e && r.planId === p) || null;
-  }
-
-  function updateCurrentHint(){
-    const empNo = String($("#empSelect").value || "").trim();
-    const planId = String($("#planSelect").value || "").trim();
-    const hint = $("#currentHint");
-    const hintText = $("#currentHintText");
-    if(!hint || !hintText){
-      return;
-    }
-    const ex = findExisting(empNo, planId);
-    if(ex){
-      hintText.textContent = `${ex.empNo} • ${planIndex.get(ex.planId)?.title || ex.planId} • ${formatDateLocal(ex.startDateTs)}`;
-      hint.style.display = "inline-flex";
-    }else{
-      hintText.textContent = "—";
-      hint.style.display = "none";
-    }
-  }
-
-  function renderTable(rows, planIndexLocal, filters, canWriteLocal){
-    const tbody = $("#tbody");
-    tbody.textContent = "";
-
-    const fEmp = String(filters.empNo || "").trim();
-    const fPlan = String(filters.planId || "").trim();
-
-    let list = Array.isArray(rows) ? rows.slice() : [];
-    if(fEmp) list = list.filter(r => r.empNo === fEmp);
-    if(fPlan) list = list.filter(r => r.planId === fPlan);
-
-    list.sort((a,b) => {
-      const ae = String(a.empNo||"");
-      const be = String(b.empNo||"");
-      if(ae !== be) return ae.localeCompare(be, "sv");
-
-      const ap = planIndexLocal.get(a.planId);
-      const bp = planIndexLocal.get(b.planId);
-      const at = String(ap?.title || a.planId || "");
-      const bt = String(bp?.title || b.planId || "");
-      if(at !== bt) return at.localeCompare(bt, "sv");
-
-      return Number(a.startDateTs) - Number(b.startDateTs);
-    });
-
-    const metaEl = $("#listMeta");
-    if(metaEl) metaEl.textContent = `Visar ${list.length} koppling(ar).`;
-
-    if(list.length === 0){
-      const tr = document.createElement("tr");
-      const td = document.createElement("td");
-      td.colSpan = 5;
-      td.className = "muted2";
-      td.textContent = "Inga kopplingar att visa (eller filtren matchar inget).";
-      tr.appendChild(td);
-      tbody.appendChild(tr);
-      return;
-    }
-
-    for(const r of list){
-      const tr = document.createElement("tr");
-      tr.tabIndex = 0; /* keyboard focus */
-      tr.setAttribute("role", "row");
-      tr.title = "Klicka för att fylla formuläret";
-
-      const plan = planIndexLocal.get(r.planId) || null;
-      const planTitle = plan ? plan.title : ("Okänd plan (" + r.planId + ")");
-      const planStatus = plan ? plan.status : "unknown";
-
-      const tdEmp = document.createElement("td");
-      tdEmp.textContent = r.empNo;
-      tr.appendChild(tdEmp);
-
-      const tdPlan = document.createElement("td");
-      tdPlan.textContent = planTitle;
-      tr.appendChild(tdPlan);
-
-      const tdStart = document.createElement("td");
-      tdStart.textContent = formatDateLocal(r.startDateTs);
-      tr.appendChild(tdStart);
-
-      const tdStatus = document.createElement("td");
-      const pill = document.createElement("span");
-      pill.className = "pill";
-      pill.textContent = (planStatus === "unknown") ? "unknown" : String(planStatus);
-      tdStatus.appendChild(pill);
-      tr.appendChild(tdStatus);
-
-      const tdAct = document.createElement("td");
-      tdAct.style.textAlign = "right";
-
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "secondary";
-      btn.textContent = "Ta bort";
-      btn.disabled = !canWriteLocal;
-      btn.setAttribute("aria-label", `Ta bort koppling: empNo ${r.empNo}, plan ${planTitle}`);
-      btn.addEventListener("click", (ev) => {
-        ev.stopPropagation();
-        if(!canWriteLocal) return;
-        const ok = confirm(`Ta bort koppling?\nEmployee: ${r.empNo}\nPlan: ${planTitle}\nStart: ${formatDateLocal(r.startDateTs)}`);
-        if(!ok) return;
-        deleteAssignment(r.empNo, r.planId);
-      });
-      tdAct.appendChild(btn);
-      tr.appendChild(tdAct);
-
-      // UX: click row -> prefill form
-      function prefill(){
-        const empSel = $("#empSelect");
-        const planSel = $("#planSelect");
-        const dateEl = $("#startDate");
-
-        if(empSel) empSel.value = String(r.empNo);
-        if(planSel){
-          // välj bara om plan fortfarande är active och finns i select
-          const p = planIndex.get(r.planId);
-          if(p && p.status === "active"){
-            planSel.value = String(r.planId);
-          }else{
-            planSel.value = ""; // fail-safe
-          }
-        }
-        if(dateEl){
-          const iso = localMidnightTsToISO(r.startDateTs);
-          if(iso) dateEl.value = iso;
-        }
-        updateCurrentHint();
-        try{ $("#empSelect")?.focus(); }catch{}
-      }
-
-      tr.addEventListener("click", prefill);
-      tr.addEventListener("keydown", (e) => {
-        if(e.key === "Enter" || e.key === " "){
-          e.preventDefault();
-          prefill();
-        }
-      });
-
-      tbody.appendChild(tr);
-    }
-  }
-
-  // -----------------------------
-  // STATE
-  // -----------------------------
-  let lockReasons = [];
-  let employees = [];
-  let plans = [];
-  let planIndex = new Map();
-  let assignments = [];
-  let canWrite = true;
-
-  function recomputeLocks(empRes, planRes, asgRes){
-    lockReasons = [];
-
-    if(!empRes.ok) lockReasons.push(...empRes.issues);
-    else if(empRes.issues?.length) lockReasons.push(...empRes.issues);
-
-    if(!planRes.ok) lockReasons.push(...planRes.issues);
-    else if(planRes.issues?.length) lockReasons.push(...planRes.issues);
-
-    if(!asgRes.ok) lockReasons.push(...asgRes.issues);
-    else if(asgRes.issues?.length) lockReasons.push(...asgRes.issues);
-
-    canWrite = !!(empRes.ok && planRes.ok && asgRes.ok);
-
-    const hasEmp = employees.length > 0;
-    const hasActivePlan = plans.some(p => p.status === "active");
-    if(!hasEmp) canWrite = false;
-    if(!hasActivePlan) canWrite = false;
-
-    showLockBox(lockReasons);
-  }
-
-  // -----------------------------
-  // UPSERT / DELETE (AO-061)
-  // -----------------------------
-  function validateAssignInput(empNo, planId, startTs){
-    const emp = normalizeEmpNoDigitsOnly(empNo);
-    const pid = String(planId || "").trim();
-    const ts = Number(startTs);
-
-    if(!emp) return { ok:false, err:"Välj en medarbetare." };
-    if(!pid) return { ok:false, err:"Välj en plan." };
-    if(!Number.isFinite(ts) || ts <= 0) return { ok:false, err:"Välj ett giltigt startdatum." };
-
-    const plan = planIndex.get(pid) || null;
-    if(!plan) return { ok:false, err:"PlanId finns inte i AO-060 (korrupt data eller borttagen plan)." };
-    if(plan.status !== "active") return { ok:false, err:"Endast active plans får kopplas." };
-
-    return { ok:true, empNo: emp, planId: pid, startDateTs: ts };
-  }
-
-  function upsertAssignment(empNo, planId, startDateTs){
-    if(!canWrite){
-      setMsg("err", "Skrivning är låst (fail-closed).");
-      return;
-    }
-
-    const v = validateAssignInput(empNo, planId, startDateTs);
-    if(!v.ok){ setMsg("err", v.err); return; }
 
     const now = Date.now();
-    const next = assignments.slice();
 
-    const idx = next.findIndex(r => r.empNo === v.empNo && r.planId === v.planId);
-    if(idx >= 0){
-      const prev = next[idx];
-      const keepId = String(prev.id || "").trim() || makePaId();
-      const keepCreated = Number(prev.createdAt) > 0 ? Number(prev.createdAt) : now;
+    function finalize(obj){
+      const out = { ...obj };
 
-      next[idx] = {
-        id: keepId,
-        empNo: v.empNo,
-        planId: v.planId,
-        startDateTs: v.startDateTs,
-        createdAt: keepCreated,
-        updatedAt: now
-      };
-    }else{
-      next.push({
-        id: makePaId(),
-        empNo: v.empNo,
-        planId: v.planId,
-        startDateTs: v.startDateTs,
+      out.empNo = myEmp;
+      out.questionId = id || String(out.questionId || "").trim();
+      out.questionTitle = title || String(out.questionTitle || "").trim();
+
+      out.answerText = sanitizeText(out.answerText, MAX_ANSWER_LEN);
+
+      const hasText = String(out.answerText || "").trim().length > 0;
+      out.signed = !!out.signed && hasText;
+      out.signedAt = out.signed ? (Number(out.signedAt) > 0 ? Number(out.signedAt) : now) : null;
+
+      out.updatedAt = now;
+      out.updatedBy = myEmp;
+
+      return out;
+    }
+
+    if(idx < 0){
+      const base = {
+        id: "ans_" + Math.random().toString(16).slice(2) + "_" + now.toString(16),
+        questionId: id || "",
+        questionTitle: title || "",
+        empNo: myEmp,
+        answerText: "",
+        signed: false,
+        signedAt: null,
         createdAt: now,
-        updatedAt: now
+        updatedAt: now,
+        updatedBy: myEmp
+      };
+      const merged = finalize({ ...base, ...patch });
+      answers.push(merged);
+      if(!safeSaveAnswersArray(answers)) return { ok:false, err:"Kunde inte spara." };
+      return { ok:true, answer: merged };
+    }
+
+    const cur = answers[idx];
+    if(answerEmp(cur) !== myEmp) return { ok:false, err:"Åtkomst nekad (inte ditt svar)." };
+
+    const merged = finalize({ ...cur, ...patch });
+    answers[idx] = merged;
+
+    if(!safeSaveAnswersArray(answers)) return { ok:false, err:"Kunde inte spara." };
+    return { ok:true, answer: merged };
+  }
+
+  const MODE = { TASKS:"tasks", QUESTIONS:"questions" };
+  let mode = MODE.TASKS;
+
+  let selectedTaskId = null;
+  let selectedQuestionKey = null;
+
+  function setKpis(a,b,c){
+    $("#kpiA").textContent = a;
+    $("#kpiB").textContent = b;
+    $("#kpiC").textContent = c;
+  }
+
+  function closeDetail(){
+    selectedTaskId = null;
+    selectedQuestionKey = null;
+
+    $("#detailEmpty").style.display = "block";
+    $("#detailTask").style.display = "none";
+    $("#detailQuestion").style.display = "none";
+
+    setMsgA("", "");
+    setMsgB("", "");
+  }
+
+  $("#btnCloseDetailA").addEventListener("click", closeDetail);
+  $("#btnCloseDetailB").addEventListener("click", closeDetail);
+
+  function setHashForMode(m){
+    const want = (m === MODE.QUESTIONS) ? "#questions" : "";
+    const cur = String(window.location.hash || "");
+    if(cur !== want){
+      try{ history.replaceState(null, "", window.location.pathname + window.location.search + want); }catch{}
+    }
+  }
+
+  function setMode(next){
+    mode = next;
+    $("#tabTasks").setAttribute("aria-pressed", String(mode === MODE.TASKS));
+    $("#tabQuestions").setAttribute("aria-pressed", String(mode === MODE.QUESTIONS));
+    setHashForMode(mode);
+
+    const filterEl = $("#filter");
+    clearChildren(filterEl);
+
+    if(mode === MODE.TASKS){
+      filterEl.appendChild(new Option("Ej klara", "open", true, true));
+      filterEl.appendChild(new Option("Pågår", "progress"));
+      filterEl.appendChild(new Option("Klara", "done"));
+      filterEl.appendChild(new Option("Alla", "all"));
+      $("#tipLine").textContent = "Tips: Klicka på en uppgift för att uppdatera status/kommentar.";
+    }else{
+      filterEl.appendChild(new Option("Ej svarade", "open", true, true));
+      filterEl.appendChild(new Option("Svarade", "done"));
+      filterEl.appendChild(new Option("Alla", "all"));
+      $("#tipLine").textContent = "Tips: Klicka på en fråga för att svara och signera.";
+    }
+
+    closeDetail();
+    render();
+  }
+
+  $("#tabTasks").addEventListener("click", () => setMode(MODE.TASKS));
+  $("#tabQuestions").addEventListener("click", () => setMode(MODE.QUESTIONS));
+
+  function makeItemCardBase(titleText, pillsArr, linesArr, openKey){
+    const el = document.createElement("div");
+    el.className = "item";
+    el.tabIndex = 0;
+    el.setAttribute("role", "button");
+    el.dataset.open = String(openKey || "");
+    el.setAttribute("aria-label", "Öppna");
+
+    const left = document.createElement("div");
+    left.style.minWidth = "260px";
+    left.style.flex = "1 1 520px";
+
+    const title = document.createElement("p");
+    title.className = "item-title";
+    title.textContent = String(titleText || "—");
+    left.appendChild(title);
+
+    const meta1 = document.createElement("div");
+    meta1.className = "meta";
+    (pillsArr || []).forEach(p => meta1.appendChild(pill(p)));
+    left.appendChild(meta1);
+
+    (linesArr || []).forEach(({label, value}) => {
+      const div = document.createElement("div");
+      div.className = "meta";
+      const s = document.createElement("span");
+      const strong = document.createElement("strong");
+      strong.textContent = label;
+      s.appendChild(strong);
+      s.appendChild(document.createTextNode(" " + String(value || "—")));
+      div.appendChild(s);
+      left.appendChild(div);
+    });
+
+    const right = document.createElement("div");
+    right.className = "row";
+    right.style.gap = "8px";
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.open = String(openKey || "");
+    btn.textContent = "Öppna";
+    right.appendChild(btn);
+
+    el.appendChild(left);
+    el.appendChild(right);
+
+    return el;
+  }
+
+  function renderTasksList(listEl){
+    const tOk = tasksExistsAndValid();
+    if(!tOk.ok){
+      setKpis("Öppna: 0", "Pågår: 0", "Klara: 0");
+      listEl.appendChild(emptyBox(tOk.reason));
+      return { items: [] };
+    }
+
+    if(HARD_LOCK){
+      setKpis("Öppna: 0", "Pågår: 0", "Klara: 0");
+      listEl.appendChild(emptyBox("Listning är avstängd (fail-closed)."));
+      return { items: [] };
+    }
+
+    const filter = $("#filter").value;
+    const q = String($("#search").value || "").trim().toLowerCase();
+
+    const mine = computeMineVisibleTasks();
+
+    const done = mine.filter(x => (normalizeStatus(x?.status) || "open") === "done").length;
+    const prog = mine.filter(x => (normalizeStatus(x?.status) || "open") === "progress").length;
+    const open = mine.filter(x => (normalizeStatus(x?.status) || "open") === "open").length;
+    setKpis("Öppna: " + open, "Pågår: " + prog, "Klara: " + done);
+
+    let items = mine;
+
+    if(filter === "open") items = items.filter(x => (normalizeStatus(x?.status) || "open") !== "done");
+    if(filter === "progress") items = items.filter(x => (normalizeStatus(x?.status) || "open") === "progress");
+    if(filter === "done") items = items.filter(x => (normalizeStatus(x?.status) || "open") === "done");
+
+    if(q){
+      items = items.filter(x => {
+        const blob = `${x?.title||""} ${x?.text||""} ${x?.adminNote||""} ${x?.prio||""}`.toLowerCase();
+        return blob.includes(q);
       });
     }
 
-    const res = writeLocalFailClosed(ASG_KEY, next);
+    if(items.length === 0){
+      listEl.appendChild(emptyBox("Inga uppgifter att visa.\n\nOBS: Den här sidan läser endast AO-014_TASKS_V1.\nOm dina onboarding-block inte publiceras dit kommer listan bli tom."));
+      return { items: mine };
+    }
+
+    items.slice(0, 80).forEach(x => {
+      const st = normalizeStatus(x?.status) || "open";
+      const dates = dateLabel(x || {});
+      const prio = String(x?.prio || "normal");
+
+      const lines = [{ label:"Text:", value: String(x?.text || "—") }];
+      if(x?.adminNote) lines.push({ label:"Admin:", value: String(x.adminNote) });
+      if(x?.employeeComment){
+        lines.push({ label:"Din kommentar:", value: sanitizeText(String(x.employeeComment), MAX_COMMENT_LEN) });
+      }
+
+      listEl.appendChild(
+        makeItemCardBase(
+          String(x?.title || "Uppgift"),
+          [statusLabel(st), "Prio: " + prio, "Datum: " + dates],
+          lines,
+          String(x?.id || "")
+        )
+      );
+    });
+
+    return { items: mine };
+  }
+
+  function renderQuestionsList(listEl){
+    const qRes = readQuestionsArray();
+    if(!qRes.ok){
+      setKpis("Ej svarade: 0", "Svarade: 0", "Totalt: 0");
+      listEl.appendChild(emptyBox(qRes.reason));
+      return { items: [] };
+    }
+    if(HARD_LOCK){
+      setKpis("Ej svarade: 0", "Svarade: 0", "Totalt: 0");
+      listEl.appendChild(emptyBox("Frågor är avstängda (fail-closed) eftersom org/assignments saknas/korrupt."));
+      return { items: [] };
+    }
+
+    const filter = $("#filter").value;
+    const q = String($("#search").value || "").trim().toLowerCase();
+
+    const allVisible = qRes.arr.filter(canSeeQuestion);
+
+    const decorated = allVisible.map(qq => {
+      const ans = findMyAnswerForQuestion(qq);
+      const answered = !!(ans && String(ans.answerText || "").trim());
+      const signed = !!(ans && ans.signed === true);
+      const key = (qId(qq) ? ("id:" + qId(qq)) : ("t:" + normKey(qTitle(qq))));
+      return { q: qq, key, answered, signed, ans };
+    });
+
+    const answeredCount = decorated.filter(x => x.answered).length;
+    const openCount = decorated.filter(x => !x.answered).length;
+    setKpis("Ej svarade: " + openCount, "Svarade: " + answeredCount, "Totalt: " + decorated.length);
+
+    let items = decorated.slice();
+
+    if(filter === "open") items = items.filter(x => !x.answered);
+    if(filter === "done") items = items.filter(x => x.answered);
+
+    if(q){
+      items = items.filter(x => {
+        const blob = `${qTitle(x.q)} ${qText(x.q)} ${x.answered ? "svarad" : "osvarad"}`.toLowerCase();
+        return blob.includes(q);
+      });
+    }
+
+    items.sort((a,b)=>{
+      const ao = Number(!!a.answered), bo = Number(!!b.answered);
+      if(ao !== bo) return ao - bo;
+      const as = Number(!!a.signed), bs = Number(!!b.signed);
+      if(as !== bs) return as - bs;
+      return qTitle(a.q).localeCompare(qTitle(b.q), "sv");
+    });
+
+    if(items.length === 0){
+      const total = Number(qRes?.meta?.total ?? 0);
+      const visible = allVisible.length;
+
+      let msg = "Inga frågor att visa.\n\nOBS: Den här sidan läser endast AO-012_QUESTIONS_V1.";
+      msg += `\n\nDiagnos:\n- Hittade ${total} frågor i storage (shape: ${String(qRes?.meta?.shape || "okänd")})\n- Synliga efter scope/emp-filter: ${visible}`;
+
+      if(total === 0){
+        msg += "\n\nTrolig orsak: materialize/skapande har inte skrivit några frågor ännu.";
+      }else if(visible === 0){
+        msg += "\n\nTrolig orsak: scopeId i frågorna matchar inte org eller ligger utanför ditt scope, eller empNo i frågan är inte du.";
+      }
+
+      listEl.appendChild(emptyBox(msg));
+      return { items: decorated };
+    }
+
+    items.slice(0, 120).forEach(x => {
+      const title = qTitle(x.q);
+      const text  = qText(x.q);
+
+      const state = x.answered ? (x.signed ? "Svarad + signerad" : "Svarad (osignerad)") : "Ej svarad";
+      const scope = qScope(x.q) ? ("scope: " + qScope(x.q)) : "scope: global";
+
+      const lines = [{ label:"Fråga:", value: text }];
+
+      if(x.answered){
+        const snip = sanitizeText(String(x.ans?.answerText || ""), 160);
+        lines.push({ label:"Ditt svar:", value: snip || "—" });
+      }
+
+      listEl.appendChild(
+        makeItemCardBase(
+          title || "Fråga",
+          [state, scope],
+          lines,
+          x.key
+        )
+      );
+    });
+
+    return { items: decorated };
+  }
+
+  function openTaskDetail(task){
+    selectedTaskId = String(task?.id || "");
+    selectedQuestionKey = null;
+
+    $("#detailEmpty").style.display = "none";
+    $("#detailTask").style.display = "block";
+    $("#detailQuestion").style.display = "none";
+
+    setMsgA("", "");
+
+    $("#dTitle").textContent = String(task.title || "Uppgift");
+    $("#dText").textContent = String(task.text || "—");
+    $("#dDates").textContent = "Datum: " + dateLabel(task);
+
+    const st = normalizeStatus(task.status) || "open";
+    $("#dStatusPill").textContent = statusLabel(st);
+
+    if(task.adminNote){
+      $("#dAdminNoteWrap").style.display = "block";
+      $("#dAdminNote").textContent = String(task.adminNote);
+    }else{
+      $("#dAdminNoteWrap").style.display = "none";
+      $("#dAdminNote").textContent = "";
+    }
+
+    $("#dStatus").value = st;
+    $("#dComment").value = String(task.employeeComment || "");
+
+    const isDone = (st === "done");
+    const writable = !HARD_LOCK && tasksExistsAndValid().ok;
+
+    $("#dStatus").disabled = (!writable) || isDone;
+    $("#btnSaveTask").disabled = (!writable);
+    $("#dComment").disabled = (!writable);
+
+    for(const opt of $("#dStatus").options) opt.disabled = false;
+    if(st === "open"){
+      const oDone = Array.from($("#dStatus").options).find(o => o.value === "done");
+      if(oDone) oDone.disabled = true;
+    }
+    if(st === "progress"){
+      const oOpen = Array.from($("#dStatus").options).find(o => o.value === "open");
+      if(oOpen) oOpen.disabled = true;
+    }
+  }
+
+  function currentQuestionDecorated(){
+    const qRes = readQuestionsArray();
+    if(!qRes.ok) return null;
+
+    const allVisible = qRes.arr.filter(canSeeQuestion).map(qq => {
+      const ans = findMyAnswerForQuestion(qq);
+      const answered = !!(ans && String(ans.answerText || "").trim());
+      const signed = !!(ans && ans.signed === true);
+      const key = (qId(qq) ? ("id:" + qId(qq)) : ("t:" + normKey(qTitle(qq))));
+      return { q: qq, key, answered, signed, ans };
+    });
+
+    return allVisible.find(x => String(x.key) === String(selectedQuestionKey || "")) || null;
+  }
+
+  function openQuestionDetail(decorated){
+    selectedQuestionKey = String(decorated.key || "");
+    selectedTaskId = null;
+
+    $("#detailEmpty").style.display = "none";
+    $("#detailTask").style.display = "none";
+    $("#detailQuestion").style.display = "block";
+
+    setMsgB("", "");
+
+    const qq = decorated.q;
+    const ans = findMyAnswerForQuestion(qq);
+
+    $("#qTitle").textContent = qTitle(qq) || "Fråga";
+    $("#qText").textContent  = qText(qq) || "—";
+
+    const scope = qScope(qq) ? qScope(qq) : "global";
+    $("#qMetaPill").textContent = "scope: " + scope;
+
+    const answered = !!(ans && String(ans.answerText || "").trim());
+    const signed = !!(ans && ans.signed === true);
+
+    $("#qStatePill").textContent = answered ? (signed ? "Svarad + signerad" : "Svarad (osignerad)") : "Ej svarad";
+    $("#qAnswer").value = String(ans?.answerText || "");
+
+    $("#qSign").checked = signed;
+    $("#qSignedPill").textContent = signed && ans?.signedAt ? ("Signatur: " + new Date(Number(ans.signedAt)).toLocaleString("sv-SE")) : "Signatur: —";
+
+    const hasText = String($("#qAnswer").value || "").trim().length > 0;
+    $("#signWrap").classList.toggle("danger", !hasText);
+
+    const writable = !HARD_LOCK;
+    $("#qAnswer").disabled = !writable;
+    $("#btnSaveAnswer").disabled = !writable;
+    $("#btnSign").disabled = !writable || !hasText;
+  }
+
+  $("#btnSaveTask").addEventListener("click", () => {
+    setMsgA("", "");
+
+    const tOk = tasksExistsAndValid();
+    if(!tOk.ok){ setMsgA("err", tOk.reason); return; }
+    if(HARD_LOCK){ setMsgA("err", "Skrivning är låst (fail-closed)."); return; }
+
+    const mine = computeMineVisibleTasks();
+    const t = mine.find(x => String(x?.id) === String(selectedTaskId || ""));
+    if(!t){
+      setMsgA("err", "Vald uppgift hittades inte.");
+      closeDetail();
+      render();
+      return;
+    }
+
+    const desiredStatus = normalizeStatus($("#dStatus").value || (t.status||"open"));
+    if(!desiredStatus){ setMsgA("err", "Ogiltig status (okänt värde)."); return; }
+
+    const desiredComment = sanitizeText($("#dComment").value || "", MAX_COMMENT_LEN);
+
+    const res = upsertTaskMutation({
+      id: t.id,
+      scopeId: t.scopeId,
+      status: desiredStatus,
+      employeeComment: desiredComment
+    });
+
     if(!res.ok){
-      setMsg("err", "Kunde inte spara (localStorage fullt eller blockerat).");
+      setMsgA("err", res.err || "Kunde inte spara.");
+      render();
+      const mine2 = computeMineVisibleTasks();
+      const again = mine2.find(x => String(x?.id) === String(t.id));
+      if(again) openTaskDetail(again); else closeDetail();
       return;
     }
 
-    const re = loadAssignments();
-    if(!re.ok){
-      canWrite = false;
-      showLockBox(["AO-061 blev korrupt efter skrivning (ovanligt). Stoppar vidare writes."]);
-      setMsg("err", "Sparat, men kunde inte läsa tillbaka (fail-closed).");
+    setMsgA("ok", "Sparat.");
+    render();
+    const mine2 = computeMineVisibleTasks();
+    const again = mine2.find(x => String(x?.id) === String(t.id));
+    if(again) openTaskDetail(again);
+  });
+
+  $("#qAnswer").addEventListener("input", () => {
+    const hasText = String($("#qAnswer").value || "").trim().length > 0;
+    $("#signWrap").classList.toggle("danger", !hasText);
+    $("#btnSign").disabled = HARD_LOCK || !hasText;
+    if(!hasText){
+      $("#qSign").checked = false;
+      $("#qSignedPill").textContent = "Signatur: —";
+    }
+  });
+
+  $("#btnSaveAnswer").addEventListener("click", () => {
+    setMsgB("", "");
+    if(HARD_LOCK){ setMsgB("err", "Låst (fail-closed)."); return; }
+
+    const dec = currentQuestionDecorated();
+    if(!dec){
+      setMsgB("err", "Vald fråga hittades inte.");
+      closeDetail();
+      render();
       return;
     }
 
-    setMsg("ok", idx >= 0 ? "Koppling uppdaterad." : "Koppling skapad.");
-    refreshAndRender(true);
-  }
+    const text = sanitizeText($("#qAnswer").value || "", MAX_ANSWER_LEN);
+    const wantSigned = !!$("#qSign").checked;
 
-  function deleteAssignment(empNo, planId){
-    if(!canWrite){
-      setMsg("err", "Skrivning är låst (fail-closed).");
-      return;
-    }
-    const e = normalizeEmpNoDigitsOnly(empNo);
-    const p = String(planId || "").trim();
-    if(!e || !p){
-      setMsg("err", "Ogiltig rad (saknar empNo/planId).");
-      return;
-    }
+    const patch = {
+      answerText: text,
+      signed: (wantSigned && String(text).trim().length > 0),
+      signedAt: (wantSigned && String(text).trim().length > 0) ? Date.now() : null
+    };
 
-    const next = assignments
-      .slice()
-      .filter(r => !(r.empNo === e && r.planId === p))
-      .map(r => ({
-        id: String(r.id || "").trim() || makePaId(),
-        empNo: normalizeEmpNoDigitsOnly(r.empNo),
-        planId: String(r.planId || "").trim(),
-        startDateTs: Number(r.startDateTs) || 0,
-        createdAt: Number(r.createdAt) || Date.now(),
-        updatedAt: Number(r.updatedAt) || Number(r.createdAt) || Date.now()
-      }))
-      .filter(r => r.empNo && r.planId && Number.isFinite(r.startDateTs) && r.startDateTs > 0);
-
-    const res = writeLocalFailClosed(ASG_KEY, next);
+    const res = upsertMyAnswer(dec.q, patch);
     if(!res.ok){
-      setMsg("err", "Kunde inte spara borttagning (localStorage fullt eller blockerat).");
+      setMsgB("err", res.err || "Kunde inte spara svar.");
+      render();
+      const dec2 = currentQuestionDecorated();
+      if(dec2) openQuestionDetail(dec2);
       return;
     }
 
-    const re = loadAssignments();
-    if(!re.ok){
-      canWrite = false;
-      showLockBox(["AO-061 blev korrupt efter borttagning (ovanligt). Stoppar vidare writes."]);
-      setMsg("err", "Borttaget, men kunde inte läsa tillbaka (fail-closed).");
+    const signed = !!res.answer?.signed;
+    $("#qSignedPill").textContent = signed && res.answer?.signedAt ? ("Signatur: " + new Date(Number(res.answer.signedAt)).toLocaleString("sv-SE")) : "Signatur: —";
+
+    setMsgB("ok", signed ? "Sparat + signerad." : "Sparat.");
+    render();
+    const dec2 = currentQuestionDecorated();
+    if(dec2) openQuestionDetail(dec2);
+  });
+
+  $("#btnSign").addEventListener("click", () => {
+    setMsgB("", "");
+    if(HARD_LOCK){ setMsgB("err", "Låst (fail-closed)."); return; }
+
+    const dec = currentQuestionDecorated();
+    if(!dec){
+      setMsgB("err", "Vald fråga hittades inte.");
+      closeDetail();
+      render();
       return;
     }
 
-    setMsg("ok", "Koppling borttagen.");
-    refreshAndRender(true);
-  }
-
-  // -----------------------------
-  // RENDER WITH FILTERS
-  // -----------------------------
-  function renderTableWithCurrentFilters(){
-    const fEmp = String($("#filterEmp").value || "").trim();
-    const fPlan = String($("#filterPlan").value || "").trim();
-    renderTable(assignments, planIndex, { empNo:fEmp, planId:fPlan }, canWrite);
-
-    $("#btnAssign").disabled = !canWrite;
-    $("#empSelect").disabled = employees.length === 0;
-    $("#planSelect").disabled = plans.filter(p => p.status === "active").length === 0;
-
-    updateCurrentHint();
-  }
-
-  function setDefaultDateIfEmpty(){
-    const el = $("#startDate");
-    if(!el) return;
-    if(el.value) return;
-    const now = new Date();
-    const y = now.getFullYear();
-    const m = String(now.getMonth()+1).padStart(2,"0");
-    const d = String(now.getDate()).padStart(2,"0");
-    el.value = `${y}-${m}-${d}`;
-  }
-
-  function applyQueryPreselectOnce(){
-    if(queryAppliedOnce) return;
-    queryAppliedOnce = true;
-
-    let notes = [];
-    const empSel = $("#empSelect");
-    const planSel = $("#planSelect");
-
-    if(qp.empNo){
-      const can = employees.some(e => e.empNo === qp.empNo);
-      if(can && empSel) empSel.value = qp.empNo;
-      else notes.push(`Query empNo=${qp.empNo} hittades inte i AO-020_ROLE_ASSIGNMENTS_V2.`);
-    }
-
-    if(qp.planId){
-      const can = plans.some(p => p.id === qp.planId && p.status === "active");
-      if(can && planSel) planSel.value = qp.planId;
-      else notes.push(`Query planId=${qp.planId} hittades inte som active i AO-060_PLANS_V1.`);
-    }
-
-    // Om koppling redan finns: förifyll datum direkt (snabbt)
-    const ex = findExisting(String(empSel?.value||""), String(planSel?.value||""));
-    if(ex){
-      const dateEl = $("#startDate");
-      const iso = localMidnightTsToISO(ex.startDateTs);
-      if(dateEl && iso) dateEl.value = iso;
-    }
-
-    if(notes.length){
-      const existing = lockReasons.slice();
-      showLockBox(existing.concat(notes));
-    }
-
-    updateCurrentHint();
-  }
-
-  function refreshAndRender(keepFilterState){
-    const prevFilterEmp = keepFilterState ? String($("#filterEmp").value||"") : "";
-    const prevFilterPlan = keepFilterState ? String($("#filterPlan").value||"") : "";
-
-    const empRes = loadEmployeesFromAssignments();
-    employees = empRes.list;
-
-    const planRes = loadPlans();
-    plans = planRes.list;
-    planIndex = buildPlanIndex(plans);
-
-    const asgRes = loadAssignments();
-    assignments = asgRes.list;
-
-    recomputeLocks(empRes, planRes, asgRes);
-
-    const empOpts = employees.map(x => ({ value:x.empNo, label:x.empNo }));
-    fillSelect($("#empSelect"), empOpts, employees.length ? "(Välj empNo)" : "(Inga employees)");
-
-    const activePlans = plans.filter(p => p.status === "active");
-    const planOpts = activePlans.map(p => ({ value:p.id, label:p.title }));
-    fillSelect($("#planSelect"), planOpts, activePlans.length ? "(Välj active plan)" : "(Inga active plans)");
-
-    const fEmpOpts = employees.map(x => ({ value:x.empNo, label:x.empNo }));
-    fillSelect($("#filterEmp"), fEmpOpts, "(Alla employees)");
-
-    const fPlanOpts = plans.map(p => ({ value:p.id, label:p.title }));
-    fillSelect($("#filterPlan"), fPlanOpts, "(Alla plans)");
-
-    if(keepFilterState){
-      if(prevFilterEmp && employees.some(e => e.empNo === prevFilterEmp)) $("#filterEmp").value = prevFilterEmp;
-      if(prevFilterPlan && plans.some(p => p.id === prevFilterPlan)) $("#filterPlan").value = prevFilterPlan;
-    }
-
-    setDefaultDateIfEmpty();
-    applyQueryPreselectOnce();
-    renderTableWithCurrentFilters();
-  }
-
-  // -----------------------------
-  // EVENTS
-  // -----------------------------
-  $("#btnAssign").addEventListener("click", () => {
-    setMsg("", "");
-
-    const empNo = String($("#empSelect").value || "").trim();
-    const planId = String($("#planSelect").value || "").trim();
-    const iso = String($("#startDate").value || "").trim();
-
-    const ts = isoDateToLocalMidnightTs(iso);
-    if(ts === null){
-      setMsg("err", "Välj ett giltigt startdatum.");
+    const text = sanitizeText($("#qAnswer").value || "", MAX_ANSWER_LEN);
+    if(!String(text).trim()){
+      setMsgB("err", "Du kan inte signera ett tomt svar.");
+      $("#qSign").checked = false;
       return;
     }
 
-    upsertAssignment(empNo, planId, ts);
+    $("#qSign").checked = true;
+
+    const res = upsertMyAnswer(dec.q, { answerText: text, signed: true, signedAt: Date.now() });
+    if(!res.ok){
+      setMsgB("err", res.err || "Kunde inte signera.");
+      render();
+      const dec2 = currentQuestionDecorated();
+      if(dec2) openQuestionDetail(dec2);
+      return;
+    }
+
+    $("#qSignedPill").textContent = "Signatur: " + new Date(Number(res.answer.signedAt)).toLocaleString("sv-SE");
+    setMsgB("ok", "Signerad.");
+    render();
+    const dec2 = currentQuestionDecorated();
+    if(dec2) openQuestionDetail(dec2);
   });
 
-  $("#filterEmp").addEventListener("change", () => {
-    setMsg("", "");
-    renderTableWithCurrentFilters();
+  const MODE_OBJ = { TASKS:"tasks", QUESTIONS:"questions" };
+
+  function activateOpenKey(key){
+    if(mode === MODE_OBJ.TASKS){
+      const mine = computeMineVisibleTasks();
+      const task = mine.find(t => String(t?.id) === String(key));
+      if(task) openTaskDetail(task);
+      return;
+    }
+    if(mode === MODE_OBJ.QUESTIONS){
+      selectedQuestionKey = String(key || "");
+      const dec = currentQuestionDecorated();
+      if(dec) openQuestionDetail(dec);
+      return;
+    }
+  }
+
+  $("#list").addEventListener("click", (e) => {
+    const node = e.target && e.target.closest ? e.target.closest("[data-open]") : null;
+    if(!node) return;
+    const key = node.getAttribute("data-open") || node.dataset.open || "";
+    if(!key) return;
+    activateOpenKey(key);
   });
 
-  $("#filterPlan").addEventListener("change", () => {
-    setMsg("", "");
-    renderTableWithCurrentFilters();
+  $("#list").addEventListener("keydown", (e) => {
+    const isEnter = (e.key === "Enter");
+    const isSpace = (e.key === " " || e.key === "Spacebar");
+    if(!isEnter && !isSpace) return;
+
+    const node = e.target && e.target.closest ? e.target.closest(".item[data-open]") : null;
+    if(!node) return;
+
+    e.preventDefault();
+    const key = node.getAttribute("data-open") || node.dataset.open || "";
+    if(!key) return;
+    activateOpenKey(key);
   });
 
-  $("#empSelect").addEventListener("change", () => {
-    setMsg("", "");
-    updateCurrentHint();
-  });
-  $("#planSelect").addEventListener("change", () => {
-    setMsg("", "");
-    updateCurrentHint();
-  });
+  function render(){
+    const list = $("#list");
+    clearChildren(list);
 
-  // -----------------------------
-  // INIT
-  // -----------------------------
-  refreshAndRender(false);
+    $("#detailEmpty").style.display = "block";
+    $("#detailTask").style.display = "none";
+    $("#detailQuestion").style.display = "none";
+
+    if(mode === MODE_OBJ.TASKS){
+      const { items } = renderTasksList(list);
+      if(selectedTaskId){
+        const mine = (items && items.length) ? items : computeMineVisibleTasks();
+        const t = mine.find(x => String(x?.id) === String(selectedTaskId));
+        if(t) openTaskDetail(t); else selectedTaskId = null;
+      }
+      return;
+    }
+
+    const { items } = renderQuestionsList(list);
+    if(selectedQuestionKey){
+      const dec = (items && items.length) ? (items.find(x => String(x.key) === String(selectedQuestionKey)) || null) : currentQuestionDecorated();
+      if(dec) openQuestionDetail(dec); else selectedQuestionKey = null;
+    }
+  }
+
+  $("#filter").addEventListener("change", render);
+  $("#search").addEventListener("input", render);
+
+  function initFromHash(){
+    const h = String(window.location.hash || "").toLowerCase();
+    if(h === "#questions") setMode(MODE_OBJ.QUESTIONS);
+    else setMode(MODE_OBJ.TASKS);
+  }
+  window.addEventListener("hashchange", initFromHash);
+
+  initFromHash();
 
 })();
 </script>
 
+<!-- ============================================================
+Ändringslogg (≤ 8 rader)
+- v1.9: MASTER DESIGN-SPEC v1.0 applicerad (CSS + topbar-struktur).
+- v1.9: Ingen lift/transform på hover (endast skugga/border).
+- v1.9: Tiles: stripe (6px) + bas-skugga + page-accent-skugga.
+- v1.9: Topbar: Min sida (neutral) + Logga ut (röd) till höger.
+- Oförändrad logik, keys, fail-closed och XSS-policy.
+Testnoteringar:
+- Verifiera att Logga ut funkar (id=navLogout), att tabbar fungerar, och att list-tiles öppnas med Enter/Space.
+============================================================ -->
 </body>
 </html>
