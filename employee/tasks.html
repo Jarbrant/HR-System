@@ -593,9 +593,14 @@
     "use strict";
 
     /* ============================================================
-      AO-EMP-TASKS-QA-01 (PROD) | FIL-ID: employee/tasks.html
+      AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.9) | FIL-ID: employee/tasks.html
       Projekt: HR-System (GitHub Pages / localStorage-first)
       Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only
+
+      PATCH v1.9:
+      - Fix: Visa även “paket/block-frågor” via AO-050_PACKAGES_V1 (blockId) utan nya keys.
+      - Fail-closed: paket-frågor kräver scope-match + tilldelning (empNo/ALL/*).
+      - Deep-link: ?tab=questions&open=<blockId> öppnar direkt.
 
       POLICY (LÅST):
       - UI-only • Fail-closed (requireAuth)
@@ -613,6 +618,7 @@
     const KEY_ASSIGNMENTS  = "AO-020_ROLE_ASSIGNMENTS_V2";
     const KEY_QUESTIONS    = "AO-012_QUESTIONS_V1";
     const KEY_ANSWERS      = "AO-013_ANSWERS_V1";
+    const KEY_PACKAGES     = "AO-050_PACKAGES_V1"; // READ-ONLY (no writes)
 
     /* ===========================
        DOM
@@ -952,7 +958,7 @@
 
     function readAnswers(){ return readLocalArray(KEY_ANSWERS); }
 
-    function getQuestionId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? ""); }
+    function getQuestionId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? q?.blockId ?? q?.blockID ?? ""); }
     function getQuestionTitle(q){ return String(q?.title ?? q?.name ?? q?.text ?? "Fråga"); }
     function getQuestionBody(q){ return String(q?.body ?? q?.question ?? q?.prompt ?? q?.text ?? ""); }
 
@@ -966,13 +972,13 @@
       const answers = readAnswers();
       const me = normStr(myEmpNo);
 
-      // Prefer exact questionId match
+      // Prefer exact questionId match (incl blockId)
       if (qId){
         const hit = answers.find(a => {
           if (!a || typeof a !== "object") return false;
           const aEmp = answerEmpNo(a);
           if (aEmp && me && aEmp !== me) return false;
-          const aQid = String(a.questionId ?? a.qid ?? a.question_id ?? "");
+          const aQid = String(a.questionId ?? a.qid ?? a.question_id ?? a.blockId ?? "");
           return aQid && aQid === qId;
         });
         if (hit) return hit;
@@ -1008,6 +1014,7 @@
       const me = normStr(myEmpNo);
       if (!me) return { ok:false, err:"Saknar empNo." };
 
+      // IMPORTANT: prefer blockId-capable id
       const qId = normStr(getQuestionId(q));
       const qTitle = normStr(getQuestionTitle(q));
 
@@ -1020,7 +1027,6 @@
         existing.answer = String(answerText ?? "");
         existing.updatedAt = now;
         existing.updatedBy = me;
-        // keep signed flags as-is unless empty -> keep
         const ok = writeLocalArray(KEY_ANSWERS, all);
         return ok ? { ok:true, id: ensureAnswerId(existing), updated:true } : { ok:false, err:"Kunde inte spara svar (storage)." };
       }
@@ -1028,7 +1034,7 @@
       const obj = {
         id: ensureAnswerId({}),
         empNo: me,
-        questionId: qId || "",
+        questionId: qId || "",          // <- blockId lands here
         questionTitle: qTitle || "",
         answer: String(answerText ?? ""),
         signed: false,
@@ -1061,6 +1067,191 @@
 
       const ok = writeLocalArray(KEY_ANSWERS, all);
       return ok ? { ok:true, id: ensureAnswerId(existing) } : { ok:false, err:"Kunde inte signera (storage)." };
+    }
+
+    /* ===========================
+       Packages → Question blocks (READ ONLY)
+       Fixar: “frågor syns på home men inte här”
+    ============================ */
+    function readPackagesRaw(){
+      try{
+        const raw = localStorage.getItem(KEY_PACKAGES);
+        return safeJsonParse(raw || "");
+      }catch{
+        return null;
+      }
+    }
+    function normalizePackages(raw){
+      if (Array.isArray(raw)) return raw;
+      if (raw && typeof raw === "object"){
+        if (Array.isArray(raw.packages)) return raw.packages;
+        if (Array.isArray(raw.items)) return raw.items;
+        if (Array.isArray(raw.data)) return raw.data;
+      }
+      return [];
+    }
+
+    function getPkgId(p, idx){
+      return String(p?.id ?? p?.packageId ?? p?.uuid ?? ("pkg_" + idx));
+    }
+    function getPkgTitle(p){
+      return String(p?.title ?? p?.name ?? p?.label ?? "Paket");
+    }
+    function getPkgScope(p){
+      return normStr(p?.scopeId ?? p?.scope ?? p?.scopeKey ?? p?.nodeId ?? p?.orgNodeId ?? "");
+    }
+    function getPkgAssigned(p){
+      // tolerate variants
+      return p?.assignedTo ?? p?.assignees ?? p?.targets ?? p?.employees ?? p?.empNos ?? p?.empNoList ?? p?.toEmpNo ?? p?.empNo ?? null;
+    }
+    function isPkgAssignedToMe(p, empNo){
+      const a = getPkgAssigned(p);
+      const me = normStr(empNo);
+      if (!me || a == null) return false;
+
+      if (typeof a === "string" || typeof a === "number"){
+        const s = String(a).trim();
+        if (s === "ALL" || s === "*") return true;
+        return s === me;
+      }
+      if (Array.isArray(a)){
+        const arr = a.map(x => String(x).trim());
+        if (arr.includes("ALL") || arr.includes("*")) return true;
+        return arr.includes(me);
+      }
+      if (a && typeof a === "object"){
+        // some schemas: { all:true } or { empNos:[...] }
+        if (a.all === true || a.ALL === true) return true;
+        const list = a.empNos || a.empNoList || a.employees || a.targets || null;
+        if (Array.isArray(list)){
+          const arr2 = list.map(x => String(x).trim());
+          if (arr2.includes("ALL") || arr2.includes("*")) return true;
+          return arr2.includes(me);
+        }
+      }
+      return false;
+    }
+
+    function getBlocksFromPackage(p){
+      // tolerate deep schema: p.blocks, p.content.blocks, p.modules[].blocks, etc.
+      const out = [];
+
+      function pushIfBlock(b){
+        if (!b || typeof b !== "object") return;
+        out.push(b);
+      }
+
+      // direct
+      if (Array.isArray(p?.blocks)) p.blocks.forEach(pushIfBlock);
+      if (Array.isArray(p?.content?.blocks)) p.content.blocks.forEach(pushIfBlock);
+
+      // modules
+      const mods = p?.modules ?? p?.areas ?? p?.sections ?? null;
+      if (Array.isArray(mods)){
+        for (const m of mods){
+          if (Array.isArray(m?.blocks)) m.blocks.forEach(pushIfBlock);
+          if (Array.isArray(m?.items)) m.items.forEach(pushIfBlock);
+        }
+      }
+
+      // fallback: generic scan (bounded)
+      // (Fail-safe: do not recurse too deep)
+      function scan(obj, depth){
+        if (!obj || depth > 3) return;
+        if (Array.isArray(obj)){
+          for (const v of obj) scan(v, depth + 1);
+          return;
+        }
+        if (typeof obj !== "object") return;
+
+        // common container keys
+        if (Array.isArray(obj.blocks)) obj.blocks.forEach(pushIfBlock);
+        if (Array.isArray(obj.items)) obj.items.forEach(pushIfBlock);
+
+        for (const k of Object.keys(obj)){
+          if (k === "blocks" || k === "items") continue;
+          scan(obj[k], depth + 1);
+        }
+      }
+      scan(p, 0);
+
+      // de-dupe by reference-ish
+      return out.filter(Boolean);
+    }
+
+    function blockKind(b){
+      const t = String(b?.type ?? b?.kind ?? b?.blockType ?? "").toLowerCase().trim();
+      return t;
+    }
+    function blockId(b){
+      return normStr(b?.id ?? b?.blockId ?? b?.blockID ?? b?.uuid ?? "");
+    }
+    function blockTitle(b){
+      return String(b?.title ?? b?.name ?? b?.label ?? b?.questionTitle ?? b?.promptTitle ?? "Fråga");
+    }
+    function blockBody(b){
+      return String(
+        b?.body ?? b?.text ?? b?.question ?? b?.prompt ?? b?.content ?? b?.description ?? ""
+      );
+    }
+
+    function deriveQuestionsFromPackages(auth){
+      const raw = readPackagesRaw();
+      const pkgs = normalizePackages(raw);
+      if (!Array.isArray(pkgs) || pkgs.length === 0) return [];
+
+      const me = normStr(auth?.empNo);
+      const myScope = normStr(auth?.scopeId);
+      if (!me || !myScope) return [];
+
+      const out = [];
+
+      for (let i=0;i<pkgs.length;i++){
+        const p = pkgs[i];
+        if (!p || typeof p !== "object") continue;
+
+        const scope = getPkgScope(p);
+        if (!scope) continue;                 // fail-closed: package must declare scope
+        if (!hasValidScopeMatch({ scopeId: scope }, myScope)) continue;
+
+        if (!isPkgAssignedToMe(p, me)) continue; // fail-closed: must be assigned
+
+        const pid = getPkgId(p, i);
+        const ptitle = getPkgTitle(p);
+
+        const blocks = getBlocksFromPackage(p);
+        for (const b of blocks){
+          const k = blockKind(b);
+          if (k !== "question") continue;
+
+          const bid = blockId(b);
+          if (!bid) continue; // fail-closed: must have blockId for stable answering
+
+          const title = normStr(blockTitle(b)) || "Fråga";
+          const body  = normStr(blockBody(b)) || title;
+
+          out.push({
+            id: bid,                    // <- blockId becomes questionId
+            blockId: bid,
+            title,
+            body,
+            source: `pkg:${pid}`,
+            packageId: pid,
+            packageTitle: ptitle
+          });
+        }
+      }
+
+      // de-dupe by id
+      const seen = new Set();
+      const uniq = [];
+      for (const q of out){
+        const k = String(q.id);
+        if (seen.has(k)) continue;
+        seen.add(k);
+        uniq.push(q);
+      }
+      return uniq;
     }
 
     /* ===========================
@@ -1288,7 +1479,6 @@
           return;
         }
 
-        // Keep selection; refresh
         renderAll();
       });
 
@@ -1308,7 +1498,7 @@
     function renderQuestionDetail(q, auth){
       detailBox.textContent = "";
 
-      const qid = normStr(getQuestionId(q));
+      const qid = normStr(getQuestionId(q)); // includes blockId
       const titleTxt = normStr(getQuestionTitle(q)) || "Fråga";
       const bodyTxt = normStr(getQuestionBody(q)) || titleTxt;
 
@@ -1322,9 +1512,14 @@
       const myAns = findMyAnswerForQuestion(q, auth.empNo);
       const isSigned = !!myAns?.signed;
       const signedAt = myAns?.signedAt ? new Date(Number(myAns.signedAt)) : null;
+
+      // Optional source hint (read-only)
+      const src = normStr(q?.source ?? q?.packageId ?? "");
+      const srcTxt = src ? (" • " + src) : "";
+
       meta.textContent = isSigned
-        ? ("Signerat" + (signedAt && Number.isFinite(signedAt.getTime()) ? (" • " + signedAt.toLocaleString("sv-SE")) : ""))
-        : (isAnswered(q, auth.empNo) ? "Sparat (ej signerat)" : "Ej besvarad");
+        ? ("Signerat" + (signedAt && Number.isFinite(signedAt.getTime()) ? (" • " + signedAt.toLocaleString("sv-SE")) : "") + srcTxt)
+        : (isAnswered(q, auth.empNo) ? ("Sparat (ej signerat)" + srcTxt) : ("Ej besvarad" + srcTxt));
 
       const qBox = el("div", "");
       qBox.style.fontSize = "13px";
@@ -1441,25 +1636,52 @@
       });
     }
 
+    function mergeQuestions(baseQs, pkgQs){
+      const out = [];
+      const seen = new Set();
+
+      function add(q){
+        if (!q || typeof q !== "object") return;
+        const id = normStr(getQuestionId(q)) || normStr(q.id);
+        const title = normStr(getQuestionTitle(q)) || normStr(q.title);
+        const key = id ? ("id:" + id) : ("t:" + normKey(title));
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        out.push(q);
+      }
+
+      (Array.isArray(baseQs) ? baseQs : []).forEach(add);
+      (Array.isArray(pkgQs) ? pkgQs : []).forEach(add);
+      return out;
+    }
+
     function buildQuestionItems(auth){
-      const questions = readQuestions();
       const empNo = normStr(auth.empNo);
 
-      // Employee sees questions; optional: if questions have scope/assigned, you can add filtering later.
+      // Base (AO-012) + Package blocks (AO-050)
+      const qBase = readQuestions();
+      const qPkg  = deriveQuestionsFromPackages(auth);
+      const questions = mergeQuestions(qBase, qPkg);
+
       return (Array.isArray(questions) ? questions : []).map(q => {
         const id = normStr(getQuestionId(q)) || ("q_" + normKey(getQuestionTitle(q)));
         const title = normStr(getQuestionTitle(q)) || "Fråga";
         const answered = isAnswered(q, empNo);
         const a = findMyAnswerForQuestion(q, empNo);
         const signed = !!a?.signed;
-        const sub = signed ? "signerat" : (answered ? "sparat" : "ej besvarad");
+        const subState = signed ? "signerat" : (answered ? "sparat" : "ej besvarad");
+
+        // show source hint in sub (neutral)
+        const src = normStr(q?.source ?? q?.packageTitle ?? "");
+        const srcTxt = src ? (" • " + src) : "";
+
         return {
           type: "question",
-          id,
+          id, // should be blockId or questionId
           title,
           body: normStr(getQuestionBody(q)) || "",
-          sub: "question • " + sub,
-          isDone: answered, // "done" means answered
+          sub: "question • " + subState + srcTxt,
+          isDone: answered,
           _raw: q
         };
       });
@@ -1468,6 +1690,32 @@
     function findSelected(items){
       if (!SELECTED) return null;
       return items.find(it => it.type === SELECTED.type && String(it.id) === String(SELECTED.id)) || null;
+    }
+
+    /* ===========================
+       Deep-link helpers
+    ============================ */
+    function getParam(name){
+      try{
+        const u = new URL(window.location.href);
+        return u.searchParams.get(name);
+      }catch{
+        return null;
+      }
+    }
+
+    function applyDeepLink(itemsForCurrentTab){
+      const openId = normStr(getParam("open") || "");
+      if (!openId) return;
+
+      // select only if exists in current tab list
+      const hit = itemsForCurrentTab.find(it => String(it.id) === openId) || null;
+      if (hit){
+        SELECTED = { type: hit.type, id: hit.id };
+      } else {
+        // fail-soft: keep empty, but show guard only if user explicitly asked
+        showGuard("Obs: kunde inte hitta frågan att öppna. Kontrollera att blockId finns i dina aktiva paket och att scope/tilldelning matchar.");
+      }
     }
 
     /* ===========================
@@ -1508,6 +1756,12 @@
       countsPill.textContent = `Uppgifter: ${openTasks} öppna • ${doneTasks} klara  |  Frågor: ${openQs} öppna • ${doneQs} besvarade`;
 
       let items = (ACTIVE_TAB === "questions") ? questionItems : taskItems;
+
+      // Apply deep-link once when entering tab (only if no manual selection yet)
+      if (!SELECTED){
+        applyDeepLink(items);
+      }
+
       items = filterBySearch(items);
       items = filterByShow(items);
 
@@ -1524,8 +1778,6 @@
       }
 
       if (sel.type === "task"){
-        // Need the original task and index in "taskItems list".
-        // Rebuild with reference index: find in visible tasks by id.
         const all = readLocalArray(KEY_TASKS);
         const mine = visibleTasksForMe(all, empNo, scopeId);
 
@@ -1549,20 +1801,24 @@
       }
 
       if (sel.type === "question"){
-        const questions = readQuestions();
+        // Find question from merged sources: easiest -> rebuild merged and match by id
+        const qBase = readQuestions();
+        const qPkg  = deriveQuestionsFromPackages(AUTH);
+        const merged = mergeQuestions(qBase, qPkg);
+
         let qHit = null;
 
         // Prefer id match
-        qHit = questions.find(q => normStr(getQuestionId(q)) && normStr(getQuestionId(q)) === String(sel.id)) || null;
+        qHit = merged.find(q => normStr(getQuestionId(q)) && normStr(getQuestionId(q)) === String(sel.id)) || null;
 
         // Fallback by title-key if needed
         if (!qHit){
-          qHit = questions.find(q => ("q_" + normKey(getQuestionTitle(q))) === String(sel.id)) || null;
+          qHit = merged.find(q => ("q_" + normKey(getQuestionTitle(q))) === String(sel.id)) || null;
         }
 
         if (!qHit){
           renderDetailEmpty();
-          showGuard("Fail-closed: kunde inte hitta vald fråga (korrupt data).");
+          showGuard("Fail-closed: kunde inte hitta vald fråga (korrupt data eller ej tilldelad/scope).");
           return;
         }
 
@@ -1597,21 +1853,35 @@
       const res = mustAuthOrStop();
       if (!res) return;
       AUTH = res.auth;
-      setTab("tasks");
+
+      // initial tab from URL
+      const tab = normStr(getParam("tab"));
+      if (tab === "questions") setTab("questions");
+      else setTab("tasks");
     })();
   </script>
 
   <!-- ============================================================
   Ändringslogg (≤ 8 rader)
-  1) MASTER DESIGN-SPEC: 1100px wrap, topbar-semantik (Min sida neutral, Logga ut röd), inga lift-hovers.
-  2) List-tabbing: Uppgifter/Frågor + sök + visa (öppna/alla/klara).
-  3) Frågor visas här och matchar svar via questionId eller titel-fallback (read AO-012/013).
-  4) Spara svar + signera (sign sparar endast signed=true + signedAt + updatedBy=empNo).
-  5) Task-status: ej startad/pågår/klar – sparas tillbaka i AO-014_TASKS_V1 (inom scope + assigned).
-  6) Fail-closed: kräver auth + scopeId, och blockerar vid korrupt/otillåten data.
-  Testnoteringar:
-  - Logga in som EMPLOYEE med scopeId → se uppgifter + frågor i samma vy.
-  - Välj en fråga → svara → Spara → Signera → kontrollera AO-013_ANSWERS_V1 att id finns kvar.
+  1) FIX: Frågor från paket/block (blockId) visas nu i Gör → Frågor via READ av AO-050_PACKAGES_V1.
+  2) Fail-closed: paket-frågor kräver scope + tilldelning (empNo eller ALL/*); annars visas de inte.
+  3) Svar kopplas stabilt med questionId=blockId (och title-fallback finns kvar).
+  4) Deep-link: ?tab=questions&open=<blockId> öppnar vald fråga direkt.
+  5) Ingen ny storage-key/datamodell; AO-050 läses endast.
+  6) MASTER DESIGN-SPEC bibehållen (1100/16, topbar-semantik, inga lift-hovers).
+  Testnoteringar (exakta steg)
+  1) Logga in som EMPLOYEE (scopeId finns).
+  2) Säkerställ att AO-050_PACKAGES_V1 innehåller ett question-block med blockId + scope + tilldelning till empNo.
+  3) Gå till employee/tasks.html → fliken “Frågor” → se paket-frågor i listan.
+  4) Öppna fråga → skriv svar → “Spara svar” → kontrollera AO-013_ANSWERS_V1 att questionId == blockId.
+  5) Klicka “Signera” → kontrollera signed=true och signedAt.
+  Risk / edge cases
+  - Om paket saknar scope eller tilldelning: frågorna visas inte (fail-closed).
+  - Om paket har question-block utan blockId: visas inte (fail-closed).
+  QA-check (P0/P1/P2)
+  - P0: Inga nya keys skrivs, XSS-säker rendering (textContent), fail-closed vid saknad scope/tilldelning.
+  - P1: Regression: AO-012-frågor fungerar fortsatt; svar matchar på questionId eller titel.
+  - P2: Tolerant schema-läsning av paket (olika former) utan krasch.
   ============================================================ -->
 </body>
 </html>
