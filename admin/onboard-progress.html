@@ -1,7 +1,15 @@
 <!-- ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.8) | FIL-ID: admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.9) | FIL-ID: admin/onboard-progress.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN/SYSTEM_ADMIN – Plan → Progress per medarbetare (read-only v1)
+
+UI-UPGRADE v1.9 (MASTER DESIGN-SPEC v1.0 LÅST):
+- Topbar: vänster brand/sidtitel, höger "Min sida"(neutral) + "Logga ut"(röd)
+- Kontrollrad som tiles-grid (4 kol / 2 kol <920px)
+- Lane tiles (KPI) för status (Done/Ready/Locked/Missing)
+- Tabellrad klickbar → öppnar detaljer (ingen extra UX-stök)
+- Detaljer: visar blockId (om finns) för question/both + tydlig id-rad
+- Inga writes, inga nya keys, XSS-safe, fail-closed
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -21,17 +29,6 @@ Keys (LÅST – läs endast):
 - AO-013_ANSWERS_V1
 - AO-020_ORG_V1
 - AO-020_ROLE_ASSIGNMENTS_V2
-
-Senaste sanning: 2026-01-05
-Ändringslogg:
-- PATCH v1.7:
-  - P0: FIX 404 – Tilldelning länkar nu till onboard-plan-assignments.html (rätt filnamn i repo).
-  - P0: FIX “Hantera/Tilldela”-länk per rad använder samma rätta fil.
-  - Oförändrat: read-only, inga writes, inga nya keys, XSS-safe, fail-closed.
-- PATCH v1.8 (2026-01-06):
-  - UX: Visar i “Detaljer” vilka blocks som finns i training (info/task/question/both).
-  - UX: För question/both: visar svarsalternativ om de finns i block-data (read-only).
-  - Oförändrat: read-only, inga writes, inga nya keys.
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -47,6 +44,214 @@ Senaste sanning: 2026-01-05
   <script src="../UI/UI-03-APP.js"></script>
 
   <style>
+    /* =========================
+       MASTER DESIGN-SPEC v1.0
+       ========================= */
+    :root{
+      /* Page Color ID: Onboarding → Medarbetare → Rosa (SIDFÄRG) */
+      --page-accent: 236, 72, 153; /* pink-ish */
+      --tile-brd: rgba(0,0,0,.08);
+      --tile-base1: 0 1px 0 rgba(0,0,0,.03);
+      --tile-base2: 0 10px 24px rgba(0,0,0,.06);
+      --tile-base2-hover: 0 10px 24px rgba(0,0,0,.08);
+      --r12: 12px;
+      --stripe-h: 6px;
+      --gap-nav: 10px;
+      --gap-lane: 12px;
+
+      /* STATUSFÄRGER (endast status) */
+      --st-green: 34,197,94;
+      --st-orange: 249,115,22;
+      --st-red: 239,68,68;
+      --st-blue: 59,130,246;
+      --st-gray: 100,116,139;
+    }
+
+    /* Container: håll 1100px + 16px padding (matchar systemets container men säkra) */
+    .wrap{
+      max-width:1100px;
+      margin:0 auto;
+      padding:16px;
+    }
+
+    /* =========================
+       Topbar (låst semantik)
+       ========================= */
+    header.top{
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      backdrop-filter: blur(10px);
+    }
+    .topbar{
+      display:flex;
+      align-items:center;
+      gap:12px;
+      justify-content: space-between;
+      padding: 10px 0;
+    }
+    .topbarLeft{
+      display:flex;
+      align-items:baseline;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .brandTitle strong{ font-weight: 900; }
+    .brandTitle .muted{ color: var(--muted); }
+
+    .topbarRight{
+      display:flex;
+      align-items:center;
+      gap:10px;
+      flex-wrap:wrap;
+      justify-content:flex-end;
+      margin-left:auto;
+    }
+
+    /* "Min sida" neutral, "Logga ut" röd-tonad */
+    .btnTop{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,.12);
+      background: rgba(255,255,255,.86);
+      color: #111;
+      text-decoration:none;
+      box-shadow: 0 1px 0 rgba(0,0,0,.03);
+      white-space:nowrap;
+    }
+    .btnTop:hover{ box-shadow: 0 1px 0 rgba(0,0,0,.03), 0 10px 24px rgba(0,0,0,.08); }
+    .btnTop:focus{ outline: 3px solid rgba(11,95,255,.18); outline-offset: 2px; }
+
+    .btnTop.neutral{
+      color: #111;
+      background: rgba(15,23,42,.06); /* mörkgrå/neutral */
+      border-color: rgba(15,23,42,.18);
+    }
+    .btnTop.logout{
+      color: #991b1b;
+      background: rgba(239,68,68,.10);
+      border-color: rgba(239,68,68,.26);
+    }
+
+    /* =========================
+       NAV grid (tiles)
+       ========================= */
+    .navGrid{
+      display:grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: var(--gap-nav);
+      margin-top: 8px;
+    }
+    @media (max-width: 920px){
+      .navGrid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    .tile{
+      position:relative;
+      min-height: 74px; /* NAV-tile */
+      border: 1px solid var(--tile-brd);
+      border-radius: var(--r12);
+      background: rgba(255,255,255,.92);
+      box-shadow: var(--tile-base1), var(--tile-base2), 0 10px 24px rgba(var(--page-accent), .14);
+      overflow:hidden;
+      padding: 10px 12px;
+    }
+    .tile::before{
+      content:"";
+      position:absolute;
+      top:0; left:0; right:0;
+      height: var(--stripe-h);
+      background: rgba(var(--page-accent), .75);
+    }
+    .tile:hover{
+      box-shadow: var(--tile-base1), var(--tile-base2-hover), 0 10px 24px rgba(var(--page-accent), .24);
+    }
+
+    .tileTitle{
+      margin: 6px 0 4px;
+      font-weight: 900;
+      color: #111;
+    }
+    .tileMeta{
+      font-size: 12px;
+      color: rgba(17,17,17,.75);
+    }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+
+    /* Form-controls (konstant) */
+    label{ font-size: 12px; opacity:.86; display:block; }
+    input, select{
+      width:100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,.12);
+      background:#fff;
+      color:#111;
+      margin-top: 6px;
+    }
+    input:focus, select:focus{
+      outline: 3px solid rgba(11,95,255,.18);
+      outline-offset: 2px;
+    }
+    .btnRow{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-top:8px;
+      align-items:center;
+    }
+    .btnRow .secondary{
+      padding: 8px 10px;
+      border-radius: 10px;
+    }
+
+    /* =========================
+       Lane tiles (KPI)
+       ========================= */
+    .laneGrid{
+      display:grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: var(--gap-lane);
+      margin: 12px 0;
+    }
+    @media (max-width: 920px){
+      .laneGrid{ grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    .laneTile{
+      position:relative;
+      min-height: 92px; /* lane-tile */
+      border: 1px solid var(--tile-brd);
+      border-radius: var(--r12);
+      background: rgba(255,255,255,.92);
+      box-shadow: var(--tile-base1), var(--tile-base2);
+      overflow:hidden;
+      padding: 12px 12px 10px;
+    }
+    .laneTile::before{
+      content:"";
+      position:absolute;
+      top:0; left:0; right:0;
+      height: var(--stripe-h);
+      background: rgba(var(--st-gray), .75);
+    }
+    .laneTile:hover{ box-shadow: var(--tile-base1), var(--tile-base2-hover); }
+
+    .laneTile[data-st="done"]::before{ background: rgba(var(--st-green), .75); }
+    .laneTile[data-st="ready"]::before{ background: rgba(var(--st-blue), .75); }
+    .laneTile[data-st="locked"]::before{ background: rgba(var(--st-gray), .75); }
+    .laneTile[data-st="missing"]::before{ background: rgba(var(--st-red), .75); }
+
+    .laneName{ margin-top: 6px; font-weight: 900; color:#111; }
+    .laneValue{ font-size: 28px; font-weight: 900; margin-top: 4px; color:#111; }
+    .laneHint{ font-size: 12px; color: rgba(17,17,17,.75); margin-top: 2px; }
+
+    /* =========================
+       Pills / lock / warnings
+       ========================= */
     .pill{
       display:inline-flex;
       align-items:center;
@@ -68,7 +273,7 @@ Senaste sanning: 2026-01-05
       margin-top: 10px;
       padding: 10px 12px;
       border: 1px dashed var(--line);
-      border-radius: var(--r14);
+      border-radius: 14px;
       background:#fff;
       color: var(--muted);
     }
@@ -76,38 +281,15 @@ Senaste sanning: 2026-01-05
     .lockbox ul{ margin:8px 0 0; padding-left: 18px; }
     .lockbox li{ margin: 3px 0; }
 
-    .grid2{
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      align-items:end;
-    }
-    @media (max-width: 820px){
-      .grid2{ grid-template-columns: 1fr; }
-    }
-
-    .filterRow{
-      display:flex;
-      gap:8px;
-      flex-wrap:wrap;
-      align-items:center;
-      margin-top:8px;
-    }
-    .filterRow .btn{
-      padding: 8px 10px;
-    }
-    .hintTiny{
-      margin-top:6px;
-      font-size:.88rem;
-      color: var(--muted);
-    }
-
+    /* =========================
+       Table + clickable rows
+       ========================= */
     table{
       width:100%;
       border-collapse: collapse;
       background:#fff;
       border: 1px solid var(--line);
-      border-radius: var(--r14);
+      border-radius: 14px;
       overflow:hidden;
     }
     thead th{
@@ -123,28 +305,18 @@ Senaste sanning: 2026-01-05
       border-bottom: 1px solid var(--line);
       vertical-align: top;
     }
-    tbody tr:hover{ background: rgba(167,243,208,.10); }
+    tbody tr.rowClickable:hover{ background: rgba(167,243,208,.10); cursor:pointer; }
+    tbody tr.rowClickable:focus-within{ outline: 3px solid rgba(11,95,255,.18); outline-offset: 2px; }
 
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
     .muted2{ color: var(--muted); font-size:.92rem; }
 
-    .panel{
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,.86);
-    }
-    .panel .panel-title{ display:flex; align-items:center; gap:10px; }
-    .panel-title .right{ margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
-    .kpi{
-      display:flex;
-      gap:8px;
-      flex-wrap:wrap;
-      align-items:center;
-    }
-
+    /* =========================
+       Details list
+       ========================= */
     .detailsList{
-      margin-top: 10px;
+      margin-top: 12px;
       border: 1px solid var(--line);
-      border-radius: var(--r14);
+      border-radius: 14px;
       background:#fff;
       overflow:hidden;
     }
@@ -158,9 +330,8 @@ Senaste sanning: 2026-01-05
       justify-content: space-between;
       background: rgba(255,255,255,.92);
     }
-    .detailsBody{
-      padding: 10px 12px;
-    }
+    .detailsBody{ padding: 10px 12px; }
+
     .itemRow{
       display:grid;
       grid-template-columns: 90px 1fr 140px 120px;
@@ -191,32 +362,11 @@ Senaste sanning: 2026-01-05
     .status.missing{ background: rgba(254,202,202,.28); color:#111; }
     .status.unknown{ background: rgba(253,230,138,.25); color:#111; }
 
-    .toplinks{
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-      justify-content:flex-end;
-    }
-
-    .badge-na{
-      display:inline-flex;
-      align-items:center;
-      gap:8px;
-      padding: 4px 10px;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      background: rgba(254,202,202,.20);
-      color:#111;
-      font-size:.88rem;
-      white-space:nowrap;
-    }
-
-    /* v1.8: content preview in details (read-only) */
+    /* v1.9: content preview in details (read-only) */
     .blockPreview{
       margin-top: 8px;
       border: 1px dashed var(--line);
-      border-radius: var(--r14);
+      border-radius: 14px;
       padding: 8px 10px;
       background: rgba(255,255,255,.92);
     }
@@ -256,111 +406,149 @@ Senaste sanning: 2026-01-05
 
 <body>
 <header class="top">
-  <div class="brand">
-    <strong>HR-System</strong>
-    <span class="muted">• Admin • Onboarding Progress (Read-only)</span>
-  </div>
+  <div class="wrap">
+    <div class="topbar" aria-label="Topbar">
+      <div class="topbarLeft">
+        <div class="brandTitle">
+          <strong>HR-System</strong>
+          <span class="muted">• Admin • Onboarding Progress (Read-only)</span>
+        </div>
+        <span class="pill"><strong id="whoName">—</strong> <span class="muted">•</span> <span id="whoRole">—</span></span>
+      </div>
 
-  <nav class="nav" aria-label="Meny">
-    <a href="./home.html">Hem</a>
-    <a href="./onboard-plans.html">Onboarding Plans</a>
-    <a href="./onboard-progress.html" aria-current="page">Onboarding Progress</a>
-    <a href="./onboard-plan-assignments.html">Tilldelning</a>
-    <a href="./tasks.html">Skapa uppgift</a>
-    <a href="./tasks-list.html">Översikt</a>
-    <a href="./questions.html">Frågor</a>
-    <a href="./reports.html">Felrapporter</a>
-    <a href="./answers.html">Svar</a>
-    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
-  </nav>
+      <div class="topbarRight">
+        <a class="btnTop neutral" href="./home.html" id="navMyPage">Min sida</a>
+        <a class="btnTop logout" href="#" id="navLogout">Logga ut</a>
+      </div>
+    </div>
+
+    <!-- Behåll nav-länkar, men som enkel rad under topbar -->
+    <nav class="nav" aria-label="Meny" style="margin-top:6px;">
+      <a href="./home.html">Hem</a>
+      <a href="./onboard-plans.html">Onboarding Plans</a>
+      <a href="./onboard-progress.html" aria-current="page">Onboarding Progress</a>
+      <a href="./onboard-plan-assignments.html">Tilldelning</a>
+      <a href="./tasks.html">Skapa uppgift</a>
+      <a href="./tasks-list.html">Översikt</a>
+      <a href="./questions.html">Frågor</a>
+      <a href="./answers.html">Svar</a>
+      <a href="./reports.html">Felrapporter</a>
+    </nav>
+  </div>
 </header>
 
-<main class="container">
+<main class="wrap">
   <h1 class="tight">Onboarding – Progress per plan</h1>
   <p class="muted">
     Välj en aktiv plan och se progress per medarbetare baserat på <span class="mono">startDateTs</span> + <span class="mono">dayOffset</span>.
     Sidan är <strong>read-only</strong> och gör inga writes.
   </p>
 
-  <section class="card">
-    <div class="row space-between wrap" style="margin-bottom:10px;">
-      <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
-      </div>
-      <div class="toplinks">
-        <span id="warnPills"></span>
+  <div id="warnPills" style="display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end;"></div>
+  <div id="lockBox" class="lockbox" style="display:none;"></div>
+
+  <!-- Kontrollrad som tiles-grid -->
+  <section class="navGrid" aria-label="Kontroller">
+    <div class="tile">
+      <div class="tileTitle">Plan</div>
+      <div class="tileMeta">Välj aktiv plan</div>
+      <label class="sr-only" for="planSelect">Aktiv plan</label>
+      <select id="planSelect" aria-label="Aktiv plan"></select>
+      <div class="tileMeta mono" id="planMetaId" style="margin-top:6px; opacity:.75;">planId: —</div>
+    </div>
+
+    <div class="tile">
+      <div class="tileTitle">Filter</div>
+      <div class="tileMeta">empNo (exakt eller prefix)</div>
+      <label class="sr-only" for="empFilter">Filter (empNo)</label>
+      <input id="empFilter" type="text" inputmode="numeric" placeholder="t.ex. 3001 eller 30" />
+      <div class="btnRow">
+        <button id="btnApplyFilter" type="button" class="secondary">Apply</button>
+        <button id="btnClearFilter" type="button" class="secondary">Clear</button>
       </div>
     </div>
 
-    <div id="lockBox" class="lockbox" style="display:none;"></div>
+    <div class="tile">
+      <div class="tileTitle">Läge</div>
+      <div class="tileMeta">Säkerhet</div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <span class="pill"><strong>Read-only</strong> • inga writes</span>
+        <span class="pill" title="Fail-closed: korrupt data låser actions."><strong>Fail-closed</strong></span>
+      </div>
+      <div class="tileMeta mono" style="margin-top:10px; opacity:.75;">keys: AO-060/061/057/014/012/013</div>
+    </div>
 
-    <section class="panel" aria-label="Plan progress">
-      <div class="panel-title">
-        <span>Välj plan</span>
-        <div class="right">
-          <span class="pill"><strong>Read-only</strong> • inga writes</span>
-          <a class="secondary" href="./onboard-plan-assignments.html" title="Tilldela/ändra startdatum (writes i AO-061)">Tilldelning</a>
+    <div class="tile">
+      <div class="tileTitle">Nästa steg</div>
+      <div class="tileMeta">Fortsätt utan att spara här</div>
+      <div style="margin-top:10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <a id="nextStepLink" class="secondary" href="./onboard-plans.html" style="text-decoration:none;">Öppna Onboarding Plans</a>
+        <a id="assignmentsLink" class="secondary" href="./onboard-plan-assignments.html" style="text-decoration:none;" title="Tilldela/ändra startdatum (writes i AO-061)">Tilldelning</a>
+      </div>
+      <div class="tileMeta mono" id="nextMeta" style="margin-top:10px; opacity:.75;">?planId=—&empNo=—</div>
+    </div>
+  </section>
+
+  <!-- KPI lane tiles -->
+  <section class="laneGrid" aria-label="Statusöversikt">
+    <div class="laneTile" data-st="done">
+      <div class="laneName">Done</div>
+      <div class="laneValue" id="kpiDone">—</div>
+      <div class="laneHint">klara items (valda raden)</div>
+    </div>
+    <div class="laneTile" data-st="ready">
+      <div class="laneName">Ready</div>
+      <div class="laneValue" id="kpiReady">—</div>
+      <div class="laneHint">tillgängliga men ej klara</div>
+    </div>
+    <div class="laneTile" data-st="locked">
+      <div class="laneName">Locked</div>
+      <div class="laneValue" id="kpiLocked">—</div>
+      <div class="laneHint">ej tillgängliga än</div>
+    </div>
+    <div class="laneTile" data-st="missing">
+      <div class="laneName">Missing</div>
+      <div class="laneValue" id="kpiMissing">—</div>
+      <div class="laneHint">saknar training-data</div>
+    </div>
+  </section>
+
+  <p id="planHint" class="muted2" style="margin: 4px 0 10px;"></p>
+
+  <section aria-label="Progress per medarbetare">
+    <table>
+      <thead>
+        <tr>
+          <th>Medarbetare</th>
+          <th>Startdatum</th>
+          <th>Totalt</th>
+          <th>Done</th>
+          <th>Ready</th>
+          <th>Locked</th>
+          <th>Hantera</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <p id="emptyState" class="muted2" style="margin-top:10px; display:none;"></p>
+
+    <div id="detailsPanel" class="detailsList" style="display:none;">
+      <div class="detailsHeader">
+        <div>
+          <strong id="detailsTitle">Detaljer</strong>
+          <div class="muted2" id="detailsSub" style="margin-top:2px;"></div>
         </div>
+        <div class="kpi" id="detailsKpi"></div>
       </div>
-
-      <div class="grid2" style="padding: 12px;">
-        <label>
-          Aktiv plan
-          <select id="planSelect"></select>
-        </label>
-
-        <label>
-          Filter (empNo)
-          <input id="empFilter" type="text" inputmode="numeric" placeholder="t.ex. 3001" />
-          <div class="filterRow">
-            <button id="btnApplyFilter" type="button" class="secondary">Apply</button>
-            <button id="btnClearFilter" type="button" class="secondary">Clear</button>
-            <span class="pill" title="Matchar exakt eller prefix (t.ex. 30 matchar 3001, 3002)."><strong>Match</strong>: exakt/prefix</span>
-          </div>
-          <div class="hintTiny">Tips: skriv t.ex. <span class="mono">3001</span> (exakt) eller <span class="mono">30</span> (prefix).</div>
-        </label>
-      </div>
-
-      <div style="padding: 0 12px 12px;">
-        <p id="planHint" class="muted2" style="margin:0;"></p>
-      </div>
-
-      <div style="padding: 0 12px 12px;">
-        <table aria-label="Progress per medarbetare">
-          <thead>
-            <tr>
-              <th>Medarbetare</th>
-              <th>Startdatum</th>
-              <th>Totalt</th>
-              <th>Done</th>
-              <th>Ready</th>
-              <th>Locked</th>
-              <th>Hantera</th>
-            </tr>
-          </thead>
-          <tbody id="rows"></tbody>
-        </table>
-
-        <p id="emptyState" class="muted2" style="margin-top:10px; display:none;"></p>
-
-        <div id="detailsPanel" class="detailsList" style="display:none;">
-          <div class="detailsHeader">
-            <div>
-              <strong id="detailsTitle">Detaljer</strong>
-              <div class="muted2" id="detailsSub" style="margin-top:2px;"></div>
-            </div>
-            <div class="kpi" id="detailsKpi"></div>
-          </div>
-          <div class="detailsBody" id="detailsBody"></div>
-        </div>
-      </div>
-    </section>
+      <div class="detailsBody" id="detailsBody"></div>
+    </div>
   </section>
 </main>
 
 <script>
 /* ============================================================
-AO-ONBOARD-PROGRESS-01 (PATCH v1.8) | admin/onboard-progress.html
+AO-ONBOARD-PROGRESS-01 (PATCH v1.9) | admin/onboard-progress.html
 Read-only • Fail-closed • XSS-safe rendering
 ============================================================ */
 (function(){
@@ -558,6 +746,7 @@ Read-only • Fail-closed • XSS-safe rendering
     navLogout.addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
   }
 
+  /* ============ Org + scope helpers ============ */
   function normalizeOrgNodes(raw){
     const arr = Array.isArray(raw) ? raw : [];
     const out = [];
@@ -716,6 +905,7 @@ Read-only • Fail-closed • XSS-safe rendering
     return { ok:true, map, issues: [] };
   }
 
+  /* ============ Read keys ============ */
   const warnings = [];
   function addWarn(text){ if(text) warnings.push(String(text)); }
 
@@ -828,6 +1018,7 @@ Read-only • Fail-closed • XSS-safe rendering
     return;
   }
 
+  /* ============ Data indexes ============ */
   const trainingsById = new Map();
   (Array.isArray(trainingsRead.value) ? trainingsRead.value : []).forEach(t => {
     const id = String(t && t.id ? t.id : "").trim();
@@ -1126,7 +1317,7 @@ Read-only • Fail-closed • XSS-safe rendering
     const training = trainingsById.get(trainingId) || null;
 
     if(!trainingId || !training){
-      return { status:"missing", label:"Missing training", done:false, doneReason:"missing", availableTs:null, note:"TrainingId saknas eller hittas inte i AO-057." };
+      return { status:"missing", label:"Missing", done:false, doneReason:"missing", availableTs:null, note:"TrainingId saknas eller hittas inte i AO-057." };
     }
 
     if(!assignment || !isFiniteNumber(Number(assignment.startDateTs)) || Number(assignment.startDateTs) <= 0){
@@ -1168,19 +1359,20 @@ Read-only • Fail-closed • XSS-safe rendering
     const nowTs = Date.now();
     const items = normalizePlanItemsForDisplay(plan);
 
-    let done = 0, ready = 0, locked = 0;
+    let done = 0, ready = 0, locked = 0, missing = 0;
     const details = [];
 
     for(const it of items){
       const st = computeItemStatus(assignment ? assignment.empNo : "", empScopeId, assignment, it, nowTs);
       if(st.status === "done") done++;
       else if(st.status === "ready") ready++;
+      else if(st.status === "missing") missing++;
       else locked++;
 
       details.push({ item: it, status: st });
     }
 
-    return { total: items.length, done, ready, locked, details };
+    return { total: items.length, done, ready, locked, missing, details };
   }
 
   function clearDetails(){
@@ -1195,6 +1387,11 @@ Read-only • Fail-closed • XSS-safe rendering
     setText(detailsTitle, "Detaljer");
     setText(detailsSub, "");
     if(detailsKpi) clearNode(detailsKpi);
+
+    setText($("#kpiDone"), "—");
+    setText($("#kpiReady"), "—");
+    setText($("#kpiLocked"), "—");
+    setText($("#kpiMissing"), "—");
   }
 
   function getActiveEmpFilter(){
@@ -1219,6 +1416,31 @@ Read-only • Fail-closed • XSS-safe rendering
     return qs ? (base + "?" + qs) : base;
   }
 
+  function updateNextStepLinks(planId, empNo){
+    const pid = String(planId||"").trim();
+    const e = String(empNo||"").trim();
+    const qs = new URLSearchParams();
+    if(pid) qs.set("planId", pid);
+    if(e) qs.set("empNo", e);
+    const s = qs.toString();
+
+    const next = $("#nextStepLink");
+    const asg = $("#assignmentsLink");
+    const meta = $("#nextMeta");
+    const planMeta = $("#planMetaId");
+
+    if(planMeta) setText(planMeta, "planId: " + (pid || "—"));
+    if(meta) setText(meta, s ? ("?" + s) : "?planId=—&empNo=—");
+
+    /* Read-only "save to next step" = bara navigera med querystring */
+    if(next){
+      next.href = s ? ("./onboard-plans.html?" + s) : "./onboard-plans.html";
+    }
+    if(asg){
+      asg.href = s ? ("./onboard-plan-assignments.html?" + s) : "./onboard-plan-assignments.html";
+    }
+  }
+
   function renderRows(planId){
     const tbody = $("#rows");
     if(!tbody) return;
@@ -1241,6 +1463,8 @@ Read-only • Fail-closed • XSS-safe rendering
 
     const pid = String(planId||"").trim();
     const plan = plansActive.find(p => p.id === pid) || null;
+
+    updateNextStepLinks(pid, "");
 
     if(!pid || !plan){
       if(empty){
@@ -1306,6 +1530,7 @@ Read-only • Fail-closed • XSS-safe rendering
 
     rows.forEach(r => {
       const tr = document.createElement("tr");
+      tr.className = "rowClickable";
 
       const tdEmp = document.createElement("td");
       const empLine = document.createElement("div");
@@ -1348,24 +1573,37 @@ Read-only • Fail-closed • XSS-safe rendering
         : "Tilldela plan (writes i AO-061).";
       tdBtn.appendChild(aManage);
 
+      tr.appendChild(tdBtn);
+
+      /* Clickable row → open details if assigned */
       if(r.assignment){
-        const btn = document.createElement("button");
-        btn.type = "button";
-        btn.className = "secondary";
-        btn.style.marginLeft = "8px";
-        btn.textContent = "Detaljer";
-        btn.addEventListener("click", () => renderDetails(plan, r.assignment, r.meta, r.summary));
-        tdBtn.appendChild(btn);
+        tr.addEventListener("click", (ev) => {
+          /* Ignore clicks on links/buttons */
+          const t = ev && ev.target ? ev.target : null;
+          const tag = t && t.tagName ? String(t.tagName).toUpperCase() : "";
+          if(tag === "A" || tag === "BUTTON" || (t && t.closest && t.closest("a,button"))) return;
+
+          renderDetails(plan, r.assignment, r.meta, r.summary);
+          updateNextStepLinks(pid, r.empNo);
+        });
       }
 
-      tr.appendChild(tdBtn);
       tbody.appendChild(tr);
     });
   }
 
-  // v1.8: extract question/options from a training block (best-effort, read-only)
+  /* v1.9: extract id + question/options from a training block (best-effort, read-only) */
+  function getBlockId(b){
+    return String(
+      b?.blockId ??
+      b?.id ??
+      b?.block_id ??
+      b?.uuid ??
+      ""
+    ).trim();
+  }
+
   function extractOptionsFromBlock(b){
-    // Try common field names without assuming schema changes.
     const candidates = [
       b?.options,
       b?.answers,
@@ -1378,11 +1616,9 @@ Read-only • Fail-closed • XSS-safe rendering
 
     for(const c of candidates){
       if(Array.isArray(c)){
-        // string list
         if(c.every(x => typeof x === "string" || typeof x === "number")){
           return c.map(x => String(x)).map(s => s.trim()).filter(Boolean).slice(0, 30);
         }
-        // object list: {text/label/title/value}
         if(c.every(x => x && typeof x === "object" && !Array.isArray(x))){
           const out = [];
           for(const o of c){
@@ -1450,9 +1686,19 @@ Read-only • Fail-closed • XSS-safe rendering
     pillLocked.className = "pill";
     pillLocked.textContent = "Locked: " + summary.locked;
 
+    const pillMissing = document.createElement("span");
+    pillMissing.className = "pill err";
+    pillMissing.textContent = "Missing: " + (summary.missing || 0);
+
     kpi.appendChild(pillDone);
     kpi.appendChild(pillReady);
     kpi.appendChild(pillLocked);
+    kpi.appendChild(pillMissing);
+
+    setText($("#kpiDone"), String(summary.done));
+    setText($("#kpiReady"), String(summary.ready));
+    setText($("#kpiLocked"), String(summary.locked));
+    setText($("#kpiMissing"), String(summary.missing || 0));
 
     if(!String(meta?.scopeId || "").trim()){
       const p = document.createElement("span");
@@ -1497,7 +1743,7 @@ Read-only • Fail-closed • XSS-safe rendering
       c2.appendChild(line1);
       c2.appendChild(line2);
 
-      // v1.8: preview of blocks/questions/options (read-only)
+      /* Preview of blocks/questions/options + blockId */
       if(training && Array.isArray(training.blocks) && training.blocks.length){
         const sum = summarizeTrainingBlocks(training);
         const bp = document.createElement("div");
@@ -1522,7 +1768,6 @@ Read-only • Fail-closed • XSS-safe rendering
         }
         bp.appendChild(tags);
 
-        // List question blocks with options (best-effort)
         const qBlocks = training.blocks.filter(b => {
           const tp = normalizeBlockType(b?.type ?? b?.kind);
           return (tp === "question" || tp === "both");
@@ -1539,12 +1784,18 @@ Read-only • Fail-closed • XSS-safe rendering
 
           qBlocks.slice(0, 12).forEach((b) => {
             const li = document.createElement("li");
+
             const t = String(b?.title ?? "").trim();
             const prompt = getBlockPrompt(b);
             const opts = extractOptionsFromBlock(b);
+            const bid = getBlockId(b);
 
-            const head = [t || "(utan titel)", prompt ? ("– " + prompt) : ""].filter(Boolean).join(" ");
-            li.textContent = head;
+            /* Visa blockId tydligt */
+            const headParts = [];
+            headParts.push(t || "(utan titel)");
+            if(bid) headParts.push(`[blockId: ${bid}]`);
+            if(prompt) headParts.push("– " + prompt);
+            li.textContent = headParts.join(" ");
 
             if(opts.length){
               const subUl = document.createElement("ul");
@@ -1561,7 +1812,6 @@ Read-only • Fail-closed • XSS-safe rendering
               }
               li.appendChild(subUl);
             } else {
-              // show explicit note so it's clear why nothing appears
               const no = document.createElement("div");
               no.className = "bpLine";
               no.textContent = "Alternativ: (saknas i block-data)";
@@ -1646,7 +1896,8 @@ Read-only • Fail-closed • XSS-safe rendering
 
   function onChange(){
     const sel = $("#planSelect");
-    renderRows(sel ? sel.value : "");
+    const v = sel ? sel.value : "";
+    renderRows(v);
   }
 
   const planSel = $("#planSelect");
