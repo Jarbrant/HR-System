@@ -1,12 +1,15 @@
 <!-- ============================================================
-FIL: admin/onboard-materialize.html  (NY)
-AO-ONBOARD-MATERIALIZE-02 (PROD) — PATCH v1.1 (2026-01-06)
+FIL: admin/onboard-materialize.html  (PROD HEL FIL)
+AO-ONBOARD-MATERIALIZE-02 (PROD) — PATCH v1.2 (2026-01-07)
 Projekt: HR-System
 Syfte: ADMIN – Materialisera onboarding (AO-050_PACKAGES_V1) → TASKS + QUESTIONS
 
-PATCH v1.1:
-- Cache-bustar onboard-materialize.js (v=1.1) för att undvika att gammal/404-cachad fil gör att HR_ONBOARD_MATERIALIZE saknas
-- Tydligare fail-closed vid script-load-fel (utan nya keys / utan kopplingsändringar)
+PATCH v1.2:
+- FIX (P0): Anpassad till engine v1.4:
+  * Engine export: window.HROnboardMaterialize.materialize({dryRun})
+  * Rätt summary-mappning från res.stats
+- FIX (P0): Cache-bust uppdaterad till v=1.4
+- Fail-closed: tydligare fel om engine-script inte laddas / fel export
 
 Policy (LÅST):
 - UI-only • Fail-closed • ADMIN-only
@@ -129,8 +132,8 @@ Policy (LÅST):
     <section class="box" aria-label="Sammanfattning">
       <h2 class="tight" style="font-size:1.02rem; font-weight:950; margin:0;">Sammanfattning</h2>
       <div class="tiny" style="margin-top:6px;">
-        - Endast blocktyper: task/question/both materialiseras<br />
-        - info/document ignoreras (read-only innehåll)<br />
+        - Materialiserar task/question (inkl. items[] från block-bank)<br />
+        - info/document ignoreras<br />
         - Kräver assignments(scopeId) för empNo
       </div>
       <div id="summary" class="mono">—</div>
@@ -149,11 +152,10 @@ Policy (LÅST):
 <script src="../UI/UI-03-APP.js"></script>
 
 <!-- Materialize engine (PROD) -->
-<!-- PATCH v1.1: cache-bust + onerror flag (ingen ny logik i engine) -->
 <script>
   window.__MAT_ENGINE_LOAD_FAILED = false;
 </script>
-<script src="./onboard-materialize.js?v=1.1" onerror="window.__MAT_ENGINE_LOAD_FAILED=true;"></script>
+<script src="./onboard-materialize.js?v=1.4" onerror="window.__MAT_ENGINE_LOAD_FAILED=true;"></script>
 
 <script>
 (function(){
@@ -213,20 +215,20 @@ Policy (LÅST):
       return;
     }
 
-    statePill.textContent = res.dryRun ? "Status: Dry-run OK" : "Status: OK (körd)";
-    statePill.className = "pill ok";
-
+    const stats = (res && res.stats && typeof res.stats === "object") ? res.stats : {};
     const s = [
       `dryRun: ${res.dryRun ? "true" : "false"}`,
-      `activePackages: ${res.activePackages}`,
-      `assignmentsEmpCount: ${res.assignmentsEmpCount}`,
-      `blocksScanned: ${res.blocksScanned}`,
-      `tasksAdded: ${res.tasksAdded}`,
-      `questionsAdded: ${res.questionsAdded}`,
-      `tasksTotalAfter: ${res.tasksTotalAfter}`,
-      `questionsTotalAfter: ${res.questionsTotalAfter}`
+      `activePackages: ${Number(stats.activePackages ?? 0)}`,
+      `assignmentsEmpCount: ${Number(stats.employees ?? 0)}`,
+      `scanned: ${Number(stats.scanned ?? 0)}`,
+      `itemsAdded: ${Number(stats.itemsAdded ?? 0)}`,
+      `tasksAdded: ${Number(stats.tasksAdded ?? 0)}`,
+      `questionsAdded: ${Number(stats.questionsAdded ?? 0)}`
     ].join("\n");
     elSummary.textContent = s;
+
+    statePill.textContent = res.dryRun ? "Status: Dry-run OK" : "Status: OK (körd)";
+    statePill.className = "pill ok";
 
     setMsg("ok", res.dryRun
       ? "Dry-run OK. Inga writes gjorda."
@@ -238,22 +240,24 @@ Policy (LÅST):
 
     if (window.__MAT_ENGINE_LOAD_FAILED) {
       renderResult({ ok:false, reasons:[
-        "Saknar HR_ONBOARD_MATERIALIZE (engine-script kunde inte laddas).",
-        "Kontroll: att filen finns på /admin/onboard-materialize.js (inte 404) och att filen INTE innehåller <script>-taggar.",
-        "Tips: öppna /admin/onboard-materialize.js i browser och se att du får JS-kod, inte en 404-sida."
+        "Engine-script kunde inte laddas (onerror).",
+        "Kontroll: /admin/onboard-materialize.js finns (inte 404) och serveras som JS.",
+        "Tips: öppna /admin/onboard-materialize.js i browser och se att du får JS-kod."
       ]});
       return;
     }
 
-    if(!window.HR_ONBOARD_MATERIALIZE || typeof window.HR_ONBOARD_MATERIALIZE !== "function"){
+    // Engine v1.4 exports window.HROnboardMaterialize.materialize
+    const eng = window.HROnboardMaterialize;
+    if(!eng || typeof eng.materialize !== "function"){
       renderResult({ ok:false, reasons:[
-        "Saknar HR_ONBOARD_MATERIALIZE (script laddad men exporter saknas).",
-        "Vanlig orsak: onboard-materialize.js innehåller syntaxfel eller är en HTML/404 som serveras som JS."
+        "Saknar engine API: window.HROnboardMaterialize.materialize",
+        "Vanlig orsak: fel fil deployad/cachad, eller syntaxfel i onboard-materialize.js."
       ]});
       return;
     }
 
-    const res = window.HR_ONBOARD_MATERIALIZE({ dryRun: !!dryRun });
+    const res = eng.materialize({ dryRun: !!dryRun });
     renderResult(res);
   }
 
@@ -263,7 +267,6 @@ Policy (LÅST):
     runMaterialize(false);
   });
 
-  // init
   elSummary.textContent = "Redo.\nTips: kör Dry-run först.";
   elDebug.textContent = "{}";
 })();
@@ -271,10 +274,9 @@ Policy (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- PATCH v1.1: cache-bustar onboard-materialize.js (v=1.1) + tydligare fail-closed om engine ej laddas
-- Ingen ny storage-key, ingen write i UI utöver materialize-run
-Testnoteringar:
-- Logga in som ADMIN → öppna sidan → Dry-run → Kör → kontrollera AO-014_TASKS_V1 + AO-012_QUESTIONS_V1
+- PATCH v1.2: uppdaterad integration mot engine v1.4 (HROnboardMaterialize.materialize)
+- PATCH v1.2: cache-bust v=1.4 + summary från res.stats
+- Fail-closed förbättrat vid saknad export / load-fel
 ============================================================ -->
 </body>
 </html>
