@@ -5,11 +5,14 @@ Projekt: HR-System
 Syfte: Materialisera onboarding (AO-050_PACKAGES_V1) → TASKS + QUESTIONS
 
 PATCH v1.4 (2026-01-07):
-- FIX (kritisk): normalizeAssignments prioriterar wrapper-array (t.ex. {assignments:[...]})
-  innan object-map, så key "assignments" inte felaktigt behandlas som empNo-map.
-  => eliminerar felet: "record för assignments är inte objekt."
-- Oförändrat: idempotens via stabil pkgKey + blockKey + _origin
-- Oförändrat: stöd pkg.blocks och pkg.items
+- FIX: Wrapper assignments-shape {assignments:[...]} prioriteras före object-map
+  => eliminerar "record för assignments är inte objekt"
+- FIX: Exporterar kompatibelt engine-API för både:
+  * window.HR_ONBOARD_MATERIALIZE(opts)
+  * window.HROnboardMaterialize.materialize(opts)
+  => eliminerar "Saknar engine API: window.HROnboardMaterialize.materialize"
+- Oförändrat: idempotens via _origin (dedupe)
+- Oförändrat: stöd pkg.items utöver pkg.blocks
 - Oförändrat: info/document ignoreras
 - Inga nya storage-keys, inga kopplingsändringar
 
@@ -66,9 +69,7 @@ Policy (LÅST):
     return (max && s.length > max) ? s.slice(0, max) : s;
   }
 
-  function normStatus(x) {
-    return asStr(x, 40).toLowerCase();
-  }
+  function normStatus(x) { return asStr(x, 40).toLowerCase(); }
 
   function normKind(block) {
     const k = asStr(block && (block.type || block.kind) || "", 20).toLowerCase();
@@ -98,15 +99,12 @@ Policy (LÅST):
     return [];
   }
 
-  // Robust "active package" match
   function isActivePackage(pkg) {
     if (!pkg || typeof pkg !== "object") return false;
 
-    // Primary: status string
     const st = normStatus(pkg.status);
     if (st === "active") return true;
 
-    // Secondary: boolean flags used by other UIs
     if (pkg.isActive === true) return true;
     if (pkg.active === true) return true;
     if (pkg.enabled === true) return true;
@@ -137,17 +135,16 @@ Policy (LÅST):
     return null;
   }
 
-  // PATCH v1.4: wrapper-array prioriteras före object-map
   function normalizeAssignments(raw) {
     const empty = Object.create(null);
 
     if (raw == null) return { ok: false, map: empty, err: `${ASG_KEY} saknas (null).` };
 
-    // 1) Försök wrapper/array först (t.ex. {assignments:[...]})
-    const arrFirst = extractAssignmentsArray(raw);
-    if (arrFirst) {
+    // PATCH v1.4: Wrapper/array prioriteras före object-map
+    const arr = extractAssignmentsArray(raw);
+    if (arr) {
       const out = Object.create(null);
-      for (const rec of arrFirst) {
+      for (const rec of arr) {
         if (!isObj(rec)) continue;
         for (const rk of Object.keys(rec)) {
           if (SPECIAL_KEYS.has(String(rk))) {
@@ -161,7 +158,7 @@ Policy (LÅST):
       return { ok: true, map: out };
     }
 
-    // 2) Annars: object-map { "3001": {scopeId:...}, ... }
+    // Case A: object-map { "3001": {scopeId:...}, ... }
     if (isObj(raw)) {
       const out = Object.create(null);
       for (const k of Object.keys(raw)) {
@@ -171,19 +168,18 @@ Policy (LÅST):
         }
         const rec = raw[key];
 
-        // Fail-closed men tydligt: om rec finns måste det vara objekt eller null
+        // Tillåt null/undefined record (hoppar över senare)
         if (rec != null && !isObj(rec)) {
           return { ok: false, map: empty, err: `${ASG_KEY} record för ${key} är inte objekt.` };
         }
 
-        if (rec != null) {
+        if (rec && isObj(rec)) {
           for (const rk of Object.keys(rec)) {
             if (SPECIAL_KEYS.has(String(rk))) {
               return { ok: false, map: empty, err: `${ASG_KEY} record för ${key} innehåller blockerad special-key (${rk}).` };
             }
           }
         }
-
         out[key] = rec;
       }
       return { ok: true, map: out };
@@ -199,7 +195,6 @@ Policy (LÅST):
     const title = asStr(pkg && (pkg.title || pkg.name) || "", 160);
     if (title) return "pkgt:" + fnv1a32(title);
 
-    // fallback: hash a few stable-ish fields
     const st = normStatus(pkg && pkg.status);
     const blocksLen = Array.isArray(pkg && pkg.blocks) ? pkg.blocks.length : (Array.isArray(pkg && pkg.items) ? pkg.items.length : 0);
     return "pkgx:" + fnv1a32(st + "|" + String(blocksLen));
@@ -212,9 +207,7 @@ Policy (LÅST):
     const title = asStr(block && block.title || "", 200);
     const text = asStr(block && (block.text || block.description) || "", 800);
 
-    // If both empty, last resort: index (can change, but only used when there's truly nothing else)
     if (!title && !text) return "idx:" + String(fallbackIndex);
-
     return "bh:" + fnv1a32(kind + "|" + title + "|" + text);
   }
 
@@ -228,43 +221,6 @@ Policy (LÅST):
   function extractScopeId(rec) {
     if (!rec || typeof rec !== "object") return "";
     return asStr(rec.scopeId || rec.scope || rec.nodeId || rec.orgId || "", 140);
-  }
-
-  function clampInt(n, lo, hi, def) {
-    const x = Number(n);
-    if (!Number.isFinite(x)) return def;
-    const xi = Math.trunc(x);
-    if (xi < lo) return lo;
-    if (xi > hi) return hi;
-    return xi;
-  }
-
-  function normalizeTaskAnswer(block) {
-    const v = asStr(block && block.taskAnswer || "", 20).toLowerCase();
-    return (v === "scale") ? "scale" : "checkbox";
-  }
-
-  function normalizeQuestionAnswer(block, kind) {
-    const v = asStr(block && block.questionAnswer || "", 20).toLowerCase();
-    if (kind === "both") return "text";
-    if (kind === "question") return (v === "choice") ? "choice" : "text";
-    return "text";
-  }
-
-  function normalizeOptions(raw) {
-    const arr = Array.isArray(raw) ? raw : [];
-    return arr.map(x => asStr(x, 40)).filter(Boolean).slice(0, 10);
-  }
-
-  function normalizeCorrectOptions(raw, options) {
-    const opts = Array.isArray(options) ? options : [];
-    const set = new Set(opts.map(x => String(x)));
-    const arr = Array.isArray(raw) ? raw : [];
-    const cleaned = arr.map(x => asStr(x, 40)).filter(Boolean);
-    const filtered = cleaned.filter(v => set.has(v));
-    const out = [];
-    for (const v of filtered) { if (!out.includes(v)) out.push(v); }
-    return out.slice(0, 2);
   }
 
   function materialize(opts) {
@@ -337,54 +293,61 @@ Policy (LÅST):
           const kind = normKind(block);
           if (!kind) continue;
 
-          // info/document ignoreras
+          // ignore read-only content
           if (kind === "info" || kind === "document") continue;
+
+          const title = asStr(block.title || "", 140) || "Block";
+          const text = asStr(block.text || block.description || "", (kind === "both" ? 800 : 800));
 
           const blockKey = stableBlockKey(block, kind, bi);
           const origin = originKey(pkgKey, blockKey, empNo);
 
-          const title = asStr(block.title || "", 120) || "Block";
-          const text = asStr(block.text || block.description || "", 2000);
-
-          const taskAnswer = normalizeTaskAnswer(block);
-          const questionAnswer = normalizeQuestionAnswer(block, kind);
-
-          const scaleMin = clampInt(block.scaleMin, 1, 10, 1);
-          const scaleMax0 = clampInt(block.scaleMax, 1, 10, 5);
-          const scaleMax = (scaleMax0 < scaleMin) ? scaleMin : scaleMax0;
-
           // TASK
           if (kind === "task" || kind === "both") {
-            if (!taskOrigins.has(origin)) {
+            const o = "T:" + origin;
+            if (!taskOrigins.has(o)) {
+              tasksAdded++;
+              const taskAnswer = (block.taskAnswer === "scale") ? "scale" : "checkbox";
+              const scaleMin = Number.isFinite(Number(block.scaleMin)) ? Number(block.scaleMin) : 1;
+              const scaleMax = Number.isFinite(Number(block.scaleMax)) ? Number(block.scaleMax) : 5;
+
               tasks.push({
                 id: genId("tsk"),
                 empNo,
                 scopeId,
                 title,
                 text,
-                answerType: taskAnswer,          // checkbox|scale
+                answerType: taskAnswer,       // kompat
+                taskAnswer,                  // kompat
                 scaleMin,
                 scaleMax,
-                status: "open",                  // UI kan tolka som open/done
-                done: false,
+                scaleMinLabel: asStr(block.scaleMinLabel || "", 60),
+                scaleMaxLabel: asStr(block.scaleMaxLabel || "", 60),
+                status: "open",
                 createdAt: now,
                 updatedAt: now,
-                _origin: origin,
-                _source: "onboard",
-                _pkgKey: pkgKey,
-                _blockKey: blockKey
+                _origin: o
               });
-              taskOrigins.add(origin);
-              tasksAdded++;
+              taskOrigins.add(o);
             }
           }
 
           // QUESTION
           if (kind === "question" || kind === "both") {
-            if (!questionOrigins.has(origin)) {
-              const options = (questionAnswer === "choice") ? normalizeOptions(block.options) : [];
-              const correctOptions = (questionAnswer === "choice")
-                ? normalizeCorrectOptions(block.correctOptions, options)
+            const o = "Q:" + origin;
+            if (!questionOrigins.has(o)) {
+              questionsAdded++;
+
+              const questionAnswer =
+                (kind === "both") ? "text" :
+                (block.questionAnswer === "choice") ? "choice" : "text";
+
+              const options = Array.isArray(block.options)
+                ? block.options.map(x => asStr(x, 60)).filter(Boolean).slice(0, 10)
+                : [];
+
+              const correctOptions = Array.isArray(block.correctOptions)
+                ? block.correctOptions.map(x => asStr(x, 60)).filter(Boolean).slice(0, 2)
                 : [];
 
               questions.push({
@@ -393,49 +356,33 @@ Policy (LÅST):
                 scopeId,
                 title,
                 text,
-                answerType: questionAnswer,      // text|choice
-                options,
-                correctOptions,
+                answerType: questionAnswer,     // kompat
+                questionAnswer,                 // kompat
+                options: (questionAnswer === "choice") ? options : [],
+                correctOptions: (questionAnswer === "choice") ? correctOptions : [],
+                status: "open",
                 createdAt: now,
                 updatedAt: now,
-                _origin: origin,
-                _source: "onboard",
-                _pkgKey: pkgKey,
-                _blockKey: blockKey
+                _origin: o
               });
-              questionOrigins.add(origin);
-              questionsAdded++;
+              questionOrigins.add(o);
             }
           }
         }
       }
     }
 
-    // Ingen write vid dryRun
-    if (dryRun) {
-      return {
-        ok: true,
-        dryRun: true,
-        activePackages: activePkgs.length,
-        assignmentsEmpCount: empNos.length,
-        blocksScanned,
-        tasksAdded,
-        questionsAdded,
-        tasksTotalAfter: tasks.length,
-        questionsTotalAfter: questions.length
-      };
+    if (!dryRun) {
+      const w1 = writeJson(TASKS_KEY, tasks);
+      if (!w1.ok) return { ok: false, dryRun, reasons: [w1.err] };
+
+      const w2 = writeJson(QUESTIONS_KEY, questions);
+      if (!w2.ok) return { ok: false, dryRun, reasons: [w2.err] };
     }
-
-    // Write (fail-closed om write misslyckas)
-    const w1 = writeJson(TASKS_KEY, tasks);
-    if (!w1.ok) return { ok: false, dryRun: false, reasons: [w1.err || "Kunde inte spara TASKS."] };
-
-    const w2 = writeJson(QUESTIONS_KEY, questions);
-    if (!w2.ok) return { ok: false, dryRun: false, reasons: [w2.err || "Kunde inte spara QUESTIONS."] };
 
     return {
       ok: true,
-      dryRun: false,
+      dryRun,
       activePackages: activePkgs.length,
       assignmentsEmpCount: empNos.length,
       blocksScanned,
@@ -446,16 +393,12 @@ Policy (LÅST):
     };
   }
 
-  // Export (LÅST): onboard-materialize.html förväntar sig denna symbol
-  window.HR_ONBOARD_MATERIALIZE = function (opts) {
-    try {
-      return materialize(opts || {});
-    } catch (e) {
-      return {
-        ok: false,
-        dryRun: !!(opts && opts.dryRun),
-        reasons: ["Oväntat fel i materialize (fail-closed).", String((e && e.message) || e || "Okänt fel")]
-      };
-    }
-  };
+  // --- EXPORTS (kompat) ---
+  // Ny: funktions-export (som din klistrade HTML använder)
+  window.HR_ONBOARD_MATERIALIZE = materialize;
+
+  // Äldre: objekt-export (som din drift verkar leta efter)
+  window.HROnboardMaterialize = window.HROnboardMaterialize || {};
+  window.HROnboardMaterialize.materialize = materialize;
+
 })();
