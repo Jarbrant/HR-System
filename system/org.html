@@ -1,13 +1,14 @@
 <!-- ============================================================
-AO-004 (MASTER SYS • UX-MODAL v1.3.1) | FIL-ID: system/org.html
+AO-004 (MASTER SYS • UX-MODAL v1.3.2) | FIL-ID: system/org.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: Org Builder = enda sanna källan för scope-trädet (subtree)
 
 PATCH (DENNA VERSION):
 - HÖGER (Org-träd):
-  - Tar bort texten “Öppna” i varje ruta (klickbarheten kvarstår).
-  - Root-rad: “andra rutan” (pill #2) visar Strukturnamn (t.ex. Cateringcare) istället för typ.
-  - Root-radens titel visar bolagsnamn om bolag finns (oförändrat mot v1.3).
+  - Root-radens titel visar Strukturnamn (t.ex. Cateringcare) om det finns, annars bolagsnamn.
+  - Tar bort raden/pillen “Strukturnamn: …” (visas istället som root-titel).
+  - Tar bort alla “Barn: X”-pills från listan (UI-rensning).
+  - Org-trädets rader är inte klickbara (ingen öppna på klick/Enter/Space).
 
 Policy (LÅST):
 - SYSTEM_ADMIN-only: org-trädet är systemets styrstruktur (ren förvaltning)
@@ -75,7 +76,7 @@ Policy (LÅST):
       align-items:flex-start;
       flex-wrap:wrap;
       margin-top:10px;
-      cursor:pointer;
+      cursor: default; /* PATCH: ej klickbar känsla */
     }
     .item:hover{
       box-shadow: var(--shadow-soft);
@@ -347,7 +348,7 @@ Policy (LÅST):
         <div id="list" role="tree" aria-label="Org-träd"></div>
 
         <div class="smallnote">
-          Tips: Klicka på en nod för att öppna. Åtgärder (redigera/ta bort) görs i modalerna till vänster (fail-closed).
+          Tips: Redigera via modalerna till vänster (fail-closed). Org-trädet till höger är en ren översikt.
         </div>
       </section>
 
@@ -1121,8 +1122,6 @@ Policy (LÅST):
     openOverlay(companyOverlay);
   }
 
-  function closeCompanyModal(){ closeOverlay(companyOverlay); }
-
   function saveCompany(){
     if(companyEditingMode !== "edit" && companyEditingMode !== "create"){
       setModalMsg("#companyMsg","err","Du måste klicka Redigera först.");
@@ -1278,7 +1277,7 @@ Policy (LÅST):
 
     setModalMsg("#companyMsg","ok","Bolag borttaget.");
     setMsg("ok","Bolag borttaget.");
-    closeCompanyModal();
+    closeOverlay(companyOverlay);
     renderList();
   }
 
@@ -1411,8 +1410,6 @@ Policy (LÅST):
     openOverlay(unitOverlay);
   }
 
-  function closeUnitModal(){ closeOverlay(unitOverlay); }
-
   function saveUnit(){
     if(unitEditingMode !== "edit" && unitEditingMode !== "create"){
       setModalMsg("#unitMsg","err","Du måste klicka Redigera först.");
@@ -1531,7 +1528,7 @@ Policy (LÅST):
     const node = nodes.find(x => x.id === unitEditingId);
     if(!node){
       setModalMsg("#unitMsg","err","Enheten hittades inte (kan vara borttagen).");
-      closeUnitModal();
+      closeOverlay(unitOverlay);
       renderList();
       return;
     }
@@ -1565,7 +1562,7 @@ Policy (LÅST):
 
     setModalMsg("#unitMsg","ok","Enhet borttagen.");
     setMsg("ok","Enhet borttagen.");
-    closeUnitModal();
+    closeOverlay(unitOverlay);
     renderList();
   }
 
@@ -1711,19 +1708,20 @@ Policy (LÅST):
 
     const criticalLocked = !!v.criticalLock;
 
-    // Root UI-label: visa bolagsnamn om bolag finns (utan att ändra root i storage)
-    const rootDisplayName = (bolag && String(bolag.name || "").trim())
-      ? String(bolag.name).trim()
-      : "Koncern (Root)";
-
-    // Root pill #2: Strukturnamn
+    // Root title: Strukturnamn först (om finns), annars bolagsnamn, annars fallback
     const rootStructureName = (bolag && String(bolag.structureName || "").trim())
       ? String(bolag.structureName).trim()
-      : "—";
+      : "";
+
+    const rootCompanyName = (bolag && String(bolag.name || "").trim())
+      ? String(bolag.name).trim()
+      : "";
+
+    const rootDisplayName = rootStructureName || rootCompanyName || "Koncern (Root)";
 
     rows.forEach(r => {
       const isRoot = (r.id === ROOT_ID);
-      const kids = childCount(r.id);
+      const kids = childCount(r.id); // behåll för delete-guard (UI visar ej Barn)
 
       const deleteBlocked =
         criticalLocked ||
@@ -1740,14 +1738,11 @@ Policy (LÅST):
       el.className = "item";
       el.setAttribute("role", "treeitem");
       el.setAttribute("aria-level", String(r.depth));
-      el.setAttribute("tabindex", "0");
-      el.setAttribute("data-open", escapeHtml(r.id));
-      el.setAttribute("aria-label", `${shownName} ${r.type || ""} (öppna)`);
+      // PATCH: ej klickbar, ej keyboard-open
+      el.setAttribute("aria-label", `${shownName} ${r.type || ""}`);
 
-      // Pill #2 ändras bara för root: visar Strukturnamn
-      const pill2 = isRoot
-        ? `<span class="pill">Strukturnamn: ${escapeHtml(rootStructureName)}</span>`
-        : (r.type ? `<span class="pill">${escapeHtml(r.type)}</span>` : ``);
+      // Root: ingen "Strukturnamn:"-pill längre (visas som titel).
+      const typePill = (!isRoot && r.type) ? `<span class="pill">${escapeHtml(r.type)}</span>` : ``;
 
       el.innerHTML = `
         <div class="treeName">
@@ -1756,8 +1751,7 @@ Policy (LÅST):
             <p class="item-title">${escapeHtml(shownName)}</p>
             <div class="meta">
               <span class="pill">ID: ${escapeHtml(r.id)}</span>
-              ${pill2}
-              <span class="pill">Barn: ${kids}</span>
+              ${typePill}
               ${criticalLocked ? `<span class="pill warnpill">Actions låsta</span>` : `<span class="pill okpill">OK</span>`}
               ${guards.deleteLocked ? `<span class="pill warnpill">Delete låst</span>` : ``}
               ${(!isRoot && guards.blocked.has(r.id)) ? `<span class="pill warnpill">Scope-skydd</span>` : ``}
@@ -1768,53 +1762,6 @@ Policy (LÅST):
         </div>
       `;
       list.appendChild(el);
-    });
-
-    function openNodeById(id){
-      if(criticalLocked){
-        setMsg("err","Åtgärder stoppas (fail-closed): kritiskt datafel. Kör Reparera först.");
-        return;
-      }
-
-      const node = nodes.find(x => x.id === id);
-      if(!node){
-        setMsg("err","Noden hittades inte (kan vara borttagen).");
-        renderList();
-        return;
-      }
-
-      const curBolag = ensureBolagType(getBolag(nodes));
-
-      if(id === ROOT_ID){
-        openCompanyModal(nodes, curBolag, guards);
-        return;
-      }
-
-      if(curBolag && node.id === curBolag.id){
-        openCompanyModal(nodes, curBolag, guards);
-        return;
-      }
-
-      if(isEnhetNode(node)){
-        openUnitModal(nodes, curBolag, node, guards);
-        return;
-      }
-
-      setMsg("", "Denna nodtyp hanteras inte här ännu. (Bolag/Enhet hanteras via modalerna.)");
-    }
-
-    list.querySelectorAll('[data-open]').forEach(el => {
-      el.addEventListener("click", () => {
-        const id = el.getAttribute("data-open");
-        if(id) openNodeById(id);
-      });
-      el.addEventListener("keydown", (e) => {
-        if(e.key === "Enter" || e.key === " "){
-          e.preventDefault();
-          const id = el.getAttribute("data-open");
-          if(id) openNodeById(id);
-        }
-      });
     });
   }
 
