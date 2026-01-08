@@ -593,14 +593,18 @@
     "use strict";
 
     /* ============================================================
-      AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.9.1) | FIL-ID: employee/tasks.html
+      AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v2.0.0) | FIL-ID: employee/tasks.html
       Projekt: HR-System (GitHub Pages / localStorage-first)
       Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only
 
-      PATCH v1.9.1:
-      - FIX: Paket-frågor kunde filtreras bort om scope/tilldelning låg på blocknivå istället för paketnivå.
-      - Ny tolerant logik (fortfarande fail-closed): scope/tilldelning kan komma från paket ELLER block.
-      - Inga nya keys/datamodell.
+      PATCH v2.0.0:
+      - FIX: Dubbel-deklaration av AUTH/ACTIVE_TAB/SELECTED (kunde orsaka krascher).
+      - FIX: Deep-link (?tab=questions&open=ID) väljer item innan filter, och detalj visas även om filter döljer det.
+      - FIX: Task-detalj matchar korrekt mot original-index (stabil id-match, fallback-index säkrare).
+      - HARDEN: Basfrågor (AO-012) visas endast om:
+        * frågan matchar scope+tilldelning, ELLER
+        * du redan har ett svar på den (så inget “spökinnehåll” dyker upp).
+      - Inga nya keys/datamodell. AO-050 läses endast.
 
       POLICY (LÅST):
       - UI-only • Fail-closed (requireAuth)
@@ -618,7 +622,7 @@
     const KEY_ASSIGNMENTS  = "AO-020_ROLE_ASSIGNMENTS_V2";
     const KEY_QUESTIONS    = "AO-012_QUESTIONS_V1";
     const KEY_ANSWERS      = "AO-013_ANSWERS_V1";
-    const KEY_PACKAGES     = "AO-050_PACKAGES_V1"; // READ-ONLY (no writes)
+    const KEY_PACKAGES     = "AO-050_PACKAGES_V1"; // READ-ONLY
 
     /* ===========================
        DOM
@@ -654,6 +658,8 @@
     }
 
     function safeJsonParse(str){ try { return JSON.parse(str); } catch { return null; } }
+    function normStr(s){ return String(s ?? "").trim(); }
+    function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
 
     function readAnyStorage(key){
       try { const s1 = sessionStorage.getItem(key); if (s1) return s1; } catch {}
@@ -683,9 +689,9 @@
         return null;
       }
 
-      if (!String(auth.scopeId || "").trim()) {
-        const empNo = String(auth.empNo || "").trim();
-        const role  = String(auth.role || "").trim();
+      if (!normStr(auth.scopeId)) {
+        const empNo = normStr(auth.empNo);
+        const role  = normStr(auth.role);
         const res = resolveScopeIdFromAssignments(empNo, role);
         if (res.scopeId) {
           const patched = patchSessionScope(sess, res.scopeId);
@@ -720,7 +726,7 @@
     }
 
     function patchSessionScope(sessionObj, scopeId){
-      const sid = String(scopeId || "").trim();
+      const sid = normStr(scopeId);
       if (!sessionObj || typeof sessionObj !== "object" || !sid) return null;
 
       const out = sessionObj;
@@ -793,8 +799,8 @@
     }
 
     function resolveScopeIdFromAssignments(empNo, role){
-      const me = String(empNo ?? "").trim();
-      const r  = String(role ?? "").trim();
+      const me = normStr(empNo);
+      const r  = normStr(role);
 
       const debug = {
         totalAssignments: 0,
@@ -835,7 +841,7 @@
     }
 
     /* ===========================
-       Data readers (NO NEW KEYS)
+       Storage readers (NO NEW KEYS)
     ============================ */
     function readLocalArray(key){
       try{
@@ -846,7 +852,6 @@
         return [];
       }
     }
-
     function writeLocalArray(key, arr){
       try{
         localStorage.setItem(key, JSON.stringify(arr));
@@ -856,8 +861,51 @@
       }
     }
 
-    function normStr(s){ return String(s ?? "").trim(); }
-    function normKey(s){ return normStr(s).toLowerCase().replace(/\s+/g," ").trim(); }
+    /* ===========================
+       Common assignment helpers
+    ============================ */
+    function isAssignedValueToMe(a, empNo){
+      const me = normStr(empNo);
+      if (!me || a == null) return false;
+
+      if (typeof a === "string" || typeof a === "number"){
+        const s = String(a).trim();
+        if (s === "ALL" || s === "*") return true;
+        return s === me;
+      }
+      if (Array.isArray(a)){
+        const arr = a.map(x => String(x).trim());
+        if (arr.includes("ALL") || arr.includes("*")) return true;
+        return arr.includes(me);
+      }
+      if (a && typeof a === "object"){
+        if (a.all === true || a.ALL === true || a.any === true) return true;
+        const list = a.empNos || a.empNoList || a.employees || a.targets || a.items || a.users || null;
+        if (Array.isArray(list)){
+          const arr2 = list.map(x => String(x).trim());
+          if (arr2.includes("ALL") || arr2.includes("*")) return true;
+          return arr2.includes(me);
+        }
+        const one = a.empNo || a.employeeNo || a.userId || null;
+        if (one != null){
+          const s = String(one).trim();
+          if (s === "ALL" || s === "*") return true;
+          return s === me;
+        }
+      }
+      return false;
+    }
+
+    function hasValidScopeMatch(obj, myScopeId){
+      const scope = normStr(obj?.scopeId ?? obj?.scope ?? obj?.scopeKey ?? obj?.nodeId ?? "");
+      const mine  = normStr(myScopeId);
+      if (!scope || !mine) return false;
+
+      if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function"){
+        return window.HRApp.sameOrMissingScope(scope, mine);
+      }
+      return scope === mine;
+    }
 
     /* ===========================
        Tasks (tolerant schema)
@@ -907,46 +955,30 @@
       return t?.assignedTo ?? t?.assignee ?? t?.toEmpNo ?? t?.empNo ?? t?.targetEmpNo ?? null;
     }
     function isAssignedToMe(t, empNo){
-      const a = getAssignedTo(t);
-      const me = String(empNo || "").trim();
-      if (!me || a == null) return false;
-
-      if (typeof a === "string" || typeof a === "number"){
-        const s = String(a).trim();
-        if (s === "ALL" || s === "*") return true;
-        return s === me;
-      }
-      if (Array.isArray(a)){
-        return a.map(x => String(x).trim()).includes(me);
-      }
-      return false;
+      return isAssignedValueToMe(getAssignedTo(t), empNo);
     }
 
-    function hasValidScopeMatch(t, myScopeId){
-      const scope = String(t?.scopeId ?? t?.scope ?? t?.scopeKey ?? t?.nodeId ?? "").trim();
-      const mine  = String(myScopeId ?? "").trim();
-      if (!scope || !mine) return false;
-
-      if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function"){
-        return window.HRApp.sameOrMissingScope(scope, mine);
+    function visibleTasksForMeWithIndex(allTasks, empNo, scopeId){
+      const arr = Array.isArray(allTasks) ? allTasks : [];
+      const out = [];
+      for (let i=0;i<arr.length;i++){
+        const t = arr[i];
+        if (!hasValidScopeMatch(t, scopeId)) continue;
+        if (!isAssignedToMe(t, empNo)) continue;
+        out.push({ t, originalIndex: i });
       }
-      return scope === mine;
-    }
-
-    function visibleTasksForMe(allTasks, empNo, scopeId){
-      return (Array.isArray(allTasks) ? allTasks : []).filter(t => {
-        if (!hasValidScopeMatch(t, scopeId)) return false;
-        if (!isAssignedToMe(t, empNo)) return false;
-        return true;
-      });
+      return out;
     }
 
     /* ===========================
        Questions + Answers
     ============================ */
-    function readQuestions(){
+    function readQuestionsRaw(){
       const raw = localStorage.getItem(KEY_QUESTIONS);
-      const parsed = safeJsonParse(raw || "");
+      return safeJsonParse(raw || "");
+    }
+    function readQuestions(){
+      const parsed = readQuestionsRaw();
       if (Array.isArray(parsed)) return parsed;
       if (parsed && typeof parsed === "object"){
         if (Array.isArray(parsed.questions)) return parsed.questions;
@@ -955,7 +987,6 @@
       }
       return [];
     }
-
     function readAnswers(){ return readLocalArray(KEY_ANSWERS); }
 
     function getQuestionId(q){ return String(q?.id ?? q?.questionId ?? q?.qid ?? q?.blockId ?? q?.blockID ?? ""); }
@@ -1068,7 +1099,7 @@
 
     /* ===========================
        Packages → Question blocks (READ ONLY)
-       FIX: scope/tilldelning kan ligga på blocknivå
+       scope/tilldelning kan ligga på paket ELLER block
     ============================ */
     function readPackagesRaw(){
       try{
@@ -1101,11 +1132,9 @@
       return p?.assignedTo ?? p?.assignees ?? p?.targets ?? p?.employees ?? p?.empNos ?? p?.empNoList ?? p?.toEmpNo ?? p?.empNo ?? p?.assignment ?? p?.assign ?? null;
     }
     function isPkgAssignedToMe(p, empNo){
-      const a = getPkgAssigned(p);
-      return isAssignedValueToMe(a, empNo);
+      return isAssignedValueToMe(getPkgAssigned(p), empNo);
     }
 
-    /* --- NEW: block-level scope & assignment (tolerant) --- */
     function getBlockScope(b){
       return normStr(
         b?.scopeId ?? b?.scope ?? b?.scopeKey ?? b?.nodeId ?? b?.orgNodeId ??
@@ -1114,44 +1143,11 @@
       );
     }
     function getBlockAssigned(b){
-      return b?.assignedTo ?? b?.assignees ?? b?.targets ?? b?.employees ?? b?.empNos ?? b?.empNoList ?? b?.toEmpNo ?? b?.empNo ?? b?.assignment ?? b?.assign ?? b?.meta?.assignedTo ?? b?.meta?.empNos ?? null;
+      return b?.assignedTo ?? b?.assignees ?? b?.targets ?? b?.employees ?? b?.empNos ?? b?.empNoList ?? b?.toEmpNo ?? b?.empNo ??
+        b?.assignment ?? b?.assign ?? b?.meta?.assignedTo ?? b?.meta?.empNos ?? null;
     }
     function isBlockAssignedToMe(b, empNo){
-      const a = getBlockAssigned(b);
-      return isAssignedValueToMe(a, empNo);
-    }
-
-    function isAssignedValueToMe(a, empNo){
-      const me = normStr(empNo);
-      if (!me || a == null) return false;
-
-      if (typeof a === "string" || typeof a === "number"){
-        const s = String(a).trim();
-        if (s === "ALL" || s === "*") return true;
-        return s === me;
-      }
-      if (Array.isArray(a)){
-        const arr = a.map(x => String(x).trim());
-        if (arr.includes("ALL") || arr.includes("*")) return true;
-        return arr.includes(me);
-      }
-      if (a && typeof a === "object"){
-        if (a.all === true || a.ALL === true || a.any === true) return true;
-        const list = a.empNos || a.empNoList || a.employees || a.targets || a.items || a.users || null;
-        if (Array.isArray(list)){
-          const arr2 = list.map(x => String(x).trim());
-          if (arr2.includes("ALL") || arr2.includes("*")) return true;
-          return arr2.includes(me);
-        }
-        // sometimes: { empNo:"123" }
-        const one = a.empNo || a.employeeNo || a.userId || null;
-        if (one != null){
-          const s = String(one).trim();
-          if (s === "ALL" || s === "*") return true;
-          return s === me;
-        }
-      }
-      return false;
+      return isAssignedValueToMe(getBlockAssigned(b), empNo);
     }
 
     function getBlocksFromPackage(p){
@@ -1196,7 +1192,6 @@
 
     function blockKind(b){
       const t = String(b?.type ?? b?.kind ?? b?.blockType ?? b?.block_kind ?? "").toLowerCase().trim();
-      // tolerant aliases
       if (t === "q" || t === "questionnaire" || t === "quiz_question") return "question";
       return t;
     }
@@ -1207,9 +1202,7 @@
       return String(b?.title ?? b?.name ?? b?.label ?? b?.questionTitle ?? b?.promptTitle ?? "Fråga");
     }
     function blockBody(b){
-      return String(
-        b?.body ?? b?.text ?? b?.question ?? b?.prompt ?? b?.content ?? b?.description ?? ""
-      );
+      return String(b?.body ?? b?.text ?? b?.question ?? b?.prompt ?? b?.content ?? b?.description ?? "");
     }
 
     function deriveQuestionsFromPackages(auth){
@@ -1240,15 +1233,14 @@
           if (k !== "question") continue;
 
           const bid = blockId(b);
-          if (!bid) continue; // fail-closed: must have stable id
+          if (!bid) continue; // fail-closed
 
-          // FIX: scope/tilldelning kan ligga på paket ELLER block
           const scope = pkgScope || getBlockScope(b);
-          if (!scope) continue; // fail-closed: must declare scope somewhere
+          if (!scope) continue; // fail-closed
           if (!hasValidScopeMatch({ scopeId: scope }, myScope)) continue;
 
           const assignedOk = pkgAssignedOk || isBlockAssignedToMe(b, me);
-          if (!assignedOk) continue; // fail-closed: must be assigned (pkg OR block)
+          if (!assignedOk) continue; // fail-closed
 
           const title = normStr(blockTitle(b)) || "Fråga";
           const body  = normStr(blockBody(b)) || title;
@@ -1277,11 +1269,47 @@
     }
 
     /* ===========================
+       Base questions (AO-012) safety filter
+       - Visa bara om: scope+tilldelning matchar ELLER du redan svarat.
+    ============================ */
+    function baseQuestionScope(q){
+      return normStr(q?.scopeId ?? q?.scope ?? q?.scopeKey ?? q?.nodeId ?? q?.orgNodeId ?? q?.meta?.scopeId ?? q?.meta?.scope ?? "");
+    }
+    function baseQuestionAssigned(q){
+      return q?.assignedTo ?? q?.assignees ?? q?.targets ?? q?.employees ?? q?.empNos ?? q?.empNoList ?? q?.toEmpNo ?? q?.empNo ??
+        q?.assignment ?? q?.assign ?? q?.meta?.assignedTo ?? q?.meta?.empNos ?? null;
+    }
+    function shouldShowBaseQuestion(q, auth){
+      const me = normStr(auth?.empNo);
+      const scopeId = normStr(auth?.scopeId);
+      if (!me || !scopeId) return false;
+
+      // must have some stable handle (id or title)
+      const qid = normStr(getQuestionId(q));
+      const title = normStr(getQuestionTitle(q));
+      if (!qid && !title) return false;
+
+      // if already answered -> show (so employee can read/sign/see)
+      if (isAnswered(q, me)) return true;
+
+      // else require explicit scope + assignment match (fail-closed)
+      const s = baseQuestionScope(q);
+      if (!s) return false;
+      if (!hasValidScopeMatch({ scopeId: s }, scopeId)) return false;
+
+      const a = baseQuestionAssigned(q);
+      if (!isAssignedValueToMe(a, me)) return false;
+
+      return true;
+    }
+
+    /* ===========================
        UI state
     ============================ */
     let AUTH = null;
     let ACTIVE_TAB = "tasks";
     let SELECTED = null;
+    let DEEP_LINK_APPLIED = false;
 
     function setTab(tab){
       ACTIVE_TAB = (tab === "questions") ? "questions" : "tasks";
@@ -1366,18 +1394,18 @@
       }
     }
 
-    function renderDetailEmpty(){
-      detailHint.textContent = "Välj ett kort i listan.";
+    function renderDetailEmpty(msg){
+      detailHint.textContent = msg ? String(msg) : "Välj ett kort i listan.";
       detailIdPill.textContent = "—";
       detailBox.textContent = "";
       const empty = el("div", "detailEmpty");
-      empty.textContent = "Välj ett kort i listan.";
+      empty.textContent = msg ? String(msg) : "Välj ett kort i listan.";
       detailBox.appendChild(empty);
     }
 
-    function renderTaskDetail(task, taskIndex, auth){
+    function renderTaskDetail(task, taskOriginalIndex, auth){
       detailBox.textContent = "";
-      const id = getTaskId(task, taskIndex);
+      const id = getTaskId(task, taskOriginalIndex);
 
       detailHint.textContent = "Uppgift";
       detailIdPill.textContent = `task:${id}`;
@@ -1467,31 +1495,37 @@
           (rDone.input.checked ? "done" :
           (rDoing.input.checked ? "doing" : "todo"));
 
-        let found = false;
+        // hitta via ID (primärt) annars fallback via originalIndex
+        const wantedId = String(id);
+        let idxFound = -1;
 
         for (let i=0;i<all.length;i++){
-          const tid = getTaskId(all[i], i);
-          if (String(tid) !== String(id)) continue;
-
-          if (!hasValidScopeMatch(all[i], scopeId)) {
-            showGuard("Fail-closed: scope matchar inte (uppgiften ligger utanför din scope).");
-            return;
+          if (String(getTaskId(all[i], i)) === wantedId){
+            idxFound = i;
+            break;
           }
-          if (!isAssignedToMe(all[i], empNo)) {
-            showGuard("Fail-closed: uppgiften är inte tilldelad dig.");
-            return;
-          }
-
-          all[i] = setTaskStatus(all[i], newStatus);
-          all[i].comment = String(ta.value ?? "");
-          found = true;
-          break;
+        }
+        if (idxFound === -1 && Number.isInteger(taskOriginalIndex) && taskOriginalIndex >= 0 && taskOriginalIndex < all.length){
+          // fallback (om ingen stabil id fanns)
+          idxFound = taskOriginalIndex;
         }
 
-        if (!found){
+        if (idxFound === -1){
           showGuard("Fail-closed: kunde inte hitta uppgiften att spara.");
           return;
         }
+
+        if (!hasValidScopeMatch(all[idxFound], scopeId)) {
+          showGuard("Fail-closed: scope matchar inte (uppgiften ligger utanför din scope).");
+          return;
+        }
+        if (!isAssignedToMe(all[idxFound], empNo)) {
+          showGuard("Fail-closed: uppgiften är inte tilldelad dig.");
+          return;
+        }
+
+        all[idxFound] = setTaskStatus(all[idxFound], newStatus);
+        all[idxFound].comment = String(ta.value ?? "");
 
         const ok = writeLocalArray(KEY_TASKS, all);
         if (!ok){
@@ -1533,7 +1567,7 @@
       const isSigned = !!myAns?.signed;
       const signedAt = myAns?.signedAt ? new Date(Number(myAns.signedAt)) : null;
 
-      const src = normStr(q?.source ?? q?.packageId ?? "");
+      const src = normStr(q?.source ?? q?.packageTitle ?? q?.packageId ?? "");
       const srcTxt = src ? (" • " + src) : "";
 
       meta.textContent = isSigned
@@ -1632,10 +1666,10 @@
       const all = readLocalArray(KEY_TASKS);
       const empNo = normStr(auth.empNo);
       const scopeId = normStr(auth.scopeId);
-      const mine = visibleTasksForMe(all, empNo, scopeId);
+      const mine = visibleTasksForMeWithIndex(all, empNo, scopeId);
 
-      return mine.map((t, idx) => {
-        const id = getTaskId(t, idx);
+      return mine.map(({ t, originalIndex }) => {
+        const id = getTaskId(t, originalIndex);
         const title = getTaskTitle(t);
         const subParts = [];
         subParts.push("task");
@@ -1649,7 +1683,8 @@
           title,
           sub: subParts.join(" • "),
           isDone: isDoneTask(t),
-          _raw: t
+          _raw: t,
+          _originalIndex: originalIndex
         };
       });
     }
@@ -1662,7 +1697,7 @@
         if (!q || typeof q !== "object") return;
         const id = normStr(getQuestionId(q)) || normStr(q.id);
         const title = normStr(getQuestionTitle(q)) || normStr(q.title);
-        const key = id ? ("id:" + id) : ("t:" + normKey(title));
+        const key = id ? ("id:" + id) : (title ? ("t:" + normKey(title)) : "");
         if (!key || seen.has(key)) return;
         seen.add(key);
         out.push(q);
@@ -1676,13 +1711,18 @@
     function buildQuestionItems(auth){
       const empNo = normStr(auth.empNo);
 
-      const qBase = readQuestions();
+      const qBaseAll = readQuestions();
+      const qBase = (Array.isArray(qBaseAll) ? qBaseAll : []).filter(q => shouldShowBaseQuestion(q, auth));
+
       const qPkg  = deriveQuestionsFromPackages(auth);
       const questions = mergeQuestions(qBase, qPkg);
 
-      return (Array.isArray(questions) ? questions : []).map(q => {
-        const id = normStr(getQuestionId(q)) || ("q_" + normKey(getQuestionTitle(q)));
+      const items = [];
+      for (const q of (Array.isArray(questions) ? questions : [])){
+        const idStable = normStr(getQuestionId(q));
         const title = normStr(getQuestionTitle(q)) || "Fråga";
+        const id = idStable || ("q_" + normKey(title)); // fallback key for UI list only
+
         const answered = isAnswered(q, empNo);
         const a = findMyAnswerForQuestion(q, empNo);
         const signed = !!a?.signed;
@@ -1691,7 +1731,7 @@
         const src = normStr(q?.source ?? q?.packageTitle ?? "");
         const srcTxt = src ? (" • " + src) : "";
 
-        return {
+        items.push({
           type: "question",
           id,
           title,
@@ -1699,8 +1739,9 @@
           sub: "question • " + subState + srcTxt,
           isDone: answered,
           _raw: q
-        };
-      });
+        });
+      }
+      return items;
     }
 
     function findSelected(items){
@@ -1721,27 +1762,30 @@
     }
 
     function applyDeepLink(itemsForCurrentTab){
+      if (DEEP_LINK_APPLIED) return;
+
       const openId = normStr(getParam("open") || "");
-      if (!openId) return;
+      if (!openId) { DEEP_LINK_APPLIED = true; return; }
 
       const hit = itemsForCurrentTab.find(it => String(it.id) === openId) || null;
       if (hit){
         SELECTED = { type: hit.type, id: hit.id };
       } else {
-        showGuard("Obs: kunde inte hitta frågan att öppna. Kontrollera att blockId finns i dina aktiva paket och att scope/tilldelning matchar.");
+        // bara en mild hint (ingen hård fail)
+        showGuard("Obs: kunde inte hitta objektet att öppna via länken. Kontrollera att det är tilldelat dig och att scope matchar.");
       }
+      DEEP_LINK_APPLIED = true;
     }
 
     /* ===========================
        Render all
     ============================ */
-    let AUTH = null;
-    let ACTIVE_TAB = "tasks";
-    let SELECTED = null;
-
     function renderAll(){
       hideGuard();
       if (!AUTH){
+        countsPill.textContent = "—";
+        listPill.textContent = "—";
+        listBox.textContent = "";
         renderDetailEmpty();
         return;
       }
@@ -1757,81 +1801,75 @@
         countsPill.textContent = "Fail-closed";
         listPill.textContent = "—";
         listBox.textContent = "";
-        renderDetailEmpty();
+        renderDetailEmpty("Fail-closed: saknar scopeId i session.");
         showGuard("Fail-closed: saknar scopeId i session. (Access/Assignments måste vara korrekt.)");
         return;
       }
 
-      const taskItems = buildTaskItems(AUTH);
-      const questionItems = buildQuestionItems(AUTH);
+      const taskItemsFull = buildTaskItems(AUTH);
+      const questionItemsFull = buildQuestionItems(AUTH);
 
-      const openTasks = taskItems.filter(x => !x.isDone).length;
-      const doneTasks = taskItems.filter(x => x.isDone).length;
+      const openTasks = taskItemsFull.filter(x => !x.isDone).length;
+      const doneTasks = taskItemsFull.filter(x => x.isDone).length;
 
-      const openQs = questionItems.filter(x => !x.isDone).length;
-      const doneQs = questionItems.filter(x => x.isDone).length;
+      const openQs = questionItemsFull.filter(x => !x.isDone).length;
+      const doneQs = questionItemsFull.filter(x => x.isDone).length;
 
-      countsPill.textContent = `Uppgifter: ${openTasks} öppna • ${doneTasks} klara  |  Frågor: ${openQs} öppna • ${doneQs} besvarade`;
+      countsPill.textContent =
+        `Uppgifter: ${openTasks} öppna • ${doneTasks} klara  |  Frågor: ${openQs} öppna • ${doneQs} besvarade`;
 
-      let items = (ACTIVE_TAB === "questions") ? questionItems : taskItems;
+      const itemsFull = (ACTIVE_TAB === "questions") ? questionItemsFull : taskItemsFull;
 
+      // deep-link (innan filter)
       if (!SELECTED){
-        applyDeepLink(items);
+        applyDeepLink(itemsFull);
       }
 
-      items = filterBySearch(items);
-      items = filterByShow(items);
+      // list = filterade items
+      let itemsShown = itemsFull;
+      itemsShown = filterBySearch(itemsShown);
+      itemsShown = filterByShow(itemsShown);
 
-      listPill.textContent = `${items.length} visade`;
+      listPill.textContent = `${itemsShown.length} visade`;
+      renderList(itemsShown);
 
-      renderList(items);
+      // detail = välj från FULL lista (så deep-link och val inte tappar pga filter)
+      const selFull = SELECTED
+        ? itemsFull.find(it => it.type === SELECTED.type && String(it.id) === String(SELECTED.id))
+        : null;
 
-      const sel = findSelected(items);
-      if (!sel){
-        renderDetailEmpty();
+      if (!selFull){
+        if (SELECTED){
+          renderDetailEmpty("Valt objekt döljs av filter/sök. Ändra filter för att se det i listan.");
+        } else {
+          renderDetailEmpty();
+        }
         return;
       }
 
-      if (sel.type === "task"){
+      if (selFull.type === "task"){
         const all = readLocalArray(KEY_TASKS);
-        const mine = visibleTasksForMe(all, empNo, scopeId);
+        const mine = visibleTasksForMeWithIndex(all, empNo, scopeId);
 
-        let found = null;
-        let foundIdx = -1;
-        for (let i=0;i<mine.length;i++){
-          const id = getTaskId(mine[i], i);
-          if (String(id) === String(sel.id)){
-            found = mine[i];
-            foundIdx = i;
+        // match via id mot originalindex-id
+        let hit = null;
+        for (const row of mine){
+          if (String(getTaskId(row.t, row.originalIndex)) === String(selFull.id)){
+            hit = row;
             break;
           }
         }
-        if (!found){
-          renderDetailEmpty();
+        if (!hit){
+          renderDetailEmpty("Fail-closed: kunde inte hitta vald uppgift (korrupt data eller filter).");
           showGuard("Fail-closed: kunde inte hitta vald uppgift (korrupt data eller filter).");
           return;
         }
-        renderTaskDetail(found, foundIdx, AUTH);
+        renderTaskDetail(hit.t, hit.originalIndex, AUTH);
         return;
       }
 
-      if (sel.type === "question"){
-        const qBase = readQuestions();
-        const qPkg  = deriveQuestionsFromPackages(AUTH);
-        const merged = mergeQuestions(qBase, qPkg);
-
-        let qHit = merged.find(q => normStr(getQuestionId(q)) && normStr(getQuestionId(q)) === String(sel.id)) || null;
-        if (!qHit){
-          qHit = merged.find(q => ("q_" + normKey(getQuestionTitle(q))) === String(sel.id)) || null;
-        }
-
-        if (!qHit){
-          renderDetailEmpty();
-          showGuard("Fail-closed: kunde inte hitta vald fråga (korrupt data eller ej tilldelad/scope).");
-          return;
-        }
-
-        renderQuestionDetail(qHit, AUTH);
+      if (selFull.type === "question"){
+        renderQuestionDetail(selFull._raw, AUTH);
         return;
       }
 
@@ -1871,17 +1909,16 @@
 
   <!-- ============================================================
   Ändringslogg (≤ 8 rader)
-  1) FIX: Paket-frågor visas även när scope/tilldelning ligger på blocknivå (tolerant, fortfarande fail-closed).
-  2) Scope hämtas från paket ELLER block (krav: scope måste finnas någonstans).
-  3) Tilldelning hämtas från paket ELLER block (krav: måste matcha empNo eller ALL/*).
-  4) Toleranta alias för block-typ: q/questionnaire/quiz_question → question.
-  5) Inga nya storage-keys/datamodell; AO-050 läses endast.
-  6) XSS-säker rendering bibehållen (textContent).
+  1) FIX: Tog bort dubbel-deklarationer (AUTH/ACTIVE_TAB/SELECTED) som kunde ge krascher.
+  2) FIX: Deep-link väljer objekt före filter och detalj visas även om filter döljer i listan.
+  3) FIX: Task-detalj sparar mot korrekt objekt (primärt id-match, fallback-index).
+  4) HARDEN: AO-012 basfrågor visas endast om scope+tilldelning matchar, eller om du redan har ett svar.
+  5) Behöll paket-frågeläsning där scope/tilldelning kan ligga på paket ELLER block (fail-closed).
+  6) Inga nya storage-keys/datamodell; AO-050 läses endast.
   Testnoteringar
-  1) Logga in som EMPLOYEE (scopeId finns).
-  2) Säkerställ att AO-050_PACKAGES_V1 har question-block med blockId och scope/tilldelning (paket eller block).
-  3) employee/tasks.html → Frågor → se frågorna.
-  4) Svara → spara → kontrollera AO-013_ANSWERS_V1 (questionId=blockId).
+  1) Från employee/home.html: klicka kort → öppnar tasks.html?tab=questions&open=ID och rätt fråga väljs.
+  2) Byt “Visa: Öppna” → “Alla” och kontrollera att signerat/sparat syns.
+  3) Svara → Spara → kontrollera AO-013_ANSWERS_V1 (questionId=blockId när id finns).
   ============================================================ -->
 </body>
 </html>
