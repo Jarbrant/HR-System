@@ -1,14 +1,20 @@
 /* ============================================================
-AO-002 v1.6 | FILE: UI/UI-03-APP.js
+AO-002 v1.7 (PATCH) + AO-AUTH-PIN-V1 (TEST) | FILE: UI/UI-03-APP.js
 Projekt: HR-System
 Syfte: CORE “hjärta” — Auth-guard, RBAC, fail-closed routing, scope-grund, XSS-helpers
 Nivå: UI-only (GitHub Pages) | localStorage-first
+
 Policy (LÅST):
 - Ingen backend
 - Fail-closed guards (sessionStorage → localStorage fallback)
 - Ingen känslig persondata (endast empNo om det finns i session; logga ej)
-- Inga nya storage-keys/datamodell utan AO (AO-002: skriver inget nytt)
-- XSS-escape på allt som renderas från storage (helpers erbjuds här)
+- Inga nya storage-keys/datamodell utan AO
+
+AO-AUTH-PIN-V1 (TEST) — TILLÅTET I DENNA PATCH:
+- Uppgraderar auth till PIN-verify (PBKDF2 via WebCrypto) + session TTL + enkel lockout
+- Skapar/uppdaterar endast befintlig session-key: AO-001_LOGIN_V1 (session)
+- Ny key (lokal audit, UI-only): AO-091_AUDIT_LOG_V1  (ringbuffer, ej manipulationssäker)
+- Ny key (lockout state, session): AO-090_AUTH_STATE_V1 (sessionStorage)
 
 TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
 - Nya keys (exakt):
@@ -21,7 +27,7 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   "use strict";
 
   // ============================================================
-  // STORAGE (AO-002 LÅST)
+  // STORAGE (CORE)
   // ============================================================
 
   // STORAGE: Återanvänd exakt befintlig session-nyckel.
@@ -29,6 +35,16 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
 
   // STORAGE: Befintliga nycklar (läsning endast)
   const ASSIGNMENTS_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
+
+  // ============================================================
+  // STORAGE (AO-AUTH-PIN-V1) — nya keys (tillåtna av AO)
+  // ============================================================
+
+  // AUTH-state (felräknare + lockout) i sessionStorage (mer privat än localStorage)
+  const AUTH_STATE_KEY = "AO-090_AUTH_STATE_V1";
+
+  // Audit-logg i localStorage (UI-only, ringbuffer). Logga ALDRIG empNo.
+  const AUDIT_LOG_KEY = "AO-091_AUDIT_LOG_V1";
 
   // ============================================================
   // STORAGE (AO-ONBOARD-PLANS-01 LÅST) — exakt nya keys
@@ -88,6 +104,20 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     }
   }
 
+  // STORAGE: skriv sessionStorage (fail-closed).
+  function writeSessionStorageJson(key, value) {
+    const k = String(key || "");
+    if (!k) return { ok: false, error: "WRITE_INVALID_KEY" };
+
+    try {
+      const payload = JSON.stringify(value);
+      sessionStorage.setItem(k, payload);
+      return { ok: true };
+    } catch {
+      return { ok: false, error: "WRITE_FAILED" };
+    }
+  }
+
   // GUARD: rensa session (tillåtet som “clearSession”).
   function clearSession() {
     try { sessionStorage.removeItem(SESSION_KEY); } catch {}
@@ -107,7 +137,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     if (!Array.isArray(c.PUBLIC_ROUTES)) return null;
 
     // GUARD: BASE_PATH finns i config (default "" enligt PRC-beslut).
-    // Vi accepterar "" eller "/HR-System" etc.
     if (typeof c.BASE_PATH !== "string") return null;
 
     return c;
@@ -118,12 +147,7 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   // ============================================================
 
   function decodeOnceSafe(s) {
-    // GUARD: defensiv decodeURIComponent
-    try {
-      return decodeURIComponent(String(s || ""));
-    } catch {
-      return String(s || "");
-    }
+    try { return decodeURIComponent(String(s || "")); } catch { return String(s || ""); }
   }
 
   function collapseSlashes(p) {
@@ -137,8 +161,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   }
 
   function normalizeBasePath(basePath) {
-    // SCOPE: PRC-beslut: BASE_PATH default "" (tom).
-    // Om satt, ska den vara "/HR-System" (utan trailing slash).
     const b = String(basePath || "").trim();
     if (!b) return "";
     const withSlash = ensureLeadingSlash(b);
@@ -149,15 +171,13 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     const p = String(pathname || "");
     const b = normalizeBasePath(basePath);
 
-    if (!b) return p; // inget att trimma
-    if (p === b) return "/"; // exakt bas => root i app
+    if (!b) return p;
+    if (p === b) return "/";
     if (p.startsWith(b + "/")) return p.slice(b.length) || "/";
-    return p; // matchar inte => lämna, men detta kan leda till deny senare
+    return p;
   }
 
   function hasDotDotSegment(p) {
-    // GUARD: blockera .. segment (även om den är URL-encoded)
-    // Vi kollar både innan och efter decode.
     const raw = String(p || "");
     const dec = decodeOnceSafe(raw);
 
@@ -186,7 +206,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
 
   // ============================================================
   // AUTH SHAPE (P1) — canonical getAuth()
-  // + AO-002 v1.4: resolve scopeId from assignments if missing
   // ============================================================
 
   function normalizeRole(roleRaw) {
@@ -200,8 +219,7 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   }
 
   function normalizeEmpNo(empRaw) {
-    const s = String(empRaw ?? "").trim();
-    return s;
+    return String(empRaw ?? "").trim();
   }
 
   function extractEmpNo(sessionLike) {
@@ -335,7 +353,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   function isHtmlLikeRoute(appRelPath) {
     const p = String(appRelPath || "").toLowerCase();
     if (!p) return false;
-    // Standard: endast .html (samt "/" och prefix "/")
     return p === "/" || p.endsWith(".html") || p.endsWith("/");
   }
 
@@ -372,13 +389,10 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
 
     if (e === "/") return rel === "/";
 
-    // Exakt fil (.html)
     if (e.toLowerCase().endsWith(".html")) return rel === e;
 
-    // Prefix med trailing "/" (t.ex. "/admin/") => enkel startsWith räcker
     if (e.endsWith("/")) return rel.startsWith(e);
 
-    // Prefix utan trailing "/" (t.ex. "/admin") => root-aware
     return rootAwareStartsWith(rel, e);
   }
 
@@ -450,8 +464,265 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     const appRel = String(dest || "").trim();
     if (!appRel.startsWith("/")) return loginUrl("route");
 
-    // Viktigt: ingen omskrivning här. Config är “sanningen”.
     return absPathFromApp(appRel);
+  }
+
+  // ============================================================
+  // AUTH (AO-AUTH-PIN-V1) — PIN verify + session TTL + lockout (UI-only)
+  // ============================================================
+
+  function getAuthPolicy() {
+    const cfg = getConfig();
+    if (!cfg || !cfg.AUTH || typeof cfg.AUTH !== "object") return null;
+    return cfg.AUTH;
+  }
+
+  function readAuthState() {
+    const s = safeJsonParse(sessionStorage.getItem(AUTH_STATE_KEY) || "");
+    if (!s || typeof s !== "object") return { failed: 0, lockedUntil: 0 };
+    return {
+      failed: Number(s.failed) || 0,
+      lockedUntil: Number(s.lockedUntil) || 0,
+    };
+  }
+
+  function writeAuthState(next) {
+    const v = {
+      failed: Number(next && next.failed) || 0,
+      lockedUntil: Number(next && next.lockedUntil) || 0,
+    };
+    return writeSessionStorageJson(AUTH_STATE_KEY, v);
+  }
+
+  function clearAuthState() {
+    try { sessionStorage.removeItem(AUTH_STATE_KEY); } catch {}
+  }
+
+  function isLockedOutNow() {
+    const pol = getAuthPolicy();
+    if (!pol || !pol.SESSION) return false;
+
+    const st = readAuthState();
+    return st.lockedUntil && st.lockedUntil > Date.now();
+  }
+
+  function recordFailedAttempt() {
+    const pol = getAuthPolicy();
+    if (!pol || !pol.SESSION) return;
+
+    const st = readAuthState();
+    const max = Number(pol.SESSION.maxFailedAttempts) || 8;
+    const lockMs = Number(pol.SESSION.lockoutMs) || 60000;
+
+    const failed = (Number(st.failed) || 0) + 1;
+
+    // Kort, rakt: lås efter max försök
+    const lockedUntil = failed >= max ? (Date.now() + lockMs) : (Number(st.lockedUntil) || 0);
+    writeAuthState({ failed, lockedUntil });
+  }
+
+  function recordSuccessfulLogin() {
+    // Reset lockout state efter lyckad login
+    clearAuthState();
+  }
+
+  function hexToBytes(hex) {
+    const s = String(hex || "").trim().toLowerCase();
+    if (!s || s.length % 2 !== 0) return null;
+    const out = new Uint8Array(s.length / 2);
+    for (let i = 0; i < out.length; i++) {
+      const b = parseInt(s.substr(i * 2, 2), 16);
+      if (!Number.isFinite(b)) return null;
+      out[i] = b;
+    }
+    return out;
+  }
+
+  function bytesToHex(buf) {
+    const b = buf instanceof ArrayBuffer ? new Uint8Array(buf) : (buf instanceof Uint8Array ? buf : null);
+    if (!b) return "";
+    let out = "";
+    for (let i = 0; i < b.length; i++) out += b[i].toString(16).padStart(2, "0");
+    return out;
+  }
+
+  async function pbkdf2Hex(pin, salt, iterations, dkLenBytes) {
+    // WebCrypto-only: funkar i moderna browsers
+    if (!window.crypto || !window.crypto.subtle) return "";
+
+    const enc = new TextEncoder();
+    const keyMaterial = await window.crypto.subtle.importKey(
+      "raw",
+      enc.encode(String(pin || "")),
+      "PBKDF2",
+      false,
+      ["deriveBits"]
+    );
+
+    const bits = await window.crypto.subtle.deriveBits(
+      {
+        name: "PBKDF2",
+        salt: enc.encode(String(salt || "")),
+        iterations: Number(iterations) || 120000,
+        hash: "SHA-256",
+      },
+      keyMaterial,
+      (Number(dkLenBytes) || 32) * 8
+    );
+
+    return bytesToHex(bits);
+  }
+
+  async function verifyPinForRole(role, pin) {
+    const cfg = getConfig();
+    const pol = getAuthPolicy();
+    if (!cfg || !pol || !pol.PIN_HASHES_BY_ROLE || !pol.PBKDF2) return { ok: false, error: "AUTH_CONFIG_MISSING" };
+
+    const r = normalizeRole(role);
+    if (!r) return { ok: false, error: "AUTH_ROLE_INVALID" };
+
+    if (isLockedOutNow()) return { ok: false, error: "AUTH_LOCKED" };
+
+    const rec = pol.PIN_HASHES_BY_ROLE[r];
+    if (!rec || typeof rec !== "object") return { ok: false, error: "AUTH_ROLE_NO_HASH" };
+
+    const salt = String(rec.salt || "");
+    const expected = String(rec.hashHex || "").toLowerCase();
+    if (!salt || !expected) return { ok: false, error: "AUTH_HASH_INVALID" };
+
+    const got = await pbkdf2Hex(
+      String(pin || ""),
+      salt,
+      Number(pol.PBKDF2.iterations) || 120000,
+      Number(pol.PBKDF2.dkLenBytes || pol.PBKDF2.dkLen || 32) || 32
+    );
+
+    // Fail-closed om crypto saknas
+    if (!got) {
+      recordFailedAttempt();
+      return { ok: false, error: "AUTH_CRYPTO_UNAVAILABLE" };
+    }
+
+    if (got !== expected) {
+      recordFailedAttempt();
+      return { ok: false, error: "AUTH_PIN_BAD" };
+    }
+
+    recordSuccessfulLogin();
+    return { ok: true };
+  }
+
+  function buildSessionPayload(role, empNo, scopeId) {
+    const pol = getAuthPolicy();
+    const ttl = pol && pol.SESSION ? (Number(pol.SESSION.ttlMs) || 0) : 0;
+
+    const now = Date.now();
+    const expiresAt = ttl > 0 ? (now + ttl) : null;
+
+    return {
+      // Kort: vi behåller befintlig form “auth: {}” så resten inte brister.
+      auth: {
+        isAuthed: true,
+        role: normalizeRole(role),
+        empNo: normalizeEmpNo(empNo),
+        scopeId: String(scopeId || "").trim(),
+        expiresAt: expiresAt,
+      },
+    };
+  }
+
+  function saveSession(sessionObj) {
+    // Säkrast: sessionStorage. (readStorage kan fortfarande läsa localStorage fallback om ni redan gör det.)
+    return writeSessionStorageJson(SESSION_KEY, sessionObj);
+  }
+
+  // AUDIT (UI-only) — logga aldrig empNo/persondata
+  function auditAppend(action, meta) {
+    const cfg = getConfig();
+    if (!cfg) return;
+
+    const now = Date.now();
+    const safeAction = String(action || "").trim().slice(0, 64);
+    if (!safeAction) return;
+
+    // Minimal, utan identitet. (UI-only = ej manipulationssäker)
+    const entry = {
+      ts: now,
+      action: safeAction,
+      // meta får inte innehålla empNo/person-id. Vi filtrerar hårt.
+      meta: sanitizeAuditMeta(meta),
+    };
+
+    try {
+      const raw = localStorage.getItem(AUDIT_LOG_KEY);
+      const parsed = safeJsonParse(raw || "");
+      const arr = Array.isArray(parsed) ? parsed : [];
+      arr.push(entry);
+
+      // Ringbuffer max 200
+      const max = 200;
+      const out = arr.length > max ? arr.slice(arr.length - max) : arr;
+
+      localStorage.setItem(AUDIT_LOG_KEY, JSON.stringify(out));
+    } catch {
+      // Fail-closed: vi blockerar inte flödet pga audit-fel
+    }
+  }
+
+  function sanitizeAuditMeta(meta) {
+    if (!meta || typeof meta !== "object") return null;
+
+    const out = {};
+    const keys = Object.keys(meta);
+
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      const low = String(k).toLowerCase();
+
+      // Blockera allt som ser ut som person/emp/id
+      if (low.includes("emp") || low.includes("person") || low.includes("id") || low.includes("ssn") || low.includes("email") || low.includes("phone")) {
+        continue;
+      }
+
+      const v = meta[k];
+
+      // Bara primitiva typer
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+        out[k] = v;
+      }
+    }
+
+    return Object.keys(out).length ? out : null;
+  }
+
+  // PUBLIC login helper (async)
+  async function pinLogin(role, pin, empNo, scopeId) {
+    // 1) verify PIN
+    const vr = await verifyPinForRole(role, pin);
+    if (!vr.ok) return vr;
+
+    // 2) scope: om scopeId saknas, försök resolve, annars ev test-default (fail-closed i nästa steg)
+    const authRole = normalizeRole(role);
+    const me = normalizeEmpNo(empNo);
+    const resolvedScope = String(scopeId || "").trim() || resolveScopeIdFromAssignments(me);
+
+    // 3) Om fortfarande saknas: använd TEST_DEFAULT_SCOPE_ID (endast i test), annars fail-closed
+    let finalScope = resolvedScope;
+    if (!finalScope) {
+      const pol = getAuthPolicy();
+      const testScope = pol ? String(pol.TEST_DEFAULT_SCOPE_ID || "").trim() : "";
+      finalScope = testScope || "";
+    }
+
+    // Fail-closed: role måste finnas
+    if (!authRole) return { ok: false, error: "AUTH_ROLE_INVALID" };
+
+    const sess = buildSessionPayload(authRole, me, finalScope);
+    const wr = saveSession(sess);
+    if (!wr.ok) return { ok: false, error: "AUTH_SESSION_WRITE_FAILED" };
+
+    auditAppend("AUTH_LOGIN_OK", { role: authRole }); // meta filtreras, men role är OK
+    return { ok: true, session: sess };
   }
 
   // ============================================================
@@ -593,7 +864,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     if (updatedAt === null) return { ok: false, error: "VALIDATION_PLAN_UPDATEDAT_INVALID" };
     if (!Array.isArray(items)) return { ok: false, error: "VALIDATION_PLAN_ITEMS_NOT_ARRAY" };
 
-    // Validate items + ensure no duplicate trainingId (save-side strict)
     const seen = new Set();
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
@@ -609,7 +879,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   }
 
   function normalizePlanForRead(plan) {
-    // Read-side: tolerant + dedupe items by trainingId (keep first). NO WRITES.
     if (!isPlainObject(plan)) return null;
 
     const id = String(plan.id ?? "").trim();
@@ -643,7 +912,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
       itemsOut.push({ trainingId, dayOffset, order, gateRequired });
     }
 
-    // Minimal required fields for consumer: id + title (others defaulted)
     if (!id || !title) return null;
     if (createdAt === null || updatedAt === null) return null;
 
@@ -688,7 +956,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   }
 
   function genId(prefix) {
-    // Ingen ny key. Unik via tid + random. Stabil i UI-only.
     const p = String(prefix || "id_");
     const t = Date.now();
     const r = Math.random().toString(16).slice(2, 10);
@@ -696,8 +963,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   }
 
   function readArrayKeyOrEmpty(key) {
-    // Spec: missing key => []
-    // Corrupt JSON or not array => fail-closed (ok:false)
     const raw = localStorage.getItem(String(key || ""));
     if (raw === null) return { ok: true, data: [] };
 
@@ -734,7 +999,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   function savePlans(plansArray) {
     if (!Array.isArray(plansArray)) return { ok: false, error: "VALIDATION_PLANS_NOT_ARRAY" };
 
-    // Save-side: strict validate each plan (including dup trainingId check)
     for (let i = 0; i < plansArray.length; i++) {
       const vr = validatePlan(plansArray[i]);
       if (!vr.ok) return vr;
@@ -746,13 +1010,11 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   function savePlanAssignments(assignmentsArray) {
     if (!Array.isArray(assignmentsArray)) return { ok: false, error: "VALIDATION_PA_LIST_NOT_ARRAY" };
 
-    // Save-side: strict validate each assignment
     for (let i = 0; i < assignmentsArray.length; i++) {
       const vr = validatePlanAssignment(assignmentsArray[i]);
       if (!vr.ok) return vr;
     }
 
-    // En per {empNo, planId} — dedupe enforcement at save-time (fail-closed if duplicates exist)
     const seen = new Set();
     for (let i = 0; i < assignmentsArray.length; i++) {
       const a = assignmentsArray[i];
@@ -765,7 +1027,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   }
 
   function upsertPlanAssignment(existingArray, input) {
-    // En assignment per {empNo, planId}. Replace existing; update updatedAt.
     if (!Array.isArray(existingArray)) return { ok: false, error: "VALIDATION_PA_LIST_NOT_ARRAY" };
 
     const now = Date.now();
@@ -777,7 +1038,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     if (!planId) return { ok: false, error: "VALIDATION_PA_PLANID_REQUIRED" };
     if (startDateTs === null) return { ok: false, error: "VALIDATION_PA_STARTDATE_INVALID" };
 
-    // Find existing by composite key
     let idx = -1;
     for (let i = 0; i < existingArray.length; i++) {
       const row = existingArray[i];
@@ -865,6 +1125,7 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
 
   function logout() {
     clearSession();
+    auditAppend("AUTH_LOGOUT", {});
     redirect(loginUrl("logout"));
   }
 
@@ -891,7 +1152,15 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     debugLog,
     logout,
 
-    // AO-ONBOARD-PLANS-01 (1/5) — public helpers (no side effects unless called)
+    // AO-AUTH-PIN-V1 (TEST) — explicit login helper (async)
+    AUTH_STATE_KEY,
+    AUDIT_LOG_KEY,
+    pinLogin,              // (role, pin, empNo, scopeId) => {ok, session?}
+    verifyPinForRole,      // (role, pin) => {ok}
+    isLockedOutNow,        // () => boolean
+    readAuthState,         // () => {failed, lockedUntil}
+
+    // AO-ONBOARD-PLANS-01 (1/5)
     PLANS_KEY,
     PLAN_ASSIGNMENTS_KEY,
     readPlans,
