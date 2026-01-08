@@ -3,16 +3,17 @@ AO-BLOCK-PIPELINE-01 (MASTER) | BLOCK 2/5 | FIL-ID: admin/packages-block.html
 Projekt: HR-System
 Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
 
-NYTT i denna patch:
-- Item-klick visar “All info” (detaljpanel) inkl ID, required, typ, options, facit-status, skala m.m.
-- All info är redigerbar i item-editor (inkl facit). Fail-closed bibehålls.
-- Debug-paneler är öppna som standard (men fortsatt XSS-safe via textContent).
+NYTT i denna patch (v2.0):
+- FIX: Import/migrering från AO-057_TRAININGS_V1 → AO-0XX_BLOCKS_V1 om block-banken saknas/är tom (för att “block från trainings.html” ska dyka upp).
+- FIX: Legacy-parser stödjer även kortprefix (D:, I:, Q:, QC:, T:, TS:) utöver DOC:/QT:/TC:.
+- UX/Policy: Read-only (SYSTEM_ADMIN) och Låst (fail-closed) disable:ar alla editorfält (så det inte känns “redigerbart men går ej spara”).
+- SPEC: Hover “ingen lift” (tar bort translateY i listor; endast skugga/brightness).
 
 POLICY (LÅST):
 - UI-only • Fail-closed
 - sessionStorage först (auth) • fallback localStorage via CORE (HRApp)
 - XSS-safe rendering (textContent, inga osäkra innerHTML)
-- Inga nya storage-keys (endast AO-0XX_BLOCKS_V1 läses/skrivs här)
+- Inga nya storage-keys (endast AO-0XX_BLOCKS_V1 skrivs här; AO-057_TRAININGS_V1 läses ENDAST för engångsimport vid tom bank)
 - SYSTEM_ADMIN = steward-läge (read-only)
 ============================================================ -->
 <!doctype html>
@@ -74,10 +75,9 @@ POLICY (LÅST):
       background:#fff;
       cursor:pointer;
       box-shadow: var(--shadow-soft);
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      transition: box-shadow .15s ease, filter .15s ease; /* SPEC: ingen lift */
     }
     .rowItem:hover{
-      transform: translateY(-1px);
       box-shadow: 0 8px 22px rgba(17,17,17,.10);
       filter: brightness(1.02);
     }
@@ -182,6 +182,11 @@ POLICY (LÅST):
       background:#fff;
       cursor:pointer;
       box-shadow: var(--shadow-soft);
+      transition: box-shadow .15s ease, filter .15s ease; /* SPEC: ingen lift */
+    }
+    .itemRow:hover{
+      box-shadow: 0 8px 22px rgba(17,17,17,.10);
+      filter: brightness(1.02);
     }
     .itemRow.active{ outline: 2px solid rgba(59,130,246,.35); }
     .itemTop{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
@@ -223,7 +228,7 @@ POLICY (LÅST):
 
   <nav class="nav" aria-label="Meny">
     <a href="./home.html">Hem</a>
-    <a href="./tasks.html">Skapa block</a>
+    <a href="./trainings.html">Utbildningar</a>
     <a href="./packages-block.html" aria-current="page">Block-editor</a>
     <a href="./onboard-plans.html">Onboard-planer</a>
     <a href="./reports.html">Felrapporter</a>
@@ -237,7 +242,7 @@ POLICY (LÅST):
     <div>
       <h1 class="tight">Block-editor (Block-bank)</h1>
       <p class="muted2">
-        Här ser du block som skapats i <strong>Skapa block</strong> och kan redigera dem innan publicering.
+        Här ser du block som skapats i <strong>Utbildningar</strong> och kan redigera dem innan publicering.
         Publicering gör blocket valbart i <strong>Onboard-planer</strong>.
       </p>
 
@@ -258,7 +263,7 @@ POLICY (LÅST):
     </div>
 
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
-      <a class="btn secondary" href="./tasks.html">+ Skapa nytt block</a>
+      <a class="btn secondary" href="./trainings.html">+ Skapa/ändra i Utbildningar</a>
     </div>
   </div>
 
@@ -481,7 +486,7 @@ POLICY (LÅST):
 
                 <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
                   <input id="qReqInp" type="checkbox" />
-                  <span>Krver svar</span>
+                  <span>Kräver svar</span>
                 </label>
               </div>
 
@@ -519,7 +524,7 @@ POLICY (LÅST):
 
                 <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
                   <input id="tReqInp" type="checkbox" />
-                  <span>Krver klar (done)</span>
+                  <span>Kräver klar (done)</span>
                 </label>
 
                 <div class="tiny" id="tHint" style="margin-top:6px;">Skala kräver min/max och text.</div>
@@ -561,8 +566,9 @@ POLICY (LÅST):
 (function(){
   "use strict";
 
-  const SESSION_KEY = "AO-001_LOGIN_V1";
-  const BLOCKS_KEY  = "AO-0XX_BLOCKS_V1"; // SANNING: All QA/publicering här ska ligga i AO-0XX_BLOCKS_V1
+  const SESSION_KEY   = "AO-001_LOGIN_V1";
+  const BLOCKS_KEY    = "AO-0XX_BLOCKS_V1";     // Block-bank (read/write)
+  const TRAININGS_KEY = "AO-057_TRAININGS_V1";  // Läses endast för import om block-bank saknas/är tom
 
   const $ = (s) => document.querySelector(s);
 
@@ -582,7 +588,6 @@ POLICY (LÅST):
   const btnSave = $("#btnSave");
   const btnPublish = $("#btnPublish");
 
-  const editorPanel = $("#editorPanel");
   const editorWrap = $("#editorWrap");
   const panelHint = $("#panelHint");
   const blockTag = $("#blockTag");
@@ -742,7 +747,7 @@ POLICY (LÅST):
     try{ parsed = JSON.parse(raw); }
     catch{ return { ok:false, missing:false, corrupt:true, blocks:[] }; }
 
-    // Back-compat: vissa versioner kan ha wrapper { blocks: [...] }
+    // Back-compat: wrapper { blocks: [...] }
     if(parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.blocks)){
       parsed = parsed.blocks;
     }
@@ -851,14 +856,11 @@ POLICY (LÅST):
   }
 
   function renderAllInfo(it, index){
-    // Detta är en ren visning (sammanfattning) av data som redan finns i AO-0XX_BLOCKS_V1.
-    // XSS: Vi sätter alltid via textContent.
     detailType.textContent = itemKindLabel(it);
     detailIndex.textContent = "#" + String((index ?? 0) + 1);
     detailId.textContent = getItemId(it) || "—";
     detailReq.textContent = getReqLabel(it);
 
-    // answerType/Meta varierar per item
     if(it.kind === "question"){
       detailAnswerType.textContent = (String(it.answerType || "text") === "choice") ? "Val" : "Text";
       const opts = Array.isArray(it.options) ? it.options.map(x => String(x||"").trim()).filter(Boolean) : [];
@@ -866,10 +868,8 @@ POLICY (LÅST):
         ? ("Alternativ: " + String(opts.length))
         : "—";
 
-      // options (valfråga)
       if(String(it.answerType || "text") === "choice"){
         detailOptionsWrap.style.display = "block";
-        // numrera för tydlighet (utan innerHTML)
         const key = normalizeFacitText(it.answerKey);
         const lines = opts.map((o, i) => {
           const mark = (key && o === key) ? " ★" : "";
@@ -881,12 +881,10 @@ POLICY (LÅST):
         detailOptions.textContent = "—";
       }
 
-      // facit
       detailFacitWrap.style.display = "block";
       detailFacit.textContent = normalizeFacitText(it.answerKey) || "—";
       setDetailFacitPillFor(it);
 
-      // scale wrap off
       detailScaleWrap.style.display = "none";
       detailScale.textContent = "—";
     }
@@ -913,7 +911,6 @@ POLICY (LÅST):
         detailMeta.textContent = "—";
       }
 
-      // question-only wraps off
       detailOptionsWrap.style.display = "none";
       detailOptions.textContent = "—";
       detailFacitWrap.style.display = "none";
@@ -945,44 +942,97 @@ POLICY (LÅST):
   }
 
   // ------------------------------
-  // Back-compat import (kritisk fix)
+  // Legacy-parser (kritisk fix)
   // ------------------------------
   function parseLegacyLinesToItems(text){
     const out = [];
     const lines = String(text || "").split("\n").map(s => s.trim()).filter(Boolean).slice(0, 500);
 
-    for(const line of lines){
+    function pushDoc(t, requiresSign){
+      out.push({ kind:"document", text: t, requiresSign: (requiresSign !== false) });
+    }
+    function pushQuestionText(t){
+      out.push({ kind:"question", questionId: genId("q"), text: t, answerType:"text", options:[], requiresAnswer:true, answerKey:"" });
+    }
+    function pushQuestionChoice(qText, opts){
+      const uniq = [];
+      for(const o of (opts || [])){
+        const s = String(o||"").trim().slice(0,60);
+        if(s && !uniq.includes(s)) uniq.push(s);
+      }
+      const base = uniq.slice(0,10);
+      out.push({ kind:"question", questionId: genId("q"), text: qText, answerType:"choice", options: base, requiresAnswer:true, answerKey:"" });
+    }
+    function pushTaskCheckbox(t){
+      out.push({ kind:"task", taskId: genId("t"), text: t, answerType:"checkbox", scale:null, requiresDone:true });
+    }
+    function pushTaskScale(t, mn, mx, minLabel, maxLabel){
+      const a = clampInt(mn, 1, 10, 1);
+      const b0 = clampInt(mx, 1, 10, 5);
+      const b = (b0 < a) ? a : b0;
+      out.push({ kind:"task", taskId: genId("t"), text: t, answerType:"scale", scale:{min:a,max:b,minLabel:String(minLabel||"").slice(0,40),maxLabel:String(maxLabel||"").slice(0,40)}, requiresDone:true });
+    }
+
+    for(const line0 of lines){
+      const line = String(line0);
       const up = line.toUpperCase();
 
-      if(up.startsWith("DOC:")){
-        const t = line.slice(4).trim();
-        out.push({ kind:"document", text: t, requiresSign: true });
+      // DOC:/D: => document (requiresSign=true)
+      if(up.startsWith("DOC:") || up.startsWith("D:")){
+        const t = (up.startsWith("DOC:") ? line.slice(4) : line.slice(2)).trim();
+        pushDoc(t, true);
         continue;
       }
-      if(up.startsWith("QT:")){
-        const t = line.slice(3).trim();
-        out.push({ kind:"question", questionId: genId("q"), text: t, answerType:"text", options:[], requiresAnswer:true, answerKey:"" });
+
+      // I: => info/document men utan sign-krav (vanligt i vissa legacy)
+      if(up.startsWith("I:")){
+        const t = line.slice(2).trim();
+        pushDoc(t, false);
         continue;
       }
+
+      // QT:/Q: => question text
+      if(up.startsWith("QT:") || up.startsWith("Q:")){
+        const t = (up.startsWith("QT:") ? line.slice(3) : line.slice(2)).trim();
+        pushQuestionText(t);
+        continue;
+      }
+
+      // QC: => question choice, format: QC: fråga | opt1 | opt2 ...
       if(up.startsWith("QC:")){
-        // QC: fråga | opt1 | opt2 ...
         const rest = line.slice(3).trim();
         const parts = rest.split("|").map(s => s.trim()).filter(Boolean);
         const qText = String(parts[0] || "").trim();
-        const opts = parts.slice(1).map(s => s.slice(0,60)).filter(Boolean);
-        const uniq = [];
-        for(const o of opts){ if(o && !uniq.includes(o)) uniq.push(o); }
-        out.push({ kind:"question", questionId: genId("q"), text: qText, answerType:"choice", options: uniq.slice(0,10), requiresAnswer:true, answerKey:"" });
+        const opts = parts.slice(1);
+        pushQuestionChoice(qText, opts);
         continue;
       }
-      if(up.startsWith("TC:")){
-        const t = line.slice(3).trim();
-        out.push({ kind:"task", taskId: genId("t"), text: t, answerType:"checkbox", scale:null, requiresDone:true });
+
+      // TC:/T: => task checkbox
+      if(up.startsWith("TC:") || up.startsWith("T:")){
+        const t = (up.startsWith("TC:") ? line.slice(3) : line.slice(2)).trim();
+        pushTaskCheckbox(t);
         continue;
       }
+
+      // TS: => task scale, stöd 2 format:
+      // A) TS: text | min=1 max=5 | labelMin=... | labelMax=...
+      // B) TS:1-5 | text  (eller TS: 1-5 | text)
       if(up.startsWith("TS:")){
-        // TS: text | min=1 max=5 | labelMin=... | labelMax=...
-        const parts = line.slice(3).split("|").map(s => s.trim()).filter(Boolean);
+        const rest = line.slice(3).trim();
+
+        // Format B: "1-5 | text"
+        const m = rest.match(/^\s*(\d+)\s*-\s*(\d+)\s*\|\s*(.+)$/);
+        if(m){
+          const mn = clampInt(m[1], 1, 10, 1);
+          const mx = clampInt(m[2], 1, 10, 5);
+          const t = String(m[3] || "").trim();
+          pushTaskScale(t, mn, mx, "", "");
+          continue;
+        }
+
+        // Format A: split by |
+        const parts = rest.split("|").map(s => s.trim()).filter(Boolean);
         const t = String(parts[0] || "").trim();
         let mn = 1, mx = 5, minLabel = "", maxLabel = "";
         for(const p of parts.slice(1)){
@@ -991,9 +1041,10 @@ POLICY (LÅST):
           const m3 = p.match(/labelmin\s*=\s*(.+)$/i); if(m3) minLabel = String(m3[1]||"").slice(0,40);
           const m4 = p.match(/labelmax\s*=\s*(.+)$/i); if(m4) maxLabel = String(m4[1]||"").slice(0,40);
         }
-        if(mx < mn) mx = mn;
-        out.push({ kind:"task", taskId: genId("t"), text: t, answerType:"scale", scale:{min:mn,max:mx,minLabel,maxLabel}, requiresDone:true });
-        continue;
+        if(t){
+          pushTaskScale(t, mn, mx, minLabel, maxLabel);
+          continue;
+        }
       }
     }
 
@@ -1059,6 +1110,7 @@ POLICY (LÅST):
       };
     }
 
+    // fallback (fail-soft) -> document
     return {
       kind: "document",
       text: "Okänd item-typ (normaliserad till dokument).",
@@ -1155,7 +1207,6 @@ POLICY (LÅST):
           if(uniq.length < 2) reasons.push(`Item #${i+1}: Val-fråga kräver minst 2 alternativ.`);
         }
 
-        // FACIT (hård regel) – fail-closed: saknas facit => ingen publicering
         const key = normalizeFacitText(it.answerKey);
         if(!key){
           reasons.push(`Item #${i+1}: Fråga saknar facit.`);
@@ -1182,6 +1233,120 @@ POLICY (LÅST):
   }
 
   // ------------------------------
+  // Import från trainings (om block-bank tom)
+  // ------------------------------
+  function loadTrainingsArray(){
+    const raw = safeGetLocalRaw(TRAININGS_KEY);
+    if(raw === null) return { ok:true, missing:true, corrupt:false, trainings:[] };
+    let parsed;
+    try{ parsed = JSON.parse(raw); }
+    catch{ return { ok:false, missing:false, corrupt:true, trainings:[] }; }
+
+    // vanliga wrappers
+    if(parsed && typeof parsed === "object" && !Array.isArray(parsed)){
+      if(Array.isArray(parsed.trainings)) parsed = parsed.trainings;
+      else if(Array.isArray(parsed.items)) parsed = parsed.items;
+      else if(Array.isArray(parsed.list)) parsed = parsed.list;
+      else if(Array.isArray(parsed.data)) parsed = parsed.data;
+    }
+
+    if(!Array.isArray(parsed)) return { ok:false, missing:false, corrupt:true, trainings:[] };
+    return { ok:true, missing:false, corrupt:false, trainings: parsed };
+  }
+
+  function extractBlocksFromTrainings(trainings){
+    const out = [];
+    const arr = Array.isArray(trainings) ? trainings : [];
+    for(const t0 of arr){
+      const t = (t0 && typeof t0 === "object") ? t0 : {};
+      const tModule = String(t.module || t.mod || "").slice(0,60);
+      const tArea   = String(t.area || t.domain || "").slice(0,60);
+      const tStep   = String(t.step || t.title || t.name || t.trainingTitle || "").slice(0,60);
+
+      const blocks = Array.isArray(t.blocks) ? t.blocks
+                  : (Array.isArray(t.blockBank) ? t.blockBank
+                  : (t.content && Array.isArray(t.content.blocks) ? t.content.blocks : null));
+
+      if(!Array.isArray(blocks) || blocks.length === 0) continue;
+
+      for(const b0 of blocks){
+        const b = (b0 && typeof b0 === "object") ? b0 : {};
+        // bygg en "raw block" som normalizeBlock kan svälja
+        const rawBlock = Object.assign({}, b, {
+          blockId: b.blockId || b.id || genId("blk"),
+          title: b.title || b.name || b.heading || b.label || "",
+          module: b.module || tModule,
+          area: b.area || tArea,
+          step: b.step || tStep,
+          status: b.status || "draft",
+          updatedAt: b.updatedAt || t.updatedAt || Date.now(),
+          createdAt: b.createdAt || t.createdAt || Date.now()
+        });
+
+        // om blocket i training är ett “enkelt item” (kind/type) -> lägg in som items
+        if(!Array.isArray(rawBlock.items)){
+          const k = String(rawBlock.kind || rawBlock.type || "").toLowerCase();
+          if(k === "document" || k === "doc"){
+            rawBlock.items = [{ kind:"document", text: rawBlock.text || rawBlock.body || "", requiresSign: (rawBlock.requiresSign ?? true) }];
+          }else if(k === "info" || k === "information"){
+            rawBlock.items = [{ kind:"document", text: rawBlock.text || rawBlock.body || "", requiresSign: false }];
+          }else if(k === "question"){
+            rawBlock.items = [{
+              kind:"question",
+              questionId: rawBlock.questionId || rawBlock.id || genId("q"),
+              text: rawBlock.text || rawBlock.question || rawBlock.prompt || "",
+              answerType: (rawBlock.answerType === "choice" || rawBlock.mode === "choice") ? "choice" : "text",
+              options: rawBlock.options || rawBlock.choices || [],
+              requiresAnswer: (rawBlock.requiresAnswer !== false && rawBlock.required !== false),
+              answerKey: rawBlock.answerKey || rawBlock.facit || ""
+            }];
+          }else if(k === "task"){
+            rawBlock.items = [{
+              kind:"task",
+              taskId: rawBlock.taskId || rawBlock.id || genId("t"),
+              text: rawBlock.text || rawBlock.task || rawBlock.prompt || "",
+              answerType: (rawBlock.answerType === "scale" || rawBlock.mode === "scale") ? "scale" : "checkbox",
+              scale: rawBlock.scale || rawBlock.range || null,
+              requiresDone: (rawBlock.requiresDone !== false && rawBlock.required !== false)
+            }];
+          }
+        }
+
+        out.push(rawBlock);
+      }
+    }
+    return out.slice(0, 800);
+  }
+
+  function maybeImportBlocksIfBankEmpty(st){
+    // Policy: vi läser TRAININGS_KEY endast om block-bank saknas/är tom.
+    const bankEmpty = (!!st.missing) || (Array.isArray(st.blocks) && st.blocks.length === 0);
+    if(!bankEmpty) return { did:false, msg:"" };
+
+    const ts = loadTrainingsArray();
+    if(ts.corrupt || !ts.ok) return { did:false, msg:`Hittade ${TRAININGS_KEY} men den är korrupt (ingen import).` };
+    if(ts.missing || !Array.isArray(ts.trainings) || ts.trainings.length === 0) return { did:false, msg:"" };
+
+    const rawBlocks = extractBlocksFromTrainings(ts.trainings);
+    if(rawBlocks.length === 0) return { did:false, msg:"" };
+
+    // normalisera + de-dupe
+    const normalized = rawBlocks.map(normalizeBlock);
+    const map = new Map();
+    for(const b of normalized){
+      const id = String(b.blockId || "");
+      if(!id) continue;
+      if(!map.has(id)) map.set(id, b);
+    }
+    const blocks = Array.from(map.values());
+
+    const res = saveBlocks(blocks);
+    if(!res.ok) return { did:false, msg: res.err || "Kunde inte importera." };
+
+    return { did:true, msg:`Importerade ${blocks.length} block från ${TRAININGS_KEY} till ${BLOCKS_KEY}.` };
+  }
+
+  // ------------------------------
   // State
   // ------------------------------
   const STATE = {
@@ -1204,7 +1369,7 @@ POLICY (LÅST):
     const canWrite = (!STATE.locked && !isSystemAdmin);
     btnSave.disabled = !(canWrite && STATE.dirty && STATE.edit);
     btnPublish.disabled = true;
-    btnEdit.disabled = !(STATE.edit && (STATE.edit.items?.length > 0));
+    btnEdit.disabled = !(!!STATE.edit);
 
     updatePublishButton();
   }
@@ -1417,7 +1582,6 @@ POLICY (LÅST):
   }
 
   function itemMetaLine(it){
-    // Visas i item-rutan: ID + facit-status/options/skala – “all info” snabböversikt
     const id = getItemId(it);
     const idTxt = id ? ("ID: " + id) : "ID: —";
 
@@ -1474,12 +1638,13 @@ POLICY (LÅST):
     const items = Array.isArray(b.items) ? b.items : [];
     itemsSummary.textContent = `${items.length} items`;
 
-    btnAddItem.disabled = (STATE.locked || isSystemAdmin) ? true : false;
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    btnAddItem.disabled = !canWrite;
 
     if(items.length === 0){
       const d = document.createElement("div");
       d.className = "muted2";
-      d.textContent = "Inga items. (Om du förväntar dig frågor här: öppna Debug (block raw) för att se var de ligger i storage.)";
+      d.textContent = "Inga items. (Om du förväntar dig items här: öppna Debug (block raw) för att se var de ligger i storage.)";
       itemRows.appendChild(d);
       STATE.selectedItemIndex = -1;
       btnItemUp.disabled = true;
@@ -1490,7 +1655,6 @@ POLICY (LÅST):
     }
 
     items.forEach((itRaw, idx) => {
-      // Normalisera när vi arbetar med item – bibehåller datakontraktet
       const it = normalizeItem(itRaw);
       items[idx] = it;
 
@@ -1518,7 +1682,6 @@ POLICY (LÅST):
       title.appendChild(tag);
       title.appendChild(tt);
 
-      // QA: facit status på frågor
       if(it.kind === "question"){
         const pill = document.createElement("span");
         const ok = facitOkForQuestion(it);
@@ -1547,11 +1710,7 @@ POLICY (LÅST):
         renderItems();
         showItemEditor(idx);
 
-        // UX: tydligt att “all info” öppnats – scrolla panelen i vy
-        try{
-          itemEditor.scrollIntoView({ behavior: "smooth", block: "start" });
-        }catch{}
-
+        try{ itemEditor.scrollIntoView({ behavior: "smooth", block: "start" }); }catch{}
         updateItemActions();
       }
       row.addEventListener("click", openItem);
@@ -1565,6 +1724,17 @@ POLICY (LÅST):
     updateItemActions();
     if(STATE.selectedItemIndex >= 0) showItemEditor(STATE.selectedItemIndex);
     else itemEditor.style.display = "none";
+  }
+
+  function setEditorDisabled(canWrite){
+    // Blockfält
+    moduleInp.disabled = !canWrite;
+    areaInp.disabled   = !canWrite;
+    stepInp.disabled   = !canWrite;
+    titleInp.disabled  = !canWrite;
+
+    addItemKind.disabled = !canWrite;
+    btnAddItem.disabled  = !canWrite;
   }
 
   function showEditor(){
@@ -1588,6 +1758,9 @@ POLICY (LÅST):
     }catch{
       debugBlockPre.textContent = "{}";
     }
+
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    setEditorDisabled(canWrite);
 
     renderItems();
     setSelectionPill();
@@ -1651,7 +1824,7 @@ POLICY (LÅST):
     qFacitPill.textContent = "Facit: —";
     qFacitPill.className = "qaPill";
     debugPre.textContent = "{}";
-    // All info reset
+
     detailType.textContent = "—";
     detailIndex.textContent = "—";
     detailId.textContent = "—";
@@ -1666,7 +1839,6 @@ POLICY (LÅST):
   }
 
   function rebuildFacitChoiceOptions(opts, selected){
-    // XSS-safe: vi bygger option-element, ingen innerHTML
     qFacitChoiceSel.innerHTML = "";
     const o0 = document.createElement("option");
     o0.value = "";
@@ -1706,7 +1878,6 @@ POLICY (LÅST):
     itemEditor.style.display = "block";
     itemKindInp.value = itemKindLabel(it);
 
-    // ALL INFO – renderas alltid vid item-val
     renderAllInfo(it, index);
 
     const isDoc = (it.kind === "document");
@@ -1761,7 +1932,7 @@ POLICY (LÅST):
     debugPre.textContent = JSON.stringify(it, null, 2);
 
     const canWrite = (!STATE.locked && !isSystemAdmin);
-    // SYSTEM_ADMIN/locked => read-only: editor inputs disabled
+
     itemTextInp.disabled = !canWrite;
 
     qAnswerSel.disabled = !canWrite;
@@ -1814,9 +1985,7 @@ POLICY (LÅST):
         lines.forEach(x => { const s = x.slice(0,60); if(s && !uniq.includes(s)) uniq.push(s); });
         it.options = uniq.slice(0,10);
 
-        // facit från dropdown (måste matcha option)
         it.answerKey = normalizeFacitText(qFacitChoiceSel.value || "");
-        // om alternativen ändras och facit ej längre matchar -> rensa (fail-closed)
         if(it.answerKey && !it.options.includes(it.answerKey)){
           it.answerKey = "";
         }
@@ -1851,7 +2020,6 @@ POLICY (LÅST):
 
     items[i] = normalizeItem(it);
 
-    // Uppdatera UI-pills + debug + ALL INFO direkt så du ser “allt” efter varje ändring
     setFacitPillFor(items[i]);
     debugPre.textContent = JSON.stringify(items[i], null, 2);
     renderAllInfo(items[i], i);
@@ -1883,7 +2051,6 @@ POLICY (LÅST):
   });
   qOptionsInp.addEventListener("input", () => {
     applyItemEditorToState();
-    // uppdatera facit-lista i UI om val-fråga
     showItemEditor(STATE.selectedItemIndex);
     markDirty();
     renderItems();
@@ -2098,9 +2265,18 @@ POLICY (LÅST):
       }
     }
 
-    const st = loadBlocksState();
+    let st = loadBlocksState();
     if(st.corrupt){
       lockReasons.push(`${BLOCKS_KEY} är korrupt (JSON/shape). Åtgärda eller rensa nyckeln innan redigering.`);
+    }
+
+    // Import/migrering om bank tom (och inte korrupt)
+    if(!st.corrupt){
+      const imp = maybeImportBlocksIfBankEmpty(st);
+      if(imp.did){
+        setMsg("ok", imp.msg);
+        st = loadBlocksState(); // reload efter import
+      }
     }
 
     STATE.lockReasons = lockReasons;
@@ -2118,20 +2294,24 @@ POLICY (LÅST):
       computeVisible();
       if(STATE.visible.length){
         selectBlock(STATE.visible[0].blockId);
-        setMsg("ok", "Laddad första block.");
+        if(!elMsg.textContent) setMsg("ok", "Laddad första block.");
       }else{
         hideEditor();
         setMsg("warn", "Inga block matchar filter.");
       }
     }else{
       hideEditor();
-      setMsg(st.missing ? "warn" : "warn", "Inga block ännu. Skapa i “Skapa block”.");
+      setMsg(st.missing ? "warn" : "warn", "Inga block ännu. Skapa i “Utbildningar”.");
     }
 
     const canWrite = (!STATE.locked && !isSystemAdmin);
     btnSave.disabled = true;
     btnPublish.disabled = true;
     btnAddItem.disabled = !canWrite;
+    btnEdit.disabled = !(!!STATE.edit);
+
+    // disable editorfält om read-only
+    setEditorDisabled(canWrite);
   }
 
   init();
@@ -2140,28 +2320,34 @@ POLICY (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- UI: Item-klick visar “All info” (detaljpanel) med full text, ID, krav, svarstyp, options, facit, skala.
-- UI: Item-rader visar meta direkt (ID + Facit OK/Saknas / Alt-count / Skala).
-- Debug: Panels alltid synliga (open by default), fortsatt XSS-safe via textContent.
-- Redigering: Facit kan alltid rättas; fail-closed rensar facit om options inte matchar.
-- Inga nya storage-keys; QA/publicering fortsätter vara låst till AO-0XX_BLOCKS_V1.
+- FIX: Import från AO-057_TRAININGS_V1 → AO-0XX_BLOCKS_V1 när block-bank saknas/är tom.
+- FIX: Legacy-parser stödjer D:/I:/Q:/QC:/T:/TS: (utöver DOC:/QT:/TC:).
+- UX: Read-only/låst läge disable:ar alla editorfält (tydligt fail-closed).
+- SPEC: Hover “ingen lift” i listor (tar bort translateY; behåller skugga/brightness).
+- Nav: “Skapa/ändra” pekar mot trainings.html för att minska förvirring.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Öppna admin/packages-block.html → välj ett block.
-2) Klicka på en fråga/uppgift i item-listan → “Detaljer (all info)” ska visa full info + ID + facit-status.
-3) Ändra facit (textfråga: skriv, valfråga: välj) → “Facit: OK/Saknas” ska uppdateras direkt.
-4) Ändra alternativ för valfråga så facit inte matchar → facit ska rensas (fail-closed) och visa “Saknas”.
-5) Spara → ladda om sidan → verifiera att ändringar ligger kvar i AO-0XX_BLOCKS_V1.
-6) Publicera → ska blockas om någon fråga saknar facit.
+1) Om du har block i Utbildningar men tom AO-0XX_BLOCKS_V1:
+   - Öppna admin/packages-block.html → den ska visa “Importerade X block…”.
+2) Välj ett block → item-listan ska visa items.
+3) Klicka på ett item → “Detaljer (all info)” ska visa full info + ID + facit-status.
+4) Ändra facit:
+   - Textfråga: skriv facit i facitfältet
+   - Valfråga: välj facit i dropdown
+   → “Facit: OK/Saknas” uppdateras direkt.
+5) Ändra alternativ för valfråga så facit inte matchar → facit rensas (fail-closed) och visar “Saknas”.
+6) Spara → ladda om → verifiera att ändringar ligger kvar i AO-0XX_BLOCKS_V1.
+7) Publicera → blockas om någon fråga saknar facit.
+8) Logga in som SYSTEM_ADMIN → allt ska vara read-only (fält disabled).
 ============================================================ -->
 
 <!-- ============================================================
 Risk / edge cases
-- Stora mängder items kan göra rendering tyngre; meta + all-info ökar DOM lite (men inom rimligt).
-- Legacy-data utan questionId/taskId visas som ID: — (normalisering skapar ID vid spar).
-- SYSTEM_ADMIN: read-only; kan se all info men inte ändra/spara/publicera.
+- Import körs bara när block-bank är tom; efter import jobbar allt i AO-0XX_BLOCKS_V1.
+- Om AO-057_TRAININGS_V1 är korrupt: ingen import (fail-closed), sidan fortsätter som vanligt.
+- Legacy-format TS: stöder “TS:1-5 | text” och “TS: text | min=… max=…”.
 ============================================================ -->
 
 </body>
