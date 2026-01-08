@@ -4,11 +4,9 @@ Projekt: HR-System
 Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
 
 NYTT i denna patch:
-- Kvalitetssäkring av frågor: Facit lagras på question-items (answerKey)
-- Publicering (fail-closed): alla frågor måste ha facit
-  * Text-fråga: facit = fri text
-  * Val-fråga: facit måste matcha ett av alternativen
-- UI: visar “Facit: OK / Saknas” per fråga + tydlig kontroll i item-editor
+- Item-klick visar “All info” (detaljpanel) inkl ID, required, typ, options, facit-status, skala m.m.
+- All info är redigerbar i item-editor (inkl facit). Fail-closed bibehålls.
+- Debug-paneler är öppna som standard (men fortsatt XSS-safe via textContent).
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -189,11 +187,30 @@ POLICY (LÅST):
     .itemTop{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
     .itemTitle{ font-weight: 950; line-height:1.2; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     .itemMeta{ margin-top:6px; }
+    .itemMeta2{ margin-top:6px; font-size:.86rem; color: var(--muted); }
 
     .qaLine{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px; }
     .qaPill{ font-size:.82rem; padding:2px 8px; border-radius:999px; border:1px solid var(--line); background:#fff; color:var(--muted); }
     .qaPill.ok{ background: rgba(167,243,208,.16); border-color: rgba(16,185,129,.26); color:#065f46; }
     .qaPill.bad{ background: rgba(254,242,242,.85); border-color: rgba(239,68,68,.30); color:#7f1d1d; }
+
+    /* Item detail summary (All info) */
+    .detailCard{
+      margin-top:10px;
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      padding:10px;
+    }
+    .detailGrid{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+    }
+    @media (max-width: 800px){ .detailGrid{ grid-template-columns: 1fr; } }
+    .detailLabel{ font-size:.82rem; color: var(--muted); font-weight: 900; margin-bottom:4px; }
+    .detailValue{ font-size:.92rem; color:#111; line-height:1.25; white-space:pre-wrap; }
+    .detailValue.mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; }
   </style>
 </head>
 
@@ -359,7 +376,66 @@ POLICY (LÅST):
             <div id="itemEditor" style="margin-top:12px; display:none; border-top:1px dashed var(--line); padding-top:12px;">
               <h3 style="margin-top:0;">Item-editor</h3>
 
-              <label>
+              <!-- ALL INFO (sammanfattning) - visas alltid vid item-klick -->
+              <div class="detailCard" aria-label="Detaljer för valt item">
+                <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
+                  <div style="font-weight:950;">Detaljer (all info)</div>
+                  <span class="qaPill" id="detailFacitPill" style="display:none;">Facit: —</span>
+                </div>
+
+                <div class="detailGrid" style="margin-top:10px;">
+                  <div>
+                    <div class="detailLabel">Typ</div>
+                    <div class="detailValue" id="detailType">—</div>
+                  </div>
+                  <div>
+                    <div class="detailLabel">Index</div>
+                    <div class="detailValue" id="detailIndex">—</div>
+                  </div>
+                  <div>
+                    <div class="detailLabel">ID</div>
+                    <div class="detailValue mono" id="detailId">—</div>
+                  </div>
+                  <div>
+                    <div class="detailLabel">Krav</div>
+                    <div class="detailValue" id="detailReq">—</div>
+                  </div>
+                  <div>
+                    <div class="detailLabel">Svarstyp</div>
+                    <div class="detailValue" id="detailAnswerType">—</div>
+                  </div>
+                  <div>
+                    <div class="detailLabel">Meta</div>
+                    <div class="detailValue" id="detailMeta">—</div>
+                  </div>
+                </div>
+
+                <div style="margin-top:10px;">
+                  <div class="detailLabel">Text (full)</div>
+                  <div class="detailValue" id="detailText">—</div>
+                </div>
+
+                <div style="margin-top:10px; display:none;" id="detailOptionsWrap">
+                  <div class="detailLabel">Alternativ (val-fråga)</div>
+                  <div class="detailValue" id="detailOptions">—</div>
+                </div>
+
+                <div style="margin-top:10px; display:none;" id="detailScaleWrap">
+                  <div class="detailLabel">Skala</div>
+                  <div class="detailValue" id="detailScale">—</div>
+                </div>
+
+                <div style="margin-top:10px; display:none;" id="detailFacitWrap">
+                  <div class="detailLabel">Facit (answerKey)</div>
+                  <div class="detailValue" id="detailFacit">—</div>
+                </div>
+
+                <div class="tiny" style="margin-top:10px;">
+                  Tips: Du kan alltid rätta facit här och spara. Publicering blockas om facit saknas (fail-closed).
+                </div>
+              </div>
+
+              <label style="margin-top:12px;">
                 Typ
                 <input id="itemKindInp" type="text" disabled />
               </label>
@@ -457,15 +533,16 @@ POLICY (LÅST):
                 </label>
               </div>
 
-              <details style="margin-top:12px;">
-                <summary class="tiny" style="cursor:pointer; font-weight:900; color: var(--muted);">Debug (valt item)</summary>
+              <!-- Debug: öppet som standard (XSS-safe via textContent) -->
+              <div style="margin-top:12px;">
+                <div class="tiny" style="font-weight:900; color: var(--muted);">Debug: Item (normaliserad)</div>
                 <pre id="debugPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
-              </details>
+              </div>
 
-              <details style="margin-top:10px;">
-                <summary class="tiny" style="cursor:pointer; font-weight:900; color: var(--muted);">Debug (block raw)</summary>
+              <div style="margin-top:10px;">
+                <div class="tiny" style="font-weight:900; color: var(--muted);">Debug: Block (raw från storage)</div>
                 <pre id="debugBlockPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
-              </details>
+              </div>
             </div>
           </div>
         </div>
@@ -485,7 +562,7 @@ POLICY (LÅST):
   "use strict";
 
   const SESSION_KEY = "AO-001_LOGIN_V1";
-  const BLOCKS_KEY  = "AO-0XX_BLOCKS_V1";
+  const BLOCKS_KEY  = "AO-0XX_BLOCKS_V1"; // SANNING: All QA/publicering här ska ligga i AO-0XX_BLOCKS_V1
 
   const $ = (s) => document.querySelector(s);
 
@@ -505,6 +582,7 @@ POLICY (LÅST):
   const btnSave = $("#btnSave");
   const btnPublish = $("#btnPublish");
 
+  const editorPanel = $("#editorPanel");
   const editorWrap = $("#editorWrap");
   const panelHint = $("#panelHint");
   const blockTag = $("#blockTag");
@@ -550,6 +628,22 @@ POLICY (LÅST):
 
   const dWrap = $("#dWrap");
   const dSignInp = $("#dSignInp");
+
+  // All info (detail panel)
+  const detailType = $("#detailType");
+  const detailIndex = $("#detailIndex");
+  const detailId = $("#detailId");
+  const detailReq = $("#detailReq");
+  const detailAnswerType = $("#detailAnswerType");
+  const detailMeta = $("#detailMeta");
+  const detailText = $("#detailText");
+  const detailOptionsWrap = $("#detailOptionsWrap");
+  const detailOptions = $("#detailOptions");
+  const detailScaleWrap = $("#detailScaleWrap");
+  const detailScale = $("#detailScale");
+  const detailFacitWrap = $("#detailFacitWrap");
+  const detailFacit = $("#detailFacit");
+  const detailFacitPill = $("#detailFacitPill");
 
   const debugPre = $("#debugPre");
   const debugBlockPre = $("#debugBlockPre");
@@ -726,6 +820,128 @@ POLICY (LÅST):
       return opts.includes(key);
     }
     return true;
+  }
+
+  // All info helpers (XSS-safe)
+  function getItemId(it){
+    if(!it) return "";
+    if(it.kind === "question") return String(it.questionId || "");
+    if(it.kind === "task") return String(it.taskId || "");
+    return "";
+  }
+  function getReqLabel(it){
+    if(!it) return "—";
+    if(it.kind === "question") return (it.requiresAnswer !== false) ? "Kräver svar" : "Svar valfritt";
+    if(it.kind === "task") return (it.requiresDone !== false) ? "Kräver klar (done)" : "Klar valfritt";
+    if(it.kind === "document") return (it.requiresSign !== false) ? "Kräver signering" : "Signering valfritt";
+    return "—";
+  }
+
+  function setDetailFacitPillFor(it){
+    if(!it || it.kind !== "question"){
+      detailFacitPill.style.display = "none";
+      detailFacitPill.textContent = "Facit: —";
+      detailFacitPill.className = "qaPill";
+      return;
+    }
+    const ok = facitOkForQuestion(it);
+    detailFacitPill.style.display = "inline-flex";
+    detailFacitPill.textContent = ok ? "Facit: OK" : "Facit: Saknas";
+    detailFacitPill.className = "qaPill " + (ok ? "ok" : "bad");
+  }
+
+  function renderAllInfo(it, index){
+    // Detta är en ren visning (sammanfattning) av data som redan finns i AO-0XX_BLOCKS_V1.
+    // XSS: Vi sätter alltid via textContent.
+    detailType.textContent = itemKindLabel(it);
+    detailIndex.textContent = "#" + String((index ?? 0) + 1);
+    detailId.textContent = getItemId(it) || "—";
+    detailReq.textContent = getReqLabel(it);
+
+    // answerType/Meta varierar per item
+    if(it.kind === "question"){
+      detailAnswerType.textContent = (String(it.answerType || "text") === "choice") ? "Val" : "Text";
+      const opts = Array.isArray(it.options) ? it.options.map(x => String(x||"").trim()).filter(Boolean) : [];
+      detailMeta.textContent = (String(it.answerType || "text") === "choice")
+        ? ("Alternativ: " + String(opts.length))
+        : "—";
+
+      // options (valfråga)
+      if(String(it.answerType || "text") === "choice"){
+        detailOptionsWrap.style.display = "block";
+        // numrera för tydlighet (utan innerHTML)
+        const key = normalizeFacitText(it.answerKey);
+        const lines = opts.map((o, i) => {
+          const mark = (key && o === key) ? " ★" : "";
+          return (String(i+1) + ") " + o + mark);
+        }).join("\n");
+        detailOptions.textContent = lines || "—";
+      }else{
+        detailOptionsWrap.style.display = "none";
+        detailOptions.textContent = "—";
+      }
+
+      // facit
+      detailFacitWrap.style.display = "block";
+      detailFacit.textContent = normalizeFacitText(it.answerKey) || "—";
+      setDetailFacitPillFor(it);
+
+      // scale wrap off
+      detailScaleWrap.style.display = "none";
+      detailScale.textContent = "—";
+    }
+    else if(it.kind === "task"){
+      detailAnswerType.textContent = (String(it.answerType || "checkbox") === "scale") ? "Skala" : "Checkbox";
+
+      if(String(it.answerType || "checkbox") === "scale"){
+        const sc = it.scale || {};
+        const mn = clampInt(sc.min, 1, 10, 1);
+        const mx0 = clampInt(sc.max, 1, 10, 5);
+        const mx = (mx0 < mn) ? mn : mx0;
+        const ml = String(sc.minLabel || "").trim();
+        const xl = String(sc.maxLabel || "").trim();
+
+        detailScaleWrap.style.display = "block";
+        detailScale.textContent =
+          `${mn}–${mx}` +
+          (ml || xl ? `\nLabel min: ${ml || "—"}\nLabel max: ${xl || "—"}` : "");
+
+        detailMeta.textContent = "Skala: " + mn + "–" + mx;
+      }else{
+        detailScaleWrap.style.display = "none";
+        detailScale.textContent = "—";
+        detailMeta.textContent = "—";
+      }
+
+      // question-only wraps off
+      detailOptionsWrap.style.display = "none";
+      detailOptions.textContent = "—";
+      detailFacitWrap.style.display = "none";
+      detailFacit.textContent = "—";
+      setDetailFacitPillFor(null);
+    }
+    else if(it.kind === "document"){
+      detailAnswerType.textContent = "—";
+      detailMeta.textContent = "—";
+
+      detailOptionsWrap.style.display = "none";
+      detailOptions.textContent = "—";
+      detailScaleWrap.style.display = "none";
+      detailScale.textContent = "—";
+      detailFacitWrap.style.display = "none";
+      detailFacit.textContent = "—";
+      setDetailFacitPillFor(null);
+    }
+    else{
+      detailAnswerType.textContent = "—";
+      detailMeta.textContent = "—";
+      detailOptionsWrap.style.display = "none";
+      detailScaleWrap.style.display = "none";
+      detailFacitWrap.style.display = "none";
+      setDetailFacitPillFor(null);
+    }
+
+    detailText.textContent = String(it.text || "").trim() || "—";
   }
 
   // ------------------------------
@@ -939,7 +1155,7 @@ POLICY (LÅST):
           if(uniq.length < 2) reasons.push(`Item #${i+1}: Val-fråga kräver minst 2 alternativ.`);
         }
 
-        // FACIT (hård regel)
+        // FACIT (hård regel) – fail-closed: saknas facit => ingen publicering
         const key = normalizeFacitText(it.answerKey);
         if(!key){
           reasons.push(`Item #${i+1}: Fråga saknar facit.`);
@@ -1187,6 +1403,56 @@ POLICY (LÅST):
     STATE.selectedItemIndex = -1;
   }
 
+  function updateItemActions(){
+    const b = STATE.edit;
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+
+    const items = (b && Array.isArray(b.items)) ? b.items : [];
+    const i = STATE.selectedItemIndex;
+    const ok = (b && i >= 0 && i < items.length);
+
+    btnItemDelete.disabled = !(canWrite && ok);
+    btnItemUp.disabled = !(canWrite && ok && i > 0);
+    btnItemDown.disabled = !(canWrite && ok && i < items.length - 1);
+  }
+
+  function itemMetaLine(it){
+    // Visas i item-rutan: ID + facit-status/options/skala – “all info” snabböversikt
+    const id = getItemId(it);
+    const idTxt = id ? ("ID: " + id) : "ID: —";
+
+    if(it.kind === "question"){
+      const at = String(it.answerType || "text");
+      if(at === "choice"){
+        const opts = Array.isArray(it.options) ? it.options.map(x => String(x||"").trim()).filter(Boolean) : [];
+        const ok = facitOkForQuestion(it);
+        return `${idTxt} • Alt: ${opts.length} • Facit: ${ok ? "OK" : "Saknas"}`;
+      }else{
+        const key = normalizeFacitText(it.answerKey);
+        return `${idTxt} • Facit: ${key ? "OK" : "Saknas"}`;
+      }
+    }
+
+    if(it.kind === "task"){
+      const at = String(it.answerType || "checkbox");
+      if(at === "scale"){
+        const sc = it.scale || {};
+        const mn = clampInt(sc.min, 1, 10, 1);
+        const mx0 = clampInt(sc.max, 1, 10, 5);
+        const mx = (mx0 < mn) ? mn : mx0;
+        return `${idTxt} • Skala: ${mn}–${mx}`;
+      }
+      return `${idTxt} • Checkbox`;
+    }
+
+    if(it.kind === "document"){
+      const rs = (it.requiresSign !== false) ? "Sign: Ja" : "Sign: Nej";
+      return `${idTxt} • ${rs}`;
+    }
+
+    return idTxt;
+  }
+
   function renderItems(){
     clear(itemRows);
 
@@ -1224,6 +1490,7 @@ POLICY (LÅST):
     }
 
     items.forEach((itRaw, idx) => {
+      // Normalisera när vi arbetar med item – bibehåller datakontraktet
       const it = normalizeItem(itRaw);
       items[idx] = it;
 
@@ -1264,8 +1531,13 @@ POLICY (LÅST):
       meta.className = "tiny itemMeta";
       meta.textContent = `#${idx + 1}`;
 
+      const meta2 = document.createElement("div");
+      meta2.className = "itemMeta2";
+      meta2.textContent = itemMetaLine(it);
+
       left.appendChild(title);
       left.appendChild(meta);
+      left.appendChild(meta2);
 
       top.appendChild(left);
       row.appendChild(top);
@@ -1274,6 +1546,12 @@ POLICY (LÅST):
         STATE.selectedItemIndex = idx;
         renderItems();
         showItemEditor(idx);
+
+        // UX: tydligt att “all info” öppnats – scrolla panelen i vy
+        try{
+          itemEditor.scrollIntoView({ behavior: "smooth", block: "start" });
+        }catch{}
+
         updateItemActions();
       }
       row.addEventListener("click", openItem);
@@ -1287,19 +1565,6 @@ POLICY (LÅST):
     updateItemActions();
     if(STATE.selectedItemIndex >= 0) showItemEditor(STATE.selectedItemIndex);
     else itemEditor.style.display = "none";
-  }
-
-  function updateItemActions(){
-    const b = STATE.edit;
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-
-    const items = (b && Array.isArray(b.items)) ? b.items : [];
-    const i = STATE.selectedItemIndex;
-    const ok = (b && i >= 0 && i < items.length);
-
-    btnItemDelete.disabled = !(canWrite && ok);
-    btnItemUp.disabled = !(canWrite && ok && i > 0);
-    btnItemDown.disabled = !(canWrite && ok && i < items.length - 1);
   }
 
   function showEditor(){
@@ -1386,9 +1651,22 @@ POLICY (LÅST):
     qFacitPill.textContent = "Facit: —";
     qFacitPill.className = "qaPill";
     debugPre.textContent = "{}";
+    // All info reset
+    detailType.textContent = "—";
+    detailIndex.textContent = "—";
+    detailId.textContent = "—";
+    detailReq.textContent = "—";
+    detailAnswerType.textContent = "—";
+    detailMeta.textContent = "—";
+    detailText.textContent = "—";
+    detailOptionsWrap.style.display = "none";
+    detailScaleWrap.style.display = "none";
+    detailFacitWrap.style.display = "none";
+    setDetailFacitPillFor(null);
   }
 
   function rebuildFacitChoiceOptions(opts, selected){
+    // XSS-safe: vi bygger option-element, ingen innerHTML
     qFacitChoiceSel.innerHTML = "";
     const o0 = document.createElement("option");
     o0.value = "";
@@ -1427,6 +1705,9 @@ POLICY (LÅST):
 
     itemEditor.style.display = "block";
     itemKindInp.value = itemKindLabel(it);
+
+    // ALL INFO – renderas alltid vid item-val
+    renderAllInfo(it, index);
 
     const isDoc = (it.kind === "document");
     itemTextInp.maxLength = isDoc ? 2000 : 240;
@@ -1480,6 +1761,7 @@ POLICY (LÅST):
     debugPre.textContent = JSON.stringify(it, null, 2);
 
     const canWrite = (!STATE.locked && !isSystemAdmin);
+    // SYSTEM_ADMIN/locked => read-only: editor inputs disabled
     itemTextInp.disabled = !canWrite;
 
     qAnswerSel.disabled = !canWrite;
@@ -1568,8 +1850,11 @@ POLICY (LÅST):
     }
 
     items[i] = normalizeItem(it);
+
+    // Uppdatera UI-pills + debug + ALL INFO direkt så du ser “allt” efter varje ändring
     setFacitPillFor(items[i]);
     debugPre.textContent = JSON.stringify(items[i], null, 2);
+    renderAllInfo(items[i], i);
   }
 
   function markDirty(){ setDirty(true); }
@@ -1647,6 +1932,7 @@ POLICY (LÅST):
     STATE.selectedItemIndex = i - 1;
     markDirty();
     renderItems();
+    showItemEditor(STATE.selectedItemIndex);
   });
 
   btnItemDown.addEventListener("click", () => {
@@ -1661,6 +1947,7 @@ POLICY (LÅST):
     STATE.selectedItemIndex = i + 1;
     markDirty();
     renderItems();
+    showItemEditor(STATE.selectedItemIndex);
   });
 
   btnItemDelete.addEventListener("click", () => {
@@ -1677,6 +1964,8 @@ POLICY (LÅST):
     STATE.selectedItemIndex = Math.min(i, items.length - 1);
     markDirty();
     renderItems();
+    if(STATE.selectedItemIndex >= 0) showItemEditor(STATE.selectedItemIndex);
+    else itemEditor.style.display = "none";
   });
 
   btnAddItem.addEventListener("click", () => {
@@ -1851,25 +2140,28 @@ POLICY (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- NYTT: Facit på question-items via fältet answerKey (sparas i AO-0XX_BLOCKS_V1).
-- NYTT: Publicering kräver facit på alla frågor (fail-closed).
-- UI: Visar Facit: OK/Saknas på frågerader + editorstöd (dropdown för val, textarea för text).
-- Back-compat: läser facit från answerKey/facit/correctAnswer/correctOption m.fl. om de finns.
-- Inga nya storage-keys. Fortsatt XSS-safe rendering.
+- UI: Item-klick visar “All info” (detaljpanel) med full text, ID, krav, svarstyp, options, facit, skala.
+- UI: Item-rader visar meta direkt (ID + Facit OK/Saknas / Alt-count / Skala).
+- Debug: Panels alltid synliga (open by default), fortsatt XSS-safe via textContent.
+- Redigering: Facit kan alltid rättas; fail-closed rensar facit om options inte matchar.
+- Inga nya storage-keys; QA/publicering fortsätter vara låst till AO-0XX_BLOCKS_V1.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Skapa block i admin/tasks.html med en fråga (text + val).
-2) Öppna admin/packages-block.html → välj block → öppna frågan.
-3) Fyll facit (text eller välj facit bland alternativ) → Spara.
-4) Publicera: ska blockas om någon fråga saknar facit.
+1) Öppna admin/packages-block.html → välj ett block.
+2) Klicka på en fråga/uppgift i item-listan → “Detaljer (all info)” ska visa full info + ID + facit-status.
+3) Ändra facit (textfråga: skriv, valfråga: välj) → “Facit: OK/Saknas” ska uppdateras direkt.
+4) Ändra alternativ för valfråga så facit inte matchar → facit ska rensas (fail-closed) och visa “Saknas”.
+5) Spara → ladda om sidan → verifiera att ändringar ligger kvar i AO-0XX_BLOCKS_V1.
+6) Publicera → ska blockas om någon fråga saknar facit.
 ============================================================ -->
 
 <!-- ============================================================
 Risk / edge cases
-- Om äldre frågor saknar facit kommer de kräva komplettering innan publicering (avsiktligt).
-- Om alternativ ändras och facit inte längre matchar rensas facit automatiskt (fail-closed).
+- Stora mängder items kan göra rendering tyngre; meta + all-info ökar DOM lite (men inom rimligt).
+- Legacy-data utan questionId/taskId visas som ID: — (normalisering skapar ID vid spar).
+- SYSTEM_ADMIN: read-only; kan se all info men inte ändra/spara/publicera.
 ============================================================ -->
 
 </body>
