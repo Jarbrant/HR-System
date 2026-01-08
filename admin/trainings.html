@@ -495,13 +495,14 @@ POLICY (LÅST):
 <script>
 /* ============================================================
 AO-TRAININGS-AI-DOCMODE-01 | admin/trainings.html
-PATCH (KOMPAT v1.0):
-- Block sparas med alias-fält för kompatibilitet:
-  * blockId + id
-  * kind + type
-  * text + description
-  * items[] (för läsare som förväntar items)
-- Ingen ny storage-key, endast AO-057_TRAININGS_V1
+PATCH (FACIT-STABIL v1.1):
+- Facit sparas som:
+  * correctOptions (som tidigare, text-match)
+  * correctOptionIndexes (NYTT fält i samma objekt, ingen ny storage-key)
+- Slutar trunkera options vid 40 tecken (trunkering får ske i UI-rendering, inte i datat)
+- normalizeCorrectOptions klarar både strängar och index (bakåt/framåt kompat)
+- items[] för question innehåller även correctOptionIndexes (för automatisk rättning)
+POLICY: Oförändrat (UI-only, inga nya keys, XSS-safe)
 ============================================================ */
 (function(){
   "use strict";
@@ -667,17 +668,80 @@ PATCH (KOMPAT v1.0):
     return out;
   }
 
+  // PATCH: trunkera inte options i data (bara rimlig maxlängd)
   function normalizeOptions(raw){
     const arr = Array.isArray(raw) ? raw : [];
-    return arr.slice(0,10).map(x => String(x||"").trim().slice(0,40));
+    return arr
+      .slice(0,10)
+      .map(x => String(x||"").trim())
+      .map(x => x.replace(/\s+/g, " ").trim())
+      .filter(Boolean)
+      .map(x => x.slice(0,120)); // tillåter längre än 40 så facit inte “kapas”
   }
 
-  function normalizeCorrectOptions(raw, options){
+  function isIntLike(x){
+    if(typeof x === "number" && Number.isFinite(x)) return true;
+    if(typeof x === "string" && x.trim() && String(parseInt(x,10)) === x.trim()) return true;
+    return false;
+  }
+
+  function normalizeCorrectIndexes(raw, options){
+    const opts = Array.isArray(options) ? options : [];
+    const max = opts.length;
+    const out = [];
+    (Array.isArray(raw) ? raw : []).forEach(v => {
+      if(!isIntLike(v)) return;
+      const i = clampInt(v, 0, 9999, 0);
+      if(i < 0 || i >= max) return;
+      if(!out.includes(i)) out.push(i);
+    });
+    return out.slice(0,2);
+  }
+
+  function indexesToOptions(indexes, options){
+    const opts = Array.isArray(options) ? options : [];
+    const idx = Array.isArray(indexes) ? indexes : [];
+    const out = [];
+    idx.forEach(i => {
+      if(typeof i !== "number") return;
+      if(i < 0 || i >= opts.length) return;
+      const v = String(opts[i] || "").trim();
+      if(!v) return;
+      if(!out.includes(v)) out.push(v);
+    });
+    return out.slice(0,2);
+  }
+
+  // PATCH: klarar både correctOptions (strängar) och correctOptionIndexes (index)
+  function normalizeCorrectOptions(rawOptionsOrIdx, options){
     const opts = Array.isArray(options) ? options : [];
     const set = new Set(opts.map(x => String(x || "").trim()));
-    const cleaned = dedupeStrings(Array.isArray(raw) ? raw : []).slice(0, 20);
+    const rawArr = Array.isArray(rawOptionsOrIdx) ? rawOptionsOrIdx : [];
+
+    // om det ser ut som index-lista → mappa till options
+    const looksIdx = rawArr.length && rawArr.every(v => isIntLike(v));
+    if(looksIdx){
+      const idx = normalizeCorrectIndexes(rawArr, opts);
+      return indexesToOptions(idx, opts);
+    }
+
+    // annars treat som strängar
+    const cleaned = dedupeStrings(rawArr).slice(0, 20);
     const filtered = cleaned.filter(v => set.has(v));
     return filtered.slice(0,2);
+  }
+
+  function computeCorrectIndexesFromOptions(correctOptions, options){
+    const opts = Array.isArray(options) ? options : [];
+    const corr = Array.isArray(correctOptions) ? correctOptions : [];
+    const out = [];
+    corr.forEach(v => {
+      const s = String(v||"").trim();
+      if(!s) return;
+      const idx = opts.indexOf(s);
+      if(idx >= 0 && !out.includes(idx)) out.push(idx);
+    });
+    return out.slice(0,2);
   }
 
   function isObj(x){ return !!x && typeof x === "object" && !Array.isArray(x); }
@@ -689,7 +753,7 @@ PATCH (KOMPAT v1.0):
   }
 
   // --- data model normalization (backward tolerant) ---
-  // KOMPAT: block får alias-fält + items[]
+  // KOMPAT: block får alias-fält + items[] + facit-index
   function normalizeBlock(raw){
     const b = isObj(raw) ? raw : {};
 
@@ -721,21 +785,35 @@ PATCH (KOMPAT v1.0):
     const scaleMax = (scaleMax0 < scaleMin) ? scaleMin : scaleMax0;
 
     const options0 = normalizeOptions(b.options);
+
+    // PATCH: stöd för correctOptionIndexes också
     let correctOptions = [];
+    let correctOptionIndexes = [];
+
     if(kind === "question" && questionAnswer === "choice"){
-      correctOptions = normalizeCorrectOptions(b.correctOptions, options0);
+      // normalisera från whichever exists
+      const fromText = normalizeCorrectOptions(b.correctOptions, options0);
+      const fromIdx = indexesToOptions(normalizeCorrectIndexes(b.correctOptionIndexes, options0), options0);
+
+      // union (max 2) men stabil ordning: text först, sen idx
+      const merged = [];
+      fromText.forEach(x => { if(!merged.includes(x)) merged.push(x); });
+      fromIdx.forEach(x => { if(!merged.includes(x)) merged.push(x); });
+      correctOptions = merged.slice(0,2);
+
+      correctOptionIndexes = computeCorrectIndexesFromOptions(correctOptions, options0);
     }else{
       correctOptions = [];
+      correctOptionIndexes = [];
     }
+
     const finalOptions = (kind === "question" && questionAnswer === "choice") ? options0 : [];
     if(kind === "question" && questionAnswer !== "choice"){
       correctOptions = [];
+      correctOptionIndexes = [];
     }
 
     // KOMPAT items[] (för sidor som läser items)
-    // - info/document => 1 item
-    // - task/question => 1 item
-    // - both => 2 items (task + question)
     const items = [];
     if(kind === "both"){
       items.push({
@@ -758,7 +836,8 @@ PATCH (KOMPAT v1.0):
         description: text,
         questionAnswer: "text",
         options: [],
-        correctOptions: []
+        correctOptions: [],
+        correctOptionIndexes: []
       });
     }else if(kind === "task"){
       items.push({
@@ -782,7 +861,8 @@ PATCH (KOMPAT v1.0):
         description: text,
         questionAnswer,
         options: finalOptions,
-        correctOptions
+        correctOptions,
+        correctOptionIndexes
       });
     }else{
       items.push({
@@ -795,7 +875,6 @@ PATCH (KOMPAT v1.0):
       });
     }
 
-    // returnera block med alias
     return {
       // primärt
       blockId,
@@ -817,6 +896,7 @@ PATCH (KOMPAT v1.0):
       scaleMaxLabel: String(b.scaleMaxLabel || "").slice(0,40),
       options: finalOptions,
       correctOptions,
+      correctOptionIndexes,
 
       // kompat-läsning
       items
@@ -1105,7 +1185,6 @@ PATCH (KOMPAT v1.0):
       block.description = String(block.text || "").slice(0, (block.kind==="document")?2000:240);
       setDirty(true);
       t.textContent = block.title ? block.title : "Namnlöst block";
-      // håll items i sync (kompat)
       block.items = normalizeBlock(block).items;
     });
     lblTitle.appendChild(inTitle);
@@ -1218,11 +1297,13 @@ PATCH (KOMPAT v1.0):
           if(block.questionAnswer !== "choice"){
             block.options = [];
             block.correctOptions = [];
+            block.correctOptionIndexes = [];
           }else{
             if(!Array.isArray(block.options) || block.options.length === 0){
               block.options = ["", "", ""];
             }
             if(!Array.isArray(block.correctOptions)) block.correctOptions = [];
+            if(!Array.isArray(block.correctOptionIndexes)) block.correctOptionIndexes = [];
           }
           setDirty(true);
           renderBlocks();
@@ -1238,18 +1319,24 @@ PATCH (KOMPAT v1.0):
         opt.appendChild(h); opt.appendChild(ht);
 
         const optArea = document.createElement("textarea");
-        optArea.maxLength = 500;
+        optArea.maxLength = 1500;
         optArea.value = (Array.isArray(block.options) ? block.options : []).join("\n");
         optArea.placeholder = "Skriv ett alternativ per rad…";
         optArea.addEventListener("input", () => {
           const lines = String(optArea.value || "").split("\n").map(s => s.trim());
-          const cleaned = lines.filter(v => v.length > 0).slice(0,10).map(x => x.slice(0,40));
+          const cleaned = lines
+            .map(v => v.replace(/\s+/g, " ").trim())
+            .filter(v => v.length > 0)
+            .slice(0,10)
+            .map(x => x.slice(0,120)); // PATCH: längre än 40 så facit inte kapas
+
           block.options = cleaned;
-          if(Array.isArray(block.correctOptions)){
-            block.correctOptions = normalizeCorrectOptions(block.correctOptions, block.options);
-          }else{
-            block.correctOptions = [];
-          }
+
+          // håll både correctOptions + index i sync
+          const nextCorr = normalizeCorrectOptions(block.correctOptions, block.options);
+          block.correctOptions = nextCorr;
+          block.correctOptionIndexes = computeCorrectIndexesFromOptions(block.correctOptions, block.options);
+
           setDirty(true);
           block.items = normalizeBlock(block).items;
         });
@@ -1261,7 +1348,7 @@ PATCH (KOMPAT v1.0):
         const ch = document.createElement("h3"); ch.textContent = "Rätt svar";
         const cht = document.createElement("div");
         cht.className = "tiny";
-        cht.textContent = "Markera max 2 korrekta. Kräver att alternativet finns i listan ovan.";
+        cht.textContent = "Markera max 2 korrekta. (Sparas som text + index för stabil automatisk rättning.)";
         corr.appendChild(ch);
         corr.appendChild(cht);
 
@@ -1272,9 +1359,15 @@ PATCH (KOMPAT v1.0):
         corr.appendChild(corrHint);
 
         const optsNow = Array.isArray(block.options) ? block.options : [];
-        const current = Array.isArray(block.correctOptions) ? block.correctOptions.slice() : [];
-        const safeCurrent = normalizeCorrectOptions(current, optsNow);
-        block.correctOptions = safeCurrent;
+
+        // PATCH: ta hänsyn till att facit kan ligga i index
+        const fromIdx = indexesToOptions(normalizeCorrectIndexes(block.correctOptionIndexes, optsNow), optsNow);
+        const fromTxt = normalizeCorrectOptions(block.correctOptions, optsNow);
+        const merged = [];
+        fromTxt.forEach(x => { if(!merged.includes(x)) merged.push(x); });
+        fromIdx.forEach(x => { if(!merged.includes(x)) merged.push(x); });
+        block.correctOptions = merged.slice(0,2);
+        block.correctOptionIndexes = computeCorrectIndexesFromOptions(block.correctOptions, optsNow);
 
         const list = document.createElement("div");
         list.style.display = "flex";
@@ -1307,8 +1400,7 @@ PATCH (KOMPAT v1.0):
               next = normalizeCorrectOptions(next, optsNow);
 
               if(cb.checked){
-                if(next.includes(optVal)){
-                }else{
+                if(!next.includes(optVal)){
                   if(next.length >= 2){
                     cb.checked = false;
                     corrHint.style.display = "block";
@@ -1323,6 +1415,8 @@ PATCH (KOMPAT v1.0):
 
               corrHint.style.display = "none";
               block.correctOptions = normalizeCorrectOptions(next, optsNow);
+              block.correctOptionIndexes = computeCorrectIndexesFromOptions(block.correctOptions, optsNow);
+
               setDirty(true);
               block.items = normalizeBlock(block).items;
             });
@@ -1554,7 +1648,7 @@ PATCH (KOMPAT v1.0):
       t.status = desired;
     }
 
-    // normalize block inkl kompat-alias + items
+    // normalize block inkl kompat-alias + items + facit-index
     t.blocks = (Array.isArray(t.blocks) ? t.blocks : []).map(normalizeBlock);
     t.items = t.blocks; // kompat
 
@@ -1753,23 +1847,27 @@ PATCH (KOMPAT v1.0):
       scaleMin: 1,
       scaleMax: 5,
       options: [],
-      correctOptions: []
+      correctOptions: [],
+      correctOptionIndexes: []
     };
 
     if(k === "question"){
       base.questionAnswer = "choice";
       base.options = ["", "", ""];
       base.correctOptions = [];
+      base.correctOptionIndexes = [];
     }
     if(k === "both"){
       base.questionAnswer = "text";
       base.options = [];
       base.correctOptions = [];
+      base.correctOptionIndexes = [];
     }
     if(k === "document"){
       base.questionAnswer = "text";
       base.options = [];
       base.correctOptions = [];
+      base.correctOptionIndexes = [];
     }
 
     STATE.edit.blocks.push(normalizeBlock(base));
@@ -1786,7 +1884,7 @@ PATCH (KOMPAT v1.0):
     }
     STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"info", title:"Information", text:"Kort info om utbildningen och vad som förväntas." }));
     STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"task", title:"Uppgift", text:"Gör uppgiften och markera när du är klar.", taskAnswer:"checkbox" }));
-    STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"question", title:"Fråga", text:"Svara kort.", questionAnswer:"choice", options:["", "", ""], correctOptions:[] }));
+    STATE.edit.blocks.push(normalizeBlock({ blockId: genId("blk"), kind:"question", title:"Fråga", text:"Svara kort.", questionAnswer:"choice", options:["", "", ""], correctOptions:[], correctOptionIndexes:[] }));
     STATE.edit.items = STATE.edit.blocks;
     setDirty(true);
     renderBlocks();
@@ -2008,10 +2106,12 @@ PATCH (KOMPAT v1.0):
 
 <!-- ============================================================
 Ändringslogg (AO-TRAININGS-AI-DOCMODE-01) ≤ 8 rader
-- PATCH: Block sparas kompatibelt (id/type/description + items[]) utan ny storage-key
-- Oförändrat: publish-regel, XSS-regler, ADMIN-only och fail-closed
+- PATCH: Facit sparas stabilt: correctOptions + correctOptionIndexes (ingen ny storage-key)
+- PATCH: Slutar trunkera options i data (förhindrar att facit/text inte matchar)
+- PATCH: normalizeCorrectOptions stödjer både strängar och index
+- KOMPAT: items[] för question innehåller nu även correctOptionIndexes
 Test:
-- Skapa question-block med val + rätt svar → Spara → kontrollera AO-057_TRAININGS_V1 att block har options+correctOptions samt alias och items
+- Skapa choice-fråga med långa alternativ + markera rätt → Spara → kontrollera AO-057_TRAININGS_V1 att block har options + correctOptions + correctOptionIndexes samt i items[]
 ============================================================ -->
 </body>
 </html>
