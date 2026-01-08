@@ -3,12 +3,12 @@ AO-BLOCK-PIPELINE-01 (MASTER) | BLOCK 2/5 | FIL-ID: admin/packages-block.html
 Projekt: HR-System
 Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
 
-NYTT i BLOCK 2/5:
-- Kopplar sidan till Block-bank: AO-0XX_BLOCKS_V1 (source of truth för block)
-- Lista/öppna block (draft/published)
-- Redigera block-metadata + items (document/question/task)
-- Publicera (draft → published) med hård validering (fail-closed)
-- Fail-closed vid korrupt block-bank (låser Save/Publish)
+NYTT i denna patch:
+- Kvalitetssäkring av frågor: Facit lagras på question-items (answerKey)
+- Publicering (fail-closed): alla frågor måste ha facit
+  * Text-fråga: facit = fri text
+  * Val-fråga: facit måste matcha ett av alternativen
+- UI: visar “Facit: OK / Saknas” per fråga + tydlig kontroll i item-editor
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -189,6 +189,11 @@ POLICY (LÅST):
     .itemTop{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
     .itemTitle{ font-weight: 950; line-height:1.2; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
     .itemMeta{ margin-top:6px; }
+
+    .qaLine{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px; }
+    .qaPill{ font-size:.82rem; padding:2px 8px; border-radius:999px; border:1px solid var(--line); background:#fff; color:var(--muted); }
+    .qaPill.ok{ background: rgba(167,243,208,.16); border-color: rgba(16,185,129,.26); color:#065f46; }
+    .qaPill.bad{ background: rgba(254,242,242,.85); border-color: rgba(239,68,68,.30); color:#7f1d1d; }
   </style>
 </head>
 
@@ -379,12 +384,29 @@ POLICY (LÅST):
                   <textarea id="qOptionsInp" maxlength="500" placeholder="Skriv ett alternativ per rad…"></textarea>
                 </label>
 
+                <div id="qFacitChoiceWrap" style="margin-top:10px; display:none;">
+                  <label>
+                    Facit (måste väljas)
+                    <select id="qFacitChoiceSel"></select>
+                  </label>
+                </div>
+
+                <div id="qFacitTextWrap" style="margin-top:10px; display:none;">
+                  <label>
+                    Facit (fri text)
+                    <textarea id="qFacitTextInp" maxlength="500" placeholder="Skriv facit/korrekt svar…"></textarea>
+                  </label>
+                </div>
+
+                <div class="qaLine">
+                  <span class="qaPill" id="qFacitPill">Facit: —</span>
+                  <span class="tiny" id="qHint">Val kräver minst 2 alternativ.</span>
+                </div>
+
                 <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
                   <input id="qReqInp" type="checkbox" />
                   <span>Krver svar</span>
                 </label>
-
-                <div class="tiny" id="qHint" style="margin-top:6px;">Val kräver minst 2 alternativ.</div>
               </div>
 
               <!-- Task -->
@@ -511,6 +533,11 @@ POLICY (LÅST):
   const qOptionsInp = $("#qOptionsInp");
   const qReqInp = $("#qReqInp");
   const qHint = $("#qHint");
+  const qFacitChoiceWrap = $("#qFacitChoiceWrap");
+  const qFacitChoiceSel = $("#qFacitChoiceSel");
+  const qFacitTextWrap = $("#qFacitTextWrap");
+  const qFacitTextInp = $("#qFacitTextInp");
+  const qFacitPill = $("#qFacitPill");
 
   const tWrap = $("#tWrap");
   const tAnswerSel = $("#tAnswerSel");
@@ -685,10 +712,24 @@ POLICY (LÅST):
     return "Item";
   }
 
+  function normalizeFacitText(v){
+    return String(v ?? "").replace(/\s+/g," ").trim().slice(0, 500);
+  }
+
+  function facitOkForQuestion(it){
+    if(!it || it.kind !== "question") return true;
+    const at = String(it.answerType || "text");
+    const key = normalizeFacitText(it.answerKey);
+    if(!key) return false;
+    if(at === "choice"){
+      const opts = Array.isArray(it.options) ? it.options.map(o => String(o||"").trim()) : [];
+      return opts.includes(key);
+    }
+    return true;
+  }
+
   // ------------------------------
   // Back-compat import (kritisk fix)
-  // - Om gamla blocks saknar .items men har t.ex. questions/tasks/documents/content eller rawText
-  // - Så konverteras de till nya items[] här.
   // ------------------------------
   function parseLegacyLinesToItems(text){
     const out = [];
@@ -704,7 +745,7 @@ POLICY (LÅST):
       }
       if(up.startsWith("QT:")){
         const t = line.slice(3).trim();
-        out.push({ kind:"question", questionId: genId("q"), text: t, answerType:"text", options:[], requiresAnswer:true });
+        out.push({ kind:"question", questionId: genId("q"), text: t, answerType:"text", options:[], requiresAnswer:true, answerKey:"" });
         continue;
       }
       if(up.startsWith("QC:")){
@@ -715,7 +756,7 @@ POLICY (LÅST):
         const opts = parts.slice(1).map(s => s.slice(0,60)).filter(Boolean);
         const uniq = [];
         for(const o of opts){ if(o && !uniq.includes(o)) uniq.push(o); }
-        out.push({ kind:"question", questionId: genId("q"), text: qText, answerType:"choice", options: uniq.slice(0,10), requiresAnswer:true });
+        out.push({ kind:"question", questionId: genId("q"), text: qText, answerType:"choice", options: uniq.slice(0,10), requiresAnswer:true, answerKey:"" });
         continue;
       }
       if(up.startsWith("TC:")){
@@ -745,7 +786,6 @@ POLICY (LÅST):
 
   function normalizeItem(raw){
     const it = (raw && typeof raw === "object") ? raw : {};
-    // Back-compat: vissa gamla versioner kan ha "type" istället för "kind"
     const kind = String(it.kind || it.type || "").trim();
 
     if(kind === "document"){
@@ -763,13 +803,19 @@ POLICY (LÅST):
         : (Array.isArray(it.choices)
             ? it.choices.slice(0,10).map(x => String(x||"").trim().slice(0,60)).filter(Boolean)
             : []);
+
+      const answerKey = normalizeFacitText(
+        it.answerKey ?? it.facit ?? it.correctAnswer ?? it.correct ?? it.correctOption ?? it.solution ?? ""
+      );
+
       return {
         kind: "question",
         questionId: String(it.questionId || it.id || genId("q")),
         text: String(it.text || it.question || it.prompt || "").slice(0, 240),
         answerType,
         options: (answerType === "choice") ? options : [],
-        requiresAnswer: (it.requiresAnswer !== false && it.required !== false)
+        requiresAnswer: (it.requiresAnswer !== false && it.required !== false),
+        answerKey
       };
     }
 
@@ -797,7 +843,6 @@ POLICY (LÅST):
       };
     }
 
-    // fail-closed: unknown -> safe placeholder item (still editable)
     return {
       kind: "document",
       text: "Okänd item-typ (normaliserad till dokument).",
@@ -808,18 +853,14 @@ POLICY (LÅST):
   function normalizeBlock(raw){
     const b = (raw && typeof raw === "object") ? raw : {};
 
-    // 1) Nya formen: b.items[]
     let itemsRaw = Array.isArray(b.items) ? b.items : null;
 
-    // 2) Legacy: separat arrays
     if(!itemsRaw){
       const legacy = [];
 
-      // documents
       if(Array.isArray(b.documents)){
         b.documents.forEach(d => legacy.push({ kind:"document", text: d?.text ?? d?.body ?? "", requiresSign: !!(d?.requiresSign ?? true) }));
       }
-      // questions
       if(Array.isArray(b.questions)){
         b.questions.forEach(q => legacy.push({
           kind:"question",
@@ -827,10 +868,10 @@ POLICY (LÅST):
           text: q?.text ?? q?.question ?? q?.prompt ?? "",
           answerType: (q?.answerType === "choice" || q?.mode === "choice") ? "choice" : "text",
           options: q?.options ?? q?.choices ?? [],
-          requiresAnswer: (q?.requiresAnswer !== false && q?.required !== false)
+          requiresAnswer: (q?.requiresAnswer !== false && q?.required !== false),
+          answerKey: q?.answerKey ?? q?.facit ?? q?.correctAnswer ?? q?.correctOption ?? ""
         }));
       }
-      // tasks
       if(Array.isArray(b.tasks)){
         b.tasks.forEach(t => legacy.push({
           kind:"task",
@@ -842,7 +883,6 @@ POLICY (LÅST):
         }));
       }
 
-      // content[] (vanlig legacy)
       if(Array.isArray(b.content)){
         b.content.forEach(x => legacy.push(x));
       }
@@ -850,7 +890,6 @@ POLICY (LÅST):
       if(legacy.length) itemsRaw = legacy;
     }
 
-    // 3) Legacy: rawText/itemsText/lines som text (DOC:/QT:/QC:/TC:/TS:)
     if(!itemsRaw){
       const txt = (b.rawText || b.itemsText || b.linesText || b.bodyText || b.blockText || "");
       if(isText(txt) && String(txt).trim()){
@@ -859,7 +898,6 @@ POLICY (LÅST):
       }
     }
 
-    // 4) Default
     const items = Array.isArray(itemsRaw) ? itemsRaw.map(normalizeItem).slice(0, 200) : [];
 
     return {
@@ -886,7 +924,8 @@ POLICY (LÅST):
     const items = Array.isArray(block?.items) ? block.items : [];
     if(items.length < 1) reasons.push("Minst 1 item krävs.");
 
-    items.forEach((it, i) => {
+    items.forEach((it0, i) => {
+      const it = normalizeItem(it0);
       const k = String(it?.kind || "");
       const tx = String(it?.text || "").trim();
       if(!tx) reasons.push(`Item #${i+1}: Text saknas.`);
@@ -894,10 +933,21 @@ POLICY (LÅST):
       if(k === "question"){
         const at = String(it?.answerType || "text");
         if(at === "choice"){
-          const opts = Array.isArray(it?.options) ? it.options : [];
+          const opts0 = Array.isArray(it?.options) ? it.options : [];
           const uniq = [];
-          opts.forEach(o => { const s = String(o||"").trim(); if(s && !uniq.includes(s)) uniq.push(s); });
+          opts0.forEach(o => { const s = String(o||"").trim(); if(s && !uniq.includes(s)) uniq.push(s); });
           if(uniq.length < 2) reasons.push(`Item #${i+1}: Val-fråga kräver minst 2 alternativ.`);
+        }
+
+        // FACIT (hård regel)
+        const key = normalizeFacitText(it.answerKey);
+        if(!key){
+          reasons.push(`Item #${i+1}: Fråga saknar facit.`);
+        }else if(at === "choice"){
+          const opts = Array.isArray(it.options) ? it.options.map(x => String(x||"").trim()) : [];
+          if(!opts.includes(key)){
+            reasons.push(`Item #${i+1}: Facit måste matcha ett av alternativen.`);
+          }
         }
       }
 
@@ -924,8 +974,8 @@ POLICY (LÅST):
     all: [],
     visible: [],
     selectedId: "",
-    edit: null,          // normalized block (working copy)
-    rawSelected: null,   // raw block from storage for debug
+    edit: null,
+    rawSelected: null,
     selectedItemIndex: -1,
     dirty: false
   };
@@ -1029,7 +1079,6 @@ POLICY (LÅST):
     }
     if(q) out = out.filter(b => blockMatches(b, q));
 
-    // sort: draft first, newest first within status
     out.sort((a,b) => {
       const sa = normStatus(a.status), sb = normStatus(b.status);
       if(sa !== sb) return (sa === "draft") ? -1 : 1;
@@ -1202,6 +1251,15 @@ POLICY (LÅST):
       title.appendChild(tag);
       title.appendChild(tt);
 
+      // QA: facit status på frågor
+      if(it.kind === "question"){
+        const pill = document.createElement("span");
+        const ok = facitOkForQuestion(it);
+        pill.className = "qaPill " + (ok ? "ok" : "bad");
+        pill.textContent = ok ? "Facit: OK" : "Facit: Saknas";
+        title.appendChild(pill);
+      }
+
       const meta = document.createElement("div");
       meta.className = "tiny itemMeta";
       meta.textContent = `#${idx + 1}`;
@@ -1260,7 +1318,6 @@ POLICY (LÅST):
     titleInp.value = b.title || "";
     statusInp.value = blockStatusLabel(b.status);
 
-    // Debug raw
     try{
       debugBlockPre.textContent = JSON.stringify(STATE.rawSelected ?? {}, null, 2);
     }catch{
@@ -1288,7 +1345,6 @@ POLICY (LÅST):
     STATE.selectedId = String(found.blockId);
     STATE.rawSelected = foundRaw;
 
-    // Viktigt: edit blir normaliserad kopia
     STATE.edit = JSON.parse(JSON.stringify(normalizeBlock(foundRaw || found)));
     STATE.selectedItemIndex = -1;
     setMsg("", "");
@@ -1325,7 +1381,39 @@ POLICY (LÅST):
     itemKindInp.value = "";
     itemTextInp.value = "";
     qOptionsInp.value = "";
+    qFacitChoiceSel.innerHTML = "";
+    qFacitTextInp.value = "";
+    qFacitPill.textContent = "Facit: —";
+    qFacitPill.className = "qaPill";
     debugPre.textContent = "{}";
+  }
+
+  function rebuildFacitChoiceOptions(opts, selected){
+    qFacitChoiceSel.innerHTML = "";
+    const o0 = document.createElement("option");
+    o0.value = "";
+    o0.textContent = "— Välj facit —";
+    qFacitChoiceSel.appendChild(o0);
+
+    (opts || []).forEach(o => {
+      const op = document.createElement("option");
+      op.value = o;
+      op.textContent = o;
+      qFacitChoiceSel.appendChild(op);
+    });
+
+    qFacitChoiceSel.value = selected || "";
+  }
+
+  function setFacitPillFor(it){
+    if(!it || it.kind !== "question"){
+      qFacitPill.textContent = "Facit: —";
+      qFacitPill.className = "qaPill";
+      return;
+    }
+    const ok = facitOkForQuestion(it);
+    qFacitPill.textContent = ok ? "Facit: OK" : "Facit: Saknas";
+    qFacitPill.className = "qaPill " + (ok ? "ok" : "bad");
   }
 
   function showItemEditor(index){
@@ -1353,7 +1441,25 @@ POLICY (LÅST):
       qOptionsInp.disabled = (qAnswerSel.value !== "choice");
       qOptionsInp.value = (Array.isArray(it.options) ? it.options : []).join("\n");
       qReqInp.checked = (it.requiresAnswer !== false);
-      qHint.textContent = (qAnswerSel.value === "choice") ? "Val kräver minst 2 alternativ." : "Text-fråga (inga alternativ).";
+
+      const key = normalizeFacitText(it.answerKey);
+
+      if(qAnswerSel.value === "choice"){
+        qHint.textContent = "Val kräver minst 2 alternativ. Facit måste matcha ett alternativ.";
+        qFacitChoiceWrap.style.display = "block";
+        qFacitTextWrap.style.display = "none";
+        const opts = (Array.isArray(it.options) ? it.options : []).map(x => String(x||"").trim()).filter(Boolean);
+        rebuildFacitChoiceOptions(opts, key);
+        qFacitTextInp.value = "";
+      }else{
+        qHint.textContent = "Text-fråga: skriv facit som fri text.";
+        qFacitChoiceWrap.style.display = "none";
+        qFacitTextWrap.style.display = "block";
+        qFacitTextInp.value = key;
+        rebuildFacitChoiceOptions([], "");
+      }
+
+      setFacitPillFor(it);
     }
 
     if(it.kind === "task"){
@@ -1374,11 +1480,13 @@ POLICY (LÅST):
     debugPre.textContent = JSON.stringify(it, null, 2);
 
     const canWrite = (!STATE.locked && !isSystemAdmin);
-    // read-only guard
     itemTextInp.disabled = !canWrite;
+
     qAnswerSel.disabled = !canWrite;
     qOptionsInp.disabled = !canWrite || (qAnswerSel.value !== "choice");
     qReqInp.disabled = !canWrite;
+    qFacitChoiceSel.disabled = !canWrite || (qAnswerSel.value !== "choice");
+    qFacitTextInp.disabled = !canWrite || (qAnswerSel.value !== "text");
 
     tAnswerSel.disabled = !canWrite;
     tMinInp.disabled = !canWrite || (tAnswerSel.value !== "scale");
@@ -1423,8 +1531,16 @@ POLICY (LÅST):
         const uniq = [];
         lines.forEach(x => { const s = x.slice(0,60); if(s && !uniq.includes(s)) uniq.push(s); });
         it.options = uniq.slice(0,10);
+
+        // facit från dropdown (måste matcha option)
+        it.answerKey = normalizeFacitText(qFacitChoiceSel.value || "");
+        // om alternativen ändras och facit ej längre matchar -> rensa (fail-closed)
+        if(it.answerKey && !it.options.includes(it.answerKey)){
+          it.answerKey = "";
+        }
       }else{
         it.options = [];
+        it.answerKey = normalizeFacitText(qFacitTextInp.value || "");
       }
     }
 
@@ -1452,6 +1568,7 @@ POLICY (LÅST):
     }
 
     items[i] = normalizeItem(it);
+    setFacitPillFor(items[i]);
     debugPre.textContent = JSON.stringify(items[i], null, 2);
   }
 
@@ -1461,7 +1578,7 @@ POLICY (LÅST):
   function onBlockFieldChange(){
     applyEditorToBlock();
     markDirty();
-    renderBlockList(); // prevents stale titles in list
+    renderBlockList();
   }
   moduleInp.addEventListener("input", onBlockFieldChange);
   areaInp.addEventListener("input", onBlockFieldChange);
@@ -1479,8 +1596,28 @@ POLICY (LÅST):
     renderItems();
     updatePublishButton();
   });
-  qOptionsInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); renderItems(); updatePublishButton(); });
+  qOptionsInp.addEventListener("input", () => {
+    applyItemEditorToState();
+    // uppdatera facit-lista i UI om val-fråga
+    showItemEditor(STATE.selectedItemIndex);
+    markDirty();
+    renderItems();
+    updatePublishButton();
+  });
   qReqInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); updatePublishButton(); });
+
+  qFacitChoiceSel.addEventListener("change", () => {
+    applyItemEditorToState();
+    markDirty();
+    renderItems();
+    updatePublishButton();
+  });
+  qFacitTextInp.addEventListener("input", () => {
+    applyItemEditorToState();
+    markDirty();
+    renderItems();
+    updatePublishButton();
+  });
 
   tAnswerSel.addEventListener("change", () => {
     applyItemEditorToState();
@@ -1554,9 +1691,9 @@ POLICY (LÅST):
     if(v === "document"){
       it = { kind:"document", text:"", requiresSign:true };
     }else if(v === "question_text"){
-      it = { kind:"question", questionId: genId("q"), text:"", answerType:"text", options:[], requiresAnswer:true };
+      it = { kind:"question", questionId: genId("q"), text:"", answerType:"text", options:[], requiresAnswer:true, answerKey:"" };
     }else if(v === "question_choice"){
-      it = { kind:"question", questionId: genId("q"), text:"", answerType:"choice", options:["Alternativ 1","Alternativ 2"], requiresAnswer:true };
+      it = { kind:"question", questionId: genId("q"), text:"", answerType:"choice", options:["Alternativ 1","Alternativ 2"], requiresAnswer:true, answerKey:"Alternativ 1" };
     }else if(v === "task_checkbox"){
       it = { kind:"task", taskId: genId("t"), text:"", answerType:"checkbox", scale:null, requiresDone:true };
     }else if(v === "task_scale"){
@@ -1580,7 +1717,6 @@ POLICY (LÅST):
     const edit = STATE.edit;
     if(!edit) return { ok:false, err:"Ingen vald block." };
 
-    // re-load bank to avoid writing over corruption introduced after load
     const st = loadBlocksState();
     if(st.corrupt) return { ok:false, err:`Fail-closed: ${BLOCKS_KEY} är korrupt.` };
 
@@ -1661,10 +1797,8 @@ POLICY (LÅST):
     setMsg("", "");
     setDirty(false);
 
-    // Lock checks:
     const lockReasons = [];
 
-    // 1) localStorage write probe (only matters if not SYSTEM_ADMIN)
     if(!isSystemAdmin){
       try{
         const t = "__probe__";
@@ -1675,7 +1809,6 @@ POLICY (LÅST):
       }
     }
 
-    // 2) block-bank corruption gate
     const st = loadBlocksState();
     if(st.corrupt){
       lockReasons.push(`${BLOCKS_KEY} är korrupt (JSON/shape). Åtgärda eller rensa nyckeln innan redigering.`);
@@ -1684,7 +1817,6 @@ POLICY (LÅST):
     STATE.lockReasons = lockReasons;
     applyLockFromState();
 
-    // Load blocks (empty ok)
     if(!st.corrupt){
       STATE.all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
     }else{
@@ -1719,24 +1851,25 @@ POLICY (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- FIX: Back-compat import av items från legacy-former (questions/tasks/documents/content + rawText/itemsText).
-- FIX: Back-compat om AO-0XX_BLOCKS_V1 är wrapper {blocks:[...]} istället för array.
-- Lagt till Debug (block raw) för att se exakt hur blocket ligger i storage.
-- Inga nya storage-keys, fortsatt XSS-safe rendering.
+- NYTT: Facit på question-items via fältet answerKey (sparas i AO-0XX_BLOCKS_V1).
+- NYTT: Publicering kräver facit på alla frågor (fail-closed).
+- UI: Visar Facit: OK/Saknas på frågerader + editorstöd (dropdown för val, textarea för text).
+- Back-compat: läser facit från answerKey/facit/correctAnswer/correctOption m.fl. om de finns.
+- Inga nya storage-keys. Fortsatt XSS-safe rendering.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Logga in som ADMIN/MANAGER → öppna admin/tasks.html → skapa ett block med QT/QC/TC (frågor + uppgifter).
-2) Öppna admin/packages-block.html → välj block → Items ska nu synas.
-3) Om Items fortfarande saknas: öppna “Debug (block raw)” och se om frågorna ligger i annan nyckel/struktur.
-4) Publicera → status=published + verifiedAt/verifiedBy.
+1) Skapa block i admin/tasks.html med en fråga (text + val).
+2) Öppna admin/packages-block.html → välj block → öppna frågan.
+3) Fyll facit (text eller välj facit bland alternativ) → Spara.
+4) Publicera: ska blockas om någon fråga saknar facit.
 ============================================================ -->
 
 <!-- ============================================================
 Risk / edge cases
-- Om tasks.html sparat en helt annan struktur än de vanligaste legacy-fälten, krävs en ny importregel.
-- Ingen realtids-sync mellan flikar (UI-only).
+- Om äldre frågor saknar facit kommer de kräva komplettering innan publicering (avsiktligt).
+- Om alternativ ändras och facit inte längre matchar rensas facit automatiskt (fail-closed).
 ============================================================ -->
 
 </body>
