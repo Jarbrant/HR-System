@@ -754,10 +754,10 @@
     "use strict";
 
     /* ============================================================
-      AO-EMP-HOME-ONBOARD-01 (PATCH v2.2 PROD) | FIL-ID: employee/home.html
+      AO-EMP-HOME-ONBOARD-01 (PATCH v2.3 PROD) | FIL-ID: employee/home.html
       Syfte: Employee – Dagskalender + Post-its + onboarding/paket (read-only)
-      PATCH v2.2:
-      - Handoff till employee/tasks.html får querystring (mode + title) för att landa rätt
+      PATCH v2.3:
+      - buildHrefForItem() är nu auth-säker (ingen global AUTH) + skickar qid/tid när möjligt
       POLICY (LÅST):
       - UI-only • Fail-closed (requireAuth)
       - EMPLOYEE-only
@@ -1724,56 +1724,84 @@
       return "Öppna";
     }
 
-  // PATCH: routing-failsafe – om title matchar en riktig fråga, behandla som question även om kind råkar vara info/unknown
-function titleLooksLikeQuestion(title){
-  const t = normKey(title || "");
-  if(!t) return false;
-  const qs = readQuestions();
-  if(!Array.isArray(qs) || qs.length === 0) return false;
-  return qs.some(q => normKey(getQuestionTitle(q)) === t);
-}
+    /* ===========================
+       ROUTING-FAILSAFE + qid/tid
+       (ingen ny storage key)
+    ============================ */
+    function findQuestionIdByTitle(title){
+      const t = normKey(title || "");
+      if(!t) return "";
+      const qs = readQuestions();
+      if(!Array.isArray(qs) || qs.length === 0) return "";
+      const hit = qs.find(q => normKey(getQuestionTitle(q)) === t);
+      if(!hit) return "";
+      return normStr(getQuestionId(hit));
+    }
 
-function titleLooksLikeTask(title, auth){
-  const t = normKey(title || "");
-  if(!t) return false;
-  const all = readTasksArray();
-  const mineAll = visibleTasksForMe(
-    all,
-    String(auth?.empNo||"").trim(),
-    String(auth?.scopeId||"").trim()
-  );
-  return mineAll.some(x => normKey(getTaskTitle(x)) === t);
-}
+    function titleLooksLikeQuestion(title){
+      return !!findQuestionIdByTitle(title);
+    }
 
-// PATCHED buildHrefForItem
-function buildHrefForItem(item){
-  let kind = kindForItem(item);
-  const title = normStr(item?.title ?? "");
+    function findTaskIdByTitleForAuth(title, auth){
+      const t = normKey(title || "");
+      if(!t) return "";
 
-  // FAILSAFE: fråga slår info/unknown om titel matchar riktig fråga
-  if((kind === "info" || kind === "unknown") && titleLooksLikeQuestion(title)){
-    kind = "question";
-  }
-  // FAILSAFE: unknown → task om titel matchar uppgift
-  else if(kind === "unknown" && AUTH && titleLooksLikeTask(title, AUTH)){
-    kind = "task";
-  }
+      const all = readTasksArray();
+      const mineAll = visibleTasksForMe(
+        all,
+        String(auth?.empNo||"").trim(),
+        String(auth?.scopeId||"").trim()
+      );
+      const hit = mineAll.find(x => normKey(getTaskTitle(x)) === t);
+      if(!hit) return "";
+      return normStr(getTaskId(hit, 0));
+    }
 
-  if(kind === "info") return "./documents.html";
+    function buildHrefForItem(item, auth){
+      let kind = kindForItem(item);
+      const title = normStr(item?.title ?? "");
 
-  if(kind === "task" || kind === "question" || kind === "both"){
-    const qs = [];
-    qs.push("mode=" + encodeURIComponent(kind));
-    if(title) qs.push("title=" + encodeURIComponent(title));
-    const src = normStr(item?.source ?? "");
-    if(src) qs.push("src=" + encodeURIComponent(src));
-    const id = normStr(item?.id ?? "");
-    if(id) qs.push("cid=" + encodeURIComponent(id));
-    return "./tasks.html" + (qs.length ? ("?" + qs.join("&")) : "");
-  }
+      // FAILSAFE: fråga slår info/unknown om titel matchar riktig fråga
+      if((kind === "info" || kind === "unknown") && titleLooksLikeQuestion(title)){
+        kind = "question";
+      }
+      // FAILSAFE: unknown → task om titel matchar uppgift
+      else if(kind === "unknown" && auth){
+        const tidGuess = findTaskIdByTitleForAuth(title, auth);
+        if(tidGuess) kind = "task";
+      }
 
-  return "";
-}
+      if(kind === "info") return "./documents.html";
+
+      if(kind === "task" || kind === "question" || kind === "both"){
+        const qs = [];
+        qs.push("mode=" + encodeURIComponent(kind));
+
+        // Backward compatible: title finns alltid (visning + fallback)
+        if(title) qs.push("title=" + encodeURIComponent(title));
+
+        // Preferera stabila IDs om vi kan (tasks.html kan börja använda dessa)
+        if(kind === "task"){
+          const tid = normStr(item?.taskId ?? item?.tid ?? "") || (auth ? findTaskIdByTitleForAuth(title, auth) : "");
+          if(tid) qs.push("tid=" + encodeURIComponent(tid));
+        } else if(kind === "question" || kind === "both"){
+          const qid = normStr(item?.questionId ?? item?.qid ?? "") || findQuestionIdByTitle(title);
+          if(qid) qs.push("qid=" + encodeURIComponent(qid));
+        }
+
+        // valfritt extra (ingen key): var kom det ifrån
+        const src = normStr(item?.source ?? "");
+        if(src) qs.push("src=" + encodeURIComponent(src));
+
+        // kompat: cid (för äldre tasks.html om den råkar använda den)
+        const cid = normStr(item?.id ?? "");
+        if(cid) qs.push("cid=" + encodeURIComponent(cid));
+
+        return "./tasks.html" + (qs.length ? ("?" + qs.join("&")) : "");
+      }
+
+      return "";
+    }
 
     function makeClickable(el, href){
       if(!href) return;
@@ -1804,7 +1832,7 @@ function buildHrefForItem(item){
       return "S";
     }
 
-    function renderMiniWeek(selected){
+    function renderMiniWeek(selected, auth){
       miniWeek.textContent = "";
       const start = mondayStart(selected);
       const todayISO = toISODate(new Date());
@@ -1843,14 +1871,14 @@ function buildHrefForItem(item){
 
         cell.addEventListener("click", () => {
           selectedDate = localMidnight(d);
-          if (AUTH) render(AUTH);
+          if (auth) render(auth);
         });
         cell.addEventListener("keydown", (e) => {
           const k = e.key;
           if(k === "Enter" || k === " "){
             e.preventDefault();
             selectedDate = localMidnight(d);
-            if (AUTH) render(AUTH);
+            if (auth) render(auth);
           }
         });
 
@@ -1884,7 +1912,7 @@ function buildHrefForItem(item){
     /* ===========================
        Render stacks
     ============================ */
-    function renderTodoStack(container, items, dayISO){
+    function renderTodoStack(container, items, dayISO, auth){
       container.textContent = "";
 
       if(!Array.isArray(items) || items.length === 0){
@@ -1910,7 +1938,7 @@ function buildHrefForItem(item){
       const k = kindForItem(top);
       const bg = cardBgForKind(k);
       const tag = labelForKind(k);
-      const href = buildHrefForItem(top);
+      const href = buildHrefForItem(top, auth);
 
       const wrap = document.createElement("div");
       wrap.className = "stackWrap";
@@ -2008,7 +2036,7 @@ function buildHrefForItem(item){
         if(!id) return;
         if(items.some(x => String(x.id) === id)){
           parkCard(dayISO, id);
-          if(AUTH) render(AUTH);
+          if(auth) render(auth);
         }
       });
 
@@ -2034,14 +2062,14 @@ function buildHrefForItem(item){
 
         rowEl.addEventListener("click", () => {
           unparkCard(dayISO, it.id);
-          if(AUTH) render(AUTH);
+          if(auth) render(auth);
         });
         rowEl.addEventListener("keydown", (e) => {
           const k = e.key;
           if(k === "Enter" || k === " "){
             e.preventDefault();
             unparkCard(dayISO, it.id);
-            if(AUTH) render(AUTH);
+            if(auth) render(auth);
           }
         });
 
@@ -2053,7 +2081,7 @@ function buildHrefForItem(item){
       container.appendChild(wrap);
     }
 
-    function renderDoneList(container, items){
+    function renderDoneList(container, items, auth){
       container.textContent = "";
 
       if(!Array.isArray(items) || items.length === 0){
@@ -2075,7 +2103,7 @@ function buildHrefForItem(item){
       list.className = "doneList";
 
       for(const it of items){
-        const href2 = buildHrefForItem(it);
+        const href2 = buildHrefForItem(it, auth);
 
         const rowEl = document.createElement("div");
         rowEl.className = "doneRow";
@@ -2165,7 +2193,7 @@ function buildHrefForItem(item){
       dateBig.textContent = fmtBig(selectedDate);
       dateSmall.textContent = fmtSmall(selectedDate);
 
-      renderMiniWeek(selectedDate);
+      renderMiniWeek(selectedDate, auth);
 
       if (!scopeId) {
         voiceLine.textContent = VOICE.UNCLEAR;
@@ -2259,8 +2287,8 @@ function buildHrefForItem(item){
       doneBoardPill.textContent = `${doneItems.length} klart`;
       todoBoardPill.textContent = `${todoItems.length} att göra`;
 
-      renderDoneList(doneGrid, doneItems);
-      renderTodoStack(todoGrid, todoItems, dayISO);
+      renderDoneList(doneGrid, doneItems, auth);
+      renderTodoStack(todoGrid, todoItems, dayISO, auth);
     }
 
     /* ===========================
@@ -2334,12 +2362,12 @@ function buildHrefForItem(item){
 
   <!-- ============================================================
   Ändringslogg (≤ 8 rader)
-  1) PATCH v2.2: Klick på kort/rad skickar nu mode+title till employee/tasks.html (querystring) för att landa rätt.
-  2) Ingen ny storage-key/datamodell. Inga nya writes.
-  3) XSS-säkert: encodeURIComponent för querystring.
+  1) PATCH v2.3: buildHrefForItem() tar auth (ingen global) och skickar mode+title samt qid/tid när möjligt.
+  2) Routing-failsafe: title som matchar riktig fråga prioriteras som question även om kind råkar vara info/unknown.
+  3) Ingen ny storage-key/datamodell. Inga nya writes.
   Test:
-  - Klicka onboarding-fråga → tasks.html?mode=question&title=...
-  - Klicka task → tasks.html?mode=task&title=...
+  - Klicka onboarding-fråga → tasks.html?mode=question&title=...&qid=...
+  - Klicka task → tasks.html?mode=task&title=...&tid=...
   ============================================================ -->
 </body>
 </html>
