@@ -1724,26 +1724,56 @@
       return "Öppna";
     }
 
-    // PATCH v2.2: bygg en länk med kontext till tasks.html
-    function buildHrefForItem(item){
-      const kind = kindForItem(item);
-      if(kind === "info") return "./documents.html";
+  // PATCH: routing-failsafe – om title matchar en riktig fråga, behandla som question även om kind råkar vara info/unknown
+function titleLooksLikeQuestion(title){
+  const t = normKey(title || "");
+  if(!t) return false;
+  const qs = readQuestions();
+  if(!Array.isArray(qs) || qs.length === 0) return false;
+  return qs.some(q => normKey(getQuestionTitle(q)) === t);
+}
 
-      if(kind === "task" || kind === "question" || kind === "both"){
-        const qs = [];
-        qs.push("mode=" + encodeURIComponent(kind));
-        const title = normStr(item?.title ?? "");
-        if(title) qs.push("title=" + encodeURIComponent(title));
-        // valfritt extra (ingen key): var kom det ifrån
-        const src = normStr(item?.source ?? "");
-        if(src) qs.push("src=" + encodeURIComponent(src));
-        const id = normStr(item?.id ?? "");
-        if(id) qs.push("cid=" + encodeURIComponent(id));
-        return "./tasks.html" + (qs.length ? ("?" + qs.join("&")) : "");
-      }
+function titleLooksLikeTask(title, auth){
+  const t = normKey(title || "");
+  if(!t) return false;
+  const all = readTasksArray();
+  const mineAll = visibleTasksForMe(
+    all,
+    String(auth?.empNo||"").trim(),
+    String(auth?.scopeId||"").trim()
+  );
+  return mineAll.some(x => normKey(getTaskTitle(x)) === t);
+}
 
-      return "";
-    }
+// PATCHED buildHrefForItem
+function buildHrefForItem(item){
+  let kind = kindForItem(item);
+  const title = normStr(item?.title ?? "");
+
+  // FAILSAFE: fråga slår info/unknown om titel matchar riktig fråga
+  if((kind === "info" || kind === "unknown") && titleLooksLikeQuestion(title)){
+    kind = "question";
+  }
+  // FAILSAFE: unknown → task om titel matchar uppgift
+  else if(kind === "unknown" && AUTH && titleLooksLikeTask(title, AUTH)){
+    kind = "task";
+  }
+
+  if(kind === "info") return "./documents.html";
+
+  if(kind === "task" || kind === "question" || kind === "both"){
+    const qs = [];
+    qs.push("mode=" + encodeURIComponent(kind));
+    if(title) qs.push("title=" + encodeURIComponent(title));
+    const src = normStr(item?.source ?? "");
+    if(src) qs.push("src=" + encodeURIComponent(src));
+    const id = normStr(item?.id ?? "");
+    if(id) qs.push("cid=" + encodeURIComponent(id));
+    return "./tasks.html" + (qs.length ? ("?" + qs.join("&")) : "");
+  }
+
+  return "";
+}
 
     function makeClickable(el, href){
       if(!href) return;
