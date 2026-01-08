@@ -1,20 +1,22 @@
 <!-- ============================================================
-AO-003 | FIL-ID: UI/UI-01-SKELETON.html
+AO-003 v1.4 (PATCH) + AO-AUTH-PIN-V1 (TEST) | FIL-ID: UI/UI-01-SKELETON.html
 Projekt: HR-System
 Syfte: Minimalt login-steg (stam) + routing via kärnan (AO-002)
 Nivå: UI-only (GitHub Pages) | localStorage-first
-Policy (LÅST):
+
+Policy (LÅST) – uppdaterad för AO-AUTH-PIN-V1:
 - Ingen backend
-- Ingen ny auth-logik (använd AO-002: getAuth/routeAfterLogin/requireAuth)
-- Ingen RBAC/scope/redirect-logik i sidan (endast routeAfterLogin)
-- Fail-closed: ogiltig input eller okänd roll => stanna kvar
-- Inga nya storage-keys/datamodell utan AO (AO-003: återanvänder AO-001_LOGIN_V1)
+- Ingen RBAC/scope/redirect-logik i sidan (endast: kalla HRApp.pinLogin + routeAfterLogin)
+- Fail-closed: ogiltig input, okänd roll eller fel PIN => stanna kvar
+- Storage: återanvänder AO-001_LOGIN_V1 (skapas av core) + seed skriver bara befintliga keys
 - Ingen känslig persondata (endast empNo)
 - URL-parametrar (?err=...) får visas som text men påverkar inte logik
-Senaste sanning: 2025-12-30 (AO-003 v1.2 PATCH-ORDER från PRC)
-Ändringslogg:
-- v1.2: strict login-target match + writeSession boolean + empNo digits-only fail + TTL 8h fast (optional override via config)
-- v1.3 (PATCH): DEV/TEST bootstrap-knapp + ?seed=1 för att skapa minimal org+assignments+roles (inga nya keys) så test-inloggning fungerar (9000/1001/2001/3001)
+
+AO-AUTH-PIN-V1 (TEST):
+- PIN-verifiering + TTL + lockout ligger i AO-002 core (UI-03-APP.js)
+- Denna sida visar PIN-fält och använder HRApp.pinLogin()
+
+Senaste sanning: PATCH på din v1.3 (seed + strict)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -35,9 +37,7 @@ Senaste sanning: 2025-12-30 (AO-003 v1.2 PATCH-ORDER från PRC)
     <p id="errText" class="muted small" style="margin-top:6px;"></p>
 
     <form id="loginForm" novalidate>
-      <label for="empNo">
-        Anställningsnummer (empNo)
-      </label>
+      <label for="empNo">Anställningsnummer (empNo)</label>
       <input
         id="empNo"
         name="empNo"
@@ -49,9 +49,7 @@ Senaste sanning: 2025-12-30 (AO-003 v1.2 PATCH-ORDER från PRC)
         aria-describedby="msg"
       />
 
-      <label for="role" style="margin-top:10px;">
-        Roll
-      </label>
+      <label for="role" style="margin-top:10px;">Roll</label>
       <select id="role" name="role" required aria-describedby="msg">
         <option value="">Välj…</option>
         <option value="EMPLOYEE">EMPLOYEE</option>
@@ -59,6 +57,19 @@ Senaste sanning: 2025-12-30 (AO-003 v1.2 PATCH-ORDER från PRC)
         <option value="ADMIN">ADMIN</option>
         <option value="SYSTEM_ADMIN">SYSTEM_ADMIN</option>
       </select>
+
+      <!-- AO-AUTH-PIN-V1: PIN-fält (TEST). Verifiering görs i HRApp.pinLogin(). -->
+      <label for="pin" style="margin-top:10px;">PIN (test)</label>
+      <input
+        id="pin"
+        name="pin"
+        type="password"
+        inputmode="numeric"
+        autocomplete="current-password"
+        required
+        maxlength="8"
+        aria-describedby="msg"
+      />
 
       <div style="display:flex; gap:10px; margin-top:12px;">
         <button id="btnLogin" type="submit">Logga in</button>
@@ -78,9 +89,9 @@ Senaste sanning: 2025-12-30 (AO-003 v1.2 PATCH-ORDER från PRC)
       <h2 class="tight" style="font-size:1.05rem;">Testdata (för att kunna logga in)</h2>
       <p class="muted small" style="margin-top:6px;">
         Systemet är fail-closed. Om org/assignments saknas fungerar ingen inloggning.
-        Skapa minimal testdata så att du kan testa rollerna:
-        <strong>9000</strong> (SYSTEM_ADMIN), <strong>1001</strong> (ADMIN),
-        <strong>2001</strong> (MANAGER), <strong>3001</strong> (EMPLOYEE).
+        Skapa minimal testdata så att du kan testa rollerna (PIN enligt AO-AUTH-PIN-V1):
+        <strong>9000</strong> (SYSTEM_ADMIN), <strong>3001</strong> (ADMIN),
+        <strong>2001</strong> (MANAGER), <strong>1234</strong> (EMPLOYEE).
       </p>
       <div style="display:flex; gap:10px; margin-top:10px; flex-wrap:wrap;">
         <button id="btnSeed" type="button">Skapa testdata</button>
@@ -100,20 +111,13 @@ Senaste sanning: 2025-12-30 (AO-003 v1.2 PATCH-ORDER från PRC)
 
 <script>
 /* ============================================================
-AO-003 v1.2 | FIL-ID: UI/UI-01-SKELETON.html (inline JS)
-Patch-order (PRC):
-- isLoginTarget() => strikt path-jämförelse (ingen includes)
-- writeSession() => return boolean; blockera redirect vid false
-- empNo => faila om icke-siffror (t.ex. 12-34)
-- TTL: 8h fast, optional override via config
-AO-003 v1.3 (PATCH):
-- TEST-SEED: skapa minimal org/assignments/roles om saknas (inga nya keys)
+AO-003 v1.4 (PATCH) — inline JS
+- Byter “writeSession/buildSession” till HRApp.pinLogin() (AO-AUTH-PIN-V1)
+- Behåller: strict empNo digits-only, strict role allowlist, errText, seed-box
+- Inga egna redirects/regler: vi använder HRApp.routeAfterLogin() efter lyckad pinLogin
 ============================================================ */
 (function () {
   "use strict";
-
-  // STORAGE: återanvänd befintlig nyckel (ingen ny key)
-  const SESSION_KEY = "AO-001_LOGIN_V1";
 
   // STORAGE KEYS (befintliga i projektets AO-plan)
   const KEY_ROLES = "AO-020_ROLES_V1";
@@ -124,11 +128,12 @@ AO-003 v1.3 (PATCH):
   const EMPNO_MAXLEN = 20;
   const EMPNO_RE = /^[0-9]{1,20}$/;
 
-  // TTL: 8h fast, optional override via config (om HR_CONFIG.SESSION_TTL_MS finns)
-  const DEFAULT_TTL_MS = 8 * 60 * 60 * 1000;
+  // PIN: test-läge (vi validerar bara “rimligt” här, verifiering sker i core)
+  const PIN_RE = /^[0-9]{1,8}$/;
 
-  // ORG: minimal seed (kontrakt nära era texter: nodes + root)
-  const ROOT_ID = "ROOT_ID"; // OBS: om er org redan använder annat root-id, ändra här
+  // ORG: minimal seed (root + en enhet)
+  const ROOT_ID = "ROOT_ID";
+  const TEST_UNIT_ID = "org_34eeebca45ba98_19b7e607383"; // din testgren/scopeId
 
   const $ = (s) => document.querySelector(s);
 
@@ -146,8 +151,7 @@ AO-003 v1.3 (PATCH):
     const u = new URL(window.location.href);
     const err = u.searchParams.get("err");
 
-    if (err) el.textContent = "Info: " + String(err);
-    else el.textContent = "";
+    el.textContent = err ? ("Info: " + String(err)) : "";
   }
 
   function initOrFail() {
@@ -155,8 +159,9 @@ AO-003 v1.3 (PATCH):
     const btnClear = $("#btnClear");
     const emp = $("#empNo");
     const role = $("#role");
+    const pin = $("#pin");
 
-    if (!form || !btnClear || !emp || !role) {
+    if (!form || !btnClear || !emp || !role || !pin) {
       setMsg("err", "Systemfel: UI-mall saknar element.");
       return null;
     }
@@ -169,8 +174,12 @@ AO-003 v1.3 (PATCH):
       setMsg("err", "Systemfel: kärnan saknas (HRApp).");
       return null;
     }
+    if (typeof window.HRApp.pinLogin !== "function") {
+      setMsg("err", "Systemfel: PIN-login saknas (AO-AUTH-PIN-V1).");
+      return null;
+    }
 
-    return { form, btnClear, emp, role };
+    return { form, btnClear, emp, role, pin };
   }
 
   function getAllowedRoles() {
@@ -185,7 +194,6 @@ AO-003 v1.3 (PATCH):
   }
 
   function normalizeEmpNo(raw) {
-    // PRC: empNo ska faila om icke-siffror => vi "sanerar" inte, vi validerar strikt
     const s = String(raw || "").trim();
     return s.length > EMPNO_MAXLEN ? s.slice(0, EMPNO_MAXLEN) : s;
   }
@@ -194,88 +202,12 @@ AO-003 v1.3 (PATCH):
     return EMPNO_RE.test(String(empNo || ""));
   }
 
-  function getSessionTtlMs() {
-    // TTL: 8h fast, optional override via config
-    const cfg = window.HR_CONFIG;
-    const ttl = cfg && typeof cfg.SESSION_TTL_MS === "number" ? cfg.SESSION_TTL_MS : null;
-    // GUARD: rimlig override (annars default 8h)
-    if (ttl && ttl > 60 * 1000 && ttl < 30 * 24 * 60 * 60 * 1000) return ttl;
-    return DEFAULT_TTL_MS;
+  function normalizePin(raw) {
+    return String(raw || "").trim().slice(0, 8);
   }
 
-  function buildSession(empNo, role) {
-    const now = Date.now();
-    const ttl = getSessionTtlMs();
-    return {
-      auth: {
-        isAuthed: true,
-        role: String(role || "").trim(),
-        scopeId: "",
-        empNo: String(empNo || "").trim(),
-        issuedAt: now,
-        expiresAt: now + ttl
-      }
-    };
-  }
-
-  function safePathFromUrlString(urlStr) {
-    // Returnerar pathname utan query/hash, defensivt
-    try {
-      const u = new URL(String(urlStr || ""), window.location.origin);
-      return String(u.pathname || "");
-    } catch {
-      return "";
-    }
-  }
-
-  function getLoginPathnameStrict() {
-    try {
-      const u = new URL(window.location.href);
-      const p = String(u.pathname || "/");
-      const idx = p.lastIndexOf("/UI/");
-      if (idx >= 0) return p.slice(0, idx) + "/UI/UI-01-SKELETON.html";
-      const lastSlash = p.lastIndexOf("/");
-      const base = lastSlash >= 0 ? p.slice(0, lastSlash) : "";
-      return base + "/UI-01-SKELETON.html";
-    } catch {
-      return "/UI/UI-01-SKELETON.html";
-    }
-  }
-
-  function isLoginTarget(targetUrl) {
-    // PRC: strikt path-jämförelse (ingen includes).
-    const targetPath = safePathFromUrlString(targetUrl);
-    if (!targetPath) return false;
-    const loginPath = getLoginPathnameStrict();
-    return targetPath === loginPath;
-  }
-
-  function computeTargetOrFail(sessionObj) {
-    const target = window.HRApp.routeAfterLogin(sessionObj);
-    if (!target || typeof target !== "string") {
-      setMsg("err", "Inloggning misslyckades (ingen giltig route).");
-      return "";
-    }
-    return target;
-  }
-
-  function writeSession(sessionObj) {
-    // PRC: return boolean; blockera redirect vid false
-    const raw = JSON.stringify(sessionObj);
-
-    // Primär: sessionStorage
-    try {
-      sessionStorage.setItem(SESSION_KEY, raw);
-      return true;
-    } catch {}
-
-    // Fallback: localStorage
-    try {
-      localStorage.setItem(SESSION_KEY, raw);
-      return true;
-    } catch {}
-
-    return false;
+  function validatePin(pin) {
+    return PIN_RE.test(String(pin || ""));
   }
 
   // ------------------------------
@@ -283,7 +215,6 @@ AO-003 v1.3 (PATCH):
   // ------------------------------
 
   function readAnyStorage(key) {
-    // GUARD: vi läser utan att skapa beroende av en viss lagringsnivå
     const s = sessionStorage.getItem(key);
     if (s) return s;
     const l = localStorage.getItem(key);
@@ -298,50 +229,45 @@ AO-003 v1.3 (PATCH):
   }
 
   function shouldShowSeedBox() {
-    // SCOPE: visa bootstrap om org/assignments saknas eller är korrupt
     const orgOk = hasParsableJson(KEY_ORG);
     const asgOk = hasParsableJson(KEY_ASSIGNMENTS);
     return !(orgOk && asgOk);
   }
 
   function seedMinimalTestData() {
-    // STORAGE: skriver endast befintliga keys. Inga personuppgifter, endast empNo.
+    // SCOPE: skriver endast befintliga keys. Endast empNo (inga mail/persondata).
     const now = Date.now();
 
-    // Roles metadata (AO-006-stil). Låst 4 roller.
     const roles = [
       { role:"EMPLOYEE", label:"Medarbetare", description:"Utför och kvitterar uppgifter.", isSystem:false, updatedAt: now },
       { role:"MANAGER", label:"Enhetschef",   description:"Operativt ansvar inom egen scope-subtree.", isSystem:false, updatedAt: now },
-      { role:"ADMIN",    label:"Admin",       description:"Operativ admin (hela org, enligt policy).", isSystem:true, updatedAt: now },
+      { role:"ADMIN",    label:"Admin",       description:"Operativ admin (inom policy).", isSystem:true, updatedAt: now },
       { role:"SYSTEM_ADMIN", label:"Systemförvaltare", description:"Ren systemförvaltning (maskinrum).", isSystem:true, updatedAt: now }
     ];
 
-    // Org minimal (objektform). Root + en enhet. (Fungerar som minsta möjliga träd.)
     const org = {
       version: 1,
       rootId: ROOT_ID,
       nodes: [
         { id: ROOT_ID, parentId: null, label: "Root", type: "ROOT", updatedAt: now },
-        { id: "UNIT_A", parentId: ROOT_ID, label: "Enhet A", type: "UNIT", updatedAt: now }
+        // Vi använder din testgren som “enhet” i seed för att matcha scopeId du gav.
+        { id: TEST_UNIT_ID, parentId: ROOT_ID, label: "Testgren", type: "UNIT", updatedAt: now }
       ]
     };
 
-    // Assignments (V2): vi skriver en tolerant struktur som ofta accepteras:
-    // - roleId och role (för kompatibilitet)
-    // - empNo som sträng
+    // Assignments (V2): empNo + role + scopeId
     const assignments = [
       { empNo: "9000", roleId: "SYSTEM_ADMIN", role: "SYSTEM_ADMIN", scopeId: ROOT_ID, updatedAt: now },
-      { empNo: "1001", roleId: "ADMIN",        role: "ADMIN",        scopeId: ROOT_ID, updatedAt: now },
-      { empNo: "2001", roleId: "MANAGER",      role: "MANAGER",      scopeId: "UNIT_A", updatedAt: now },
-      { empNo: "3001", roleId: "EMPLOYEE",     role: "EMPLOYEE",     scopeId: "UNIT_A", updatedAt: now }
+      { empNo: "3001", roleId: "ADMIN",        role: "ADMIN",        scopeId: ROOT_ID, updatedAt: now },
+      { empNo: "2001", roleId: "MANAGER",      role: "MANAGER",      scopeId: TEST_UNIT_ID, updatedAt: now },
+      { empNo: "1234", roleId: "EMPLOYEE",     role: "EMPLOYEE",     scopeId: TEST_UNIT_ID, updatedAt: now }
     ];
 
     try { localStorage.setItem(KEY_ROLES, JSON.stringify(roles)); } catch {}
     try { localStorage.setItem(KEY_ORG, JSON.stringify(org)); } catch {}
     try { localStorage.setItem(KEY_ASSIGNMENTS, JSON.stringify(assignments)); } catch {}
 
-    // DEBUG: ge tydlig feedback
-    setMsg("", "Testdata skapad. Logga in med 9000/1001/2001/3001 (välj roll i listan).");
+    setMsg("", "Testdata skapad. Logga in: roll + empNo + PIN (9000/3001/2001/1234).");
   }
 
   function wireSeedUi() {
@@ -350,28 +276,18 @@ AO-003 v1.3 (PATCH):
     const btnSeedReload = $("#btnSeedReload");
     if (!seedBox || !btnSeed || !btnSeedReload) return;
 
-    // Visa endast om det behövs (org/assignments saknas) eller om ?seed=1 triggar
     const u = new URL(window.location.href);
     const wantsSeed = u.searchParams.get("seed") === "1";
 
-    if (wantsSeed || shouldShowSeedBox()) {
-      seedBox.style.display = "block";
-    }
+    if (wantsSeed || shouldShowSeedBox()) seedBox.style.display = "block";
 
-    btnSeed.addEventListener("click", function () {
-      seedMinimalTestData();
-    });
-
+    btnSeed.addEventListener("click", function () { seedMinimalTestData(); });
     btnSeedReload.addEventListener("click", function () {
       seedMinimalTestData();
-      // Ladda om så att andra sidor/guards direkt ser data
       window.location.replace(window.location.pathname);
     });
 
-    // Auto-seed om ?seed=1 (för att komma ur “ingen kan logga in” snabbt)
-    if (wantsSeed) {
-      seedMinimalTestData();
-    }
+    if (wantsSeed) seedMinimalTestData();
   }
 
   // ---- init ----
@@ -386,58 +302,54 @@ AO-003 v1.3 (PATCH):
     return;
   }
 
-  // Wire test-seed UI (patch v1.3)
   wireSeedUi();
 
   dom.btnClear.addEventListener("click", function () {
     dom.emp.value = "";
     dom.role.value = "";
+    dom.pin.value = "";
     setMsg("", "");
   });
 
-  dom.form.addEventListener("submit", function (e) {
+  dom.form.addEventListener("submit", async function (e) {
     e.preventDefault();
     setMsg("", "");
 
     const empNo = normalizeEmpNo(dom.emp.value);
     const role = String(dom.role.value || "").trim();
+    const pin = normalizePin(dom.pin.value);
 
-    if (!empNo) {
-      setMsg("err", "Fyll i anställningsnummer.");
-      return;
-    }
-    if (!validateEmpNo(empNo)) {
-      setMsg("err", "Ogiltigt anställningsnummer (endast siffror).");
-      return;
-    }
-    if (!role) {
-      setMsg("err", "Välj roll.");
-      return;
-    }
-    if (!isValidRole(role, allowedRoles)) {
-      setMsg("err", "Ogiltig roll.");
-      return;
-    }
+    if (!empNo) return setMsg("err", "Fyll i anställningsnummer.");
+    if (!validateEmpNo(empNo)) return setMsg("err", "Ogiltigt anställningsnummer (endast siffror).");
 
-    // Beräkna target först (fail-closed)
-    const sessionObj = buildSession(empNo, role);
-    const target = computeTargetOrFail(sessionObj);
-    if (!target) return;
+    if (!role) return setMsg("err", "Välj roll.");
+    if (!isValidRole(role, allowedRoles)) return setMsg("err", "Ogiltig roll.");
 
-    // Om kärnan skickar tillbaka till login -> skriv inte session
-    if (isLoginTarget(target)) {
-      setMsg("err", "Inloggning nekad (ogiltig route).");
-      return;
+    if (!pin) return setMsg("err", "Fyll i PIN.");
+    if (!validatePin(pin)) return setMsg("err", "Ogiltig PIN (endast siffror).");
+
+    // AO-AUTH-PIN-V1: core verifierar PIN + sätter session + TTL + lockout (fail-closed)
+    setMsg("", "Loggar in…");
+
+    try {
+      const res = await window.HRApp.pinLogin(role, pin, empNo, "");
+      if (!res || res.ok !== true) {
+        const err = res && res.error ? String(res.error) : "AUTH_FAILED";
+        // Kort, rakt: visa kod (ingen extra logik här)
+        return setMsg("err", "Inloggning nekad: " + err);
+      }
+
+      // Route via core (ingen egen routing-logik)
+      const session = window.HRApp.mustGetSession();
+      if (!session) return setMsg("err", "Inloggning misslyckades: session saknas.");
+
+      const target = window.HRApp.routeAfterLogin(session);
+      if (!target || typeof target !== "string") return setMsg("err", "Inloggning misslyckades: ingen route.");
+
+      window.location.replace(target);
+    } catch {
+      setMsg("err", "Inloggning misslyckades (systemfel).");
     }
-
-    // Skriv session; om misslyckas -> visa fel och stoppa redirect
-    const ok = writeSession(sessionObj);
-    if (!ok) {
-      setMsg("err", "Systemfel: kan inte spara session (storage blockerat).");
-      return;
-    }
-
-    window.location.replace(target);
   });
 
 })();
