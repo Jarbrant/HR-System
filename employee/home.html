@@ -754,14 +754,14 @@
     "use strict";
 
     /* ============================================================
-      AO-EMP-HOME-ONBOARD-01 (2/5) | FIL-ID: employee/home.html
+      AO-EMP-HOME-ONBOARD-01 (PATCH v2.2 PROD) | FIL-ID: employee/home.html
       Syfte: Employee – Dagskalender + Post-its + onboarding/paket (read-only)
-      PATCH (v2.1 PROD) – robust data + safe legacy-compat för tasks utan scope
+      PATCH v2.2:
+      - Handoff till employee/tasks.html får querystring (mode + title) för att landa rätt
       POLICY (LÅST):
       - UI-only • Fail-closed (requireAuth)
-      - Auth via HRApp/core (UI-03-APP.js)
       - EMPLOYEE-only
-      - XSS: rendera från storage via textContent/escape (ingen osäker innerHTML)
+      - XSS: rendera via textContent (ingen osäker innerHTML)
       - Inga nya storage-keys/datamodell
       ============================================================ */
 
@@ -844,7 +844,6 @@
     window.addEventListener("unhandledrejection", (e) => {
       try{
         const reason = e && e.reason ? String(e.reason) : "Okänt fel";
-        // Sätt inte stacktrace i UI, bara kort och begripligt
         showGuard("Ett tekniskt fel inträffade. Ladda om sidan och prova igen.\n\nDetalj: " + reason);
       }catch{}
     });
@@ -891,7 +890,6 @@
             return null;
           }
         } else {
-          // Kort, begripligt (ingen intern AO-förvirring)
           showGuard(
             "Fail-closed: saknar scope i session.\n\n" +
             "Åtgärd: Kontrollera System → Access/Assignments (att din empNo har scope) och logga in igen."
@@ -1164,7 +1162,6 @@
     }
 
     function isDirectlyAssignedToMeOnly(t, empNo){
-      // Legacy-säkerhet: om scope saknas så visar vi bara om den är DIREKT empNo (inte ALL/*)
       const a = getAssignedTo(t);
       const me = String(empNo || "").trim();
       if (!me) return false;
@@ -1176,34 +1173,30 @@
         return s === me;
       }
       if (Array.isArray(a)) {
-        // Om array: tillåt bara om arrayn innehåller me OCH inte ser ut som broadcast
         return a.map(x => String(x).trim()).includes(me);
       }
       return false;
     }
 
-    function hasValidScopeMatchOrLegacy(t, myScopeId, t, myEmpNo){
+    function hasValidScopeMatchOrLegacy(t, myScopeId, myEmpNo){
       const mine  = String(myScopeId ?? "").trim();
       if (!mine) return false;
 
       const scope = String(t?.scopeId ?? t?.scope ?? t?.scopeKey ?? t?.nodeId ?? "").trim();
 
-      // Normal (strict)
       if (scope) {
         if (window.HRApp && typeof window.HRApp.sameOrMissingScope === "function") {
-          // Om HRApp har en policy, använd den
           return window.HRApp.sameOrMissingScope(scope, mine);
         }
         return scope === mine;
       }
 
-      // Legacy-compat: scope saknas -> visa endast om direkt tilldelad empNo (inte ALL)
       return isDirectlyAssignedToMeOnly(t, myEmpNo);
     }
 
     function visibleTasksForMe(allTasks, empNo, scopeId){
       return (Array.isArray(allTasks) ? allTasks : []).filter(t => {
-        if (!hasValidScopeMatchOrLegacy(scopeId, scopeId, t, empNo)) return false;
+        if (!hasValidScopeMatchOrLegacy(t, scopeId, empNo)) return false;
         if (!isAssignedToMe(t, empNo)) return false;
         return true;
       });
@@ -1344,7 +1337,7 @@
     function blocksFromPackage(pkg){
       const blocks = Array.isArray(pkg?.blocks) ? pkg.blocks : [];
       return blocks.map((b, i) => {
-        const id = normStr(b?.id) || (`idx_${i}`); // stabilt id, inte Math.random
+        const id = normStr(b?.id) || (`idx_${i}`);
         const kind = normalizeBlockKind(b?.kind);
         const title = normStr(b?.title) || "—";
         const description = normStr(b?.description ?? b?.text ?? "");
@@ -1731,10 +1724,24 @@
       return "Öppna";
     }
 
-    function targetHrefForKind(kind){
-      const k = String(kind||"").toLowerCase().trim();
-      if(k === "task" || k === "both" || k === "question") return "./tasks.html";
-      if(k === "info") return "./documents.html";
+    // PATCH v2.2: bygg en länk med kontext till tasks.html
+    function buildHrefForItem(item){
+      const kind = kindForItem(item);
+      if(kind === "info") return "./documents.html";
+
+      if(kind === "task" || kind === "question" || kind === "both"){
+        const qs = [];
+        qs.push("mode=" + encodeURIComponent(kind));
+        const title = normStr(item?.title ?? "");
+        if(title) qs.push("title=" + encodeURIComponent(title));
+        // valfritt extra (ingen key): var kom det ifrån
+        const src = normStr(item?.source ?? "");
+        if(src) qs.push("src=" + encodeURIComponent(src));
+        const id = normStr(item?.id ?? "");
+        if(id) qs.push("cid=" + encodeURIComponent(id));
+        return "./tasks.html" + (qs.length ? ("?" + qs.join("&")) : "");
+      }
+
       return "";
     }
 
@@ -1873,7 +1880,7 @@
       const k = kindForItem(top);
       const bg = cardBgForKind(k);
       const tag = labelForKind(k);
-      const href = targetHrefForKind(k);
+      const href = buildHrefForItem(top);
 
       const wrap = document.createElement("div");
       wrap.className = "stackWrap";
@@ -2038,8 +2045,7 @@
       list.className = "doneList";
 
       for(const it of items){
-        const kk = kindForItem(it);
-        const href2 = targetHrefForKind(kk);
+        const href2 = buildHrefForItem(it);
 
         const rowEl = document.createElement("div");
         rowEl.className = "doneRow";
@@ -2050,7 +2056,7 @@
 
         const s = document.createElement("div");
         s.className = "s";
-        const lbl = labelForKind(kk);
+        const lbl = labelForKind(kindForItem(it));
         s.textContent = `${lbl}${it.sub ? " • " + String(it.sub) : ""}`;
 
         rowEl.appendChild(t);
@@ -2243,7 +2249,7 @@
         const id = getTaskId(all[i], i);
         if(String(id) !== String(taskId)) continue;
 
-        if (!hasValidScopeMatchOrLegacy(scopeId, scopeId, all[i], empNo)) return false;
+        if (!hasValidScopeMatchOrLegacy(all[i], scopeId, empNo)) return false;
         if (!isAssignedToMe(all[i], empNo)) return false;
 
         all[i] = setDone(all[i]);
@@ -2298,14 +2304,12 @@
 
   <!-- ============================================================
   Ändringslogg (≤ 8 rader)
-  1) PROD: Robust init + fångar unhandledrejection/error → begripligt guard istället för “tyst” fel.
-  2) PROD: Legacy-compat för tasks utan scope: visas endast om direkt tilldelad empNo (inte ALL/*).
-  3) PROD: Paket-block-id stabilt (idx_) i stället för Math.random → minskar “fladdrig” dedupe.
-  4) TYST: Onboarding/paket försöker läsa data men visar inget och skapar ingen förvirring om keys saknas.
-  5) LÅST: Inga nya storage-keys/datamodell; inga nya writes utöver logout/session (som innan).
-  Testnoteringar:
-  - Om tasks saknar scope: de syns nu ändå (endast direkt empNo).
-  - Parkera fungerar fortsatt UI-only.
+  1) PATCH v2.2: Klick på kort/rad skickar nu mode+title till employee/tasks.html (querystring) för att landa rätt.
+  2) Ingen ny storage-key/datamodell. Inga nya writes.
+  3) XSS-säkert: encodeURIComponent för querystring.
+  Test:
+  - Klicka onboarding-fråga → tasks.html?mode=question&title=...
+  - Klicka task → tasks.html?mode=task&title=...
   ============================================================ -->
 </body>
 </html>
