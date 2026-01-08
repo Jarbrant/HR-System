@@ -593,15 +593,14 @@
     "use strict";
 
     /* ============================================================
-      AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v2.0) | FIL-ID: employee/tasks.html
+      AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.9.1) | FIL-ID: employee/tasks.html
       Projekt: HR-System (GitHub Pages / localStorage-first)
       Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only
 
-      PATCH v2.0:
-      - Fix: Paket/block-frågor visas även om scope/tilldelning ligger på block-nivå (inte bara paket-nivå).
-      - Fix: Tolerant läsning av scope + tilldelning från vanliga containerfält (meta/settings/targets).
-      - Fail-closed bibehållen: scope + tilldelning måste finnas (på paket ELLER block) för att frågan ska visas.
-      - Deep-link: ?tab=questions&open=<blockId> öppnar direkt.
+      PATCH v1.9.1:
+      - FIX: Paket-frågor kunde filtreras bort om scope/tilldelning låg på blocknivå istället för paketnivå.
+      - Ny tolerant logik (fortfarande fail-closed): scope/tilldelning kan komma från paket ELLER block.
+      - Inga nya keys/datamodell.
 
       POLICY (LÅST):
       - UI-only • Fail-closed (requireAuth)
@@ -1069,7 +1068,7 @@
 
     /* ===========================
        Packages → Question blocks (READ ONLY)
-       Fixar: “frågor syns på home men inte här”
+       FIX: scope/tilldelning kan ligga på blocknivå
     ============================ */
     function readPackagesRaw(){
       try{
@@ -1093,53 +1092,33 @@
       return String(p?.id ?? p?.packageId ?? p?.uuid ?? ("pkg_" + idx));
     }
     function getPkgTitle(p){
-      return String(p?.title ?? p?.name ?? p?.label ?? p?.meta?.title ?? p?.settings?.title ?? "Paket");
+      return String(p?.title ?? p?.name ?? p?.label ?? "Paket");
     }
-
-    function pickNestedFirstNonEmpty(obj, paths){
-      for (const path of paths){
-        const parts = String(path).split(".");
-        let cur = obj;
-        let ok = true;
-        for (const part of parts){
-          if (!cur || typeof cur !== "object") { ok = false; break; }
-          cur = cur[part];
-        }
-        if (!ok) continue;
-        const s = normStr(cur);
-        if (s) return s;
-      }
-      return "";
-    }
-
     function getPkgScope(p){
-      // tolerate scope in common places
-      return (
-        pickNestedFirstNonEmpty(p, [
-          "scopeId","scope","scopeKey","nodeId","orgNodeId","orgId","unitId","teamId",
-          "meta.scopeId","meta.scope","meta.scopeKey","meta.nodeId",
-          "settings.scopeId","settings.scope","settings.scopeKey",
-          "org.scopeId","org.nodeId","org.unitId",
-          "targets.scopeId","targets.scope"
-        ]) ||
-        ""
+      return normStr(p?.scopeId ?? p?.scope ?? p?.scopeKey ?? p?.nodeId ?? p?.orgNodeId ?? "");
+    }
+    function getPkgAssigned(p){
+      return p?.assignedTo ?? p?.assignees ?? p?.targets ?? p?.employees ?? p?.empNos ?? p?.empNoList ?? p?.toEmpNo ?? p?.empNo ?? p?.assignment ?? p?.assign ?? null;
+    }
+    function isPkgAssignedToMe(p, empNo){
+      const a = getPkgAssigned(p);
+      return isAssignedValueToMe(a, empNo);
+    }
+
+    /* --- NEW: block-level scope & assignment (tolerant) --- */
+    function getBlockScope(b){
+      return normStr(
+        b?.scopeId ?? b?.scope ?? b?.scopeKey ?? b?.nodeId ?? b?.orgNodeId ??
+        b?.meta?.scopeId ?? b?.meta?.scope ?? b?.meta?.nodeId ??
+        b?.context?.scopeId ?? b?.context?.scope ?? ""
       );
     }
-
-    function getPkgAssigned(p){
-      // tolerate variants + nested
-      const direct =
-        p?.assignedTo ?? p?.assignees ?? p?.targets ?? p?.employees ?? p?.empNos ?? p?.empNoList ?? p?.toEmpNo ?? p?.empNo ?? p?.assigned ?? p?.recipients ?? null;
-
-      if (direct != null) return direct;
-
-      const nested =
-        p?.meta?.assignedTo ?? p?.meta?.assignees ?? p?.meta?.targets ?? p?.meta?.employees ?? p?.meta?.empNos ?? p?.meta?.empNoList ??
-        p?.settings?.assignedTo ?? p?.settings?.targets ?? p?.settings?.employees ?? p?.settings?.empNos ??
-        p?.targets?.empNos ?? p?.targets?.employees ?? p?.targets?.list ??
-        null;
-
-      return nested;
+    function getBlockAssigned(b){
+      return b?.assignedTo ?? b?.assignees ?? b?.targets ?? b?.employees ?? b?.empNos ?? b?.empNoList ?? b?.toEmpNo ?? b?.empNo ?? b?.assignment ?? b?.assign ?? b?.meta?.assignedTo ?? b?.meta?.empNos ?? null;
+    }
+    function isBlockAssignedToMe(b, empNo){
+      const a = getBlockAssigned(b);
+      return isAssignedValueToMe(a, empNo);
     }
 
     function isAssignedValueToMe(a, empNo){
@@ -1157,19 +1136,22 @@
         return arr.includes(me);
       }
       if (a && typeof a === "object"){
-        if (a.all === true || a.ALL === true) return true;
-        const list = a.empNos || a.empNoList || a.employees || a.targets || a.items || a.list || null;
+        if (a.all === true || a.ALL === true || a.any === true) return true;
+        const list = a.empNos || a.empNoList || a.employees || a.targets || a.items || a.users || null;
         if (Array.isArray(list)){
           const arr2 = list.map(x => String(x).trim());
           if (arr2.includes("ALL") || arr2.includes("*")) return true;
           return arr2.includes(me);
         }
+        // sometimes: { empNo:"123" }
+        const one = a.empNo || a.employeeNo || a.userId || null;
+        if (one != null){
+          const s = String(one).trim();
+          if (s === "ALL" || s === "*") return true;
+          return s === me;
+        }
       }
       return false;
-    }
-
-    function isPkgAssignedToMe(p, empNo){
-      return isAssignedValueToMe(getPkgAssigned(p), empNo);
     }
 
     function getBlocksFromPackage(p){
@@ -1183,12 +1165,11 @@
       if (Array.isArray(p?.blocks)) p.blocks.forEach(pushIfBlock);
       if (Array.isArray(p?.content?.blocks)) p.content.blocks.forEach(pushIfBlock);
 
-      const mods = p?.modules ?? p?.areas ?? p?.sections ?? p?.groups ?? null;
+      const mods = p?.modules ?? p?.areas ?? p?.sections ?? null;
       if (Array.isArray(mods)){
         for (const m of mods){
           if (Array.isArray(m?.blocks)) m.blocks.forEach(pushIfBlock);
           if (Array.isArray(m?.items)) m.items.forEach(pushIfBlock);
-          if (Array.isArray(m?.content?.blocks)) m.content.blocks.forEach(pushIfBlock);
         }
       }
 
@@ -1214,38 +1195,20 @@
     }
 
     function blockKind(b){
-      const t = String(b?.type ?? b?.kind ?? b?.blockType ?? "").toLowerCase().trim();
-      if (t === "question" || t === "fråga") return "question";
-      if (t === "q") return "question";
-      if (t.startsWith("question")) return "question";
+      const t = String(b?.type ?? b?.kind ?? b?.blockType ?? b?.block_kind ?? "").toLowerCase().trim();
+      // tolerant aliases
+      if (t === "q" || t === "questionnaire" || t === "quiz_question") return "question";
       return t;
     }
     function blockId(b){
-      return normStr(b?.id ?? b?.blockId ?? b?.blockID ?? b?.uuid ?? b?.questionId ?? b?.qid ?? "");
+      return normStr(b?.id ?? b?.blockId ?? b?.blockID ?? b?.uuid ?? b?.meta?.id ?? b?.meta?.blockId ?? "");
     }
     function blockTitle(b){
       return String(b?.title ?? b?.name ?? b?.label ?? b?.questionTitle ?? b?.promptTitle ?? "Fråga");
     }
     function blockBody(b){
-      return String(b?.body ?? b?.text ?? b?.question ?? b?.prompt ?? b?.content ?? b?.description ?? "");
-    }
-
-    function blockScope(b){
-      return (
-        pickNestedFirstNonEmpty(b, [
-          "scopeId","scope","scopeKey","nodeId","orgNodeId",
-          "meta.scopeId","meta.scope","meta.scopeKey",
-          "settings.scopeId","settings.scope"
-        ]) || ""
-      );
-    }
-
-    function blockAssigned(b){
-      return (
-        b?.assignedTo ?? b?.assignees ?? b?.targets ?? b?.employees ?? b?.empNos ?? b?.empNoList ?? b?.toEmpNo ?? b?.empNo ??
-        b?.meta?.assignedTo ?? b?.meta?.targets ?? b?.meta?.employees ?? b?.meta?.empNos ??
-        b?.settings?.assignedTo ?? b?.settings?.targets ?? b?.settings?.employees ?? b?.settings?.empNos ??
-        null
+      return String(
+        b?.body ?? b?.text ?? b?.question ?? b?.prompt ?? b?.content ?? b?.description ?? ""
       );
     }
 
@@ -1271,22 +1234,21 @@
         const pkgAssignedOk = isPkgAssignedToMe(p, me);
 
         const blocks = getBlocksFromPackage(p);
+
         for (const b of blocks){
           const k = blockKind(b);
           if (k !== "question") continue;
 
           const bid = blockId(b);
-          if (!bid) continue; // fail-closed: must have blockId
+          if (!bid) continue; // fail-closed: must have stable id
 
-          // effective scope: block-scope wins, else package-scope
-          const effScope = normStr(blockScope(b)) || normStr(pkgScope);
-          if (!effScope) continue; // fail-closed: must have scope somewhere
-          if (!hasValidScopeMatch({ scopeId: effScope }, myScope)) continue;
+          // FIX: scope/tilldelning kan ligga på paket ELLER block
+          const scope = pkgScope || getBlockScope(b);
+          if (!scope) continue; // fail-closed: must declare scope somewhere
+          if (!hasValidScopeMatch({ scopeId: scope }, myScope)) continue;
 
-          // effective assignment: block-level wins, else package-level
-          const bAssigned = blockAssigned(b);
-          const effAssignedOk = (bAssigned != null) ? isAssignedValueToMe(bAssigned, me) : pkgAssignedOk;
-          if (!effAssignedOk) continue; // fail-closed: must be assigned somewhere
+          const assignedOk = pkgAssignedOk || isBlockAssignedToMe(b, me);
+          if (!assignedOk) continue; // fail-closed: must be assigned (pkg OR block)
 
           const title = normStr(blockTitle(b)) || "Fråga";
           const body  = normStr(blockBody(b)) || title;
@@ -1773,6 +1735,10 @@
     /* ===========================
        Render all
     ============================ */
+    let AUTH = null;
+    let ACTIVE_TAB = "tasks";
+    let SELECTED = null;
+
     function renderAll(){
       hideGuard();
       if (!AUTH){
@@ -1854,10 +1820,7 @@
         const qPkg  = deriveQuestionsFromPackages(AUTH);
         const merged = mergeQuestions(qBase, qPkg);
 
-        let qHit = null;
-
-        qHit = merged.find(q => normStr(getQuestionId(q)) && normStr(getQuestionId(q)) === String(sel.id)) || null;
-
+        let qHit = merged.find(q => normStr(getQuestionId(q)) && normStr(getQuestionId(q)) === String(sel.id)) || null;
         if (!qHit){
           qHit = merged.find(q => ("q_" + normKey(getQuestionTitle(q))) === String(sel.id)) || null;
         }
@@ -1908,20 +1871,17 @@
 
   <!-- ============================================================
   Ändringslogg (≤ 8 rader)
-  1) FIX: Paket-frågor hittas även om scope/tilldelning ligger på block-nivå (inte bara paket-nivå).
-  2) FIX: Tolerant läsning av scope/tilldelning via vanliga containerfält (meta/settings/targets).
-  3) Fail-closed kvar: scope + tilldelning måste finnas (paket ELLER block); annars visas inte frågan.
-  4) Svar kopplas stabilt med questionId=blockId (title-fallback kvar).
-  5) Deep-link: ?tab=questions&open=<blockId> öppnar vald fråga direkt.
-  6) Ingen ny storage-key/datamodell; AO-050 läses endast.
-  Testnoteringar (exakta steg)
+  1) FIX: Paket-frågor visas även när scope/tilldelning ligger på blocknivå (tolerant, fortfarande fail-closed).
+  2) Scope hämtas från paket ELLER block (krav: scope måste finnas någonstans).
+  3) Tilldelning hämtas från paket ELLER block (krav: måste matcha empNo eller ALL/*).
+  4) Toleranta alias för block-typ: q/questionnaire/quiz_question → question.
+  5) Inga nya storage-keys/datamodell; AO-050 läses endast.
+  6) XSS-säker rendering bibehållen (textContent).
+  Testnoteringar
   1) Logga in som EMPLOYEE (scopeId finns).
-  2) I AO-050_PACKAGES_V1: lägg question-block med blockId, och scope+assigned på paket ELLER block.
-  3) Gå employee/tasks.html → “Frågor” → se paket-frågor i listan.
-  4) Svara + signera → kontrollera AO-013_ANSWERS_V1: questionId == blockId.
-  Risk / edge cases
-  - Saknar både paket- och block-scope: visas ej (fail-closed).
-  - Saknar både paket- och block-tilldelning: visas ej (fail-closed).
+  2) Säkerställ att AO-050_PACKAGES_V1 har question-block med blockId och scope/tilldelning (paket eller block).
+  3) employee/tasks.html → Frågor → se frågorna.
+  4) Svara → spara → kontrollera AO-013_ANSWERS_V1 (questionId=blockId).
   ============================================================ -->
 </body>
 </html>
