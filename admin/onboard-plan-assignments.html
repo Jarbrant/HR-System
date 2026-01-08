@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-ASSIGN-01 | FIL-ID: admin/onboard-plan-assignments.html
+AO-ONBOARD-PLANS-ASSIGN-01 (PATCH v1.1) | FIL-ID: admin/onboard-plan-assignments.html
 Projekt: HR-System
 Syfte: ADMIN/SYSTEM_ADMIN – Koppla onboardingplan → medarbetare
 UI-only • Fail-closed • XSS-safe
@@ -8,7 +8,7 @@ POLICY (LÅST):
 - UI-only (GitHub Pages)
 - Endast ADMIN + SYSTEM_ADMIN
 - Fail-closed auth (HRApp.requireAuth)
-- Skriver ENDAST: AO-061 (onboarding plan-assignments)
+- Skriver ENDAST: AO-061_PLAN_ASSIGNMENTS_V1 (onboarding plan-assignments)
 - Läser:
   - AO-020_ROLE_ASSIGNMENTS_V2 (empNo)
   - AO-060_PLANS_V1 (plans)
@@ -23,6 +23,9 @@ POLICY (LÅST):
   <title>HR-System – Admin • Koppla onboardingplan</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <!-- CORE (rekommenderad ordning) -->
+  <script src="../UI/UI-04-CONFIG.js"></script>
   <script src="../UI/UI-03-APP.js"></script>
 
   <style>
@@ -80,6 +83,7 @@ POLICY (LÅST):
       border-bottom:1px solid var(--line);
       text-align:left;
       font-size:.95rem;
+      vertical-align:top;
     }
     th{
       background:rgba(17,24,39,.04);
@@ -90,7 +94,17 @@ POLICY (LÅST):
       border:1px solid var(--line);
       border-radius:var(--r14);
     }
-    .right{ text-align:right; }
+    .right{ text-align:right; white-space:nowrap; }
+
+    .nextRow{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:space-between;
+      margin-top:10px;
+    }
+    .nextRow .mutedSmall{ color:var(--muted); font-size:.92rem; }
   </style>
 </head>
 
@@ -144,6 +158,14 @@ POLICY (LÅST):
       </div>
     </div>
 
+    <div class="nextRow" aria-label="Nästa steg">
+      <div class="mutedSmall" id="handoffMeta">?planId=—&empNo=—</div>
+      <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <a class="secondary" id="goProgress" href="./onboard-progress.html" style="text-decoration:none;">Till Progress</a>
+        <a class="secondary" id="goEmployeeHome" href="../employee/home.html" style="text-decoration:none;" title="Öppnar medarbetarens vy (för kontroll).">Öppna Employee Home</a>
+      </div>
+    </div>
+
     <p id="msg" class="message" aria-live="polite" style="display:none;"></p>
   </section>
 
@@ -173,118 +195,398 @@ POLICY (LÅST):
 (function(){
   "use strict";
 
-  const ASSIGN_KEY = "AO-061";
+  // LÅSTA KEYS
+  const ASSIGN_KEY = "AO-061_PLAN_ASSIGNMENTS_V1"; // <-- FIX: samma key som onboarding-progress läser
   const PLANS_KEY  = "AO-060_PLANS_V1";
   const ASG_KEY    = "AO-020_ROLE_ASSIGNMENTS_V2";
 
+  const SPECIAL_KEYS = new Set(["__proto__", "prototype", "constructor"]);
   const $ = (s)=>document.querySelector(s);
 
   function setMsg(kind,text){
     const el=$("#msg");
+    if(!el) return;
     el.className="message"+(kind?" "+kind:"");
     el.textContent=text||"";
     el.style.display=text?"block":"none";
   }
 
-  function logout(){
-    try{ HRApp.logout(); }catch{}
-    location.replace("../UI/UI-01-SKELETON.html");
+  function redirectLogin(err){
+    try{
+      const base = "../UI/UI-01-SKELETON.html";
+      location.replace(err ? (base + "?err=" + encodeURIComponent(String(err))) : base);
+    }catch{
+      location.href = "../UI/UI-01-SKELETON.html";
+    }
   }
-  $("#navLogout").addEventListener("click",(e)=>{ e.preventDefault(); logout(); });
 
-  const session = HRApp.requireAuth({ allowRoles:["ADMIN","SYSTEM_ADMIN"] });
+  if(!window.HRApp || typeof window.HRApp.requireAuth !== "function"){
+    redirectLogin("core");
+    return;
+  }
+
+  function logout(){
+    try{
+      if(window.HRApp && typeof window.HRApp.logout === "function") window.HRApp.logout();
+    }catch{}
+    redirectLogin("logout");
+  }
+  const navLogout = $("#navLogout");
+  if(navLogout) navLogout.addEventListener("click",(e)=>{ e.preventDefault(); logout(); });
+
+  const session = window.HRApp.requireAuth({ allowRoles:["ADMIN","SYSTEM_ADMIN"] });
   if(!session) return;
 
-  $("#whoName").textContent = session.auth?.displayName || "—";
-  $("#whoRole").textContent = session.auth?.role || "—";
+  const whoName = $("#whoName");
+  const whoRole = $("#whoRole");
+  if(whoName) whoName.textContent = session.auth?.displayName || session.auth?.empNo || "—";
+  if(whoRole) whoRole.textContent = session.auth?.role || "—";
 
-  function read(key,fb){ try{ return JSON.parse(localStorage.getItem(key)||"null") ?? fb; }catch{ return fb; } }
-  function write(key,val){ localStorage.setItem(key,JSON.stringify(val)); }
+  function safeJsonParse(raw){
+    if(typeof raw !== "string" || !raw) return { ok:true, value:null };
+    try{ return { ok:true, value: JSON.parse(raw) }; }catch{ return { ok:false, value:null }; }
+  }
+  function readAny(key){
+    try{
+      const raw = localStorage.getItem(String(key||""));
+      if(raw === null) return { ok:true, value:null, missing:true };
+      const p = safeJsonParse(raw);
+      if(!p.ok) return { ok:false, value:null, missing:false, corrupt:true };
+      return { ok:true, value:p.value, missing:false };
+    }catch{
+      return { ok:false, value:null, missing:false, corrupt:true };
+    }
+  }
+  function write(key,val){
+    localStorage.setItem(String(key||""), JSON.stringify(val));
+  }
 
-  const assignments = read(ASG_KEY,{});
-  const plans = (read(PLANS_KEY,[])||[]).filter(p=>p.status==="active");
-  const links = read(ASSIGN_KEY,[]);
+  function isPlainObject(v){
+    if(!v || typeof v !== "object") return false;
+    if(Array.isArray(v)) return false;
+    const proto = Object.getPrototypeOf(v);
+    return proto === Object.prototype || proto === null;
+  }
+  function hasBlockedKeysOneLevel(obj){
+    if(!isPlainObject(obj)) return false;
+    for(const k of Object.keys(obj)){
+      if(SPECIAL_KEYS.has(String(k))) return true;
+    }
+    return false;
+  }
 
-  Object.keys(assignments).forEach(emp=>{
-    const o=document.createElement("option");
-    o.value=emp; o.textContent=emp;
-    $("#empSelect").appendChild(o);
-  });
+  // EmpNo-list: stöd för map, array, wrapper.assignments
+  function extractEmpNosFromAssignmentsV2(raw){
+    const out = [];
+    if(raw === null || raw === undefined) return out;
 
-  plans.forEach(p=>{
-    const o=document.createElement("option");
-    o.value=p.id; o.textContent=p.title||p.name||p.id;
-    $("#planSelect").appendChild(o);
-  });
+    // wrapper
+    if(isPlainObject(raw) && Array.isArray(raw.assignments)) raw = raw.assignments;
+
+    if(Array.isArray(raw)){
+      for(const rec of raw){
+        if(!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
+        if(hasBlockedKeysOneLevel(rec)) continue;
+        const emp = String(rec.empNo ?? rec.employeeNo ?? rec.id ?? "").trim();
+        if(emp) out.push(emp);
+      }
+      return Array.from(new Set(out));
+    }
+
+    if(isPlainObject(raw)){
+      if(hasBlockedKeysOneLevel(raw)) return [];
+      for(const k of Object.keys(raw)){
+        if(SPECIAL_KEYS.has(String(k))) continue;
+        const emp = String(k||"").trim();
+        if(emp) out.push(emp);
+      }
+      return Array.from(new Set(out));
+    }
+
+    return [];
+  }
+
+  // Plans: stöd för array eller wrapper.items/plans/data/list/rows/value
+  function extractArrayFromAny(value){
+    if(Array.isArray(value)) return value;
+    if(!isPlainObject(value)) return [];
+    if(hasBlockedKeysOneLevel(value)) return [];
+    const wrapperKeys = ["plans","data","items","list","rows","value"];
+    for(const k of wrapperKeys){
+      if(Object.prototype.hasOwnProperty.call(value, k) && Array.isArray(value[k])) return value[k];
+    }
+    return [];
+  }
+
+  function setHandoff(planId, empNo){
+    const pid = String(planId||"").trim();
+    const e = String(empNo||"").trim();
+
+    const qs = new URLSearchParams();
+    if(pid) qs.set("planId", pid);
+    if(e) qs.set("empNo", e);
+
+    const s = qs.toString();
+    const meta = $("#handoffMeta");
+    if(meta) meta.textContent = s ? ("?" + s) : "?planId=—&empNo=—";
+
+    const goProgress = $("#goProgress");
+    const goEmployeeHome = $("#goEmployeeHome");
+
+    if(goProgress) goProgress.href = s ? ("./onboard-progress.html?" + s) : "./onboard-progress.html";
+    // OBS: employee/home.html kan ignorera querystring; detta är bara navigering (ingen ny key)
+    if(goEmployeeHome) goEmployeeHome.href = s ? ("../employee/home.html?" + s) : "../employee/home.html";
+  }
+
+  // URL-param preselect
+  const params = new URLSearchParams(location.search);
+  const preEmp = String(params.get("empNo") || "").trim();
+  const prePlan = String(params.get("planId") || "").trim();
+
+  const asgAny = readAny(ASG_KEY);
+  const assignmentsRaw = asgAny.ok ? asgAny.value : null;
+  const empNos = extractEmpNosFromAssignmentsV2(assignmentsRaw);
+
+  const plansAny = readAny(PLANS_KEY);
+  const plansAll = extractArrayFromAny(plansAny.ok ? plansAny.value : []);
+  const plans = plansAll.filter(p => String(p?.status||"").toLowerCase().trim() === "active");
+
+  const linksAny = readAny(ASSIGN_KEY);
+  const links = Array.isArray(linksAny.ok ? linksAny.value : null) ? (linksAny.value || []) : [];
+
+  const empSelect = $("#empSelect");
+  const planSelect = $("#planSelect");
+  const startDate = $("#startDate");
+
+  if(empSelect){
+    empSelect.textContent = "";
+    if(!empNos.length){
+      const o=document.createElement("option");
+      o.value=""; o.textContent="(Inga empNo hittades)";
+      empSelect.appendChild(o);
+      empSelect.disabled = true;
+    }else{
+      empNos.slice().sort((a,b)=>String(a).localeCompare(String(b),"sv")).forEach(emp=>{
+        const o=document.createElement("option");
+        o.value=emp; o.textContent=emp;
+        empSelect.appendChild(o);
+      });
+      if(preEmp && empNos.includes(preEmp)) empSelect.value = preEmp;
+    }
+  }
+
+  if(planSelect){
+    planSelect.textContent = "";
+    if(!plans.length){
+      const o=document.createElement("option");
+      o.value=""; o.textContent="(Inga active planer)";
+      planSelect.appendChild(o);
+      planSelect.disabled = true;
+    }else{
+      plans.slice().sort((a,b)=>String(a?.title||a?.name||"").localeCompare(String(b?.title||b?.name||""),"sv")).forEach(p=>{
+        const o=document.createElement("option");
+        o.value=String(p.id||"").trim();
+        o.textContent=(p.title||p.name||p.id||"").toString();
+        planSelect.appendChild(o);
+      });
+      if(prePlan && plans.some(p=>String(p.id||"").trim()===prePlan)) planSelect.value = prePlan;
+    }
+  }
+
+  function isoDateFromTs(ts){
+    const n = Number(ts);
+    if(!Number.isFinite(n) || n <= 0) return "";
+    const d = new Date(n);
+    if(String(d)==="Invalid Date") return "";
+    const y = d.getFullYear();
+    const m = String(d.getMonth()+1).padStart(2,"0");
+    const day = String(d.getDate()).padStart(2,"0");
+    return `${y}-${m}-${day}`;
+  }
+
+  // Om vi har preselect och redan existerande länk -> förifyll datum
+  function findExisting(empNo, planId){
+    const e = String(empNo||"").trim();
+    const p = String(planId||"").trim();
+    return links.find(x => String(x?.empNo||"").trim()===e && String(x?.planId||"").trim()===p) || null;
+  }
+
+  function refreshHandoff(){
+    const emp = empSelect ? empSelect.value : "";
+    const plan = planSelect ? planSelect.value : "";
+    setHandoff(plan, emp);
+
+    // Prefill startDate om koppling finns
+    const ex = findExisting(emp, plan);
+    if(startDate){
+      startDate.value = ex ? isoDateFromTs(ex.startDateTs) : (startDate.value || "");
+    }
+  }
+
+  if(empSelect) empSelect.addEventListener("change", refreshHandoff);
+  if(planSelect) planSelect.addEventListener("change", refreshHandoff);
+
+  function clearNode(el){ while(el && el.firstChild) el.removeChild(el.firstChild); }
 
   function render(){
     const tb=$("#tbody");
-    tb.textContent="";
-    if(!links.length){
+    if(!tb) return;
+    clearNode(tb);
+
+    if(!Array.isArray(links) || links.length === 0){
       const tr=document.createElement("tr");
-      tr.innerHTML='<td colspan="5" class="muted">Inga kopplingar</td>';
+      const td=document.createElement("td");
+      td.colSpan = 5;
+      td.className = "muted";
+      td.textContent = "Inga kopplingar";
+      tr.appendChild(td);
       tb.appendChild(tr);
       return;
     }
-    links.forEach(l=>{
+
+    // stabil sort: empNo, planId
+    const rows = links.slice().sort((a,b)=>{
+      const ae = String(a?.empNo||"");
+      const be = String(b?.empNo||"");
+      if(ae !== be) return ae.localeCompare(be,"sv");
+      return String(a?.planId||"").localeCompare(String(b?.planId||""),"sv");
+    });
+
+    rows.forEach(l=>{
+      const empNo = String(l?.empNo||"").trim();
+      const planId = String(l?.planId||"").trim();
+      const startTs = Number(l?.startDateTs);
+      const status = String(l?.status||"—");
+
       const tr=document.createElement("tr");
-      tr.innerHTML=
-        `<td>${l.empNo}</td>
-         <td>${l.planId}</td>
-         <td>${new Date(l.startDateTs).toLocaleDateString("sv-SE")}</td>
-         <td>${l.status||"—"}</td>
-         <td class="right"><button data-del="${l.empNo}|${l.planId}">Ta bort</button></td>`;
+
+      const tdEmp=document.createElement("td");
+      tdEmp.textContent = empNo || "—";
+      tr.appendChild(tdEmp);
+
+      const tdPlan=document.createElement("td");
+      tdPlan.textContent = planId || "—";
+      tr.appendChild(tdPlan);
+
+      const tdDate=document.createElement("td");
+      tdDate.textContent = startTs ? new Date(startTs).toLocaleDateString("sv-SE") : "—";
+      tr.appendChild(tdDate);
+
+      const tdStatus=document.createElement("td");
+      tdStatus.textContent = status;
+      tr.appendChild(tdStatus);
+
+      const tdAct=document.createElement("td");
+      tdAct.className="right";
+
+      const btnDel=document.createElement("button");
+      btnDel.type="button";
+      btnDel.dataset.del = `${empNo}|${planId}`;
+      btnDel.textContent="Ta bort";
+      tdAct.appendChild(btnDel);
+
+      // snabb-handoff till progress med querystring
+      const aProg = document.createElement("a");
+      aProg.className = "secondary";
+      aProg.style.marginLeft = "8px";
+      aProg.style.textDecoration = "none";
+      const qs = new URLSearchParams();
+      if(planId) qs.set("planId", planId);
+      if(empNo) qs.set("empNo", empNo);
+      aProg.href = "./onboard-progress.html?" + qs.toString();
+      aProg.textContent = "Se progress";
+      tdAct.appendChild(aProg);
+
+      tr.appendChild(tdAct);
       tb.appendChild(tr);
     });
   }
 
-  $("#btnAssign").addEventListener("click",()=>{
-    const emp=$("#empSelect").value;
-    const plan=$("#planSelect").value;
-    const d=$("#startDate").value;
-    if(!emp||!plan||!d){ setMsg("err","Alla fält krävs."); return; }
+  const btnAssign = $("#btnAssign");
+  if(btnAssign){
+    btnAssign.addEventListener("click",()=>{
+      const emp = empSelect ? empSelect.value : "";
+      const plan = planSelect ? planSelect.value : "";
+      const d = startDate ? startDate.value : "";
 
-    const ts=new Date(d+"T00:00").getTime();
-    const idx=links.findIndex(x=>x.empNo===emp&&x.planId===plan);
-    if(idx>=0) links[idx].startDateTs=ts;
-    else links.push({ empNo:emp, planId:plan, startDateTs:ts, status:"active" });
+      if(!emp || !plan || !d){ setMsg("err","Alla fält krävs."); return; }
 
-    write(ASSIGN_KEY,links);
-    setMsg("ok","Koppling sparad.");
-    render();
-  });
+      // "YYYY-MM-DD" -> lokal midnatt
+      const ts = new Date(d + "T00:00").getTime();
+      if(!Number.isFinite(ts) || ts <= 0){ setMsg("err","Ogiltigt datum."); return; }
 
-  $("#tbody").addEventListener("click",(e)=>{
-    const b=e.target.closest("button[data-del]");
-    if(!b) return;
-    const [emp,plan]=b.dataset.del.split("|");
-    const i=links.findIndex(x=>x.empNo===emp&&x.planId===plan);
-    if(i>=0){
-      links.splice(i,1);
-      write(ASSIGN_KEY,links);
+      const idx = links.findIndex(x=>String(x?.empNo||"").trim()===emp && String(x?.planId||"").trim()===plan);
+      if(idx>=0){
+        links[idx].startDateTs = ts;
+        links[idx].status = String(links[idx].status||"active") || "active";
+      }else{
+        links.push({ empNo:emp, planId:plan, startDateTs:ts, status:"active" });
+      }
+
+      write(ASSIGN_KEY, links);
+
+      // uppdatera querystring (för tydlig hand-off)
+      try{
+        const qs = new URLSearchParams();
+        qs.set("planId", plan);
+        qs.set("empNo", emp);
+        history.replaceState(null, "", "./onboard-plan-assignments.html?" + qs.toString());
+      }catch{}
+
+      setMsg("ok","Koppling sparad.");
       render();
-    }
-  });
+      refreshHandoff();
+    });
+  }
 
+  const tbody = $("#tbody");
+  if(tbody){
+    tbody.addEventListener("click",(e)=>{
+      const b = e.target && e.target.closest ? e.target.closest("button[data-del]") : null;
+      if(!b) return;
+      const parts = String(b.dataset.del||"").split("|");
+      const emp = String(parts[0]||"").trim();
+      const plan = String(parts[1]||"").trim();
+
+      const i = links.findIndex(x=>String(x?.empNo||"").trim()===emp && String(x?.planId||"").trim()===plan);
+      if(i>=0){
+        links.splice(i,1);
+        write(ASSIGN_KEY, links);
+        setMsg("ok","Koppling borttagen.");
+        render();
+        refreshHandoff();
+      }
+    });
+  }
+
+  // init
   render();
+  refreshHandoff();
+
 })();
 </script>
 
 <!-- ============================================================
-Ändringslogg
-- Rensat all duplicerad markup och logik
-- Endast ADMIN/SYSTEM_ADMIN
-- Unika IDs, en topbar, en layout
-- Oförändrade storage-keys och affärsregler
-Test:
+Ändringslogg (≤8 rader)
+1) FIX: Skriver nu AO-061_PLAN_ASSIGNMENTS_V1 (inte AO-061) → koppling syns i onboarding-progress igen
+2) Lagt tillbaka tydlig hand-off: “Öppna Employee Home” + “Till Progress” (querystring planId/empNo)
+3) Preselect från querystring på empNo/planId
+4) XSS-fix: tabell renderas utan innerHTML (textContent)
+5) Robust läsning av AO-020_ROLE_ASSIGNMENTS_V2 (map/array/wrapper)
+6) CORE script-order hårdnad (UI-04-CONFIG + UI-03-APP)
+Testnoteringar (exakta klicksteg)
 1) Logga in som ADMIN
-2) Välj empNo + plan + datum → Spara
-3) Verifiera i tabell
-4) Ta bort → verifiera storage AO-061
-QA:
-P0: OK (auth, fail-closed)
-P1: OK (regression)
-P2: OK
+2) Öppna admin/onboard-plan-assignments.html
+3) Välj empNo + plan + datum → “Spara koppling”
+4) Klicka “Till Progress” → verifiera att raden/emp kan hanteras (ingen 404, data finns)
+5) (Valfritt) Klicka “Öppna Employee Home” (endast navigering)
+Risk/edge cases
+- Om employee/home.html ignorerar querystring är länken ändå ofarlig (ingen ny key)
+- Om AO-060_PLANS_V1 är wrapper-objekt stödjs common wrappers; annars tom lista (fail-closed via UI)
+QA-check
+P0: OK (auth, fail-closed, rätt key)
+P1: OK (regression: inga nya keys, samma UI-flöde)
+P2: OK (XSS-härdning i tabell)
 ============================================================ -->
 </body>
 </html>
