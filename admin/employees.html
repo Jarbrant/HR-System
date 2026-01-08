@@ -1,7 +1,7 @@
 <!-- ============================================================
-AO-ADMIN-EMPLOYEES-REBUILD-01 (PROD v1.1) | FIL-ID: admin/employees.html
+AO-ADMIN-EMPLOYEES-REBUILD-01 (PROD PATCH v1.2) | FIL-ID: admin/employees.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
-Syfte: ADMIN – Personalregister (lista + sök) + Skapa/Redigera i modal (inkl. EMPLOYEE-assign)
+Syfte: ADMIN – Personalregister (lista + sök) + Skapa/Redigera i modal (inkl. assign)
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -9,14 +9,17 @@ POLICY (LÅST):
 - Åtkomst: ADMIN + SYSTEM_ADMIN (MANAGER är isolerad till /manager/ enligt AO-002 CONFIG)
 - ADMIN: får bara assign inom egen subtree (scope-guard) • kräver ORG + viewerScope
 - SYSTEM_ADMIN: får assign till valfri scope • om ORG saknas: manuell scopeId tillåts
-- Ingen känslig persondata (endast empNo + valfritt displayName). Email visas som framtidsfält men sparas ej.
+- Ingen känslig persondata:
+  * Tillåtet: empNo, displayName (namn), title (jobbtitel), department (avdelning), startDate (YYYY-MM-DD), note (kort intern notis)
+  * Ej tillåtet: personnummer, privat adress, privat telefon, lön, bankinfo, hälsa, privata anteckningar
+  * Email visas som framtidsfält men sparas ej.
 - XSS-escape: rendera endast via textContent (ingen osäker innerHTML)
-- Inga nya storage-keys/datamodell
+- Inga nya storage-keys (datamodell utökas ENDAST inom AO-020_EMPLOYEES_V1)
 - Hel-filsleverans
 
 Keys (LÅST):
 - Läs (auth): AO-001_LOGIN_V1 via HRApp.requireAuth/getAuth
-- Läs/Skriv: AO-020_EMPLOYEES_V1 (localStorage) — employee-register
+- Läs/Skriv: AO-020_EMPLOYEES_V1 (localStorage) — employee-register (utökad med icke-känsliga fält ovan)
 - Läs/Skriv: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) — assignments (empNo -> {roleId, scopeId}) + kompat-array
 - Läs: AO-020_ORG_V1 (localStorage) — org-träd (subtree)
 
@@ -168,6 +171,13 @@ Query (LÅST):
       background: rgba(254,226,226,.25);
     }
     .dangerBox strong{ font-weight:950; }
+
+    .miniSub{
+      display:block;
+      margin-top:6px;
+      color: var(--muted);
+      font-size: .92rem;
+    }
   </style>
 </head>
 
@@ -201,7 +211,6 @@ Query (LÅST):
     </div>
 
     <div class="row" style="gap:8px;">
-      <!-- Ny personal: grön, svart text (MASTER: ingen redesign, bara semantikfärg) -->
       <button id="btnOpenCreate" type="button" class="btnGood">Ny personal</button>
     </div>
   </div>
@@ -214,12 +223,11 @@ Query (LÅST):
         Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
         <span class="muted2">• scope:</span> <span class="mono" id="whoScope">—</span>
       </div>
-      <!-- (Borttaget enligt önskemål) RW/R-keys-badges + KPI-rad -->
     </div>
 
     <div class="grid2" style="margin-top:10px;">
       <label>
-        Sök (empNo / namn)
+        Sök (empNo / namn / titel / avdelning)
         <input id="inpSearch" type="text" placeholder="t.ex. 3001 eller anna" autocomplete="off" />
       </label>
       <label>
@@ -257,7 +265,6 @@ Query (LÅST):
         <div class="muted2" id="modalSub">—</div>
       </div>
 
-      <!-- Stäng: röd-tonad enligt MASTER topbar-semantik (utan "danger action" i data) -->
       <button id="btnClose" type="button" class="btnDangerSoft" aria-label="Stäng">Stäng</button>
     </div>
 
@@ -271,23 +278,50 @@ Query (LÅST):
         <label>
           Namn (valfritt) <span class="muted2">(max 60)</span>
           <input id="mName" type="text" placeholder="t.ex. Anna" maxlength="60" />
+          <span class="miniSub">Tips: Namn är “displayName” (valfritt). Identitet i systemet är empNo.</span>
         </label>
       </div>
 
+      <!-- NYTT: Roll valbar (EMPLOYEE/MANAGER) -->
       <div class="grid2" style="margin-top:10px;">
         <label>
-          Roll (låst)
-          <!-- Roll dropdown borttagen (låst) -->
-          <div class="badge good" aria-label="Roll låst" style="margin-top:6px; justify-content:center;">
-            EMPLOYEE
-          </div>
-          <span class="muted2">Sidan skapar/assignar endast EMPLOYEE.</span>
+          Roll
+          <select id="mRole">
+            <option value="EMPLOYEE">EMPLOYEE</option>
+            <option value="MANAGER">MANAGER</option>
+          </select>
+          <span class="muted2">Välj vilken roll som ska assignas för empNo.</span>
         </label>
 
         <label>
           Scope (gren)
           <select id="mScope"></select>
           <span class="muted2" id="mScopeHint">—</span>
+        </label>
+      </div>
+
+      <!-- NYTT: Extra icke-känsliga fält (sparas i AO-020_EMPLOYEES_V1) -->
+      <div class="grid2" style="margin-top:10px;">
+        <label>
+          Titel (jobbtitel) <span class="muted2">(max 60)</span>
+          <input id="mTitle" type="text" placeholder="t.ex. Teamledare" maxlength="60" />
+        </label>
+
+        <label>
+          Avdelning <span class="muted2">(max 60)</span>
+          <input id="mDept" type="text" placeholder="t.ex. Kök / Service" maxlength="60" />
+        </label>
+      </div>
+
+      <div class="grid2" style="margin-top:10px;">
+        <label>
+          Startdatum <span class="muted2">(YYYY-MM-DD)</span>
+          <input id="mStart" type="text" inputmode="numeric" placeholder="t.ex. 2026-02-01" maxlength="10" />
+        </label>
+
+        <label>
+          Intern notis <span class="muted2">(max 140)</span>
+          <input id="mNote" type="text" placeholder="t.ex. Nyanställd – introduktion vecka 1" maxlength="140" />
         </label>
       </div>
 
@@ -344,8 +378,10 @@ Query (LÅST):
 <script>
 /* ============================================================
 AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
-- UI-only • Fail-closed • XSS-safe rendering
-- Inga nya keys/datamodell
+PATCH v1.2:
+- Roll valbar (EMPLOYEE/MANAGER)
+- Extra icke-känsliga fält sparas i AO-020_EMPLOYEES_V1 (ingen ny key)
+- Sök inkluderar title/department/note
 ============================================================ */
 (function(){
   "use strict";
@@ -383,10 +419,16 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
 
   const mEmpNo = $("#mEmpNo");
   const mName = $("#mName");
+  const mRole = $("#mRole");
   const mScope = $("#mScope");
   const mScopeHint = $("#mScopeHint");
   const mManualWrap = $("#mManualWrap");
   const mManualScope = $("#mManualScope");
+
+  const mTitle = $("#mTitle");
+  const mDept = $("#mDept");
+  const mStart = $("#mStart");
+  const mNote = $("#mNote");
 
   const btnSave = $("#btnSave");
   const btnUnassign = $("#btnUnassign");
@@ -449,6 +491,29 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
     if(s.length > 60) s = s.slice(0,60);
     return s;
   }
+  function normalizeShort(v, maxLen){
+    let s = String(v ?? "").trim();
+    if(s.length > maxLen) s = s.slice(0,maxLen);
+    return s;
+  }
+  function normalizeStartDate(v){
+    const s = String(v ?? "").trim();
+    if(!s) return "";
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(s)) return ""; // fail-closed: fel format -> sparas ej
+    const y = Number(s.slice(0,4));
+    const m = Number(s.slice(5,7));
+    const d = Number(s.slice(8,10));
+    if(!(y >= 1900 && y <= 2100)) return "";
+    if(!(m >= 1 && m <= 12)) return "";
+    if(!(d >= 1 && d <= 31)) return "";
+    return s;
+  }
+  function normalizeRoleId(v){
+    const s = normStr(v).toUpperCase();
+    if(s === "EMPLOYEE" || s === "MANAGER") return s;
+    return "EMPLOYEE";
+  }
+
   function isPlainObject(v){
     if(!v || typeof v !== "object") return false;
     if(Array.isArray(v)) return false;
@@ -605,10 +670,17 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
       }
       const empNo = normalizeEmpNo(it.empNo);
       if(!empNo) continue;
+
       const name = normalizeName(it.name);
+      const title = normalizeShort(it.title, 60);
+      const department = normalizeShort(it.department, 60);
+      const startDate = normalizeStartDate(it.startDate);
+      const note = normalizeShort(it.note, 140);
+
       const createdAt = Number.isFinite(Number(it.createdAt)) ? Number(it.createdAt) : null;
       const updatedAt = Number.isFinite(Number(it.updatedAt)) ? Number(it.updatedAt) : null;
-      out.push({ empNo, name, createdAt, updatedAt });
+
+      out.push({ empNo, name, title, department, startDate, note, createdAt, updatedAt });
     }
 
     // Dedupe (keep latest updatedAt)
@@ -639,6 +711,10 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
     const out = (Array.isArray(list)?list:[]).map(r => ({
       empNo: normalizeEmpNo(r.empNo),
       name: normalizeName(r.name),
+      title: normalizeShort(r.title, 60),
+      department: normalizeShort(r.department, 60),
+      startDate: normalizeStartDate(r.startDate),
+      note: normalizeShort(r.note, 140),
       createdAt: Number.isFinite(Number(r.createdAt)) ? Number(r.createdAt) : now,
       updatedAt: now
     })).filter(x => !!x.empNo);
@@ -895,7 +971,13 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
 
     if(q){
       out = out.filter(r => {
-        const blob = (String(r.empNo||"") + " " + String(r.name||"")).toLowerCase();
+        const blob = (
+          String(r.empNo||"") + " " +
+          String(r.name||"") + " " +
+          String(r.title||"") + " " +
+          String(r.department||"") + " " +
+          String(r.note||"")
+        ).toLowerCase();
         return blob.includes(q);
       });
     }
@@ -932,7 +1014,21 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
       tdEmp.appendChild(strong);
 
       const tdName = document.createElement("td");
-      tdName.textContent = String(e.name || "—");
+      // Namn + liten rad med titel/avdelning/start (utan nya kolumner)
+      const nameMain = document.createElement("div");
+      nameMain.textContent = String(e.name || "—");
+      tdName.appendChild(nameMain);
+
+      const metaBits = [];
+      if(e.title) metaBits.push(String(e.title));
+      if(e.department) metaBits.push(String(e.department));
+      if(e.startDate) metaBits.push("Start " + String(e.startDate));
+      if(metaBits.length){
+        const sub = document.createElement("div");
+        sub.className = "muted2";
+        sub.textContent = metaBits.join(" • ");
+        tdName.appendChild(sub);
+      }
 
       const a = STATE.asgMap[e.empNo] || null;
 
@@ -1076,8 +1172,15 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
     hideDangerConfirm();
     if(mEmpNo){ mEmpNo.value = ""; mEmpNo.disabled = false; }
     if(mName) mName.value = "";
+    if(mRole) mRole.value = "EMPLOYEE";
     if(mScope) mScope.value = "";
     if(mManualScope) mManualScope.value = "";
+
+    if(mTitle) mTitle.value = "";
+    if(mDept) mDept.value = "";
+    if(mStart) mStart.value = "";
+    if(mNote) mNote.value = "";
+
     STATE.modalEmpNo = "";
     STATE.modalMode = "create";
     setSaveBusy(false);
@@ -1092,7 +1195,7 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
 
     resetModalForm();
     STATE.modalMode = "create";
-    setModalHeader("Ny personal", "Skapar registerrad + assignment (EMPLOYEE).");
+    setModalHeader("Ny personal", "Skapar registerrad + assignment (EMPLOYEE eller MANAGER).");
     if(btnDelete) btnDelete.disabled = true;
     if(btnUnassign) btnUnassign.disabled = true;
     if(btnSave) btnSave.disabled = false;
@@ -1116,7 +1219,7 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
     const row = STATE.employees.find(x => String(x.empNo||"") === empNo) || null;
     const asg = STATE.asgMap[empNo] || null;
 
-    setModalHeader("Redigera #" + empNo, "Uppdatera namn och/eller assignment.");
+    setModalHeader("Redigera #" + empNo, "Uppdatera uppgifter och/eller assignment.");
     if(btnDelete) btnDelete.disabled = false;
     if(btnUnassign) btnUnassign.disabled = !(asg && asg.scopeId);
 
@@ -1125,6 +1228,15 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
       mEmpNo.disabled = true;
     }
     if(mName) mName.value = row ? String(row.name || "") : "";
+    if(mTitle) mTitle.value = row ? String(row.title || "") : "";
+    if(mDept) mDept.value = row ? String(row.department || "") : "";
+    if(mStart) mStart.value = row ? String(row.startDate || "") : "";
+    if(mNote) mNote.value = row ? String(row.note || "") : "";
+
+    if(mRole){
+      // assignment avgör roll. Om ingen assignment -> default EMPLOYEE
+      mRole.value = normalizeRoleId(asg && asg.roleId ? asg.roleId : "EMPLOYEE");
+    }
 
     if(STATE.orgNodes.length > 0){
       if(mScope) mScope.value = asg && asg.scopeId ? String(asg.scopeId) : "";
@@ -1170,19 +1282,37 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
     return { ok:true, msg:"" };
   }
 
-  function upsertEmployee(empNo, name){
+  function upsertEmployee(empNo, payload){
     const now = Date.now();
     const next = STATE.employees.slice();
     const idx = next.findIndex(x => String(x.empNo||"") === empNo);
+
+    const name = normalizeName(payload?.name);
+    const title = normalizeShort(payload?.title, 60);
+    const department = normalizeShort(payload?.department, 60);
+    const startDate = normalizeStartDate(payload?.startDate);
+    const note = normalizeShort(payload?.note, 140);
+
     if(idx >= 0){
-      next[idx] = { empNo, name, createdAt: next[idx].createdAt || now, updatedAt: now };
+      next[idx] = {
+        empNo,
+        name,
+        title,
+        department,
+        startDate,
+        note,
+        createdAt: next[idx].createdAt || now,
+        updatedAt: now
+      };
     }else{
-      next.push({ empNo, name, createdAt: now, updatedAt: now });
+      next.push({ empNo, name, title, department, startDate, note, createdAt: now, updatedAt: now });
     }
     saveEmployees(next);
   }
 
-  function upsertAssignment(empNo, roleId, scopeId){
+  function upsertAssignment(empNo, roleIdRaw, scopeId){
+    const roleId = normalizeRoleId(roleIdRaw);
+
     const nextMap = Object.assign({}, STATE.asgMap);
     nextMap[empNo] = { roleId, scopeId };
 
@@ -1209,7 +1339,7 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
     if(STATE.filterTimer) window.clearTimeout(STATE.filterTimer);
     STATE.filterTimer = window.setTimeout(() => {
       render();
-    }, 120); // liten debounce för stabilitet (ingen ändrad koppling)
+    }, 120);
   }
 
   // ---------- Wire UI
@@ -1241,8 +1371,13 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
 
       const empNo = normalizeEmpNo(mEmpNo ? mEmpNo.value : "");
       const name = normalizeName(mName ? mName.value : "");
-      const roleId = "EMPLOYEE"; // låst
+      const roleId = normalizeRoleId(mRole ? mRole.value : "EMPLOYEE");
       const scopeId = getSelectedScopeId();
+
+      const title = normalizeShort(mTitle ? mTitle.value : "", 60);
+      const department = normalizeShort(mDept ? mDept.value : "", 60);
+      const startDate = normalizeStartDate(mStart ? mStart.value : "");
+      const note = normalizeShort(mNote ? mNote.value : "", 140);
 
       if(!empNo){
         setModalMsg("err", "empNo måste vara 1–12 siffror.");
@@ -1264,7 +1399,7 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
 
       setSaveBusy(true);
       try{
-        upsertEmployee(empNo, name);
+        upsertEmployee(empNo, { name, title, department, startDate, note });
         upsertAssignment(empNo, roleId, scopeId);
       }catch{
         setSaveBusy(false);
@@ -1272,7 +1407,7 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
         return;
       }
 
-      setPageMsg("ok", "Sparat: #" + empNo + " (EMPLOYEE) → " + labelForScope(scopeId));
+      setPageMsg("ok", "Sparat: #" + empNo + " (" + roleId + ") → " + labelForScope(scopeId));
       closeModal();
       reloadAll();
     });
@@ -1339,7 +1474,6 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
         return;
       }
 
-      // Extra-säker: visa bekräftelseruta (kräver att empNo skrivs)
       showDangerConfirm();
       setModalMsg("", "Skriv empNo och klicka “Bekräfta” för att ta bort.");
     });
@@ -1398,42 +1532,38 @@ AO-ADMIN-EMPLOYEES-REBUILD-01 | admin/employees.html
 </script>
 
 <!-- ============================================================
-Ändringslogg (AO-ADMIN-EMPLOYEES-REBUILD-01 v1.1) ≤ 8 rader
-- Tog bort “Direktlänk” och RW/R-badges + KPI-rad (renare vy)
-- “Ny personal” fick grön semantik (svart text), ingen redesign
-- “Stäng” i modal blev röd-tonad enligt designmönster
-- Roll är låst: dropdown borttagen, visas som fast EMPLOYEE
-- “Ta bort personal” kräver manuell empNo-bekräftelse (extra säker)
-- Sök/filter fick liten debounce för stabilare rendering vid snabb input
-- “Kopiera länk” används som manuell inbjudningslänk (empNo-query)
+Ändringslogg (AO-ADMIN-EMPLOYEES-REBUILD-01 PATCH v1.2) ≤ 8 rader
+- Roll i modal är nu valbar: EMPLOYEE eller MANAGER (assignments V2)
+- Extra icke-känsliga fält sparas i AO-020_EMPLOYEES_V1: title/department/startDate/note
+- Listvy visar titel/avdelning/startdatum som subrad under namn (ingen ny kolumn)
+- Sök matchar nu även titel/avdelning/notis
+- Fail-closed: startDate med fel format sparas ej (töms)
+- Ingen ny storage-key, ingen osäker innerHTML, scope-guard oförändrad
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Logga in som SYSTEM_ADMIN (t.ex. 9000) → Admin → Personal
-2) Klicka “Ny personal” (grön) → fyll empNo=3001, namn, välj scope → Spara → se rad i listan
-3) Klicka “Öppna” på en rad → ändra namn → Spara → listan uppdateras
-4) Klicka “Kopiera länk” → se “Inbjudningslänk kopierad …?empNo=3001”
-5) Öppna /admin/employees.html?mode=create → modal öppnas direkt
-6) Öppna /admin/employees.html?empNo=3001 → edit-modal öppnas direkt
-7) Klicka “Ta bort personal” → skriv empNo i bekräftelserutan → Bekräfta → raden försvinner
+1) Logga in som SYSTEM_ADMIN → Admin → Personal
+2) Klicka “Ny personal” → empNo=3002, namn, roll=MANAGER, välj scope → fyll titel/avdelning/start → Spara
+3) Se raden: assignment=MANAGER, namn visar subrad (titel/avdelning/start)
+4) Klicka “Öppna” → ändra roll till EMPLOYEE → Spara → assignment ändras
+5) Sök: skriv “teamledare” eller “kök” → matchar rätt person
+6) Test startdatum: skriv “2026/02/01” → Spara → öppna igen → startdatum ska vara tomt (fail-closed)
 ============================================================ -->
 
 <!-- ============================================================
 Risk/edge cases
-- Om AO-020_ORG_V1 eller AO-020_ROLE_ASSIGNMENTS_V2 är korrupt JSON → sidan går read-only + guard
-- ADMIN utan viewerScope i session/assignments → skrivning blockeras (fail-closed)
-- SYSTEM_ADMIN utan ORG: manuell scope kan inte valideras (medvetet, UI-only)
-- localStorage full/blockerad → sparning misslyckas med tydligt fel
-- Clipboard kan vara blockerat av browser-policy → fallback visar länken i meddelandet
+- Äldre kod som antar att employee-objekt bara har empNo/name: ska ignorera extra fält (men om någon sida validerar “exakt schema” kan den faila)
+- MANAGER-roll kräver att AO-002 routing/allowRoles för /manager/ fungerar som tänkt (annars får MANAGER inte rätt vy)
+- startDate är strikt: fel format blir tomt (medvetet fail-closed)
 ============================================================ -->
 
 <!-- ============================================================
 QA-check (P0/P1/P2)
 P0: XSS: all rendering via textContent (ingen osäker innerHTML) ✅
 P0: Fail-closed: saknade prereqs blockerar writes + guard ✅
-P1: Regression: keys oförändrade (inga nya) ✅
-P1: Assignments compat: map + .assignments array ✅
+P1: Regression: inga nya keys; skriver endast AO-020_EMPLOYEES_V1 + AO-020_ROLE_ASSIGNMENTS_V2 ✅
+P1: Role-val: endast EMPLOYEE/MANAGER accepteras (annat => EMPLOYEE) ✅
 P2: A11y: dialog/backdrop, ESC stänger, aria-live för feedback ✅
 ============================================================ -->
 </body>
