@@ -1,37 +1,25 @@
 <!-- ============================================================
-AO-EMPLOYEES-CREATE-ASSIGN-01 (PROD v1.1) | FIL-ID: admin/employees-create.html
+AO-EMPLOYEES-CREATE-ASSIGN-01 (PROD v2.0) | FIL-ID: admin/employees-create.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
-Syfte: ADMIN/MANAGER/SYSTEM_ADMIN – Skapa employee + koppla roll+scope (1 flöde) — FÖRENKLAD UI
+Syfte: ADMIN/SYSTEM_ADMIN – Koppla befintlig personal (empNo) till enhet (scope) via assignments
 
 POLICY (LÅST):
 - UI-only • Fail-closed
 - Auth: sessionStorage först • fallback localStorage via AO-002 (HRApp)
-- Åtkomst: ADMIN + MANAGER + SYSTEM_ADMIN
-- ADMIN/MANAGER: får endast skapa/assign inom egen subtree (scope-guard)
-- SYSTEM_ADMIN: får assign till valfri scope (om org saknas: manuell scopeId)
-- Ingen känslig persondata (endast empNo + valfritt displayName)
+- Åtkomst: ADMIN + SYSTEM_ADMIN (MANAGER och EMPLOYEE har egna ytor)
+- ADMIN: får endast koppla/ta bort koppling inom egen subtree (scope-guard) • kräver ORG + viewerScope
+- SYSTEM_ADMIN: får koppla till valfri scope • om ORG saknas: manuell scopeId tillåts
+- empNo skapas INTE här: empNo måste redan finnas i AO-020_EMPLOYEES_V1 (fail-closed om saknas)
+- Ingen känslig persondata (endast empNo + ev displayName från registret)
 - XSS-escape: rendera endast via textContent (ingen osäker innerHTML)
 - Inga nya storage-keys/datamodell
 - Hel-filsleverans
 
 Keys (LÅST):
 - Läs (auth): AO-001_LOGIN_V1 via HRApp.requireAuth/getAuth
-- Läs/Skriv: AO-020_EMPLOYEES_V1 (localStorage) — employee-register
+- Läs: AO-020_EMPLOYEES_V1 (localStorage) — employee-register (READ-ONLY här)
 - Läs/Skriv: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) — assignments (empNo -> {roleId, scopeId}) + kompat-array
 - Läs: AO-020_ORG_V1 (localStorage) — org-träd (subtree)
-
-Kontrakt:
-- empNo: 1–12 siffror (string)
-- displayName: valfritt, max 60
-- Assignment: roleId="EMPLOYEE" (default) + scopeId krävs
-- Kompat: AO-020_ROLE_ASSIGNMENTS_V2 sparas som:
-  (A) object-map: { "3001": {roleId:"EMPLOYEE", scopeId:"..."}, ... }
-  (B) dessutom: .assignments = [ {empNo, roleId, scopeId}, ... ] för sidor som läser array
-
-NYTT I v1.1 (UI):
-- Förenklad 3-stegs-UI (empNo → scope → spara)
-- “Invite UI (TEST)” = genererar kopierbar länk (ingen write, ingen riktig säkerhet)
-- Efter save: navigera till admin/employee.html?empNo=...&flash=created (querystring-samspel)
 
 Senaste sanning: 2026-01-08
 ============================================================ -->
@@ -40,7 +28,7 @@ Senaste sanning: 2026-01-08
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Admin • Skapa employee</title>
+  <title>HR-System – Admin • Koppla personal</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
@@ -49,18 +37,14 @@ Senaste sanning: 2026-01-08
   <script src="../UI/UI-03-APP.js"></script>
 
   <style>
-    /* SCOPE: håll enkelt, samma “card”-känsla */
+    /* SCOPE: endast layout-hjälp som inte garanterat finns i designmallen */
+    .wrap{ max-width:1100px; margin:0 auto; padding:16px; }
     .pageHead{ display:flex; gap:10px; align-items:flex-end; justify-content:space-between; flex-wrap:wrap; }
-    .metaPills{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    .pill{
-      display:inline-flex; align-items:center; gap:8px;
-      padding:4px 10px; border:1px solid var(--line); border-radius:999px;
-      background:#fff; font-size:.88rem; color:var(--muted); white-space:nowrap;
-    }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-
     .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-    @media (max-width: 820px){ .grid2{ grid-template-columns:1fr; } }
+    @media (max-width: 920px){ .grid2{ grid-template-columns:1fr; } }
+
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+    .muted2{ color: var(--muted); font-size:.92rem; }
 
     .guard{
       margin: 12px 0;
@@ -71,23 +55,71 @@ Senaste sanning: 2026-01-08
       color:#111;
       display:none;
     }
+    .guard strong{ font-weight:950; }
 
-    .step{
+    .cardInner{ padding: 14px; }
+    .row{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .space{ justify-content:space-between; }
+
+    .panel{
       border:1px solid var(--line);
       background: rgba(255,255,255,.88);
       border-radius: var(--r14);
       padding:12px;
       margin-top:10px;
     }
-    .stepTitle{ font-weight:950; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
+    .panelTitle{ font-weight:950; display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; }
     .hint{ color:var(--muted); font-size:.92rem; margin-top:6px; }
 
-    details{ border:1px dashed rgba(15,23,42,.18); border-radius: var(--r14); padding:10px 12px; background: rgba(255,255,255,.7); margin-top:12px; }
-    details > summary{ cursor:pointer; font-weight:850; }
-    .small{ font-size:.9rem; color:var(--muted); margin-top:8px; }
+    .pill{
+      display:inline-flex; align-items:center; gap:8px;
+      padding:4px 10px; border:1px solid var(--line); border-radius:999px;
+      background:#fff; font-size:.88rem; color:var(--muted); white-space:nowrap;
+    }
 
-    .rowActions{ display:flex; gap:10px; flex-wrap:wrap; margin-top:12px; align-items:center; }
-    .okline{ margin-top:10px; color: var(--muted); font-size:.92rem; }
+    /* Topbar-semantic buttons (MASTER DESIGN-SPEC) */
+    .navRight{ margin-left:auto; display:flex; gap:8px; align-items:center; }
+    .btnTop{
+      display:inline-flex; align-items:center; justify-content:center;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,.12);
+      background: rgba(255,255,255,.92);
+      text-decoration:none;
+      color:#111;
+      white-space:nowrap;
+    }
+    /* Neutral: "Min sida" */
+    .btnTopNeutral{
+      background: rgba(15,23,42,.04);
+      border-color: rgba(15,23,42,.14);
+      color:#111;
+    }
+    /* Red-toned: "Logga ut" */
+    .btnTopDanger{
+      background: rgba(220,38,38,.10);
+      border-color: rgba(220,38,38,.28);
+      color:#7f1d1d;
+    }
+
+    /* Extra-säker delete area (2-steg, svårt att klicka fel) */
+    .dangerBox{
+      margin-top:12px;
+      border: 1px solid rgba(220,38,38,.22);
+      background: rgba(254,226,226,.22);
+      border-radius: var(--r14);
+      padding: 12px;
+    }
+    .dangerBox .small{ font-size:.9rem; color: var(--muted); margin-top:6px; }
+    .dangerRow{ display:flex; gap:10px; flex-wrap:wrap; align-items:flex-end; margin-top:10px; }
+
+    /* “primary” och “secondary” kommer från UI-02-STYLES.css; här bara semantic hint */
+    .btnDangerLike{
+      /* Inline: rödtonad men följer knappformen (ingen redesign) */
+      background: rgba(220,38,38,.10);
+      border-color: rgba(220,38,38,.28);
+      color:#7f1d1d;
+    }
   </style>
 </head>
 
@@ -95,156 +127,150 @@ Senaste sanning: 2026-01-08
 <header class="top">
   <div class="brand">
     <strong>HR-System</strong>
-    <span class="muted">• Admin • Skapa employee</span>
+    <span class="muted">• Admin • Koppla personal</span>
   </div>
 
   <nav class="nav" aria-label="Meny">
     <a href="./home.html">Hem</a>
-    <a href="./employees.html">Employees (register)</a>
-    <a href="./employees-create.html" aria-current="page">Skapa employee</a>
+    <a href="./employees.html">Personal</a>
+    <a href="./employees-create.html" aria-current="page">Koppla personal</a>
     <a href="./tasks.html">Skapa uppgift</a>
     <a href="./tasks-list.html">Översikt</a>
     <a href="./questions.html">Frågor</a>
     <a href="./reports.html">Felrapporter</a>
     <a href="./answers.html">Svar</a>
-    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
+
+    <!-- MASTER DESIGN-SPEC: högerzon = Min sida (neutral) + Logga ut (röd) -->
+    <span class="navRight">
+      <a href="#" id="navMe" class="btnTop btnTopNeutral" title="Gå till din sida">Min sida</a>
+      <a href="#" id="navLogout" class="btnTop btnTopDanger" title="Logga ut">Logga ut</a>
+    </span>
   </nav>
 </header>
 
 <main class="container">
-  <div class="pageHead">
-    <div>
-      <h1 class="tight">Skapa employee + koppla scope</h1>
-      <p class="muted" style="margin-top:6px;">
-        Enkel sida: <strong>empNo → scope → spara</strong>.
-        Efter save skickas du vidare till <span class="mono">admin/employee.html</span> via querystring.
-      </p>
+  <div class="wrap">
+    <div class="pageHead">
+      <div>
+        <h1 class="tight">Koppla personal till Admin</h1>
+        <p class="muted" style="margin-top:6px;">
+          Den här sidan <strong>skapar inte</strong> personal. Välj ett <span class="mono">empNo</span> som redan finns i registret
+          och koppla till en <strong>enhet</strong> (scope).
+        </p>
+      </div>
     </div>
-    <div class="metaPills" aria-label="Nycklar">
-      <span class="pill"><strong>RW</strong> • AO-020_EMPLOYEES_V1</span>
-      <span class="pill"><strong>RW</strong> • AO-020_ROLE_ASSIGNMENTS_V2</span>
-      <span class="pill"><strong>R</strong> • AO-020_ORG_V1</span>
-    </div>
+
+    <div id="guard" class="guard" role="alert"></div>
+
+    <section class="card" style="margin-top:12px;">
+      <div class="cardInner">
+        <div class="row space" style="margin-bottom:10px;">
+          <div class="muted">
+            Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
+            <span class="muted">• scope:</span> <span class="mono" id="whoScope">—</span>
+          </div>
+          <div class="row" aria-label="Status">
+            <span class="pill">Vald: <strong class="mono" id="stateEmp">—</strong></span>
+            <span class="pill">roleId: <strong>EMPLOYEE</strong></span>
+          </div>
+        </div>
+
+        <!-- Panel: välj personal (READ-ONLY mot registret) -->
+        <div class="panel" aria-label="Välj personal">
+          <div class="panelTitle">
+            <span>Välj personal</span>
+            <span class="pill">Register: <strong class="mono">AO-020_EMPLOYEES_V1</strong> (read-only)</span>
+          </div>
+
+          <div class="grid2" style="margin-top:10px;">
+            <label>
+              empNo <span class="muted2">(måste finnas i registret)</span>
+              <input id="inpEmpNo" type="text" inputmode="numeric" placeholder="t.ex. 3001" autocomplete="off" />
+            </label>
+
+            <label>
+              Namn (visas från registret) <span class="muted2">(läsbart)</span>
+              <input id="outName" type="text" disabled />
+            </label>
+          </div>
+
+          <p class="hint" id="empHint">Skriv empNo. Om det inte finns i registret blockeras koppling (fail-closed).</p>
+        </div>
+
+        <!-- Panel: välj enhet -->
+        <div class="panel" aria-label="Välj enhet">
+          <div class="panelTitle">
+            <span>Välj enhet</span>
+            <span class="pill">ORG: <strong class="mono">AO-020_ORG_V1</strong></span>
+          </div>
+
+          <div class="grid2" style="margin-top:10px;">
+            <label>
+              Enhet (scope)
+              <select id="selScope"></select>
+              <span class="hint" id="scopeHint">—</span>
+            </label>
+
+            <label>
+              Nuvarande koppling <span class="muted2">(från assignments)</span>
+              <input id="outCurrent" type="text" disabled />
+            </label>
+          </div>
+
+          <div id="manualScopeWrap" style="display:none; margin-top:10px;">
+            <label>
+              Enhetens scopeId (manuell) <span class="muted2">(endast SYSTEM_ADMIN när ORG saknas)</span>
+              <input id="inpManualScope" type="text" placeholder="t.ex. org_..." autocomplete="off" />
+            </label>
+          </div>
+
+          <div class="row" style="margin-top:12px;">
+            <!-- Primär åtgärd -->
+            <button id="btnLink" type="button">Koppla enhet</button>
+
+            <!-- Secondary: uppdatera listor/status -->
+            <button id="btnRefresh" type="button" class="secondary">Uppdatera</button>
+          </div>
+
+          <p id="msg" class="message" aria-live="polite" style="margin-top:12px;"></p>
+          <p class="muted2" id="kpiLine" style="margin-top:6px;"></p>
+
+          <!-- Extra-säker borttagning -->
+          <div class="dangerBox" aria-label="Ta bort koppling (säker)">
+            <div class="panelTitle" style="margin:0;">
+              <span>Ta bort koppling</span>
+              <span class="pill">Key: <strong class="mono">AO-020_ROLE_ASSIGNMENTS_V2</strong></span>
+            </div>
+            <div class="small">
+              För att minska felklick krävs en extra bekräftelse. Detta tar bara bort assignment för vald personal.
+            </div>
+
+            <div class="dangerRow">
+              <label style="min-width:260px;">
+                Bekräfta empNo
+                <input id="inpConfirmEmpNo" type="text" inputmode="numeric" placeholder="skriv samma empNo igen" autocomplete="off" />
+              </label>
+
+              <button id="btnUnlink" type="button" class="secondary btnDangerLike" disabled>Ta bort koppling</button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
   </div>
-
-  <div id="guard" class="guard" role="alert"></div>
-
-  <section class="card">
-    <div class="row space-between wrap" style="margin-bottom:10px;">
-      <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
-        <span class="muted">• scope:</span> <span class="mono" id="whoScope">—</span>
-      </div>
-      <div class="muted small">
-        Fail-closed: ADMIN/MANAGER kan bara assigna inom sin subtree.
-      </div>
-    </div>
-
-    <!-- STEG 1 -->
-    <div class="step" aria-label="Steg 1">
-      <div class="stepTitle">
-        <span>Steg 1 — empNo</span>
-        <span class="pill"><span class="mono" id="stateEmp">—</span></span>
-      </div>
-
-      <div class="grid2" style="margin-top:10px;">
-        <label>
-          empNo <span class="muted">(1–12 siffror)</span>
-          <input id="inpEmpNo" type="text" inputmode="numeric" placeholder="t.ex. 3001" />
-        </label>
-
-        <label>
-          Namn (valfritt) <span class="muted">(max 60)</span>
-          <input id="inpName" type="text" placeholder="t.ex. Anna" maxlength="60" />
-        </label>
-      </div>
-
-      <p class="hint" id="empHint">Skriv empNo så kan sidan säga om personen redan finns i registret.</p>
-    </div>
-
-    <!-- STEG 2 -->
-    <div class="step" aria-label="Steg 2">
-      <div class="stepTitle">
-        <span>Steg 2 — välj scope (gren)</span>
-        <span class="pill">roleId: <strong>EMPLOYEE</strong></span>
-      </div>
-
-      <div class="grid2" style="margin-top:10px;">
-        <label>
-          Scope (gren)
-          <select id="selScope"></select>
-          <span class="hint" id="scopeHint">—</span>
-        </label>
-
-        <label>
-          Email (kommer snart)
-          <input id="inpEmail" type="email" placeholder="t.ex. anna@..." disabled />
-          <span class="hint">UI-beredskap. Aktiveras senare (AO för identitet/invite + backend).</span>
-        </label>
-      </div>
-
-      <div id="manualScopeWrap" style="display:none; margin-top:10px;">
-        <label>
-          ScopeId (manuell) <span class="muted">(endast SYSTEM_ADMIN när ORG saknas)</span>
-          <input id="inpManualScope" type="text" placeholder="t.ex. org_..." autocomplete="off" />
-        </label>
-      </div>
-    </div>
-
-    <!-- STEG 3 -->
-    <div class="step" aria-label="Steg 3">
-      <div class="stepTitle">
-        <span>Steg 3 — spara</span>
-        <span class="pill">Efter save → <span class="mono">/admin/employee.html?empNo=…</span></span>
-      </div>
-
-      <div class="rowActions">
-        <button id="btnSave" type="button">Skapa + koppla</button>
-        <button id="btnOpenCard" type="button" class="secondary">Öppna personalkort</button>
-        <button id="btnReset" type="button" class="secondary">Rensa</button>
-      </div>
-
-      <p id="msg" class="message" aria-live="polite" style="margin-top:10px;"></p>
-      <p class="okline" id="kpiLine"></p>
-
-      <!-- INVITE UI (TEST) -->
-      <details>
-        <summary>Invite (TEST) – visa hur flödet ska bli</summary>
-        <div class="small">
-          Detta är <strong>inte skarpt säkert</strong>. Det skapar bara en kopierbar länk (ingen write).
-          Riktig inbjudan + lösenord kräver backend + tokens + hash + audit.
-        </div>
-        <div class="rowActions">
-          <button id="btnInvite" type="button" class="secondary">Skapa test-invite-länk</button>
-          <button id="btnInviteCopy" type="button" class="secondary" disabled>Kopiera</button>
-        </div>
-        <label style="margin-top:10px;">
-          Invite-länk (TEST)
-          <input id="inviteOut" type="text" readonly />
-        </label>
-      </details>
-
-      <!-- Avancerat: unassign (om du vill ha kvar) -->
-      <details>
-        <summary>Avancerat</summary>
-        <div class="rowActions">
-          <button id="btnUnassign" type="button" class="secondary">Ta bort assignment för empNo</button>
-        </div>
-        <div class="small">
-          Tar bara bort assignment (registret lämnas kvar). Fail-closed: ADMIN/MANAGER kan inte unassigna utanför sin subtree.
-        </div>
-      </details>
-    </div>
-  </section>
 </main>
 
 <script>
 /* ============================================================
-AO-EMPLOYEES-CREATE-ASSIGN-01 v1.1 | admin/employees-create.html
+AO-EMPLOYEES-CREATE-ASSIGN-01 v2.0 | admin/employees-create.html
 SCOPE:
-- Förenkla UI, behåll exakt samma keys + datamodell.
-- Redirect-samspel till admin/employee.html via querystring.
-- Invite UI (TEST) = ingen write, bara kopierbar länk.
+- Endast koppla/ta bort koppling i AO-020_ROLE_ASSIGNMENTS_V2
+- Skapar INTE empNo i AO-020_EMPLOYEES_V1 (fail-closed om saknas)
+- ADMIN/SYSTEM_ADMIN only (roller separerade)
+- Robust ORG-parse (array eller {nodes:[...]})
+- Hård fail-closed: subtree-guard för ADMIN, manuell scope endast SYSTEM_ADMIN utan ORG
+- Ingen invite, inga “RW/R”-rader, ingen redirect
 ============================================================ */
 (function(){
   "use strict";
@@ -266,28 +292,28 @@ SCOPE:
   const whoRole = $("#whoRole");
   const whoScope = $("#whoScope");
 
+  const stateEmp = $("#stateEmp");
   const inpEmpNo = $("#inpEmpNo");
-  const inpName  = $("#inpName");
+  const outName  = $("#outName");
+  const empHint  = $("#empHint");
+
   const selScope = $("#selScope");
   const scopeHint = $("#scopeHint");
   const manualWrap = $("#manualScopeWrap");
   const inpManualScope = $("#inpManualScope");
+  const outCurrent = $("#outCurrent");
 
-  const btnSave = $("#btnSave");
-  const btnOpenCard = $("#btnOpenCard");
-  const btnReset = $("#btnReset");
-  const btnUnassign = $("#btnUnassign");
+  const btnLink = $("#btnLink");
+  const btnRefresh = $("#btnRefresh");
 
-  const stateEmp = $("#stateEmp");
-  const empHint = $("#empHint");
-  const kpiLine = $("#kpiLine");
+  const inpConfirmEmpNo = $("#inpConfirmEmpNo");
+  const btnUnlink = $("#btnUnlink");
+
   const msg = $("#msg");
-
-  const btnInvite = $("#btnInvite");
-  const btnInviteCopy = $("#btnInviteCopy");
-  const inviteOut = $("#inviteOut");
+  const kpiLine = $("#kpiLine");
 
   const navLogout = $("#navLogout");
+  const navMe = $("#navMe");
 
   // -----------------------------
   // HELPERS (XSS-safe)
@@ -300,13 +326,20 @@ SCOPE:
   function showGuard(text){
     if(!guard) return;
     guard.style.display = "block";
-    guard.textContent = "Fail-closed: " + String(text || "");
+    guard.textContent = "";
+    const strong = document.createElement("strong");
+    strong.textContent = "Fail-closed: ";
+    const span = document.createElement("span");
+    span.textContent = String(text || "");
+    guard.appendChild(strong);
+    guard.appendChild(span);
   }
   function hideGuard(){
     if(!guard) return;
     guard.style.display = "none";
     guard.textContent = "";
   }
+
   function safeJsonParse(raw){
     if(typeof raw !== "string" || !raw) return { ok:true, value:null };
     try { return { ok:true, value: JSON.parse(raw) }; } catch { return { ok:false, value:null }; }
@@ -315,17 +348,13 @@ SCOPE:
     try { return localStorage.getItem(String(key||"")); } catch { return null; }
   }
   function writeLocal(key, value){
+    // Fail-closed: låt ev. exceptions bubbla till catch vid write-call sites
     localStorage.setItem(String(key||""), JSON.stringify(value));
   }
   function normStr(v){ return String(v ?? "").trim(); }
   function normalizeEmpNo(v){
     const s = String(v ?? "").trim();
     return (/^\d{1,12}$/).test(s) ? s : "";
-  }
-  function normalizeName(v){
-    let s = String(v ?? "").trim();
-    if(s.length > 60) s = s.slice(0, 60);
-    return s;
   }
   function isPlainObject(v){
     if(!v || typeof v !== "object") return false;
@@ -350,7 +379,8 @@ SCOPE:
     return;
   }
 
-  const allowRoles = ["ADMIN","MANAGER","SYSTEM_ADMIN"];
+  // Roller separerade: ADMIN + SYSTEM_ADMIN only (GUARD)
+  const allowRoles = ["ADMIN","SYSTEM_ADMIN"];
   const session = window.HRApp.requireAuth({ allowRoles });
   if(!session) return;
 
@@ -373,17 +403,36 @@ SCOPE:
     });
   }
 
+  // Min sida: försök via core om det finns, annars fall-back (ingen ny koppling i data, bara navigation)
+  if(navMe){
+    navMe.addEventListener("click", (e) => {
+      e.preventDefault();
+      try{
+        if(window.HRApp && typeof window.HRApp.goToMyPage === "function"){
+          window.HRApp.goToMyPage(session);
+          return;
+        }
+      }catch{}
+      // Fallback: tillbaka till start-skeleton (säkrast utan att gissa rollspecifika paths)
+      window.location.href = "../UI/UI-01-SKELETON.html";
+    });
+  }
+
   // -----------------------------
-  // ORG helpers (subtree)
+  // ORG (subtree) — robust parse
   // -----------------------------
   const MAX_CHAIN_GUARD = 500;
 
-  function readOrgNodes(){
+  function readOrg(){
     const raw = readLocalRaw(KEY_ORG);
-    const p = safeJsonParse(raw || "");
-    if(!p.ok) return [];
-    // OBS: vissa varianter kan vara {nodes:[...]} — vi stödjer bara array här (fail-soft => [])
-    return Array.isArray(p.value) ? p.value : [];
+    if(raw === null) return { ok:true, nodes:[] };
+    const p = safeJsonParse(raw);
+    if(!p.ok) return { ok:false, nodes:[] };
+
+    if(Array.isArray(p.value)) return { ok:true, nodes:p.value };
+    if(isPlainObject(p.value) && Array.isArray(p.value.nodes)) return { ok:true, nodes:p.value.nodes };
+
+    return { ok:true, nodes:[] }; // fail-soft: behandla som saknas, guards tar över
   }
 
   function buildOrgIndex(nodes){
@@ -447,13 +496,12 @@ SCOPE:
     return false;
   }
 
-  function getAllowedScopeIdsForViewer(viewerScopeId, org){
-    const root = normStr(viewerScopeId);
+  function listSubtree(rootId, org){
+    const root = normStr(rootId);
     if(!root || !org.byId.has(root)) return [];
     const out = [];
     const stack = [root];
     const seen = new Set();
-
     while(stack.length){
       const cur = stack.pop();
       if(seen.has(cur)) continue;
@@ -462,8 +510,6 @@ SCOPE:
       const kids = org.children.get(cur) || [];
       for(let i=kids.length-1;i>=0;i--) stack.push(kids[i]);
     }
-
-    // Root först, sen label-sort
     out.sort((a,b)=>{
       if(a === root) return -1;
       if(b === root) return 1;
@@ -472,12 +518,18 @@ SCOPE:
       const c = la.localeCompare(lb, "sv");
       return c !== 0 ? c : a.localeCompare(b, "sv");
     });
-
     return out;
   }
 
+  function labelForScope(scopeId){
+    const sid = normStr(scopeId);
+    if(!sid) return "—";
+    const n = STATE.org.byId.get(sid);
+    return n ? n.label : sid;
+  }
+
   // -----------------------------
-  // EMPLOYEES (register)
+  // EMPLOYEES (READ-ONLY här)
   // -----------------------------
   function normalizeEmployeesArray(raw){
     if(raw === null || raw === undefined) return { ok:true, list:[] };
@@ -488,24 +540,15 @@ SCOPE:
       if(!isPlainObject(it)) return { ok:false, list:[] };
       const empNo = normalizeEmpNo(it.empNo);
       if(!empNo) continue;
-      const name = normalizeName(it.name);
-      const createdAt = Number.isFinite(Number(it.createdAt)) ? Number(it.createdAt) : null;
-      const updatedAt = Number.isFinite(Number(it.updatedAt)) ? Number(it.updatedAt) : null;
-      out.push({ empNo, name, createdAt, updatedAt });
+      const name = normStr(it.name ?? "");
+      out.push({ empNo, name });
     }
 
-    // dedupe: keep latest updatedAt
+    // dedupe by empNo
     const by = new Map();
     for(const r of out){
-      const prev = by.get(r.empNo);
-      if(!prev) by.set(r.empNo, r);
-      else{
-        const pu = Number(prev.updatedAt || 0);
-        const ru = Number(r.updatedAt || 0);
-        by.set(r.empNo, (ru >= pu) ? r : prev);
-      }
+      if(!by.has(r.empNo)) by.set(r.empNo, r);
     }
-
     const list = Array.from(by.values()).sort((a,b)=>String(a.empNo).localeCompare(String(b.empNo),"sv"));
     return { ok:true, list };
   }
@@ -518,24 +561,8 @@ SCOPE:
     return normalizeEmployeesArray(p.value);
   }
 
-  function saveEmployees(list){
-    const now = Date.now();
-    const out = (Array.isArray(list)?list:[]).map(r => ({
-      empNo: normalizeEmpNo(r.empNo),
-      name: normalizeName(r.name),
-      createdAt: Number.isFinite(Number(r.createdAt)) ? Number(r.createdAt) : now,
-      updatedAt: now
-    })).filter(x => !!x.empNo);
-
-    const by = new Map();
-    for(const r of out){
-      if(!by.has(r.empNo)) by.set(r.empNo, r);
-    }
-    writeLocal(KEY_EMP, Array.from(by.values()).sort((a,b)=>String(a.empNo).localeCompare(String(b.empNo),"sv")));
-  }
-
   // -----------------------------
-  // ASSIGNMENTS V2 (compat)
+  // ASSIGNMENTS V2 (compat) — skriver endast denna key
   // -----------------------------
   function normalizeAssignmentObj(v){
     const roleId = normStr(v?.roleId ?? v?.role ?? v?.role_id ?? "");
@@ -594,6 +621,7 @@ SCOPE:
   }
 
   function saveAssignmentsV2(map, list){
+    // SECURITY: skriv en sanerad payload (minskar risk för prototype pollution)
     const safeMap = {};
     for(const empNo of Object.keys(map || {})){
       const e = normalizeEmpNo(empNo);
@@ -639,25 +667,22 @@ SCOPE:
     asgMap: {},
     asgList: [],
     viewerScope: "",
-    allowedScopeIds: [],
-    lastInviteUrl: ""
+    allowedScopeIds: []
   };
 
-  // viewerScope: om session saknar scopeId, försök resolve via assignments (minskar “scopeId=—”)
   function resolveViewerScope(){
-    const inSession = normStr(auth?.scopeId);
-    if(inSession) return inSession;
+    // GUARD: använd core om den finns; annars fallback via assignments (minskar scopeId=—)
+    try{
+      if(window.HRApp && typeof window.HRApp.getScopeId === "function"){
+        const sid = window.HRApp.getScopeId(session);
+        if(normStr(sid)) return normStr(sid);
+      }
+    }catch{}
+
     const me = normalizeEmpNo(auth?.empNo);
     if(!me) return "";
     const hit = STATE.asgMap && STATE.asgMap[me] ? STATE.asgMap[me] : null;
     return normStr(hit?.scopeId);
-  }
-
-  function labelForScope(scopeId){
-    const sid = normStr(scopeId);
-    if(!sid) return "—";
-    const n = STATE.org.byId.get(sid);
-    return n ? n.label : sid;
   }
 
   function computeAllowedScopes(){
@@ -678,20 +703,19 @@ SCOPE:
       return;
     }
 
-    // ADMIN/MANAGER: subtree
+    // ADMIN: subtree
     if(!STATE.viewerScope){
       STATE.allowedScopeIds = [];
       return;
     }
-    STATE.allowedScopeIds = getAllowedScopeIdsForViewer(STATE.viewerScope, STATE.org);
+    STATE.allowedScopeIds = listSubtree(STATE.viewerScope, STATE.org);
   }
 
   function fillScopeSelect(){
-    // rensa
     while(selScope && selScope.firstChild) selScope.removeChild(selScope.firstChild);
 
+    // ORG saknas
     if(STATE.orgNodes.length === 0){
-      // ORG saknas
       const opt = document.createElement("option");
       opt.value = "";
       opt.textContent = "ORG saknas";
@@ -700,10 +724,10 @@ SCOPE:
 
       if(viewerRole === "SYSTEM_ADMIN"){
         if(manualWrap) manualWrap.style.display = "block";
-        if(scopeHint) scopeHint.textContent = "SYSTEM_ADMIN: ORG saknas. Skriv scopeId manuellt.";
+        if(scopeHint) scopeHint.textContent = "SYSTEM_ADMIN: ORG saknas. Skriv enhetens scopeId manuellt.";
       }else{
         if(manualWrap) manualWrap.style.display = "none";
-        if(scopeHint) scopeHint.textContent = viewerRole + ": kräver ORG för subtree (fail-closed).";
+        if(scopeHint) scopeHint.textContent = "ADMIN: kräver ORG för att kunna validera subtree (fail-closed).";
       }
       return;
     }
@@ -716,15 +740,15 @@ SCOPE:
     if(ids.length === 0){
       const opt = document.createElement("option");
       opt.value = "";
-      opt.textContent = "Inga scopes tillgängliga";
+      opt.textContent = "Inga enheter tillgängliga";
       selScope.appendChild(opt);
-      if(scopeHint) scopeHint.textContent = "Fail-closed: inga scopes hittades för din roll/scope.";
+      if(scopeHint) scopeHint.textContent = "Fail-closed: inga enheter hittades för din roll/scope.";
       return;
     }
 
     const opt0 = document.createElement("option");
     opt0.value = "";
-    opt0.textContent = "Välj scope…";
+    opt0.textContent = "Välj enhet…";
     selScope.appendChild(opt0);
 
     for(const id of ids){
@@ -738,28 +762,9 @@ SCOPE:
 
     if(scopeHint){
       scopeHint.textContent = (viewerRole === "SYSTEM_ADMIN")
-        ? "SYSTEM_ADMIN: kan assigna till valfri scope."
-        : "ADMIN/MANAGER: kan bara assigna inom din subtree.";
+        ? "SYSTEM_ADMIN: kan koppla till valfri enhet."
+        : "ADMIN: kan bara koppla inom din subtree.";
     }
-  }
-
-  function validateScopeChoice(scopeId){
-    const sid = normStr(scopeId);
-    if(!sid) return { ok:false, msg:"Scope krävs." };
-
-    // ORG finns: måste existera + subtree-guard
-    if(STATE.orgNodes.length > 0){
-      if(!STATE.org.byId.has(sid)) return { ok:false, msg:"ScopeId finns inte i ORG (fail-closed)." };
-      if(viewerRole !== "SYSTEM_ADMIN"){
-        if(!STATE.viewerScope) return { ok:false, msg:"Din viewer-scope saknas (fail-closed)." };
-        if(!isInSubtree(sid, STATE.viewerScope, STATE.org)) return { ok:false, msg:"Scope ligger utanför din subtree (fail-closed)." };
-      }
-      return { ok:true, msg:"" };
-    }
-
-    // ORG saknas: endast SYSTEM_ADMIN får (manuellt)
-    if(viewerRole !== "SYSTEM_ADMIN") return { ok:false, msg:"ORG saknas: endast SYSTEM_ADMIN kan assigna utan org (fail-closed)." };
-    return { ok:true, msg:"" };
   }
 
   function getSelectedScopeId(){
@@ -771,9 +776,35 @@ SCOPE:
     return "";
   }
 
-  // -----------------------------
-  // UI: empNo status
-  // -----------------------------
+  function validateWritePrereqs(){
+    if(viewerRole === "SYSTEM_ADMIN"){
+      // SYSTEM_ADMIN får även utan ORG (manuell scope)
+      return { ok:true, msg:"" };
+    }
+    // ADMIN kräver viewerScope + ORG
+    if(!STATE.viewerScope) return { ok:false, msg:"Saknar scopeId i session. Lägg assignment för din empNo i System → Access." };
+    if(STATE.orgNodes.length === 0) return { ok:false, msg:"ORG saknas (AO-020_ORG_V1). SYSTEM_ADMIN måste skapa org-träd först." };
+    return { ok:true, msg:"" };
+  }
+
+  function validateScopeChoice(scopeId){
+    const sid = normStr(scopeId);
+    if(!sid) return { ok:false, msg:"Enhet (scope) krävs." };
+
+    if(STATE.orgNodes.length > 0){
+      if(!STATE.org.byId.has(sid)) return { ok:false, msg:"ScopeId finns inte i ORG (fail-closed)." };
+      if(viewerRole === "ADMIN"){
+        if(!STATE.viewerScope) return { ok:false, msg:"Din viewer-scope saknas (fail-closed)." };
+        if(!isInSubtree(sid, STATE.viewerScope, STATE.org)) return { ok:false, msg:"Enheten ligger utanför din subtree (fail-closed)." };
+      }
+      return { ok:true, msg:"" };
+    }
+
+    // ORG saknas: endast SYSTEM_ADMIN får (manuellt)
+    if(viewerRole !== "SYSTEM_ADMIN") return { ok:false, msg:"ORG saknas: endast SYSTEM_ADMIN kan koppla utan ORG (fail-closed)." };
+    return { ok:true, msg:"" };
+  }
+
   function findEmployee(empNo){
     const e = normalizeEmpNo(empNo);
     if(!e) return null;
@@ -785,84 +816,63 @@ SCOPE:
     return STATE.asgMap && STATE.asgMap[e] ? STATE.asgMap[e] : null;
   }
 
-  function updateEmpStatus(){
+  function updateEmpUI(){
     const empNo = normalizeEmpNo(inpEmpNo?.value);
     if(stateEmp) stateEmp.textContent = empNo ? ("#" + empNo) : "—";
+    if(outName) outName.value = "";
+    if(outCurrent) outCurrent.value = "";
+    if(inpConfirmEmpNo) inpConfirmEmpNo.value = "";
+    if(btnUnlink) btnUnlink.disabled = true;
+
+    // Standard: disable actions tills vi har korrekt state
+    if(btnLink) btnLink.disabled = true;
+    if(selScope) selScope.disabled = selScope.disabled; // ingen ändring, bara tydlighet
 
     if(!empNo){
-      if(empHint) empHint.textContent = "Skriv empNo så kan sidan säga om personen redan finns i registret.";
-      btnOpenCard.disabled = true;
+      if(empHint) empHint.textContent = "Skriv empNo. Om det inte finns i registret blockeras koppling (fail-closed).";
+      setMsg("", "");
+      return;
+    }
+
+    const prereq = validateWritePrereqs();
+    if(!prereq.ok){
+      // Vi kan fortfarande visa “finns/inte finns”, men inga writes
+      if(empHint) empHint.textContent = "Skrivrätt blockeras: " + prereq.msg;
       return;
     }
 
     const e = findEmployee(empNo);
-    const a = findAssignment(empNo);
-
-    if(e && a && a.scopeId){
-      if(empHint) empHint.textContent = "Finns redan + har assignment: " + labelForScope(a.scopeId) + ".";
-    }else if(e){
-      if(empHint) empHint.textContent = "Finns redan i registret, men saknar assignment.";
-    }else{
-      if(empHint) empHint.textContent = "Ny employee (kommer skapas vid save).";
-    }
-
-    btnOpenCard.disabled = false;
-  }
-
-  // -----------------------------
-  // NAV: open card (querystring)
-  // -----------------------------
-  function goToEmployeeCard(empNo, flash){
-    const e = normalizeEmpNo(empNo);
     if(!e){
-      setMsg("err", "Ogiltigt empNo.");
+      // KRAV: empNo får inte skapas här
+      if(empHint) empHint.textContent = "empNo finns inte i registret. Skapa personen i Personal först (employees.html).";
+      setMsg("err", "Fail-closed: empNo saknas i registret (AO-020_EMPLOYEES_V1).");
       return;
     }
-    const url = "./employee.html?empNo=" + encodeURIComponent(e) + (flash ? ("&flash=" + encodeURIComponent(flash)) : "");
-    window.location.href = url;
-  }
 
-  // -----------------------------
-  // INVITE (TEST) – ingen write
-  // -----------------------------
-  function randomToken(){
-    // TEST: inte kryptosäker (men räcker för UI-simulering)
-    const r = Math.random().toString(16).slice(2);
-    const t = Date.now().toString(16);
-    return "inv_" + t + "_" + r.slice(0, 10);
-  }
+    // Finns i register => visa namn
+    if(outName) outName.value = e.name ? String(e.name) : "";
 
-  function buildInviteUrl(empNo){
-    const e = normalizeEmpNo(empNo);
-    if(!e) return "";
-    const token = randomToken();
-    // UI: visa hur flödet skulle se ut. Inget sparas.
-    const base = "../UI/UI-01-SKELETON.html";
-    return base + "?invite=" + encodeURIComponent(token) + "&empNo=" + encodeURIComponent(e);
-  }
-
-  async function copyToClipboard(text){
-    try{
-      await navigator.clipboard.writeText(String(text || ""));
-      return true;
-    }catch{
-      return false;
-    }
-  }
-
-  // -----------------------------
-  // SAVE (write only allowed keys)
-  // -----------------------------
-  function upsertEmployee(empNo, name){
-    const now = Date.now();
-    const next = STATE.employees.slice();
-    const idx = next.findIndex(x => String(x.empNo||"") === empNo);
-    if(idx >= 0){
-      next[idx] = { empNo, name, createdAt: next[idx].createdAt || now, updatedAt: now };
+    // Visa nuvarande koppling (om finns)
+    const a = findAssignment(empNo);
+    if(a && a.scopeId){
+      const label = (STATE.orgNodes.length > 0) ? labelForScope(a.scopeId) : a.scopeId;
+      if(outCurrent) outCurrent.value = a.roleId + " → " + label;
+      if(empHint) empHint.textContent = "Finns i registret. Nuvarande koppling visas till höger.";
     }else{
-      next.push({ empNo, name, createdAt: now, updatedAt: now });
+      if(outCurrent) outCurrent.value = "—";
+      if(empHint) empHint.textContent = "Finns i registret men saknar koppling. Välj enhet och koppla.";
     }
-    saveEmployees(next);
+
+    // Nu kan vi tillåta koppla (om scope är valbar eller manuell)
+    if(btnLink) btnLink.disabled = false;
+
+    // Unlink kräver extra bekräftelse (empNo matchar)
+    if(inpConfirmEmpNo){
+      inpConfirmEmpNo.addEventListener("input", () => {
+        const c = normalizeEmpNo(inpConfirmEmpNo.value);
+        btnUnlink.disabled = !(c && c === empNo);
+      }, { once:false });
+    }
   }
 
   function upsertAssignment(empNo, roleId, scopeId){
@@ -886,16 +896,25 @@ SCOPE:
   // RELOAD (single source of truth)
   // -----------------------------
   function reloadAll(){
+    setMsg("", "");
+
     // ORG
-    STATE.orgNodes = readOrgNodes();
+    const orgRes = readOrg();
+    if(!orgRes.ok){
+      showGuard("AO-020_ORG_V1 är korrupt JSON. Åtgärda i DevTools eller återställ.");
+      if(btnLink) btnLink.disabled = true;
+      if(btnUnlink) btnUnlink.disabled = true;
+      return;
+    }
+    STATE.orgNodes = orgRes.nodes || [];
     STATE.org = buildOrgIndex(STATE.orgNodes);
 
     // ASSIGNMENTS
     const asg = loadAssignmentsV2();
     if(!asg.ok){
       showGuard("AO-020_ROLE_ASSIGNMENTS_V2 är korrupt JSON/format. Åtgärda i DevTools eller återställ.");
-      btnSave.disabled = true;
-      btnUnassign.disabled = true;
+      if(btnLink) btnLink.disabled = true;
+      if(btnUnlink) btnUnlink.disabled = true;
       return;
     }
     STATE.asgMap = asg.map || {};
@@ -905,130 +924,111 @@ SCOPE:
     STATE.viewerScope = resolveViewerScope();
     if(whoScope) whoScope.textContent = STATE.viewerScope || "—";
 
-    // fail-closed prereqs
-    if(viewerRole !== "SYSTEM_ADMIN"){
-      if(!STATE.viewerScope){
-        showGuard("Saknar scopeId för dig som " + viewerRole + ". Skapa assignment för din empNo i System → Access.");
-        btnSave.disabled = true;
-        btnUnassign.disabled = true;
-      }else if(STATE.orgNodes.length === 0){
-        showGuard(viewerRole + " kräver ORG (AO-020_ORG_V1) för subtree. SYSTEM_ADMIN måste skapa org-trädet.");
-        btnSave.disabled = true;
-        btnUnassign.disabled = true;
-      }else{
-        hideGuard();
-        btnSave.disabled = false;
-        btnUnassign.disabled = false;
-      }
+    // EMPLOYEES (read-only)
+    const emp = loadEmployees();
+    if(!emp.ok){
+      showGuard("AO-020_EMPLOYEES_V1 är korrupt format. Åtgärda i DevTools eller återställ via employees.html.");
+      if(btnLink) btnLink.disabled = true;
+      if(btnUnlink) btnUnlink.disabled = true;
+      return;
+    }
+    STATE.employees = emp.list || [];
+
+    // Guards (writes)
+    const prereq = validateWritePrereqs();
+    if(!prereq.ok){
+      showGuard(prereq.msg);
     }else{
-      // SYSTEM_ADMIN: tillåt även utan org (manuell scope)
       hideGuard();
-      btnSave.disabled = false;
-      btnUnassign.disabled = false;
     }
 
     // scopes
     computeAllowedScopes();
     fillScopeSelect();
 
-    // EMPLOYEES
-    const emp = loadEmployees();
-    if(!emp.ok){
-      showGuard("AO-020_EMPLOYEES_V1 är korrupt format. Åtgärda i DevTools eller återställ via employees.html.");
-      btnSave.disabled = true;
-      btnUnassign.disabled = true;
-      return;
-    }
-    STATE.employees = emp.list || [];
-
-    // KPI line
+    // KPI
     if(kpiLine){
       const empCount = STATE.employees.length;
       const asgCount = Object.keys(STATE.asgMap || {}).length;
-      kpiLine.textContent = "Status: " + empCount + " i register • " + asgCount + " assignments.";
+      const orgCount = Array.isArray(STATE.orgNodes) ? STATE.orgNodes.length : 0;
+      kpiLine.textContent = "Status: " + empCount + " i register • " + asgCount + " kopplingar • " + orgCount + " org-noder.";
     }
 
-    updateEmpStatus();
+    updateEmpUI();
   }
 
   // -----------------------------
   // EVENTS
   // -----------------------------
-  if(inpEmpNo) inpEmpNo.addEventListener("input", updateEmpStatus);
+  if(inpEmpNo) inpEmpNo.addEventListener("input", () => {
+    // Inline: nollställ scope-UI feedback när person byts
+    if(inpConfirmEmpNo) inpConfirmEmpNo.value = "";
+    if(btnUnlink) btnUnlink.disabled = true;
+    updateEmpUI();
+  });
 
-  if(btnReset){
-    btnReset.addEventListener("click", () => {
-      setMsg("", "");
-      if(inpEmpNo) inpEmpNo.value = "";
-      if(inpName) inpName.value = "";
-      if(selScope && !selScope.disabled) selScope.value = "";
-      if(inpManualScope) inpManualScope.value = "";
-      if(inviteOut) inviteOut.value = "";
-      if(btnInviteCopy) btnInviteCopy.disabled = true;
-      updateEmpStatus();
-    });
+  if(btnRefresh){
+    btnRefresh.addEventListener("click", () => reloadAll());
   }
 
-  if(btnOpenCard){
-    btnOpenCard.addEventListener("click", () => {
+  if(btnLink){
+    btnLink.addEventListener("click", () => {
+      setMsg("", "");
+
+      const prereq = validateWritePrereqs();
+      if(!prereq.ok){
+        setMsg("err", "Fail-closed: " + prereq.msg);
+        return;
+      }
+
       const empNo = normalizeEmpNo(inpEmpNo?.value);
       if(!empNo){
         setMsg("err", "Skriv empNo först.");
         return;
       }
-      goToEmployeeCard(empNo, "");
-    });
-  }
 
-  if(btnSave){
-    btnSave.addEventListener("click", () => {
-      setMsg("", "");
-
-      if(btnSave.disabled){
-        setMsg("err", "Fail-closed: sidan saknar förutsättningar för att skriva.");
+      // KRAV: empNo måste finnas i registret
+      const e = findEmployee(empNo);
+      if(!e){
+        setMsg("err", "Fail-closed: empNo saknas i registret. Skapa i Personal först.");
         return;
       }
 
-      const empNo = normalizeEmpNo(inpEmpNo?.value);
-      const name = normalizeName(inpName?.value);
-      const roleId = "EMPLOYEE"; // UI: låst
       const scopeId = getSelectedScopeId();
-
-      if(!empNo){
-        setMsg("err", "empNo måste vara 1–12 siffror.");
-        return;
-      }
-
       const v = validateScopeChoice(scopeId);
       if(!v.ok){
         setMsg("err", v.msg);
         return;
       }
 
-      // extra guard: ADMIN/MANAGER får aldrig gå utanför subtree (även om DOM manipuleras)
-      if(viewerRole !== "SYSTEM_ADMIN" && STATE.orgNodes.length > 0){
+      // Extra guard: ADMIN får aldrig gå utanför subtree (även om DOM manipuleras)
+      if(viewerRole === "ADMIN" && STATE.orgNodes.length > 0){
         if(!isInSubtree(scopeId, STATE.viewerScope, STATE.org)){
-          setMsg("err", "Fail-closed: scope ligger utanför din subtree.");
+          setMsg("err", "Fail-closed: enheten ligger utanför din subtree.");
           return;
         }
       }
 
-      // write
-      upsertEmployee(empNo, name);
-      upsertAssignment(empNo, roleId, scopeId);
+      try{
+        upsertAssignment(empNo, "EMPLOYEE", scopeId);
+      }catch{
+        setMsg("err", "Kunde inte spara (storage blockerad eller full).");
+        return;
+      }
 
-      // feedback + redirect
-      setMsg("ok", "Sparat. Öppnar personalkort…");
-      goToEmployeeCard(empNo, "created");
+      const label = (STATE.orgNodes.length > 0) ? labelForScope(scopeId) : scopeId;
+      setMsg("ok", "Kopplat: #" + empNo + " → " + label + ".");
+      reloadAll();
     });
   }
 
-  if(btnUnassign){
-    btnUnassign.addEventListener("click", () => {
+  if(btnUnlink){
+    btnUnlink.addEventListener("click", () => {
       setMsg("", "");
 
-      if(btnUnassign.disabled){
-        setMsg("err", "Fail-closed: sidan saknar förutsättningar för att skriva.");
+      const prereq = validateWritePrereqs();
+      if(!prereq.ok){
+        setMsg("err", "Fail-closed: " + prereq.msg);
         return;
       }
 
@@ -1038,83 +1038,74 @@ SCOPE:
         return;
       }
 
-      const cur = STATE.asgMap[empNo] || null;
-      if(!cur || !cur.scopeId){
-        setMsg("err", "Ingen assignment finns för empNo.");
+      // KRAV: empNo måste finnas i registret
+      const e = findEmployee(empNo);
+      if(!e){
+        setMsg("err", "Fail-closed: empNo saknas i registret. Skapa i Personal först.");
         return;
       }
 
-      // subtree-guard även vid unassign
-      if(viewerRole !== "SYSTEM_ADMIN" && STATE.orgNodes.length > 0){
-        if(!isInSubtree(cur.scopeId, STATE.viewerScope, STATE.org)){
-          setMsg("err", "Fail-closed: kan inte ta bort assignment utanför din subtree.");
+      const confirmEmp = normalizeEmpNo(inpConfirmEmpNo?.value);
+      if(confirmEmp !== empNo){
+        setMsg("err", "Bekräfta empNo korrekt för att ta bort koppling.");
+        return;
+      }
+
+      const cur = findAssignment(empNo);
+      if(!cur || !cur.scopeId){
+        setMsg("err", "Ingen koppling finns för empNo.");
+        return;
+      }
+
+      // subtree-guard även vid unlink
+      if(viewerRole === "ADMIN"){
+        if(STATE.orgNodes.length === 0){
+          setMsg("err", "Fail-closed: ADMIN kräver ORG för att kunna validera subtree.");
+          return;
+        }
+        if(!STATE.viewerScope || !isInSubtree(cur.scopeId, STATE.viewerScope, STATE.org)){
+          setMsg("err", "Fail-closed: kan inte ta bort koppling utanför din subtree.");
           return;
         }
       }
 
-      if(!confirm("Ta bort assignment för #" + empNo + "? (Employee-registret lämnas kvar)")) return;
+      if(!confirm("Ta bort koppling för #" + empNo + "?")) return;
 
-      deleteAssignment(empNo);
-      setMsg("ok", "Assignment borttagen.");
+      try{
+        deleteAssignment(empNo);
+      }catch{
+        setMsg("err", "Kunde inte spara (storage blockerad eller full).");
+        return;
+      }
+
+      setMsg("ok", "Koppling borttagen för #" + empNo + ".");
       reloadAll();
     });
   }
 
-  if(btnInvite){
-    btnInvite.addEventListener("click", async () => {
-      setMsg("", "");
-      const empNo = normalizeEmpNo(inpEmpNo?.value);
-      if(!empNo){
-        setMsg("err", "Skriv empNo först (invite är kopplat till en person).");
-        return;
-      }
-      const url = buildInviteUrl(empNo);
-      if(!url){
-        setMsg("err", "Kunde inte skapa invite-länk.");
-        return;
-      }
-      STATE.lastInviteUrl = url;
-      if(inviteOut) inviteOut.value = url;
-      if(btnInviteCopy) btnInviteCopy.disabled = false;
-      setMsg("", "Invite-länk skapad (TEST).");
-    });
-  }
-
-  if(btnInviteCopy){
-    btnInviteCopy.addEventListener("click", async () => {
-      setMsg("", "");
-      const url = String(inviteOut?.value || "");
-      if(!url){
-        setMsg("err", "Ingen länk att kopiera.");
-        return;
-      }
-      const ok = await copyToClipboard(url);
-      setMsg(ok ? "ok" : "err", ok ? "Kopierat." : "Kunde inte kopiera (browser blockerar). Markera och kopiera manuellt.");
-    });
-  }
-
   // INIT
-  setMsg("", "");
   reloadAll();
+
 })();
 </script>
 
 <!-- ============================================================
-Ändringslogg (AO-EMPLOYEES-CREATE-ASSIGN-01 v1.1) ≤ 8 rader
-- UI förenklad: 3-stegs flow (empNo → scope → spara), bort med tabell/sök här
-- Efter save: navigerar till admin/employee.html?empNo=…&flash=created (samspel via querystring)
-- Invite (TEST): genererar kopierbar länk utan writes (ärligt: ej skarp säkerhet)
-- Behåller exakt keys + compat-save för AO-020_ROLE_ASSIGNMENTS_V2 (map + .assignments)
-- Fail-closed guards kvar: subtree för ADMIN/MANAGER, manuell scope för SYSTEM_ADMIN utan ORG
+Ändringslogg (AO-EMPLOYEES-CREATE-ASSIGN-01 v2.0) ≤ 8 rader
+- Roller separerade: endast ADMIN + SYSTEM_ADMIN (MANAGER/EMPLOYEE bort)
+- Sidan skapar aldrig empNo: register (AO-020_EMPLOYEES_V1) är read-only här (fail-closed om saknas)
+- Invite/email/redirect/rw-rader borttagna (minskar förvirring + scope)
+- Scope UI: “Välj enhet”, robust ORG-parse (array eller {nodes:[...]})
+- Koppling sker endast i AO-020_ROLE_ASSIGNMENTS_V2 (map + .assignments compat)
+- Extra-säker “Ta bort koppling”: kräver empNo-bekräftelse + confirm
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Logga in som SYSTEM_ADMIN → Admin → Skapa employee
-2) Skriv empNo=3001, välj scope, klicka “Skapa + koppla” → ska gå till admin/employee.html?empNo=3001&flash=created
-3) Logga in som ADMIN/MANAGER → kontrollera att scope-listan bara visar din subtree
-4) SYSTEM_ADMIN + ORG saknas → scope-select låst, manuell scopeId syns och fungerar
-5) Klicka “Invite (TEST)” → “Skapa test-invite-länk” → kopiera (ingen write)
+1) Logga in som SYSTEM_ADMIN → Admin → Koppla personal
+2) Skriv empNo som finns i registret → välj enhet → “Koppla enhet” → meddelande OK
+3) Skriv empNo som INTE finns i registret → ska blockera (fail-closed)
+4) ADMIN: kontrollera att enhetslistan bara visar din subtree (org krävs)
+5) “Ta bort koppling”: skriv empNo igen i bekräftelsefältet → knappen aktiveras → confirm → bort
 ============================================================ -->
 </body>
 </html>
