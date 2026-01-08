@@ -593,13 +593,14 @@
     "use strict";
 
     /* ============================================================
-      AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v1.9) | FIL-ID: employee/tasks.html
+      AO-EMP-TASKS-QA-01 (PROD AUTOPATCH v2.0) | FIL-ID: employee/tasks.html
       Projekt: HR-System (GitHub Pages / localStorage-first)
       Syfte: Employee – “Gör” (Uppgifter + Frågor + Svara + Signera) – UI-only
 
-      PATCH v1.9:
-      - Fix: Visa även “paket/block-frågor” via AO-050_PACKAGES_V1 (blockId) utan nya keys.
-      - Fail-closed: paket-frågor kräver scope-match + tilldelning (empNo/ALL/*).
+      PATCH v2.0:
+      - Fix: Paket/block-frågor visas även om scope/tilldelning ligger på block-nivå (inte bara paket-nivå).
+      - Fix: Tolerant läsning av scope + tilldelning från vanliga containerfält (meta/settings/targets).
+      - Fail-closed bibehållen: scope + tilldelning måste finnas (på paket ELLER block) för att frågan ska visas.
       - Deep-link: ?tab=questions&open=<blockId> öppnar direkt.
 
       POLICY (LÅST):
@@ -972,7 +973,6 @@
       const answers = readAnswers();
       const me = normStr(myEmpNo);
 
-      // Prefer exact questionId match (incl blockId)
       if (qId){
         const hit = answers.find(a => {
           if (!a || typeof a !== "object") return false;
@@ -984,7 +984,6 @@
         if (hit) return hit;
       }
 
-      // Fallback: title match
       if (qTitle){
         const hit2 = answers.find(a => {
           if (!a || typeof a !== "object") return false;
@@ -1014,7 +1013,6 @@
       const me = normStr(myEmpNo);
       if (!me) return { ok:false, err:"Saknar empNo." };
 
-      // IMPORTANT: prefer blockId-capable id
       const qId = normStr(getQuestionId(q));
       const qTitle = normStr(getQuestionTitle(q));
 
@@ -1034,7 +1032,7 @@
       const obj = {
         id: ensureAnswerId({}),
         empNo: me,
-        questionId: qId || "",          // <- blockId lands here
+        questionId: qId || "",
         questionTitle: qTitle || "",
         answer: String(answerText ?? ""),
         signed: false,
@@ -1095,17 +1093,56 @@
       return String(p?.id ?? p?.packageId ?? p?.uuid ?? ("pkg_" + idx));
     }
     function getPkgTitle(p){
-      return String(p?.title ?? p?.name ?? p?.label ?? "Paket");
+      return String(p?.title ?? p?.name ?? p?.label ?? p?.meta?.title ?? p?.settings?.title ?? "Paket");
     }
+
+    function pickNestedFirstNonEmpty(obj, paths){
+      for (const path of paths){
+        const parts = String(path).split(".");
+        let cur = obj;
+        let ok = true;
+        for (const part of parts){
+          if (!cur || typeof cur !== "object") { ok = false; break; }
+          cur = cur[part];
+        }
+        if (!ok) continue;
+        const s = normStr(cur);
+        if (s) return s;
+      }
+      return "";
+    }
+
     function getPkgScope(p){
-      return normStr(p?.scopeId ?? p?.scope ?? p?.scopeKey ?? p?.nodeId ?? p?.orgNodeId ?? "");
+      // tolerate scope in common places
+      return (
+        pickNestedFirstNonEmpty(p, [
+          "scopeId","scope","scopeKey","nodeId","orgNodeId","orgId","unitId","teamId",
+          "meta.scopeId","meta.scope","meta.scopeKey","meta.nodeId",
+          "settings.scopeId","settings.scope","settings.scopeKey",
+          "org.scopeId","org.nodeId","org.unitId",
+          "targets.scopeId","targets.scope"
+        ]) ||
+        ""
+      );
     }
+
     function getPkgAssigned(p){
-      // tolerate variants
-      return p?.assignedTo ?? p?.assignees ?? p?.targets ?? p?.employees ?? p?.empNos ?? p?.empNoList ?? p?.toEmpNo ?? p?.empNo ?? null;
+      // tolerate variants + nested
+      const direct =
+        p?.assignedTo ?? p?.assignees ?? p?.targets ?? p?.employees ?? p?.empNos ?? p?.empNoList ?? p?.toEmpNo ?? p?.empNo ?? p?.assigned ?? p?.recipients ?? null;
+
+      if (direct != null) return direct;
+
+      const nested =
+        p?.meta?.assignedTo ?? p?.meta?.assignees ?? p?.meta?.targets ?? p?.meta?.employees ?? p?.meta?.empNos ?? p?.meta?.empNoList ??
+        p?.settings?.assignedTo ?? p?.settings?.targets ?? p?.settings?.employees ?? p?.settings?.empNos ??
+        p?.targets?.empNos ?? p?.targets?.employees ?? p?.targets?.list ??
+        null;
+
+      return nested;
     }
-    function isPkgAssignedToMe(p, empNo){
-      const a = getPkgAssigned(p);
+
+    function isAssignedValueToMe(a, empNo){
       const me = normStr(empNo);
       if (!me || a == null) return false;
 
@@ -1120,9 +1157,8 @@
         return arr.includes(me);
       }
       if (a && typeof a === "object"){
-        // some schemas: { all:true } or { empNos:[...] }
         if (a.all === true || a.ALL === true) return true;
-        const list = a.empNos || a.empNoList || a.employees || a.targets || null;
+        const list = a.empNos || a.empNoList || a.employees || a.targets || a.items || a.list || null;
         if (Array.isArray(list)){
           const arr2 = list.map(x => String(x).trim());
           if (arr2.includes("ALL") || arr2.includes("*")) return true;
@@ -1132,8 +1168,11 @@
       return false;
     }
 
+    function isPkgAssignedToMe(p, empNo){
+      return isAssignedValueToMe(getPkgAssigned(p), empNo);
+    }
+
     function getBlocksFromPackage(p){
-      // tolerate deep schema: p.blocks, p.content.blocks, p.modules[].blocks, etc.
       const out = [];
 
       function pushIfBlock(b){
@@ -1141,21 +1180,18 @@
         out.push(b);
       }
 
-      // direct
       if (Array.isArray(p?.blocks)) p.blocks.forEach(pushIfBlock);
       if (Array.isArray(p?.content?.blocks)) p.content.blocks.forEach(pushIfBlock);
 
-      // modules
-      const mods = p?.modules ?? p?.areas ?? p?.sections ?? null;
+      const mods = p?.modules ?? p?.areas ?? p?.sections ?? p?.groups ?? null;
       if (Array.isArray(mods)){
         for (const m of mods){
           if (Array.isArray(m?.blocks)) m.blocks.forEach(pushIfBlock);
           if (Array.isArray(m?.items)) m.items.forEach(pushIfBlock);
+          if (Array.isArray(m?.content?.blocks)) m.content.blocks.forEach(pushIfBlock);
         }
       }
 
-      // fallback: generic scan (bounded)
-      // (Fail-safe: do not recurse too deep)
       function scan(obj, depth){
         if (!obj || depth > 3) return;
         if (Array.isArray(obj)){
@@ -1164,7 +1200,6 @@
         }
         if (typeof obj !== "object") return;
 
-        // common container keys
         if (Array.isArray(obj.blocks)) obj.blocks.forEach(pushIfBlock);
         if (Array.isArray(obj.items)) obj.items.forEach(pushIfBlock);
 
@@ -1175,23 +1210,42 @@
       }
       scan(p, 0);
 
-      // de-dupe by reference-ish
       return out.filter(Boolean);
     }
 
     function blockKind(b){
       const t = String(b?.type ?? b?.kind ?? b?.blockType ?? "").toLowerCase().trim();
+      if (t === "question" || t === "fråga") return "question";
+      if (t === "q") return "question";
+      if (t.startsWith("question")) return "question";
       return t;
     }
     function blockId(b){
-      return normStr(b?.id ?? b?.blockId ?? b?.blockID ?? b?.uuid ?? "");
+      return normStr(b?.id ?? b?.blockId ?? b?.blockID ?? b?.uuid ?? b?.questionId ?? b?.qid ?? "");
     }
     function blockTitle(b){
       return String(b?.title ?? b?.name ?? b?.label ?? b?.questionTitle ?? b?.promptTitle ?? "Fråga");
     }
     function blockBody(b){
-      return String(
-        b?.body ?? b?.text ?? b?.question ?? b?.prompt ?? b?.content ?? b?.description ?? ""
+      return String(b?.body ?? b?.text ?? b?.question ?? b?.prompt ?? b?.content ?? b?.description ?? "");
+    }
+
+    function blockScope(b){
+      return (
+        pickNestedFirstNonEmpty(b, [
+          "scopeId","scope","scopeKey","nodeId","orgNodeId",
+          "meta.scopeId","meta.scope","meta.scopeKey",
+          "settings.scopeId","settings.scope"
+        ]) || ""
+      );
+    }
+
+    function blockAssigned(b){
+      return (
+        b?.assignedTo ?? b?.assignees ?? b?.targets ?? b?.employees ?? b?.empNos ?? b?.empNoList ?? b?.toEmpNo ?? b?.empNo ??
+        b?.meta?.assignedTo ?? b?.meta?.targets ?? b?.meta?.employees ?? b?.meta?.empNos ??
+        b?.settings?.assignedTo ?? b?.settings?.targets ?? b?.settings?.employees ?? b?.settings?.empNos ??
+        null
       );
     }
 
@@ -1210,14 +1264,11 @@
         const p = pkgs[i];
         if (!p || typeof p !== "object") continue;
 
-        const scope = getPkgScope(p);
-        if (!scope) continue;                 // fail-closed: package must declare scope
-        if (!hasValidScopeMatch({ scopeId: scope }, myScope)) continue;
-
-        if (!isPkgAssignedToMe(p, me)) continue; // fail-closed: must be assigned
-
         const pid = getPkgId(p, i);
         const ptitle = getPkgTitle(p);
+
+        const pkgScope = getPkgScope(p);
+        const pkgAssignedOk = isPkgAssignedToMe(p, me);
 
         const blocks = getBlocksFromPackage(p);
         for (const b of blocks){
@@ -1225,13 +1276,23 @@
           if (k !== "question") continue;
 
           const bid = blockId(b);
-          if (!bid) continue; // fail-closed: must have blockId for stable answering
+          if (!bid) continue; // fail-closed: must have blockId
+
+          // effective scope: block-scope wins, else package-scope
+          const effScope = normStr(blockScope(b)) || normStr(pkgScope);
+          if (!effScope) continue; // fail-closed: must have scope somewhere
+          if (!hasValidScopeMatch({ scopeId: effScope }, myScope)) continue;
+
+          // effective assignment: block-level wins, else package-level
+          const bAssigned = blockAssigned(b);
+          const effAssignedOk = (bAssigned != null) ? isAssignedValueToMe(bAssigned, me) : pkgAssignedOk;
+          if (!effAssignedOk) continue; // fail-closed: must be assigned somewhere
 
           const title = normStr(blockTitle(b)) || "Fråga";
           const body  = normStr(blockBody(b)) || title;
 
           out.push({
-            id: bid,                    // <- blockId becomes questionId
+            id: bid,
             blockId: bid,
             title,
             body,
@@ -1242,7 +1303,6 @@
         }
       }
 
-      // de-dupe by id
       const seen = new Set();
       const uniq = [];
       for (const q of out){
@@ -1258,8 +1318,8 @@
        UI state
     ============================ */
     let AUTH = null;
-    let ACTIVE_TAB = "tasks"; // tasks | questions
-    let SELECTED = null;      // {type:"task"|"question", id:"..."}
+    let ACTIVE_TAB = "tasks";
+    let SELECTED = null;
 
     function setTab(tab){
       ACTIVE_TAB = (tab === "questions") ? "questions" : "tasks";
@@ -1291,7 +1351,6 @@
       const mode = String(qShow.value || "open");
       if (mode === "all") return items;
       if (mode === "done") return items.filter(it => it.isDone === true);
-      // open
       return items.filter(it => it.isDone !== true);
     }
 
@@ -1435,7 +1494,6 @@
           return;
         }
 
-        // Find task by id within visible constraints (scope + assigned)
         const empNo = normStr(auth.empNo);
         const scopeId = normStr(auth.scopeId);
         if (!empNo || !scopeId){
@@ -1498,7 +1556,7 @@
     function renderQuestionDetail(q, auth){
       detailBox.textContent = "";
 
-      const qid = normStr(getQuestionId(q)); // includes blockId
+      const qid = normStr(getQuestionId(q));
       const titleTxt = normStr(getQuestionTitle(q)) || "Fråga";
       const bodyTxt = normStr(getQuestionBody(q)) || titleTxt;
 
@@ -1513,7 +1571,6 @@
       const isSigned = !!myAns?.signed;
       const signedAt = myAns?.signedAt ? new Date(Number(myAns.signedAt)) : null;
 
-      // Optional source hint (read-only)
       const src = normStr(q?.source ?? q?.packageId ?? "");
       const srcTxt = src ? (" • " + src) : "";
 
@@ -1577,7 +1634,6 @@
       btnSign.addEventListener("click", () => {
         hideGuard();
 
-        // Save first (fail-closed if empty)
         const txt = String(ta.value ?? "");
         const saveRes = upsertMyAnswer(q, auth.empNo, txt);
         if (!saveRes.ok){
@@ -1658,7 +1714,6 @@
     function buildQuestionItems(auth){
       const empNo = normStr(auth.empNo);
 
-      // Base (AO-012) + Package blocks (AO-050)
       const qBase = readQuestions();
       const qPkg  = deriveQuestionsFromPackages(auth);
       const questions = mergeQuestions(qBase, qPkg);
@@ -1671,13 +1726,12 @@
         const signed = !!a?.signed;
         const subState = signed ? "signerat" : (answered ? "sparat" : "ej besvarad");
 
-        // show source hint in sub (neutral)
         const src = normStr(q?.source ?? q?.packageTitle ?? "");
         const srcTxt = src ? (" • " + src) : "";
 
         return {
           type: "question",
-          id, // should be blockId or questionId
+          id,
           title,
           body: normStr(getQuestionBody(q)) || "",
           sub: "question • " + subState + srcTxt,
@@ -1708,12 +1762,10 @@
       const openId = normStr(getParam("open") || "");
       if (!openId) return;
 
-      // select only if exists in current tab list
       const hit = itemsForCurrentTab.find(it => String(it.id) === openId) || null;
       if (hit){
         SELECTED = { type: hit.type, id: hit.id };
       } else {
-        // fail-soft: keep empty, but show guard only if user explicitly asked
         showGuard("Obs: kunde inte hitta frågan att öppna. Kontrollera att blockId finns i dina aktiva paket och att scope/tilldelning matchar.");
       }
     }
@@ -1757,7 +1809,6 @@
 
       let items = (ACTIVE_TAB === "questions") ? questionItems : taskItems;
 
-      // Apply deep-link once when entering tab (only if no manual selection yet)
       if (!SELECTED){
         applyDeepLink(items);
       }
@@ -1767,10 +1818,8 @@
 
       listPill.textContent = `${items.length} visade`;
 
-      // Render list
       renderList(items);
 
-      // Detail
       const sel = findSelected(items);
       if (!sel){
         renderDetailEmpty();
@@ -1801,17 +1850,14 @@
       }
 
       if (sel.type === "question"){
-        // Find question from merged sources: easiest -> rebuild merged and match by id
         const qBase = readQuestions();
         const qPkg  = deriveQuestionsFromPackages(AUTH);
         const merged = mergeQuestions(qBase, qPkg);
 
         let qHit = null;
 
-        // Prefer id match
         qHit = merged.find(q => normStr(getQuestionId(q)) && normStr(getQuestionId(q)) === String(sel.id)) || null;
 
-        // Fallback by title-key if needed
         if (!qHit){
           qHit = merged.find(q => ("q_" + normKey(getQuestionTitle(q))) === String(sel.id)) || null;
         }
@@ -1854,7 +1900,6 @@
       if (!res) return;
       AUTH = res.auth;
 
-      // initial tab from URL
       const tab = normStr(getParam("tab"));
       if (tab === "questions") setTab("questions");
       else setTab("tasks");
@@ -1863,25 +1908,20 @@
 
   <!-- ============================================================
   Ändringslogg (≤ 8 rader)
-  1) FIX: Frågor från paket/block (blockId) visas nu i Gör → Frågor via READ av AO-050_PACKAGES_V1.
-  2) Fail-closed: paket-frågor kräver scope + tilldelning (empNo eller ALL/*); annars visas de inte.
-  3) Svar kopplas stabilt med questionId=blockId (och title-fallback finns kvar).
-  4) Deep-link: ?tab=questions&open=<blockId> öppnar vald fråga direkt.
-  5) Ingen ny storage-key/datamodell; AO-050 läses endast.
-  6) MASTER DESIGN-SPEC bibehållen (1100/16, topbar-semantik, inga lift-hovers).
+  1) FIX: Paket-frågor hittas även om scope/tilldelning ligger på block-nivå (inte bara paket-nivå).
+  2) FIX: Tolerant läsning av scope/tilldelning via vanliga containerfält (meta/settings/targets).
+  3) Fail-closed kvar: scope + tilldelning måste finnas (paket ELLER block); annars visas inte frågan.
+  4) Svar kopplas stabilt med questionId=blockId (title-fallback kvar).
+  5) Deep-link: ?tab=questions&open=<blockId> öppnar vald fråga direkt.
+  6) Ingen ny storage-key/datamodell; AO-050 läses endast.
   Testnoteringar (exakta steg)
   1) Logga in som EMPLOYEE (scopeId finns).
-  2) Säkerställ att AO-050_PACKAGES_V1 innehåller ett question-block med blockId + scope + tilldelning till empNo.
-  3) Gå till employee/tasks.html → fliken “Frågor” → se paket-frågor i listan.
-  4) Öppna fråga → skriv svar → “Spara svar” → kontrollera AO-013_ANSWERS_V1 att questionId == blockId.
-  5) Klicka “Signera” → kontrollera signed=true och signedAt.
+  2) I AO-050_PACKAGES_V1: lägg question-block med blockId, och scope+assigned på paket ELLER block.
+  3) Gå employee/tasks.html → “Frågor” → se paket-frågor i listan.
+  4) Svara + signera → kontrollera AO-013_ANSWERS_V1: questionId == blockId.
   Risk / edge cases
-  - Om paket saknar scope eller tilldelning: frågorna visas inte (fail-closed).
-  - Om paket har question-block utan blockId: visas inte (fail-closed).
-  QA-check (P0/P1/P2)
-  - P0: Inga nya keys skrivs, XSS-säker rendering (textContent), fail-closed vid saknad scope/tilldelning.
-  - P1: Regression: AO-012-frågor fungerar fortsatt; svar matchar på questionId eller titel.
-  - P2: Tolerant schema-läsning av paket (olika former) utan krasch.
+  - Saknar både paket- och block-scope: visas ej (fail-closed).
+  - Saknar både paket- och block-tilldelning: visas ej (fail-closed).
   ============================================================ -->
 </body>
 </html>
