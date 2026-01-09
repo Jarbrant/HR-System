@@ -3,16 +3,17 @@ AO-BLOCK-PIPELINE-01 (MASTER) | BLOCK 2/5 | FIL-ID: admin/packages-block.html
 Projekt: HR-System
 Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
 
-PATCH (AUTO-KEY DETECT FIX):
-- Fix: Blocken kan ligga i annan storage-key än AO-0XX_BLOCKS_V1 → sidan auto-detekterar rätt key.
-- Ingen ny storage-key skapas. Sidan läser + skriver tillbaka i den key där blocken hittas.
-- UI: Visar aktiv key i UI ("Key: ...") + status-pill för felsökning.
+NYTT i denna patch (EXPORT-STEGET):
+- Import/Export-steg: “Hämta från Utbildningar (AO-057_TRAININGS_V1)” → exportera som block till block-banken (AO-0XX_BLOCKS_V1)
+- Fail-closed: export blockas om trainings-data är korrupt; SYSTEM_ADMIN = read-only
+- Back-compat: stöder flera shapes i trainings (array/wrapper, olika fältnamn för block/items/content/rawText osv.)
+- Ingen ny storage-key: Läser AO-057_TRAININGS_V1, skriver endast AO-0XX_BLOCKS_V1
 
 POLICY (LÅST):
 - UI-only • Fail-closed
 - sessionStorage först (auth) • fallback localStorage via CORE (HRApp)
 - XSS-safe rendering (textContent, inga osäkra innerHTML)
-- Inga nya storage-keys (endast befintlig blocks-key läses/skrivs här)
+- Inga nya storage-keys (endast AO-0XX_BLOCKS_V1 skrivs här; AO-057_TRAININGS_V1 läses)
 - SYSTEM_ADMIN = steward-läge (read-only)
 ============================================================ -->
 <!doctype html>
@@ -211,6 +212,40 @@ POLICY (LÅST):
     .detailLabel{ font-size:.82rem; color: var(--muted); font-weight: 900; margin-bottom:4px; }
     .detailValue{ font-size:.92rem; color:#111; line-height:1.25; white-space:pre-wrap; }
     .detailValue.mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; }
+
+    /* EXPORT panel */
+    .exportBox{
+      margin-top:10px;
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      padding:10px;
+    }
+    .exportTitle{ font-weight:950; margin:0 0 6px; }
+    .exportMeta{ font-size:.88rem; color: var(--muted); line-height:1.25; }
+    .exportList{
+      margin-top:8px;
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background: rgba(250,250,250,.55);
+      padding:8px;
+      max-height: 170px;
+      overflow:auto;
+    }
+    .exportRow{
+      border:1px solid var(--line);
+      border-radius: 12px;
+      background:#fff;
+      padding:8px;
+      margin:6px 0;
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      justify-content:space-between;
+    }
+    .exportRow .left{ min-width:0; }
+    .exportRow .t{ font-weight:950; line-height:1.2; }
+    .exportRow .s{ font-size:.86rem; color: var(--muted); white-space:pre-wrap; }
   </style>
 </head>
 
@@ -223,7 +258,7 @@ POLICY (LÅST):
 
   <nav class="nav" aria-label="Meny">
     <a href="./home.html">Hem</a>
-    <a href="./trainings.html">Utbildningar</a>
+    <a href="./tasks.html">Skapa block</a>
     <a href="./packages-block.html" aria-current="page">Block-editor</a>
     <a href="./onboard-plans.html">Onboard-planer</a>
     <a href="./reports.html">Felrapporter</a>
@@ -237,7 +272,7 @@ POLICY (LÅST):
     <div>
       <h1 class="tight">Block-editor (Block-bank)</h1>
       <p class="muted2">
-        Här ser du block som skapats i <strong>Utbildningar</strong> och kan redigera dem innan publicering.
+        Här ser du block som skapats i <strong>Skapa block</strong> och kan redigera dem innan publicering.
         Publicering gör blocket valbart i <strong>Onboard-planer</strong>.
       </p>
 
@@ -258,7 +293,7 @@ POLICY (LÅST):
     </div>
 
     <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
-      <a class="btn secondary" href="./trainings.html">+ Skapa/ändra i Utbildningar</a>
+      <a class="btn secondary" href="./tasks.html">+ Skapa nytt block</a>
     </div>
   </div>
 
@@ -280,6 +315,35 @@ POLICY (LÅST):
         </div>
       </div>
 
+      <!-- EXPORT STEP (nytt) -->
+      <div class="exportBox" aria-label="Export-steg">
+        <div class="exportTitle">Export-steg: Hämta från Utbildningar</div>
+        <div class="exportMeta">
+          Källa: <span class="mono">AO-057_TRAININGS_V1</span> (read) → Mål: <span class="mono">AO-0XX_BLOCKS_V1</span> (write).
+          <br/>Tips: Detta är steget som “skickar” utbildningsinnehåll till block-banken för QA/facit/publicering.
+        </div>
+
+        <div style="margin-top:8px;">
+          <label class="tiny" style="margin:0; font-weight:900;">
+            Välj utbildning
+            <select id="trainSel"></select>
+          </label>
+        </div>
+
+        <div class="exportList" id="trainPreview" aria-label="Förhandsvisning av hittade block i utbildning">
+          <div class="muted2">Laddar utbildningar…</div>
+        </div>
+
+        <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
+          <button class="miniBtn" id="btnExportTraining" type="button" disabled>Exportera till block-bank</button>
+          <button class="miniBtn" id="btnReloadTrainings" type="button">Uppdatera</button>
+        </div>
+
+        <div class="tiny" id="trainExportHint" style="margin-top:6px;">
+          Export skapar ett nytt block per utbildning (title+items). Redigera/facit här efter export.
+        </div>
+      </div>
+
       <div style="padding:10px; border-bottom:1px solid var(--line); background: rgba(250,250,250,.75);">
         <label class="tiny" style="margin:0; font-weight:900;">
           Visa
@@ -296,7 +360,7 @@ POLICY (LÅST):
       </div>
 
       <div class="tiny" style="margin-top:10px;">
-        <strong>Key:</strong> <span class="mono" id="activeKeyLabel">—</span> (read/write)
+        <strong>Key:</strong> <span class="mono">AO-0XX_BLOCKS_V1</span> (read/write)
       </div>
     </section>
 
@@ -376,7 +440,7 @@ POLICY (LÅST):
             <div id="itemEditor" style="margin-top:12px; display:none; border-top:1px dashed var(--line); padding-top:12px;">
               <h3 style="margin-top:0;">Item-editor</h3>
 
-              <!-- ALL INFO (sammanfattning) -->
+              <!-- ALL INFO (sammanfattning) - visas alltid vid item-klick -->
               <div class="detailCard" aria-label="Detaljer för valt item">
                 <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
                   <div style="font-weight:950;">Detaljer (all info)</div>
@@ -481,7 +545,7 @@ POLICY (LÅST):
 
                 <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
                   <input id="qReqInp" type="checkbox" />
-                  <span>Kräver svar</span>
+                  <span>Krver svar</span>
                 </label>
               </div>
 
@@ -519,7 +583,7 @@ POLICY (LÅST):
 
                 <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
                   <input id="tReqInp" type="checkbox" />
-                  <span>Kräver klar (done)</span>
+                  <span>Krver klar (done)</span>
                 </label>
 
                 <div class="tiny" id="tHint" style="margin-top:6px;">Skala kräver min/max och text.</div>
@@ -533,7 +597,7 @@ POLICY (LÅST):
                 </label>
               </div>
 
-              <!-- Debug -->
+              <!-- Debug: öppet som standard (XSS-safe via textContent) -->
               <div style="margin-top:12px;">
                 <div class="tiny" style="font-weight:900; color: var(--muted);">Debug: Item (normaliserad)</div>
                 <pre id="debugPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
@@ -561,12 +625,10 @@ POLICY (LÅST):
 (function(){
   "use strict";
 
-  const SESSION_KEY = "AO-001_LOGIN_V1";
+  const SESSION_KEY  = "AO-001_LOGIN_V1";
+  const BLOCKS_KEY   = "AO-0XX_BLOCKS_V1";  // SANNING: Block-bankens write-key
+  const TRAININGS_KEY = "AO-057_TRAININGS_V1"; // Källa för export-steget (read-only här)
 
-  // CANONICAL (tidigare hårdkodat) – används som förstahandsval
-  const CANONICAL_BLOCKS_KEY  = "AO-0XX_BLOCKS_V1";
-
-  // UI
   const $ = (s) => document.querySelector(s);
 
   const elMsg = $("#msgBox");
@@ -575,7 +637,6 @@ POLICY (LÅST):
   const elState = $("#statePill");
   const elSel = $("#selPill");
   const lockBox = $("#lockBox");
-  const activeKeyLabel = $("#activeKeyLabel");
 
   const qBlocks = $("#qBlocks");
   const filterStatus = $("#filterStatus");
@@ -651,6 +712,13 @@ POLICY (LÅST):
   const debugPre = $("#debugPre");
   const debugBlockPre = $("#debugBlockPre");
 
+  // Export UI
+  const trainSel = $("#trainSel");
+  const trainPreview = $("#trainPreview");
+  const btnExportTraining = $("#btnExportTraining");
+  const btnReloadTrainings = $("#btnReloadTrainings");
+  const trainExportHint = $("#trainExportHint");
+
   const isText = (v) => (typeof v === "string");
   const clampInt = (n, lo, hi, def) => {
     const x = Number(n);
@@ -707,6 +775,7 @@ POLICY (LÅST):
   if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
     redirectLogin(); return;
   }
+  // allow ADMIN/MANAGER/SYSTEM_ADMIN to access page; SYSTEM_ADMIN is read-only
   const session = window.HRApp.requireAuth({ allowRoles: ["ADMIN","MANAGER","SYSTEM_ADMIN"] });
   if(!session) return;
 
@@ -728,126 +797,39 @@ POLICY (LÅST):
   elMode.className = "pill " + (isSystemAdmin ? "warn" : "ok");
 
   // ------------------------------
-  // Storage helpers + AUTO KEY DETECT
+  // Storage helpers
   // ------------------------------
-  const STORAGE = {
-    activeKey: CANONICAL_BLOCKS_KEY,
-    detectedFrom: "" // debug
-  };
-
   function safeGetLocalRaw(key){
     try{ return localStorage.getItem(key); }catch{ return null; }
   }
 
-  function safeSetLocalRaw(key, value){
-    try{ localStorage.setItem(key, value); return true; }catch{ return false; }
-  }
+  function loadBlocksState(){
+    const raw = safeGetLocalRaw(BLOCKS_KEY);
 
-  function isLikelyBlockArray(arr){
-    if(!Array.isArray(arr) || arr.length === 0) return false;
-    // "block-ish": object with blockId/title/items OR legacy structures
-    let hits = 0;
-    for(const x of arr.slice(0, 8)){
-      if(!x || typeof x !== "object") continue;
-      const hasId = (x.blockId || x.id);
-      const hasTitle = (typeof x.title === "string" || typeof x.name === "string");
-      const hasItemsish =
-        Array.isArray(x.items) ||
-        Array.isArray(x.questions) || Array.isArray(x.tasks) || Array.isArray(x.documents) ||
-        typeof x.rawText === "string" || typeof x.itemsText === "string" || typeof x.blockText === "string" ||
-        Array.isArray(x.content);
-      if(hasId && (hasTitle || hasItemsish)) hits++;
-    }
-    return hits >= 1;
-  }
-
-  function tryParseBlocksFromRaw(raw){
+    // Missing key: ok (empty list)
     if(raw === null) return { ok:true, missing:true, corrupt:false, blocks:[] };
 
     let parsed;
     try{ parsed = JSON.parse(raw); }
     catch{ return { ok:false, missing:false, corrupt:true, blocks:[] }; }
 
-    // Back-compat wrapper { blocks:[...] }
+    // Back-compat: wrapper { blocks: [...] }
     if(parsed && typeof parsed === "object" && !Array.isArray(parsed) && Array.isArray(parsed.blocks)){
       parsed = parsed.blocks;
     }
+
     if(!Array.isArray(parsed)) return { ok:false, missing:false, corrupt:true, blocks:[] };
 
     return { ok:true, missing:false, corrupt:false, blocks: parsed };
   }
 
-  function detectActiveBlocksKey(){
-    // 1) Try canonical first
-    const raw0 = safeGetLocalRaw(CANONICAL_BLOCKS_KEY);
-    const st0 = tryParseBlocksFromRaw(raw0);
-    if(st0.ok && !st0.corrupt && isLikelyBlockArray(st0.blocks)){
-      STORAGE.activeKey = CANONICAL_BLOCKS_KEY;
-      STORAGE.detectedFrom = "canonical";
-      return { key: STORAGE.activeKey, state: st0 };
-    }
-
-    // 2) If canonical missing/empty, scan localStorage for candidates
-    const candidates = [];
-    try{
-      const n = localStorage.length || 0;
-      for(let i=0;i<n;i++){
-        const k = localStorage.key(i);
-        if(!k) continue;
-        // Heuristik: keys som ofta bär block-bank eller trainings-agg
-        if(
-          k === CANONICAL_BLOCKS_KEY ||
-          /BLOCKS/i.test(k) ||
-          /TRAININGS/i.test(k) ||
-          /^AO-\d+_/i.test(k)
-        ){
-          candidates.push(k);
-        }
-      }
-    }catch{}
-
-    // Prioritera "blockiga" keys först
-    candidates.sort((a,b)=>{
-      const aScore =
-        (/_BLOCKS_/i.test(a)?0:1) +
-        (/BLOCKS_V1$/i.test(a)?0:1) +
-        (/TRAININGS/i.test(a)?2:0) +
-        (a === CANONICAL_BLOCKS_KEY ? -10 : 0);
-      const bScore =
-        (/_BLOCKS_/i.test(b)?0:1) +
-        (/BLOCKS_V1$/i.test(b)?0:1) +
-        (/TRAININGS/i.test(b)?2:0) +
-        (b === CANONICAL_BLOCKS_KEY ? -10 : 0);
-      return aScore - bScore;
-    });
-
-    for(const k of candidates.slice(0, 80)){
-      const raw = safeGetLocalRaw(k);
-      if(raw === null) continue;
-      const st = tryParseBlocksFromRaw(raw);
-      if(!st.ok || st.corrupt) continue;
-      if(isLikelyBlockArray(st.blocks)){
-        STORAGE.activeKey = k;
-        STORAGE.detectedFrom = "scan";
-        return { key: STORAGE.activeKey, state: st };
-      }
-    }
-
-    // 3) Fallback: use canonical even if empty (allows creating later)
-    STORAGE.activeKey = CANONICAL_BLOCKS_KEY;
-    STORAGE.detectedFrom = "fallback";
-    return { key: STORAGE.activeKey, state: st0 };
-  }
-
-  function loadBlocksState(){
-    const raw = safeGetLocalRaw(STORAGE.activeKey);
-    return tryParseBlocksFromRaw(raw);
-  }
-
   function saveBlocks(blocks){
-    const ok = safeSetLocalRaw(STORAGE.activeKey, JSON.stringify(blocks));
-    if(ok) return { ok:true };
-    return { ok:false, err:"Kunde inte spara (localStorage fullt/blockerat)." };
+    try{
+      localStorage.setItem(BLOCKS_KEY, JSON.stringify(blocks));
+      return { ok:true };
+    }catch{
+      return { ok:false, err:"Kunde inte spara (localStorage fullt/blockerat)." };
+    }
   }
 
   function genId(prefix){
@@ -911,6 +893,7 @@ POLICY (LÅST):
     return true;
   }
 
+  // All info helpers (XSS-safe)
   function getItemId(it){
     if(!it) return "";
     if(it.kind === "question") return String(it.questionId || "");
@@ -939,6 +922,7 @@ POLICY (LÅST):
   }
 
   function renderAllInfo(it, index){
+    // XSS: Vi sätter alltid via textContent.
     detailType.textContent = itemKindLabel(it);
     detailIndex.textContent = "#" + String((index ?? 0) + 1);
     detailId.textContent = getItemId(it) || "—";
@@ -1025,7 +1009,7 @@ POLICY (LÅST):
   }
 
   // ------------------------------
-  // Legacy parsing / normalize (oförändrat i sak)
+  // Back-compat import for blocks
   // ------------------------------
   function parseLegacyLinesToItems(text){
     const out = [];
@@ -1074,6 +1058,7 @@ POLICY (LÅST):
         continue;
       }
     }
+
     return out;
   }
 
@@ -1084,7 +1069,7 @@ POLICY (LÅST):
     if(kind === "document"){
       return {
         kind: "document",
-        text: String(it.text || it.body || "").slice(0, 2000),
+        text: String(it.text || it.body || it.content || "").slice(0, 2000),
         requiresSign: !!(it.requiresSign ?? it.requires_signature ?? it.sign ?? true)
       };
     }
@@ -1104,7 +1089,7 @@ POLICY (LÅST):
       return {
         kind: "question",
         questionId: String(it.questionId || it.id || genId("q")),
-        text: String(it.text || it.question || it.prompt || "").slice(0, 240),
+        text: String(it.text || it.question || it.prompt || it.label || "").slice(0, 240),
         answerType,
         options: (answerType === "choice") ? options : [],
         requiresAnswer: (it.requiresAnswer !== false && it.required !== false),
@@ -1129,11 +1114,22 @@ POLICY (LÅST):
       return {
         kind: "task",
         taskId: String(it.taskId || it.id || genId("t")),
-        text: String(it.text || it.task || it.prompt || "").slice(0, 240),
+        text: String(it.text || it.task || it.prompt || it.label || "").slice(0, 240),
         answerType,
         scale,
         requiresDone: (it.requiresDone !== false && it.required !== false)
       };
+    }
+
+    // Back-compat: om item saknar kind men ser ut som "question/task/document"
+    const k2 = String(it.kind || "").trim();
+    if(!k2){
+      if(it.questionId || it.answerType === "choice" || it.options || it.choices) {
+        return normalizeItem({ ...it, kind:"question" });
+      }
+      if(it.taskId || it.scale || it.range) {
+        return normalizeItem({ ...it, kind:"task" });
+      }
     }
 
     return {
@@ -1258,6 +1254,143 @@ POLICY (LÅST):
   }
 
   // ------------------------------
+  // Trainings: read + normalize (EXPORT-steget)
+  // ------------------------------
+  function loadTrainingsState(){
+    const raw = safeGetLocalRaw(TRAININGS_KEY);
+    if(raw === null) return { ok:true, missing:true, corrupt:false, trainings:[] };
+
+    let parsed;
+    try{ parsed = JSON.parse(raw); }
+    catch{ return { ok:false, missing:false, corrupt:true, trainings:[] }; }
+
+    // Accept common wrappers: { trainings: [...] } or { items: [...] } or { list: [...] }
+    if(parsed && typeof parsed === "object" && !Array.isArray(parsed)){
+      if(Array.isArray(parsed.trainings)) parsed = parsed.trainings;
+      else if(Array.isArray(parsed.items)) parsed = parsed.items;
+      else if(Array.isArray(parsed.list)) parsed = parsed.list;
+    }
+
+    if(!Array.isArray(parsed)) return { ok:false, missing:false, corrupt:true, trainings:[] };
+
+    return { ok:true, missing:false, corrupt:false, trainings: parsed };
+  }
+
+  function trainingTitle(t){
+    const x = String(t?.title || t?.name || t?.trainingTitle || t?.label || "").trim();
+    return x || "(utan titel)";
+  }
+
+  function trainingMeta(t){
+    const mod = String(t?.module || t?.mod || t?.moduleName || "").trim();
+    const area = String(t?.area || t?.domain || t?.topic || "").trim();
+    const step = String(t?.step || t?.stage || t?.phase || "").trim();
+    return {
+      module: mod.slice(0,60),
+      area: area.slice(0,60),
+      step: step.slice(0,60)
+    };
+  }
+
+  function extractTrainingBlocks(t){
+    // Målet: hitta “block-liknande” saker i utbildningen utan att kräva exakt shape.
+    // Returnerar array av block-kandidater där varje kandidat kan normaliseras till block.items via normalizeBlock.
+    // Prioritet: t.blocks / t.blockBank / t.content.blocks / t.items
+    if(!t || typeof t !== "object") return [];
+
+    const direct = [];
+    const candidates = [
+      t.blocks,
+      t.blockBank,
+      t.blockbank,
+      t.packageBlocks,
+      t.content?.blocks,
+      t.content?.items,
+      t.items, // vissa trainings kan ha items direkt
+      t.content
+    ];
+
+    for(const c of candidates){
+      if(Array.isArray(c)) { c.forEach(x => direct.push(x)); break; }
+    }
+
+    // Om inget block-array hittas: försök bygg ett block av legacy textfält
+    if(direct.length === 0){
+      const txt = t.rawText || t.itemsText || t.linesText || t.bodyText || t.blockText || t.text || "";
+      if(isText(txt) && String(txt).trim()){
+        // vi skapar en “pseudo-block” som normalizeBlock kan plocka items ur via rawText
+        return [{ title: trainingTitle(t), module: trainingMeta(t).module, area: trainingMeta(t).area, step: trainingMeta(t).step, rawText: String(txt) }];
+      }
+    }
+
+    // Om direct ser ut som items (dokument/frågor/uppgifter) snarare än block:
+    // wrap: { items: direct }
+    const looksLikeItem = (x) => {
+      if(!x || typeof x !== "object") return false;
+      const k = String(x.kind || x.type || "").toLowerCase();
+      if(k === "document" || k === "question" || k === "task") return true;
+      if(x.questionId || x.taskId || x.answerType || x.options || x.choices) return true;
+      return false;
+    };
+
+    if(direct.length && direct.every(looksLikeItem)){
+      return [{
+        title: trainingTitle(t),
+        module: trainingMeta(t).module,
+        area: trainingMeta(t).area,
+        step: trainingMeta(t).step,
+        items: direct
+      }];
+    }
+
+    // direct kan redan vara block; returnera som är
+    return direct.slice(0, 200);
+  }
+
+  function normalizeTrainingToExportBlock(t){
+    // Skapar exakt 1 block per utbildning (enligt UI-text). Om utbildningen har flera block:
+    // Vi slår ihop items (och markerar steg/meta från utbildningen).
+    const meta = trainingMeta(t);
+    const blocks = extractTrainingBlocks(t);
+
+    // Samla items från varje block-kandidat
+    let mergedItems = [];
+    for(const b of blocks){
+      const nb = normalizeBlock(b);
+      if(Array.isArray(nb.items) && nb.items.length){
+        mergedItems = mergedItems.concat(nb.items);
+      }
+    }
+    mergedItems = mergedItems.slice(0, 200);
+
+    // Fallback: om fortfarande tomt → skapa en doc-rad så användaren ser något (men fortsatt fail-safe)
+    if(mergedItems.length === 0){
+      const fallbackTxt =
+        String(t?.rawText || t?.text || t?.bodyText || "").trim() ||
+        "Inga hittade items i utbildningen (export skapade endast skal).";
+      mergedItems = [{ kind:"document", text: fallbackTxt.slice(0, 2000), requiresSign: true }].map(normalizeItem);
+    }
+
+    const createdAt = Number.isFinite(Number(t?.createdAt)) ? Number(t.createdAt) : Date.now();
+    const now = Date.now();
+
+    return normalizeBlock({
+      blockId: genId("blk"),
+      title: normText(trainingTitle(t), 80),
+      module: meta.module,
+      area: meta.area,
+      step: meta.step,
+      status: "draft",
+      createdAt: createdAt || now,
+      updatedAt: now,
+      createdBy: String(empNo || ""),
+      verifiedAt: null,
+      verifiedBy: "",
+      items: mergedItems
+    });
+  }
+
+  // ------------------------------
   // State
   // ------------------------------
   const STATE = {
@@ -1269,7 +1402,15 @@ POLICY (LÅST):
     edit: null,
     rawSelected: null,
     selectedItemIndex: -1,
-    dirty: false
+    dirty: false,
+
+    trainingsOk: true,
+    trainingsCorrupt: false,
+    trainingsMissing: false,
+    trainings: [],
+    selectedTrainingIndex: -1,
+    trainingPreviewBlocksCount: 0,
+    trainingPreviewItemsCount: 0
   };
 
   function setDirty(on){
@@ -1352,7 +1493,7 @@ POLICY (LÅST):
   }
 
   // ------------------------------
-  // Rendering
+  // Rendering - block list
   // ------------------------------
   function blockMatches(b, q){
     if(!q) return true;
@@ -1448,6 +1589,9 @@ POLICY (LÅST):
     });
   }
 
+  // ------------------------------
+  // Editor
+  // ------------------------------
   function hideEditor(){
     editorWrap.style.display = "none";
     panelHint.textContent = "Välj ett block i listan.";
@@ -1652,8 +1796,11 @@ POLICY (LÅST):
     titleInp.value = b.title || "";
     statusInp.value = blockStatusLabel(b.status);
 
-    try{ debugBlockPre.textContent = JSON.stringify(STATE.rawSelected ?? {}, null, 2); }
-    catch{ debugBlockPre.textContent = "{}"; }
+    try{
+      debugBlockPre.textContent = JSON.stringify(STATE.rawSelected ?? {}, null, 2);
+    }catch{
+      debugBlockPre.textContent = "{}";
+    }
 
     renderItems();
     setSelectionPill();
@@ -1920,6 +2067,7 @@ POLICY (LÅST):
 
   function markDirty(){ setDirty(true); }
 
+  // Block fields change
   function onBlockFieldChange(){
     applyEditorToBlock();
     markDirty();
@@ -1930,6 +2078,7 @@ POLICY (LÅST):
   stepInp.addEventListener("input", onBlockFieldChange);
   titleInp.addEventListener("input", onBlockFieldChange);
 
+  // Item editor change
   itemTextInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); renderItems(); updatePublishButton(); });
 
   qAnswerSel.addEventListener("change", () => {
@@ -1977,6 +2126,7 @@ POLICY (LÅST):
 
   dSignInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); });
 
+  // Item list actions
   btnItemUp.addEventListener("click", () => {
     const b = STATE.edit; if(!b) return;
     const canWrite = (!STATE.locked && !isSystemAdmin);
@@ -2064,7 +2214,7 @@ POLICY (LÅST):
     if(!edit) return { ok:false, err:"Ingen vald block." };
 
     const st = loadBlocksState();
-    if(st.corrupt) return { ok:false, err:`Fail-closed: ${STORAGE.activeKey} är korrupt.` };
+    if(st.corrupt) return { ok:false, err:`Fail-closed: ${BLOCKS_KEY} är korrupt.` };
 
     const all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
     const idx = all.findIndex(x => String(x.blockId) === String(edit.blockId));
@@ -2131,6 +2281,229 @@ POLICY (LÅST):
   btnPublish.addEventListener("click", () => { setMsg("", ""); publishBlock(); });
 
   // ------------------------------
+  // Export-step UI
+  // ------------------------------
+  function setExportUiState(){
+    const canWrite = (!STATE.locked && !isSystemAdmin);
+    const hasTrainings = Array.isArray(STATE.trainings) && STATE.trainings.length > 0;
+    const selOk = (STATE.selectedTrainingIndex >= 0 && STATE.selectedTrainingIndex < (STATE.trainings?.length || 0));
+
+    btnExportTraining.disabled = !(canWrite && hasTrainings && selOk && !STATE.trainingsCorrupt);
+    btnExportTraining.title = isSystemAdmin
+      ? "Steward-läge (read-only)."
+      : (STATE.trainingsCorrupt ? "Trainings-data är korrupt (fail-closed)." : "Exportera vald utbildning till block-banken.");
+
+    trainExportHint.textContent = STATE.trainingsCorrupt
+      ? "Fail-closed: Trainings-key verkar korrupt (JSON/shape). Åtgärda/rensa innan export."
+      : (STATE.trainingsMissing
+          ? "Inga utbildningar hittades ännu (AO-057_TRAININGS_V1 saknas)."
+          : "Export skapar ett nytt block per utbildning (title+items). Redigera/facit här efter export.");
+  }
+
+  function renderTrainingSelect(){
+    trainSel.innerHTML = "";
+    const opt0 = document.createElement("option");
+    opt0.value = "";
+    opt0.textContent = "— Välj —";
+    trainSel.appendChild(opt0);
+
+    (STATE.trainings || []).slice(0, 500).forEach((t, idx) => {
+      const o = document.createElement("option");
+      o.value = String(idx);
+      const meta = trainingMeta(t);
+      const tTitle = trainingTitle(t);
+      const suffix = [meta.module, meta.area, meta.step].filter(Boolean).join(" • ");
+      o.textContent = suffix ? `${tTitle} — ${suffix}` : tTitle;
+      trainSel.appendChild(o);
+    });
+
+    // auto-select first if none chosen
+    if(STATE.trainings && STATE.trainings.length && STATE.selectedTrainingIndex < 0){
+      STATE.selectedTrainingIndex = 0;
+      trainSel.value = "0";
+    }else if(STATE.selectedTrainingIndex >= 0){
+      trainSel.value = String(STATE.selectedTrainingIndex);
+    }else{
+      trainSel.value = "";
+    }
+  }
+
+  function renderTrainingPreview(){
+    clear(trainPreview);
+
+    if(STATE.trainingsCorrupt){
+      const d = document.createElement("div");
+      d.className = "muted2";
+      d.textContent = `Fail-closed: ${TRAININGS_KEY} verkar korrupt.`;
+      trainPreview.appendChild(d);
+      STATE.trainingPreviewBlocksCount = 0;
+      STATE.trainingPreviewItemsCount = 0;
+      setExportUiState();
+      return;
+    }
+
+    if(!STATE.trainings || STATE.trainings.length === 0){
+      const d = document.createElement("div");
+      d.className = "muted2";
+      d.textContent = "Inga utbildningar hittades.";
+      trainPreview.appendChild(d);
+      STATE.trainingPreviewBlocksCount = 0;
+      STATE.trainingPreviewItemsCount = 0;
+      setExportUiState();
+      return;
+    }
+
+    const i = STATE.selectedTrainingIndex;
+    if(i < 0 || i >= STATE.trainings.length){
+      const d = document.createElement("div");
+      d.className = "muted2";
+      d.textContent = "Välj en utbildning ovan.";
+      trainPreview.appendChild(d);
+      STATE.trainingPreviewBlocksCount = 0;
+      STATE.trainingPreviewItemsCount = 0;
+      setExportUiState();
+      return;
+    }
+
+    const t = STATE.trainings[i];
+    const blocks = extractTrainingBlocks(t);
+    const meta = trainingMeta(t);
+
+    // Räkna “block-kandidater” och items
+    let itemsCount = 0;
+    blocks.forEach(b => {
+      const nb = normalizeBlock(b);
+      itemsCount += (Array.isArray(nb.items) ? nb.items.length : 0);
+    });
+
+    STATE.trainingPreviewBlocksCount = blocks.length;
+    STATE.trainingPreviewItemsCount = itemsCount;
+
+    const header = document.createElement("div");
+    header.className = "tiny";
+    header.textContent = `Hittat: ${blocks.length} block-kandidat(er), ${itemsCount} item(s).`;
+    trainPreview.appendChild(header);
+
+    const row = document.createElement("div");
+    row.className = "exportRow";
+
+    const left = document.createElement("div");
+    left.className = "left";
+
+    const tt = document.createElement("div");
+    tt.className = "t";
+    tt.textContent = trainingTitle(t);
+
+    const sub = document.createElement("div");
+    sub.className = "s";
+    sub.textContent = [
+      meta.module ? ("Modul: " + meta.module) : "Modul: —",
+      meta.area ? ("Område: " + meta.area) : "Område: —",
+      meta.step ? ("Steg: " + meta.step) : "Steg: —",
+      `Export → 1 block (draft) med ${Math.min(itemsCount || 0, 200)} items (max 200)`
+    ].join("\n");
+
+    left.appendChild(tt);
+    left.appendChild(sub);
+
+    const right = document.createElement("div");
+    const p = document.createElement("span");
+    p.className = "pill " + (itemsCount ? "ok" : "warn");
+    p.textContent = itemsCount ? "Redo" : "Tomt innehåll";
+    right.appendChild(p);
+
+    row.appendChild(left);
+    row.appendChild(right);
+
+    trainPreview.appendChild(row);
+
+    setExportUiState();
+  }
+
+  function reloadTrainings(){
+    const st = loadTrainingsState();
+    STATE.trainingsOk = !!st.ok;
+    STATE.trainingsCorrupt = !!st.corrupt;
+    STATE.trainingsMissing = !!st.missing;
+    STATE.trainings = Array.isArray(st.trainings) ? st.trainings : [];
+
+    // clamp selection
+    if(STATE.trainings.length === 0){
+      STATE.selectedTrainingIndex = -1;
+    }else{
+      if(STATE.selectedTrainingIndex < 0 || STATE.selectedTrainingIndex >= STATE.trainings.length){
+        STATE.selectedTrainingIndex = 0;
+      }
+    }
+
+    renderTrainingSelect();
+    renderTrainingPreview();
+  }
+
+  function exportSelectedTraining(){
+    if(STATE.locked){ setMsg("err","Låst (fail-closed)."); return; }
+    if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte exportera."); return; }
+    if(STATE.trainingsCorrupt){ setMsg("err", `Fail-closed: ${TRAININGS_KEY} är korrupt.`); return; }
+
+    const idx = STATE.selectedTrainingIndex;
+    if(idx < 0 || idx >= (STATE.trainings?.length || 0)){
+      setMsg("warn","Välj en utbildning först.");
+      return;
+    }
+
+    const stBlocks = loadBlocksState();
+    if(stBlocks.corrupt){
+      setMsg("err", `Fail-closed: ${BLOCKS_KEY} är korrupt (JSON/shape).`);
+      return;
+    }
+
+    const t = STATE.trainings[idx];
+    const newBlock = normalizeTrainingToExportBlock(t);
+
+    // Dedupe: om ett block med exakt samma title+module+area+step redan finns och är draft → fråga användaren
+    const all = (Array.isArray(stBlocks.blocks) ? stBlocks.blocks : []).map(normalizeBlock);
+    const dup = all.find(b =>
+      normText(b.title,80) === normText(newBlock.title,80) &&
+      normText(b.module,60) === normText(newBlock.module,60) &&
+      normText(b.area,60) === normText(newBlock.area,60) &&
+      normText(b.step,60) === normText(newBlock.step,60) &&
+      normStatus(b.status) === "draft"
+    );
+
+    if(dup){
+      const ok = confirm("Det finns redan ett utkast i block-banken med samma titel/modul/område/steg. Skapa ändå ett nytt block?");
+      if(!ok) return;
+    }
+
+    all.push(newBlock);
+    const res = saveBlocks(all);
+    if(!res.ok){
+      setMsg("err", res.err || "Kunde inte spara exporten.");
+      return;
+    }
+
+    // Refresh UI
+    STATE.all = all;
+    renderBlockList();
+
+    // auto-select newly created
+    STATE.selectedId = String(newBlock.blockId);
+    selectBlock(newBlock.blockId);
+
+    setMsg("ok", `Export klar: skapade block (draft) i ${BLOCKS_KEY}.`);
+  }
+
+  btnReloadTrainings.addEventListener("click", () => { setMsg("", ""); reloadTrainings(); });
+
+  trainSel.addEventListener("change", () => {
+    const v = String(trainSel.value || "");
+    STATE.selectedTrainingIndex = v ? Number(v) : -1;
+    renderTrainingPreview();
+  });
+
+  btnExportTraining.addEventListener("click", () => { setMsg("", ""); exportSelectedTraining(); });
+
+  // ------------------------------
   // List filters
   // ------------------------------
   qBlocks.addEventListener("input", renderBlockList);
@@ -2143,10 +2516,6 @@ POLICY (LÅST):
     setMsg("", "");
     setDirty(false);
 
-    // Detect active blocks key BEFORE reading
-    const det = detectActiveBlocksKey();
-    activeKeyLabel.textContent = STORAGE.activeKey;
-
     const lockReasons = [];
 
     if(!isSystemAdmin){
@@ -2155,24 +2524,25 @@ POLICY (LÅST):
         localStorage.setItem(t, "1");
         localStorage.removeItem(t);
       }catch{
-        lockReasons.push("localStorage är blockerad (kan inte spara/publicera).");
+        lockReasons.push("localStorage är blockerad (kan inte spara/publicera/exportera).");
       }
     }
 
-    // If active key exists but is corrupt -> lock
-    if(det.state && det.state.corrupt){
-      lockReasons.push(`${STORAGE.activeKey} är korrupt (JSON/shape). Åtgärda eller rensa nyckeln innan redigering.`);
+    const st = loadBlocksState();
+    if(st.corrupt){
+      lockReasons.push(`${BLOCKS_KEY} är korrupt (JSON/shape). Åtgärda eller rensa nyckeln innan redigering.`);
     }
 
-    // If canonical missing but we detected another key -> inform (utan att vara varnings-spam)
-    if(STORAGE.activeKey !== CANONICAL_BLOCKS_KEY){
-      setMsg("warn", `Info: Block-bank hittades i annan key: ${STORAGE.activeKey}. (Auto-detekterad)`);
+    // Trainings corruption ska INTE låsa hela sidan, men export blockas (fail-closed i export-steget).
+    const stT = loadTrainingsState();
+    if(stT.corrupt){
+      // visa som hint, men lås inte block-editor
+      STATE.trainingsCorrupt = true;
     }
 
     STATE.lockReasons = lockReasons;
     applyLockFromState();
 
-    const st = loadBlocksState();
     if(!st.corrupt){
       STATE.all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
     }else{
@@ -2185,20 +2555,24 @@ POLICY (LÅST):
       computeVisible();
       if(STATE.visible.length){
         selectBlock(STATE.visible[0].blockId);
-        if(STORAGE.activeKey === CANONICAL_BLOCKS_KEY) setMsg("ok", "Laddad första block.");
+        setMsg("ok", "Laddad första block.");
       }else{
         hideEditor();
         setMsg("warn", "Inga block matchar filter.");
       }
     }else{
       hideEditor();
-      setMsg(st.missing ? "warn" : "warn", "Inga block ännu. Skapa i “Utbildningar”.");
+      setMsg(st.missing ? "warn" : "warn", "Inga block ännu. Skapa i “Skapa block” eller exportera från utbildningar.");
     }
 
     const canWrite = (!STATE.locked && !isSystemAdmin);
     btnSave.disabled = true;
     btnPublish.disabled = true;
     btnAddItem.disabled = !canWrite;
+
+    // Export init
+    reloadTrainings();
+    setExportUiState();
   }
 
   init();
@@ -2207,25 +2581,27 @@ POLICY (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- FIX: Auto-detekterar vilken localStorage-key som faktiskt innehåller block-bank (fallback från AO-0XX_BLOCKS_V1).
-- UI: Visar aktiv blocks-key i vänster panel (Key: ...).
-- Ingen ny storage-key skapas; läs/skriv sker i samma key som hittas.
-- Fail-closed bibehålls: korrupt JSON i aktiv key låser.
+- NYTT: Export-steg från AO-057_TRAININGS_V1 → skapar draft-block i AO-0XX_BLOCKS_V1.
+- Fail-closed: export blockas om trainings/block-bank key är korrupt; SYSTEM_ADMIN read-only.
+- Back-compat: robust läsning av trainings (array/wrapper, block/items/rawText).
+- UI: förhandsvisning visar hittade block-kandidater + item-count innan export.
+- Ingen ny storage-key; skriver endast AO-0XX_BLOCKS_V1.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Öppna admin/packages-block.html (som ADMIN/MANAGER) → block ska nu synas igen.
-2) Längst ner i vänster panel: “Key: …” ska visa vilken key sidan använder.
-3) Redigera ett block → Spara → ladda om → ändringen kvar.
-4) Om sidan visar “Info: Block-bank hittades i annan key …” är det OK (auto-detekterat).
+1) Skapa en utbildning i trainings (AO-057_TRAININGS_V1) med innehåll (items eller rawText).
+2) Öppna admin/packages-block.html → Export-steg: välj utbildning → se “Hittat … items”.
+3) Klicka “Exportera till block-bank” → nytt block ska synas i blocklistan (draft).
+4) Öppna blocket → kontrollera att items finns i listan och “All info” fungerar.
+5) Sätt facit på frågor → Spara → Publicera (ska blocka om facit saknas).
 ============================================================ -->
 
 <!-- ============================================================
 Risk / edge cases
-- Om flera keys råkar innehålla “block-lik” data väljs första match via heuristik; men den ska i praktiken bli rätt.
-- Om block-bank är tom i alla keys syns inga block (förväntat).
+- Trainings-shape kan variera; export försöker hitta blocks/items/rawText, annars skapar ett doc-fallback.
+- Export skapar 1 block per utbildning (sammanfogade items) och cap: 200 items.
+- Dedupe: varnar om liknande draft redan finns (title+meta), men tillåter ändå.
 ============================================================ -->
-
 </body>
 </html>
