@@ -1,18 +1,15 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-UI-01 (PROD REWRITE v2.0) | FIL-ID: admin/onboard-plans.html
+AO-ONBOARD-PLANS-UI-01 (PROD REWRITE v2.1 PATCH) | FIL-ID: admin/onboard-plans.html
 Projekt: HR-System
 Syfte: ADMIN – Onboarding Plans (AO-060) • Bygg plan genom att lägga till Trainings/Blocks i en Tidsaxel (enkel)
 
-NYTT v2.0 (enligt Anders):
-- Layout = 4 kolumner:
-  1) Tillgängliga utbildningar
-  2) Planens tidsaxel (EN kolumn, INGA Steg 2/3/4)
-  3) Tillgängliga block
-  4) Befintliga planer
-- Tidsaxeln är en enkel lista med ordning (order) + gateRequired. Ingen dayOffset UI.
-- Fortfarande schema-kompatibel: vi sparar dayOffset=0 för alla items (fail-closed).
-- Inga nya storage-keys/datamodell. Writes endast AO-060_PLANS_V1.
-- XSS-safe rendering (textContent).
+PATCH v2.1 (enligt Anders):
+- Städad UI: filtren i “Tillgängliga utbildningar” och “Tillgängliga block” ligger under varandra (Modul → Område → Sök).
+- Område är disabled tills Modul valts. Område-listan filtreras av vald Modul.
+- Tidsaxeln är tom vid start (ingen auto-val av plan).
+- “Ny plan” flyttad in i Tidsaxel-kolumnen och är grön.
+- “Spara” finns endast i Tidsaxel-kolumnen (tas bort från topbar).
+- “Verifiera” tas bort helt (endast Spara-flöde).
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -51,6 +48,9 @@ Keys (LÅST):
       --tileShadowB: 0 10px 22px rgba(15,23,42,.06);
       --tileShadow: var(--tileShadowA), var(--tileShadowB);
       --tileShadowHover: 0 1px 0 rgba(0,0,0,.05), 0 14px 30px rgba(15,23,42,.09);
+
+      --success:#0b7a0b;
+      --successDark:#075f07;
     }
 
     body{
@@ -105,9 +105,26 @@ Keys (LÅST):
       color: var(--ink);
     }
     button:hover{ box-shadow: var(--tileShadow); }
-    button.primary{ background:#111; color:#fff; border-color:#111; box-shadow: 0 10px 22px rgba(0,0,0,.14); }
-    button.primary:hover{ box-shadow: 0 14px 30px rgba(0,0,0,.18); }
     button:disabled{ opacity:.55; cursor:not-allowed; box-shadow:none; }
+
+    button.primary{
+      background:#111; color:#fff; border-color:#111;
+      box-shadow: 0 10px 22px rgba(0,0,0,.14);
+    }
+    button.primary:hover{ box-shadow: 0 14px 30px rgba(0,0,0,.18); }
+
+    /* Green success button (match existing button feel; no lift/resize, only shadow) */
+    button.success{
+      background: var(--success);
+      color:#fff;
+      border-color: var(--success);
+      box-shadow: 0 10px 22px rgba(11,122,11,.18);
+    }
+    button.success:hover{
+      background: var(--successDark);
+      border-color: var(--successDark);
+      box-shadow: 0 14px 30px rgba(11,122,11,.22);
+    }
 
     .btnlink{
       display:inline-flex;
@@ -124,8 +141,6 @@ Keys (LÅST):
       line-height: 1;
     }
     .btnlink:hover{ box-shadow: var(--tileShadow); }
-    .btnlink.primary{ background:#111; color:#fff; border-color:#111; box-shadow: 0 10px 22px rgba(0,0,0,.14); }
-    .btnlink.primary:hover{ box-shadow: 0 14px 30px rgba(0,0,0,.18); }
 
     .error{ border-left: 4px solid #b00020; padding: 10px; background: #fff5f7; border-radius: 12px; }
     .ok{ border-left: 4px solid #0b7a0b; padding: 10px; background: #f4fff4; border-radius: 12px; }
@@ -186,9 +201,10 @@ Keys (LÅST):
       box-shadow: 0 0 0 4px var(--focus);
     }
 
-    .filters3{
-      display:grid;
-      grid-template-columns: 1fr 1fr 1fr;
+    /* Filters stacked vertically (less clutter) */
+    .filtersStack{
+      display:flex;
+      flex-direction:column;
       gap: var(--gap);
       margin-bottom: 10px;
     }
@@ -214,7 +230,6 @@ Keys (LÅST):
     .timelineCard:hover{ border-color: var(--lineStrong); box-shadow: var(--tileShadowHover); }
 
     .rightActions{ display:flex; gap: 6px; flex-wrap:wrap; justify-content:flex-end; }
-
     .divider{ height: 1px; background: var(--line); margin: 12px 0; }
 
     .planForm{
@@ -237,7 +252,6 @@ Keys (LÅST):
     }
     @media (max-width: 760px){
       .grid4{ grid-template-columns: 1fr; }
-      .filters3{ grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -264,9 +278,6 @@ Keys (LÅST):
       </div>
 
       <div class="toolbar" aria-label="Åtgärder">
-        <button id="btnNewPlan" class="primary">+ Ny plan</button>
-        <button id="btnSavePlan" class="primary">Spara</button>
-        <button id="btnVerifyPlan">Verifiera plan → Active</button>
         <a class="btnlink" href="../admin/onboard-progress.html" aria-label="Nästa: Onboard Progress">Nästa → Onboard Progress</a>
       </div>
     </div>
@@ -282,7 +293,7 @@ Keys (LÅST):
         <div class="muted">published/verified + blocks&gt;0</div>
       </div>
 
-      <div class="filters3">
+      <div class="filtersStack" aria-label="Sök/Filter utbildningar">
         <div>
           <label for="filterModule">Modul</label>
           <select id="filterModule"></select>
@@ -308,7 +319,12 @@ Keys (LÅST):
         <div class="muted" id="planMeta">—</div>
       </div>
 
-      <div class="planForm">
+      <div class="toolbar" style="margin-bottom:10px; gap:8px;">
+        <button id="btnNewPlan" class="success">+ Ny plan</button>
+        <button id="btnSavePlan" class="primary">Spara</button>
+      </div>
+
+      <div class="planForm" aria-label="Planinställningar">
         <div>
           <label for="planTitle">Titel</label>
           <input id="planTitle" type="text" placeholder="t.ex. Onboarding Bas" />
@@ -343,7 +359,7 @@ Keys (LÅST):
         <div class="muted" id="blocksMeta">Block-bank: —</div>
       </div>
 
-      <div class="filters3">
+      <div class="filtersStack" aria-label="Sök/Filter block">
         <div>
           <label for="filterBlockModule">Modul</label>
           <select id="filterBlockModule"></select>
@@ -466,7 +482,6 @@ Keys (LÅST):
 
   const btnNewPlan = document.getElementById("btnNewPlan");
   const btnSavePlan = document.getElementById("btnSavePlan");
-  const btnVerifyPlan = document.getElementById("btnVerifyPlan");
 
   // ============================
   // STORAGE SAFE PARSE
@@ -504,6 +519,10 @@ Keys (LÅST):
   let plansOk = true;
   let plans = [];
   let currentPlan = null;
+
+  // Cached module→areas for stacked filters
+  let trainingsAreasByModule = Object.create(null);
+  let blocksAreasByModule = Object.create(null);
 
   // ============================
   // SNAPSHOT (for training)
@@ -620,6 +639,7 @@ Keys (LÅST):
 
   function loadBlocks(){
     blocksOk = false; blocksKeyUsed = ""; blocks = []; blocksById = Object.create(null);
+    blocksAreasByModule = Object.create(null);
 
     for (let k = 0; k < BLOCKS_KEY_CANDIDATES.length; k++){
       const key = BLOCKS_KEY_CANDIDATES[k];
@@ -637,7 +657,15 @@ Keys (LÅST):
       blocks = allowed;
       blocksOk = true;
 
-      for (let i = 0; i < allowed.length; i++) blocksById[allowed[i].blockId] = allowed[i];
+      for (let i = 0; i < allowed.length; i++) {
+        blocksById[allowed[i].blockId] = allowed[i];
+        const m = normStr(allowed[i].module);
+        const a = normStr(allowed[i].area);
+        if (m) {
+          if (!blocksAreasByModule[m]) blocksAreasByModule[m] = new Set();
+          if (a) blocksAreasByModule[m].add(a);
+        }
+      }
       return { ok:true };
     }
 
@@ -660,6 +688,7 @@ Keys (LÅST):
 
   function loadTrainings(){
     trainingsOk = false; trainings = []; trainingSnapshotsById = Object.create(null);
+    trainingsAreasByModule = Object.create(null);
 
     const res = safeParseLocalStorage(TRAININGS_KEY);
     if (!res.ok) return { ok:false, error:"AO-057 korrupt/oläsbar" };
@@ -687,6 +716,9 @@ Keys (LÅST):
 
       const snap = buildTrainingSnapshot(t);
       if (snap && snap.id) trainingSnapshotsById[snap.id] = snap;
+
+      if (!trainingsAreasByModule[module]) trainingsAreasByModule[module] = new Set();
+      trainingsAreasByModule[module].add(area);
     }
 
     trainings = out;
@@ -847,7 +879,6 @@ Keys (LÅST):
     const itemsIn = Array.isArray(plan.items) ? plan.items : [];
     const itemsOut = [];
 
-    // Vi accepterar legacy dayOffset men UI visar inte det; vi sätter det till 0 i UI.
     for (let i = 0; i < itemsIn.length; i++){
       const it = itemsIn[i];
       if (!isPlainObject(it)) continue;
@@ -914,8 +945,14 @@ Keys (LÅST):
       planTitle.value = "";
       planStatus.value = "draft";
       planMeta.textContent = "—";
+      planTitle.disabled = true;
+      planStatus.disabled = true;
+      btnSavePlan.disabled = true;
       return;
     }
+    planTitle.disabled = false;
+    planStatus.disabled = false;
+    btnSavePlan.disabled = !plansOk;
     planTitle.value = currentPlan.title || "";
     planStatus.value = currentPlan.status || "draft";
     planMeta.textContent = "id: " + currentPlan.id + " • items: " + String(currentPlan.items.length);
@@ -928,7 +965,7 @@ Keys (LÅST):
   }
 
   // ============================
-  // FILTERS UI
+  // FILTERS UI (stacked)
   // ============================
   function opt(el, value, text){
     const o = document.createElement("option");
@@ -937,17 +974,50 @@ Keys (LÅST):
     el.appendChild(o);
   }
 
-  function populateTrainingFilters(){
+  function setAreaDisabled(selectEl, disabled){
+    selectEl.disabled = disabled === true;
+  }
+
+  function populateTrainingModules(){
     clearNode(filterModule);
-    clearNode(filterArea);
-    opt(filterModule, "", "Alla moduler");
-    opt(filterArea, "", "Alla områden");
-
+    opt(filterModule, "", "Välj modul…");
     const modules = Array.from(new Set(trainings.map(t => normStr(t.module)))).filter(Boolean).sort();
-    const areas = Array.from(new Set(trainings.map(t => normStr(t.area)))).filter(Boolean).sort();
-
     for (const m of modules) opt(filterModule, m, m);
+  }
+
+  function populateTrainingAreasForModule(module){
+    clearNode(filterArea);
+    if (!module){
+      opt(filterArea, "", "Välj modul först");
+      setAreaDisabled(filterArea, true);
+      return;
+    }
+    setAreaDisabled(filterArea, false);
+    opt(filterArea, "", "Alla områden");
+    const set = trainingsAreasByModule[module];
+    const areas = set ? Array.from(set).filter(Boolean).sort() : [];
     for (const a of areas) opt(filterArea, a, a);
+  }
+
+  function populateBlockModules(){
+    clearNode(filterBlockModule);
+    opt(filterBlockModule, "", "Välj modul…");
+    const modules = Array.from(new Set(blocks.map(b => normStr(b.module)))).filter(Boolean).sort();
+    for (const m of modules) opt(filterBlockModule, m, m);
+  }
+
+  function populateBlockAreasForModule(module){
+    clearNode(filterBlockArea);
+    if (!module){
+      opt(filterBlockArea, "", "Välj modul först");
+      setAreaDisabled(filterBlockArea, true);
+      return;
+    }
+    setAreaDisabled(filterBlockArea, false);
+    opt(filterBlockArea, "", "Alla områden");
+    const set = blocksAreasByModule[module];
+    const areas = set ? Array.from(set).filter(Boolean).sort() : [];
+    for (const a of areas) opt(filterBlockArea, a, a);
   }
 
   function getTrainingFilterFn(){
@@ -960,19 +1030,6 @@ Keys (LÅST):
       if (q && !t.title.toLowerCase().includes(q)) return false;
       return true;
     };
-  }
-
-  function populateBlockFilters(){
-    clearNode(filterBlockModule);
-    clearNode(filterBlockArea);
-    opt(filterBlockModule, "", "Alla moduler");
-    opt(filterBlockArea, "", "Alla områden");
-
-    const modules = Array.from(new Set(blocks.map(b => normStr(b.module)))).filter(Boolean).sort();
-    const areas = Array.from(new Set(blocks.map(b => normStr(b.area)))).filter(Boolean).sort();
-
-    for (const m of modules) opt(filterBlockModule, m, m);
-    for (const a of areas) opt(filterBlockArea, a, a);
   }
 
   function getBlockFilterFn(){
@@ -1009,13 +1066,22 @@ Keys (LÅST):
       return;
     }
 
+    const m = normStr(filterModule.value);
+    if (!m){
+      const d = document.createElement("div");
+      d.className = "muted";
+      d.textContent = "Välj en modul för att se utbildningar.";
+      trainingsBox.appendChild(d);
+      return;
+    }
+
     const fn = getTrainingFilterFn();
     const filtered = trainings.filter(fn);
 
     if (filtered.length === 0){
       const d = document.createElement("div");
       d.className = "muted";
-      d.textContent = "Inga matchande trainings.";
+      d.textContent = "Inga matchande utbildningar i vald modul/område.";
       trainingsBox.appendChild(d);
       return;
     }
@@ -1045,7 +1111,7 @@ Keys (LÅST):
       btn.disabled = !currentPlan || !plansOk;
 
       btn.addEventListener("click", function(){
-        if (!currentPlan) { setStatus("error", "Ingen plan vald."); return; }
+        if (!currentPlan) { setStatus("error", "Ingen plan vald. Klicka “Ny plan” eller välj en plan i listan."); return; }
         if (!plansOk) { setStatus("error", "AO-060 är korrupt. Ändringar blockeras (fail-closed)."); return; }
         addTrainingToPlan(t.id);
       });
@@ -1081,13 +1147,22 @@ Keys (LÅST):
       return;
     }
 
+    const m = normStr(filterBlockModule.value);
+    if (!m){
+      const d = document.createElement("div");
+      d.className = "muted";
+      d.textContent = "Välj en modul för att se block.";
+      blocksBox.appendChild(d);
+      return;
+    }
+
     const fn = getBlockFilterFn();
     const filtered = blocks.filter(fn);
 
     if (filtered.length === 0){
       const d = document.createElement("div");
       d.className = "muted";
-      d.textContent = "Inga matchande blocks.";
+      d.textContent = "Inga matchande block i vald modul/område.";
       blocksBox.appendChild(d);
       return;
     }
@@ -1125,7 +1200,7 @@ Keys (LÅST):
       btn.disabled = !currentPlan || !plansOk || !blocksOk;
 
       btn.addEventListener("click", function(){
-        if (!currentPlan) { setStatus("error", "Ingen plan vald."); return; }
+        if (!currentPlan) { setStatus("error", "Ingen plan vald. Klicka “Ny plan” eller välj en plan i listan."); return; }
         if (!plansOk) { setStatus("error", "AO-060 är korrupt. Ändringar blockeras (fail-closed)."); return; }
         if (!blocksOk) { setStatus("error", "Block-bank saknas/korrupt. (fail-closed)"); return; }
         addBlockToPlan(b.blockId);
@@ -1222,8 +1297,9 @@ Keys (LÅST):
     if (!currentPlan){
       const d = document.createElement("div");
       d.className = "muted";
-      d.textContent = "Ingen plan vald. Skapa en ny plan eller välj en befintlig.";
+      d.textContent = "Ingen plan vald. Klicka “Ny plan” eller välj en befintlig plan till höger.";
       timelineBox.appendChild(d);
+      syncPlanFormFromState();
       return;
     }
 
@@ -1236,7 +1312,7 @@ Keys (LÅST):
     if (currentPlan.items.length === 0){
       const w = document.createElement("div");
       w.className = "warn";
-      w.textContent = "Tidsaxeln är tom. Lägg till trainings/blocks.";
+      w.textContent = "Tidsaxeln är tom. Lägg till trainings/blocks från vänster/höger.";
       timelineBox.appendChild(w);
       return;
     }
@@ -1288,7 +1364,7 @@ Keys (LÅST):
         l3.textContent = "order: " + String(it.order);
       }
 
-      // gateRequired toggle (enkelt men avancerat)
+      // gateRequired toggle
       const gateWrap = document.createElement("div");
       gateWrap.style.marginTop = "8px";
       const gateLabel = document.createElement("label");
@@ -1353,7 +1429,6 @@ Keys (LÅST):
     const j = i + dir;
     if (j < 0 || j >= currentPlan.items.length) return;
 
-    // swap order by swapping items, then renumber
     const tmp = currentPlan.items[i];
     currentPlan.items[i] = currentPlan.items[j];
     currentPlan.items[j] = tmp;
@@ -1379,13 +1454,13 @@ Keys (LÅST):
 
     for (let i = 0; i < currentPlan.items.length; i++){
       if (getItemKind(currentPlan.items[i]) === "training" && String(currentPlan.items[i].trainingId) === String(trainingId)){
-        setStatus("warn", "Dubblett: training finns redan i plan.");
+        setStatus("warn", "Dubblett: utbildning finns redan i plan.");
         return;
       }
     }
 
     const idx = trainings.findIndex(t => t.id === trainingId);
-    if (idx < 0){ setStatus("error", "Training är inte allowed (published/verified + blocks>0). (fail-closed)"); return; }
+    if (idx < 0){ setStatus("error", "Utbildning är inte allowed (published/verified + blocks>0). (fail-closed)"); return; }
 
     const snap = trainingSnapshotsById[trainingId] ? sanitizeSnapshotForStorage(trainingSnapshotsById[trainingId]) : null;
 
@@ -1446,13 +1521,12 @@ Keys (LÅST):
 
     currentPlan = norm.plan;
 
-    // Extra fail-closed: om planen innehåller block men block-bank saknas, blockera spara/verifiera
     let planHasBlocks = false;
     for (let i = 0; i < currentPlan.items.length; i++){
       if (getItemKind(currentPlan.items[i]) === "block"){ planHasBlocks = true; break; }
     }
     if (planHasBlocks && !blocksOk){
-      setStatus("warn", "Plan innehåller blockId men block-bank saknas/korrupt. Spara/Verifiera blockeras.");
+      setStatus("warn", "Plan innehåller blockId men block-bank saknas/korrupt. Spara blockeras.");
     } else {
       setStatus("ok", "Plan laddad: " + (currentPlan.title || "(utan titel)"));
     }
@@ -1464,12 +1538,12 @@ Keys (LÅST):
   }
 
   // ============================
-  // VALIDATE + SAVE
+  // VALIDATE + SAVE (only)
   // ============================
-  function validateCurrentPlanBeforeSave(setActiveOnVerify){
+  function validateCurrentPlanBeforeSave(){
     if (!currentPlan) return { ok:false, error:"Ingen plan vald" };
-    if (!trainingsOk) return { ok:false, error:"AO-057 saknas/korrupt — spar blockeras (fail-closed)" };
-    if (!plansOk) return { ok:false, error:"AO-060 korrupt — spar blockeras (fail-closed)" };
+    if (!trainingsOk) return { ok:false, error:"AO-057 saknas/korrupt — spara blockeras (fail-closed)" };
+    if (!plansOk) return { ok:false, error:"AO-060 korrupt — spara blockeras (fail-closed)" };
 
     syncStateFromForm();
 
@@ -1479,8 +1553,7 @@ Keys (LÅST):
     const st = normStr(currentPlan.status);
     if (!isValidPlanStatus(st)) return { ok:false, error:"Ogiltig status" };
 
-    const requireItems = (setActiveOnVerify === true) ? true : (st === "active");
-    if (requireItems && currentPlan.items.length < 1) return { ok:false, error:"Active kräver minst 1 item" };
+    if (st === "active" && currentPlan.items.length < 1) return { ok:false, error:"Active kräver minst 1 item" };
 
     currentPlan.items = sortAndRenumberItems(currentPlan.items);
 
@@ -1495,14 +1568,13 @@ Keys (LÅST):
     for (let i = 0; i < currentPlan.items.length; i++){
       if (getItemKind(currentPlan.items[i]) === "block"){ planHasBlocks = true; break; }
     }
-    if (planHasBlocks && !blocksOk) return { ok:false, error:"Plan innehåller blocks men block-bank saknas/korrupt. (fail-closed)" };
+    if (planHasBlocks && !blocksOk) return { ok:false, error:"Plan innehåller block men block-bank saknas/korrupt. (fail-closed)" };
 
     for (let i = 0; i < currentPlan.items.length; i++){
       const it = currentPlan.items[i];
       const kind = getItemKind(it);
       if (kind === "unknown") return { ok:false, error:"Ogiltigt item (trainingId XOR blockId krävs)" };
 
-      // En tidsaxel => dayOffset måste vara 0
       if (toInt(it.dayOffset) !== 0) return { ok:false, error:"dayOffset måste vara 0 (denna sida har bara en tidsaxel)" };
 
       const order = toInt(it.order);
@@ -1560,7 +1632,7 @@ Keys (LÅST):
   }
 
   function onSaveClicked(){
-    const v = validateCurrentPlanBeforeSave(false);
+    const v = validateCurrentPlanBeforeSave();
     if (!v.ok) { setStatus("error", v.error); return; }
 
     const now = Date.now();
@@ -1605,15 +1677,6 @@ Keys (LÅST):
     selectPlanById(toSave.id);
   }
 
-  function onVerifyClicked(){
-    const v = validateCurrentPlanBeforeSave(true);
-    if (!v.ok) { setStatus("error", "Verifiering misslyckades: " + v.error); return; }
-
-    currentPlan.status = "active";
-    planStatus.value = "active";
-    setStatus("ok", "Verifiering OK. Status satt till 'active' i UI. Klicka Spara för att skriva.");
-  }
-
   // ============================
   // NEW PLAN
   // ============================
@@ -1647,44 +1710,63 @@ Keys (LÅST):
     else if (!tRes.ok) setStatus("warn", tRes.error + " (Tillägg blockeras)");
     else if (trainingsOk && trainings.length === 0) setStatus("warn", "AO-057 OK, men inga published/verified trainings med blocks>0 finns ännu.");
     else if (!blocksOk) setStatus("ok", "Redo. (Block-bank ej hittad – endast trainings kan planeras)");
-    else setStatus("ok", "Redo.");
+    else setStatus("ok", "Redo. Välj modul i kolumn 1/3. Skapa/välj plan i kolumn 2/4.");
 
-    if (trainingsOk) populateTrainingFilters();
-    if (blocksOk) populateBlockFilters();
+    // Filters: populate modules, keep areas disabled until module selected
+    if (trainingsOk) {
+      populateTrainingModules();
+      populateTrainingAreasForModule("");
+      filterModule.value = "";
+      filterArea.value = "";
+    }
+    if (blocksOk) {
+      populateBlockModules();
+      populateBlockAreasForModule("");
+      filterBlockModule.value = "";
+      filterBlockArea.value = "";
+    }
+
+    // IMPORTANT: Timeline starts empty (no auto-select)
+    currentPlan = null;
+    syncPlanFormFromState();
+    renderTimeline();
 
     renderTrainingsList();
     renderBlocksList();
     renderPlansList();
 
-    if (plansOk && plans.length > 0){
-      const firstId = String(plans[0].id || "");
-      if (firstId) selectPlanById(firstId);
-      else { currentPlan = null; syncPlanFormFromState(); renderTimeline(); }
-    } else {
-      currentPlan = null;
-      syncPlanFormFromState();
-      renderTimeline();
-    }
-
     if (!plansOk){
       btnNewPlan.disabled = true;
       btnSavePlan.disabled = true;
-      btnVerifyPlan.disabled = true;
+      planTitle.disabled = true;
+      planStatus.disabled = true;
+    } else {
+      btnNewPlan.disabled = false;
+      btnSavePlan.disabled = true;
     }
 
     // Events
     btnNewPlan.addEventListener("click", newPlan);
     btnSavePlan.addEventListener("click", onSaveClicked);
-    btnVerifyPlan.addEventListener("click", onVerifyClicked);
 
     planTitle.addEventListener("input", function(){ if (currentPlan) currentPlan.title = normStr(planTitle.value); });
     planStatus.addEventListener("change", function(){ if (currentPlan) { currentPlan.status = normStr(planStatus.value); syncPlanFormFromState(); } });
 
-    filterModule.addEventListener("change", renderTrainingsList);
+    filterModule.addEventListener("change", function(){
+      const m = normStr(filterModule.value);
+      populateTrainingAreasForModule(m);
+      filterArea.value = "";
+      renderTrainingsList();
+    });
     filterArea.addEventListener("change", renderTrainingsList);
     searchTitle.addEventListener("input", renderTrainingsList);
 
-    filterBlockModule.addEventListener("change", renderBlocksList);
+    filterBlockModule.addEventListener("change", function(){
+      const m = normStr(filterBlockModule.value);
+      populateBlockAreasForModule(m);
+      filterBlockArea.value = "";
+      renderBlocksList();
+    });
     filterBlockArea.addEventListener("change", renderBlocksList);
     searchBlockTitle.addEventListener("input", renderBlocksList);
   }
@@ -1696,20 +1778,37 @@ Keys (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- v2.0: Ny layout i 4 kolumner enligt önskemål (Trainings / Timeline / Blocks / Planer).
-- v2.0: Tidsaxel förenklad till EN lista (ingen steg 2/3/4 UI).
-- v2.0: Schema-guard: dayOffset måste vara 0 på denna sida (fail-closed).
-- v2.0: Behåller gateRequired + ordning (↑/↓) + remove.
-- Inga nya keys; writes endast AO-060_PLANS_V1.
+- v2.1: Filtren i Trainings/Blocks staplade (Modul → Område → Sök) för mindre rörigt UI.
+- v2.1: Område disabled tills Modul valts; område-lista filtreras av vald modul.
+- v2.1: Tidsaxeln startar tom (ingen auto-val av plan).
+- v2.1: “Ny plan” flyttad till tidsaxeln och görs grön.
+- v2.1: “Spara” flyttad till tidsaxeln (tas bort från topbar).
+- v2.1: “Verifiera” borttagen helt (endast Spara-flöde).
 ============================================================ -->
 
 <!-- ============================================================
-Testnoteringar
-1) Öppna sidan: se 4 kolumner.
-2) Ny plan: lägg till training (kol 1) → syns i tidsaxel (kol 2).
-3) Lägg till block (kol 3) → syns i tidsaxel.
-4) Flytta ↑/↓, Ta bort.
-5) Verifiera → status active i UI, Spara → reload → kvar.
+Testnoteringar (exakta klicksteg)
+1) Öppna sidan → Tidsaxel visar “Ingen plan vald…”, Plan-fält disabled, Spara disabled.
+2) Kol 1: Välj Modul → Område blir aktivt, listan visar utbildningar i vald modul.
+3) Kol 3: Välj Modul → Område blir aktivt, listan visar block i vald modul.
+4) Klicka “+ Ny plan” (kol 2) → Plan-fält aktiveras, Spara aktiveras.
+5) Lägg till en utbildning (kol 1) och ett block (kol 3) → syns i tidsaxeln (kol 2).
+6) Flytta ↑/↓ och Ta bort → ordning uppdateras.
+7) Klicka “Spara” (kol 2) → status “Sparat.”, planen syns i listan (kol 4) och kan väljas igen.
+============================================================ -->
+
+<!-- ============================================================
+Risk / edge cases
+- Om modul inte väljs: listorna visar “Välj modul…” (avsiktligt för mindre rörigt).
+- Om block-bank är korrupt/saknas: block-kolumnen förblir fail-closed och kan inte lägga till block.
+- Om AO-060 är korrupt: Ny plan/Spara är avstängt (fail-closed).
+============================================================ -->
+
+<!-- ============================================================
+QA-check (P0/P1/P2)
+P0: Fail-closed auth + ADMIN-only kvar; inga nya keys; writes endast AO-060_PLANS_V1; XSS via textContent.
+P1: UI-flöde förenklat (stackade filter); inga kopplingar ändrade; timeline start tom enligt krav.
+P2: A11y: statusBox aria-live kvar; plan-kort keyboard-aktiverbara kvar.
 ============================================================ -->
 </body>
 </html>
