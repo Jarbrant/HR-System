@@ -1,11 +1,14 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-UI-01 (PROD PATCH v1.8) | FIL-ID: admin/onboard-plans.html
+AO-ONBOARD-PLANS-UI-01 (PROD PATCH v1.9) | FIL-ID: admin/onboard-plans.html
 Projekt: HR-System
-Syfte: ADMIN – Skapa/Redigera Onboarding Plans + Tidsaxel (↑↓) UI-only
+Syfte: ADMIN – Skapa/Redigera Onboarding Plans + Tidsaxel (Steg 1–4) UI-only
 
-PATCH v1.8 (UI-MALL):
-- Designmall: tydligare kort/”rutor” (kontrast, skugga, hover, spacing) utan att ändra kopplingar/logik.
-- NYTT: “Nästa”-knapp till admin/onboard-progress.html (endast navigation).
+PATCH v1.9 (UI + Robusthet):
+- NYTT: Steg-grid (4 kolumner) för tidsaxeln: Steg 1–4 (dayOffset 0–3)
+- UI förenklad: användaren ser direkt “steg 1–4” i en vy
+- Fail-closed: dayOffset måste vara 0–3 (planer med >3 blockeras för spara/verifiera tills fix)
+- Inline debug-kommentarer + tydligare status/warnings
+- Inga nya storage-keys/datamodell. Writes endast AO-060.
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -194,9 +197,66 @@ Keys (LÅST):
     .smallbtn.danger{ background:#ffecec; }
     .smallbtn.danger:hover{ box-shadow: var(--tileShadow); }
 
-    .timelineRow{ display:grid; grid-template-columns: 120px 1fr 170px; gap: 10px; align-items:center; }
+    /* ====== STEG-GRID (4 kolumner) ====== */
+    .stepsGrid{
+      display:grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: var(--gap);
+    }
+    .stepCol{
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background:#fff;
+      box-shadow: 0 1px 0 rgba(0,0,0,.02);
+      overflow:hidden;
+    }
+    .stepHead{
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap: 8px;
+      background: #fff;
+    }
+    .stepTitle{
+      font-size: 13px;
+      margin: 0;
+      letter-spacing:.2px;
+    }
+    .stepBody{
+      padding: 10px;
+      display:flex;
+      flex-direction:column;
+      gap: 10px;
+      min-height: 120px;
+      max-height: 56vh;
+      overflow:auto;
+    }
+    .stepHint{
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    /* Item-kort inne i steg */
+    .timelineCard{
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px;
+      background:#fff;
+      box-shadow: 0 1px 0 rgba(0,0,0,.02);
+    }
+    .timelineCard:hover{ border-color: var(--lineStrong); box-shadow: var(--tileShadowHover); }
+
+    .timelineTop{
+      display:flex;
+      align-items:flex-start;
+      justify-content:space-between;
+      gap: 10px;
+    }
     .timelineMeta{ font-size: 12px; }
     .rightActions{ display:flex; gap: 6px; justify-content:flex-end; flex-wrap:wrap; }
+
     .divider{ height: 1px; background: var(--line); margin: 12px 0; }
     .footerNote{ margin-top: 10px; }
 
@@ -205,7 +265,11 @@ Keys (LÅST):
       .col, .colRight{ min-width: auto; }
       .grid3{ grid-template-columns: 1fr; }
       .grid2{ grid-template-columns: 1fr; }
-      .timelineRow{ grid-template-columns: 1fr; }
+
+      /* Mobil: steg staplas (enkel läsning) */
+      .stepsGrid{ grid-template-columns: 1fr; }
+      .stepBody{ max-height: 38vh; }
+
       .rightActions{ justify-content:flex-start; }
       .list.trainings{ max-height: 38vh; }
       .list.blocks{ max-height: 38vh; }
@@ -232,7 +296,7 @@ Keys (LÅST):
     <div class="titlebar">
       <div>
         <h1>Onboarding Plans (ADMIN)</h1>
-        <div class="muted">Skapa plan + bygg tidsaxel. Nästa steg: progress.</div>
+        <div class="muted">Skapa plan + bygg tidsaxel i 4 steg (Steg 1–4). Nästa steg: progress.</div>
       </div>
 
       <div class="toolbar" aria-label="Åtgärder">
@@ -338,11 +402,12 @@ Keys (LÅST):
 
       <div class="divider"></div>
 
-      <div id="timelineBox" class="list" role="list"></div>
+      <!-- NYTT: 4-stegs grid -->
+      <div id="timelineBox" role="list"></div>
 
       <div class="footerNote muted">
-        Auto-sort: dag (lägst först) → order. <span class="mono">order</span> renumreras automatiskt.
-        (↑/↓ flyttar endast inom samma dayOffset, deterministiskt)
+        Steg 1–4 är fasta. <span class="mono">dayOffset</span> måste vara 0–3 (fail-closed).
+        (↑/↓ flyttar endast inom samma steg, deterministiskt)
       </div>
     </div>
   </div>
@@ -380,6 +445,7 @@ Keys (LÅST):
     return;
   }
 
+  // NOTE: requireAuth kan välja att navigera bort själv och returnera null
   if (_authResult === null) return;
 
   if (_authResult === false || (_authResult && typeof _authResult === "object" && _authResult.ok === false)) {
@@ -415,12 +481,21 @@ Keys (LÅST):
   const PLANS_KEY = "AO-060_PLANS_V1";
 
   // Block-bank (read-only; auto-detektera första som finns och är OK)
+  // DEBUG: om inga blocks syns -> kontrollera vilken key som faktiskt används i din miljö.
   const BLOCKS_KEY_CANDIDATES = [
     "AO-062_BLOCKS_V1",
     "AO-057_BLOCKS_V1",
     "AO-058_BLOCKS_V1",
     "AO-0XX_BLOCKS_V1" // placeholder (om ni faktiskt använder det)
   ];
+
+  // ============================
+  // STEG (LÅST UI)
+  // ============================
+  // Endast 4 steg på denna sida: dayOffset 0–3
+  const STEPS_MIN = 0;
+  const STEPS_MAX = 3;
+  const STEP_LABELS = ["Steg 1", "Steg 2", "Steg 3", "Steg 4"];
 
   // ============================
   // STATE
@@ -534,6 +609,11 @@ Keys (LÅST):
     return s === "draft" || s === "active" || s === "archived";
   }
 
+  function isValidStepDayOffset(v){
+    const n = toInt(v);
+    return (n !== null && n >= STEPS_MIN && n <= STEPS_MAX);
+  }
+
   function getItemKind(it){
     if (!it || typeof it !== "object") return "unknown";
     const hasBlock = !!normStr(it.blockId);
@@ -644,7 +724,7 @@ Keys (LÅST):
   // BLOCK-BANK parsing (read-only)
   // ============================
   function sanitizeBlocksArray(input){
-    // Expect array of blocks: {blockId,title,module,area,step,status,items[]...}
+    // Expect array of blocks: {blockId,title,module,area,step,status,...}
     if (!Array.isArray(input)) return { ok:false, error:"BLOCKS_NOT_ARRAY" };
     const out = [];
     for (let i = 0; i < input.length; i++){
@@ -674,8 +754,12 @@ Keys (LÅST):
 
     for (let k = 0; k < BLOCKS_KEY_CANDIDATES.length; k++){
       const key = BLOCKS_KEY_CANDIDATES[k];
+
+      // DEBUG: Om du misstänker fel key -> kontrollera localStorage manuellt och matcha mot candidates.
       const res = safeParseLocalStorage(key);
+
       if (!res.ok) {
+        // Fail-closed: om key finns men är oläsbar/korrupt -> stoppa direkt så du märker det.
         blocksOk = false;
         blocksKeyUsed = key;
         return { ok:false, error: "Block-bank korrupt/oläsbar (" + key + ")" };
@@ -712,7 +796,8 @@ Keys (LÅST):
   }
 
   // ============================
-  // SCHEMA GUARD (AO-060) – now supports trainingId OR blockId (exactly one)
+  // SCHEMA GUARD (AO-060) – supports trainingId XOR blockId
+  // + dayOffset måste vara 0–3 (Steg 1–4)
   // ============================
   function sanitizePlansArray(input) {
     if (!Array.isArray(input)) return { ok:false, error:"PLANS_NOT_ARRAY" };
@@ -750,7 +835,7 @@ Keys (LÅST):
         const kind = (blockId && !trainingId) ? "block" : ((trainingId && !blockId) ? "training" : "bad");
         if (kind === "bad") return { ok:false, error:"ITEM_BAD_REF (require trainingId XOR blockId)" };
 
-        if (dayOffset === null || dayOffset < 0) return { ok:false, error:"ITEM_BAD_DAYOFFSET" };
+        if (!isValidStepDayOffset(dayOffset)) return { ok:false, error:"ITEM_BAD_DAYOFFSET (0–3 required)" };
         if (order === null || order < 1) return { ok:false, error:"ITEM_BAD_ORDER" };
         if (typeof gateRequired !== "boolean") return { ok:false, error:"ITEM_BAD_GATEREQUIRED" };
 
@@ -809,7 +894,8 @@ Keys (LÅST):
     }
 
     const out = {
-      dayOffset: (dayOffset === null || dayOffset < 0) ? 0 : dayOffset,
+      // NOTE: vi behåller värdet i UI (även om ogiltigt) men spara/verify kommer fail-closed.
+      dayOffset: (dayOffset === null) ? 0 : dayOffset,
       order: (order === null || order < 1) ? null : order,
       gateRequired: gateRequired === true
     };
@@ -1364,6 +1450,19 @@ Keys (LÅST):
       setStatus("ok", "Plan laddad: " + (currentPlan.title || "(utan titel)"));
     }
 
+    // DEBUG/FAIL-CLOSED: varna direkt om dayOffset ligger utanför 0–3 (Steg 1–4)
+    let badSteps = 0;
+    for (let i = 0; i < currentPlan.items.length; i++){
+      const d = toInt(currentPlan.items[i].dayOffset);
+      if (!isValidStepDayOffset(d)) badSteps++;
+    }
+    if (badSteps > 0) {
+      warnOnce(
+        "badSteps:" + String(currentPlan.id) + ":" + String(badSteps),
+        "Varning: Planen har " + String(badSteps) + " item(s) med dayOffset utanför 0–3. Spara/Verifiera blockeras tills du ändrar dem."
+      );
+    }
+
     if (trainingsOk) {
       const idxById = buildTrainingIndexById();
       let unknownT = 0;
@@ -1434,7 +1533,7 @@ Keys (LÅST):
 
     const item = {
       trainingId: trainingId,
-      dayOffset: 0,
+      dayOffset: 0, // Steg 1
       order: currentPlan.items.length + 1,
       gateRequired: true
     };
@@ -1443,7 +1542,7 @@ Keys (LÅST):
     currentPlan.items.push(item);
 
     autoSortAndRenumber();
-    setStatus("ok", "Tillagd i plan.");
+    setStatus("ok", "Tillagd i Steg 1.");
     renderTimeline();
     renderTrainingsList();
   }
@@ -1463,7 +1562,7 @@ Keys (LÅST):
 
     const item = {
       blockId: String(blockId),
-      dayOffset: 0,
+      dayOffset: 0, // Steg 1
       order: currentPlan.items.length + 1,
       gateRequired: true
     };
@@ -1471,7 +1570,7 @@ Keys (LÅST):
     currentPlan.items.push(item);
 
     autoSortAndRenumber();
-    setStatus("ok", "Block tillagt i plan.");
+    setStatus("ok", "Block tillagt i Steg 1.");
     renderTimeline();
     renderBlocksList();
   }
@@ -1488,6 +1587,7 @@ Keys (LÅST):
     const dayI = toInt(currentPlan.items[i].dayOffset) ?? 0;
     const dayJ = toInt(currentPlan.items[j].dayOffset) ?? 0;
 
+    // Flytt endast inom samma steg (dayOffset)
     if (dayI !== dayJ) return;
 
     const a = currentPlan.items[i];
@@ -1513,6 +1613,9 @@ Keys (LÅST):
     renderBlocksList();
   }
 
+  // ============================
+  // Timeline (4-stegs grid)
+  // ============================
   function renderTimeline() {
     clearNode(timelineBox);
 
@@ -1529,14 +1632,56 @@ Keys (LÅST):
     const idxTraining = trainingsOk ? buildTrainingIndexById() : Object.create(null);
     const idxBlock = blocksOk ? buildBlocksIndexById() : Object.create(null);
 
+    // Skapa 4 kolumner alltid (Steg 1–4)
+    const grid = document.createElement("div");
+    grid.className = "stepsGrid";
+    grid.setAttribute("role", "list");
+
+    const colBodies = [];
+    for (let s = 0; s < 4; s++){
+      const col = document.createElement("div");
+      col.className = "stepCol";
+
+      const head = document.createElement("div");
+      head.className = "stepHead";
+
+      const title = document.createElement("div");
+      title.className = "stepTitle";
+      title.textContent = STEP_LABELS[s];
+
+      const count = document.createElement("div");
+      count.className = "muted";
+      count.id = "stepCount_" + s;
+      count.textContent = "0";
+
+      head.appendChild(title);
+      head.appendChild(count);
+
+      const body = document.createElement("div");
+      body.className = "stepBody";
+      body.setAttribute("aria-label", STEP_LABELS[s]);
+
+      const hint = document.createElement("div");
+      hint.className = "stepHint";
+      hint.textContent = "Tomt steg. Lägg till från vänster.";
+      body.appendChild(hint);
+
+      col.appendChild(head);
+      col.appendChild(body);
+
+      colBodies.push(body);
+      grid.appendChild(col);
+    }
+
     if (currentPlan.items.length === 0) {
-      const d = document.createElement("div");
-      d.className = "muted";
-      d.textContent = "Tidsaxeln är tom. Lägg till utbildningar eller block från vänster.";
-      timelineBox.appendChild(d);
+      timelineBox.appendChild(grid);
       return;
     }
 
+    // Håll reda på antal per steg för header
+    const stepCounts = [0,0,0,0];
+
+    // Render items (i planens sorterade ordning). Vi placerar dem i kolumn baserat på dayOffset.
     for (let i = 0; i < currentPlan.items.length; i++) {
       const it = currentPlan.items[i];
       const kind = getItemKind(it);
@@ -1544,41 +1689,26 @@ Keys (LÅST):
       const t = (kind === "training") ? (idxTraining[it.trainingId] || null) : null;
       const b = (kind === "block") ? (idxBlock[it.blockId] || null) : null;
 
+      const day = toInt(it.dayOffset);
+      const isDayOk = isValidStepDayOffset(day);
+
+      // UI-visning: om ogiltigt dayOffset -> visa i Steg 4 men markera tydligt (fail-closed vid spara)
+      const colIndex = isDayOk ? day : 3;
+
+      // Ta bort "Tomt steg"-hint vid första item i kolumnen
+      if (colBodies[colIndex].firstChild && colBodies[colIndex].firstChild.classList && colBodies[colIndex].firstChild.classList.contains("stepHint")) {
+        colBodies[colIndex].removeChild(colBodies[colIndex].firstChild);
+      }
+
       const card = document.createElement("div");
-      card.className = "item";
+      card.className = "timelineCard";
       card.setAttribute("role", "listitem");
 
-      const row = document.createElement("div");
-      row.className = "timelineRow";
+      const top = document.createElement("div");
+      top.className = "timelineTop";
 
       const left = document.createElement("div");
-      const lab = document.createElement("label");
-      lab.textContent = "Dag (offset)";
-      lab.setAttribute("for", "day_" + i);
-
-      const inp = document.createElement("input");
-      inp.type = "number";
-      inp.min = "0";
-      inp.step = "1";
-      inp.id = "day_" + i;
-      inp.value = String(it.dayOffset ?? 0);
-      inp.addEventListener("change", function(){
-        const v = toInt(inp.value);
-        if (v === null || v < 0) {
-          inp.value = String(it.dayOffset ?? 0);
-          setStatus("warn", "dayOffset måste vara heltal ≥ 0. (Inget ändrat)");
-          return;
-        }
-        it.dayOffset = v;
-        autoSortAndRenumber();
-        renderTimeline();
-      });
-
-      left.appendChild(lab);
-      left.appendChild(inp);
-
-      const mid = document.createElement("div");
-      mid.className = "timelineMeta";
+      left.className = "timelineMeta";
 
       const line1 = document.createElement("div");
       line1.className = "muted";
@@ -1587,9 +1717,11 @@ Keys (LÅST):
       const line3 = document.createElement("div");
       line3.className = "muted";
 
-      if (kind === "training") {
+      if (!isDayOk) {
+        // DEBUG: här syns data-problem direkt för admin.
+        line1.textContent = "Ogiltigt dayOffset (" + String(day) + ") • måste vara 0–3 (Steg 1–4)";
+      } else if (kind === "training") {
         line1.textContent = t ? (t.module + " • " + t.area) : "Okänd trainingId (fail-closed vid spara)";
-        line2.textContent = t ? t.title : ("trainingId: " + it.trainingId);
       } else if (kind === "block") {
         if (b) {
           const parts = [];
@@ -1597,20 +1729,28 @@ Keys (LÅST):
           if (b.area) parts.push(b.area);
           if (b.step) parts.push(b.step);
           line1.textContent = parts.length ? parts.join(" • ") : "Block";
-          line2.textContent = b.title;
         } else {
           line1.textContent = "Okänd blockId (fail-closed vid spara)";
-          line2.textContent = "blockId: " + it.blockId;
         }
       } else {
         line1.textContent = "Ogiltigt item (fail-closed vid spara)";
+      }
+
+      if (kind === "training") {
+        line2.textContent = t ? t.title : ("trainingId: " + it.trainingId);
+      } else if (kind === "block") {
+        line2.textContent = b ? b.title : ("blockId: " + it.blockId);
+      } else {
         line2.textContent = "—";
       }
 
-      line3.textContent = "dag: " + String(it.dayOffset) + " • order: " + String(it.order);
+      // Avancerat men enkelt: visa exakt ordning + dayOffset, men inga extra koncept.
+      line3.textContent =
+        "dayOffset: " + String(it.dayOffset) +
+        " • order: " + String(it.order);
 
       const gateWrap = document.createElement("div");
-      gateWrap.style.marginTop = "6px";
+      gateWrap.style.marginTop = "8px";
       const gateLabel = document.createElement("label");
       gateLabel.style.display = "inline-flex";
       gateLabel.style.alignItems = "center";
@@ -1627,30 +1767,60 @@ Keys (LÅST):
       gateLabel.appendChild(gateText);
       gateWrap.appendChild(gateLabel);
 
-      mid.appendChild(line1);
-      mid.appendChild(line2);
-      mid.appendChild(line3);
-      mid.appendChild(gateWrap);
+      // dayOffset input (0–3)
+      const dayWrap = document.createElement("div");
+      dayWrap.style.marginTop = "10px";
+
+      const lab = document.createElement("label");
+      lab.textContent = "Steg (0–3)";
+      lab.setAttribute("for", "day_" + i);
+
+      const inp = document.createElement("input");
+      inp.type = "number";
+      inp.min = String(STEPS_MIN);
+      inp.max = String(STEPS_MAX);
+      inp.step = "1";
+      inp.id = "day_" + i;
+      inp.value = String(it.dayOffset ?? 0);
+      inp.addEventListener("change", function(){
+        const v = toInt(inp.value);
+        if (!isValidStepDayOffset(v)) {
+          inp.value = String(it.dayOffset ?? 0);
+          setStatus("warn", "Steg måste vara heltal 0–3. (Inget ändrat)");
+          return;
+        }
+        it.dayOffset = v;
+        autoSortAndRenumber();
+        renderTimeline();
+      });
+
+      dayWrap.appendChild(lab);
+      dayWrap.appendChild(inp);
+
+      left.appendChild(line1);
+      left.appendChild(line2);
+      left.appendChild(line3);
+      left.appendChild(gateWrap);
+      left.appendChild(dayWrap);
 
       const right = document.createElement("div");
       right.className = "rightActions";
 
-      const day = toInt(it.dayOffset) ?? 0;
-      const prevSameDay = (i > 0) && ((toInt(currentPlan.items[i-1].dayOffset) ?? 0) === day);
-      const nextSameDay = (i < currentPlan.items.length - 1) && ((toInt(currentPlan.items[i+1].dayOffset) ?? 0) === day);
+      const prevSameDay = (i > 0) && ((toInt(currentPlan.items[i-1].dayOffset) ?? 0) === (toInt(currentPlan.items[i].dayOffset) ?? 0));
+      const nextSameDay = (i < currentPlan.items.length - 1) && ((toInt(currentPlan.items[i+1].dayOffset) ?? 0) === (toInt(currentPlan.items[i].dayOffset) ?? 0));
 
       const up = document.createElement("button");
       up.className = "smallbtn";
       up.textContent = "↑";
       up.disabled = !prevSameDay;
-      up.title = "Flytta upp (endast inom samma dag)";
+      up.title = "Flytta upp (endast inom samma steg)";
       up.addEventListener("click", function(){ moveItem(i, -1); });
 
       const down = document.createElement("button");
       down.className = "smallbtn";
       down.textContent = "↓";
       down.disabled = !nextSameDay;
-      down.title = "Flytta ner (endast inom samma dag)";
+      down.title = "Flytta ner (endast inom samma steg)";
       down.addEventListener("click", function(){ moveItem(i, +1); });
 
       const del = document.createElement("button");
@@ -1663,13 +1833,24 @@ Keys (LÅST):
       right.appendChild(down);
       right.appendChild(del);
 
-      row.appendChild(left);
-      row.appendChild(mid);
-      row.appendChild(right);
+      top.appendChild(left);
+      top.appendChild(right);
+      card.appendChild(top);
 
-      card.appendChild(row);
-      timelineBox.appendChild(card);
+      colBodies[colIndex].appendChild(card);
+
+      if (isDayOk) stepCounts[colIndex] += 1;
+      else stepCounts[colIndex] += 1; // visas i steg 4 men är ändå count i header
     }
+
+    // Uppdatera counts i headers
+    for (let s = 0; s < 4; s++){
+      const id = "stepCount_" + s;
+      const el = grid.querySelector("#" + CSS.escape(id));
+      if (el) el.textContent = String(stepCounts[s]);
+    }
+
+    timelineBox.appendChild(grid);
   }
 
   // ============================
@@ -1730,7 +1911,7 @@ Keys (LÅST):
       }
 
       const dayOffset = toInt(it.dayOffset);
-      if (dayOffset === null || dayOffset < 0) return { ok:false, error:"dayOffset måste vara heltal ≥ 0" };
+      if (!isValidStepDayOffset(dayOffset)) return { ok:false, error:"Steg/dayOffset måste vara heltal 0–3 (Steg 1–4)" };
 
       const order = toInt(it.order);
       if (order === null || order < 1) return { ok:false, error:"order måste vara heltal ≥ 1" };
@@ -1887,6 +2068,10 @@ Keys (LÅST):
   // INIT
   // ============================
   (function init(){
+    // DEBUG: ordning är viktig för tydlig status:
+    // - trainings (AO-057) styr om training-tillägg är tillåtet
+    // - plans (AO-060) styr om sida kan spara
+    // - blocks bank (read-only) styr om block-tillägg + save-validering för block
     const tRes = loadTrainings();
     const pRes = loadPlans();
     const bRes = loadBlocks();
@@ -1933,23 +2118,27 @@ Keys (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- PATCH v1.8: Designmall – tydligare kort/rutor (kontrast, skugga, hover, spacing) utan logikändring.
-- PATCH v1.8: Lagt till “Nästa → Onboard Progress” (endast länk).
-- Inga kopplingar ändrade, inga nya keys; writes endast AO-060_PLANS_V1.
+- PATCH v1.9: Tidsaxel som 4-kolumners Steg-grid (Steg 1–4).
+- PATCH v1.9: dayOffset valideras som 0–3 (fail-closed vid spara/verifiera).
+- PATCH v1.9: Tydligare varningar för planer med dayOffset utanför 0–3.
+- Inga nya keys; writes endast AO-060_PLANS_V1.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Öppna sidan → visuellt: korten ska vara tydliga (bakgrund + skugga).
-2) Välj plan → lägg till training → Spara → ladda om → kvar.
-3) Klicka “Nästa → Onboard Progress” → ska öppna /admin/onboard-progress.html.
+1) Öppna sidan → höger: se 4 kolumner (Steg 1–4).
+2) Skapa ny plan → lägg till training/block → ska hamna i Steg 1.
+3) Ändra “Steg (0–3)” på ett item → item flyttar kolumn.
+4) Spara → ladda om → kvar.
+5) (Fail-closed) Sätt dayOffset till 4 → ska inte accepteras, revert + varning.
 ============================================================ -->
 
 <!-- ============================================================
 QA-check (P0/P1/P2)
-P0: Inga nya storage-keys, inga logik-/kopplingsändringar — OK
-P1: Fokus/hover bättre synlighet — OK
-P2: Endast UI-justeringar — OK
+P0: Inga nya storage-keys/datamodell — OK
+P0: Fail-closed: dayOffset 0–3 krävs — OK
+P1: Block-bank fortsatt read-only + validering vid spara — OK
+P2: UI förbättrad: stegöversikt i en vy — OK
 ============================================================ -->
 </body>
 </html>
