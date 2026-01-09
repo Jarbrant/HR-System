@@ -1605,287 +1605,275 @@ POLICY (LÅST):
    - No new storage keys
    ========================================= */
 
+/* =========================================
+   BLOCK 13/17 – Training filter (DOM-safe)
+   ========================================= */
 (function(){
-  // ---- DOM (IDs are locked by BLOCK 5) ----
-  const elModule = document.getElementById("qTrainModule");   // SELECT (preferred) or INPUT (fallback)
-  const elArea   = document.getElementById("qTrainArea");     // INPUT (with datalist)
-  const elFree   = document.getElementById("qTrainFree");     // INPUT
-  const dlAreas  = document.getElementById("dlTrainAreas");   // DATALIST (areas)
-  const dlMods   = document.getElementById("dlTrainModules"); // DATALIST (legacy, optional)
-  const preview  = document.getElementById("trainPreview");
-  const btnReload = document.getElementById("btnReloadTrainings"); // exists in BLOCK 5
+  function init(){
+    // ---- DOM (IDs are locked by BLOCK 5) ----
+    const elModule = document.getElementById("qTrainModule");   // SELECT (preferred) or INPUT (fallback)
+    const elArea   = document.getElementById("qTrainArea");     // INPUT (with datalist)
+    const elFree   = document.getElementById("qTrainFree");     // INPUT
+    const dlAreas  = document.getElementById("dlTrainAreas");   // DATALIST (areas)
+    const dlMods   = document.getElementById("dlTrainModules"); // DATALIST (legacy, optional)
+    const preview  = document.getElementById("trainPreview");
 
-  // If these are missing we fail-closed (but we do NOT crash the page)
-  if(!preview || !elModule || !elArea || !elFree){
-    try { console.warn("[BLOCK13] Missing DOM hooks for training filter. Skipping bind."); } catch {}
-    return;
-  }
-
-  // ---- Helpers ----
-  const norm = (v) => String(v ?? "").trim();
-  const low  = (v) => norm(v).toLowerCase();
-
-  function uniqSorted(arr){
-    const s = new Set(arr.map(norm).filter(Boolean));
-    return Array.from(s).sort((a,b) => a.localeCompare(b, "sv"));
-  }
-
-  // More tolerant normalize for trainings (supports multiple shapes/fieldnames)
-  function normalizeTraining(raw){
-    const r = raw || {};
-    const meta = (r.meta && typeof r.meta === "object") ? r.meta : {};
-    const title  =
-      r.title ?? r.name ?? r.trainingTitle ?? r.label ?? meta.title ?? meta.name ?? "";
-
-    const module =
-      r.module ?? r.modul ?? r.moduleName ?? r.modulName ?? r.category ?? r.group ??
-      meta.module ?? meta.modul ?? meta.moduleName ?? meta.modulName ?? "";
-
-    const area   =
-      r.area ?? r.omrade ?? r.areaName ?? r.section ??
-      meta.area ?? meta.omrade ?? meta.areaName ?? "";
-
-    const id     =
-      r.trainingId ?? r.id ?? r._id ?? r.key ?? meta.id ?? meta.trainingId ?? "";
-
-    return {
-      _raw: r,
-      id: norm(id) || "",
-      title: norm(title) || "",
-      module: norm(module) || "",
-      area: norm(area) || ""
-    };
-  }
-
-  // ---- Source of trainings ----
-  function readTrainings(){
-    // 1) Prefer in-memory if present
-    try{
-      if(window.STATE){
-        const cand =
-          window.STATE.trainingsAll ||
-          window.STATE.trainings ||
-          window.STATE.allTrainings ||
-          window.STATE._trainings ||
-          null;
-
-        if(Array.isArray(cand) && cand.length){
-          return cand.map(normalizeTraining);
-        }
-      }
-    }catch{}
-
-    // 2) Fallback: read localStorage AO-057_TRAININGS_V1
-    try{
-      const key = "AO-057_TRAININGS_V1";
-      const raw = localStorage.getItem(key);
-      if(!raw) return [];
-      const parsed = JSON.parse(raw);
-
-      // Supports shapes: array OR wrapper
-      const arr =
-        (Array.isArray(parsed) ? parsed : null) ||
-        (Array.isArray(parsed?.trainings) ? parsed.trainings : null) ||
-        (Array.isArray(parsed?.items) ? parsed.items : null) ||
-        (Array.isArray(parsed?.data) ? parsed.data : null) ||
-        (Array.isArray(parsed?.blocks) ? parsed.blocks : null) ||   // <-- extra shape
-        [];
-
-      return arr.map(normalizeTraining);
-    }catch{
-      return [];
-    }
-  }
-
-  // ---- Render preview ----
-  function renderPreview(list){
-    // If your file already has a renderer we respect it
-    try{
-      if(typeof window.renderTrainingPreview === "function"){
-        window.renderTrainingPreview(list);
-        return;
-      }
-    }catch{}
-
-    // Minimal safe fallback rendering
-    preview.innerHTML = "";
-    if(!list.length){
-      const d = document.createElement("div");
-      d.className = "muted2";
-      d.textContent = "Inga träffar.";
-      preview.appendChild(d);
+    // Fail-closed (but do not crash page)
+    if(!preview || !elModule || !elArea || !elFree){
+      try { console.warn("[BLOCK13] Missing DOM hooks for training filter. Skipping bind."); } catch {}
       return;
     }
 
-    list.slice(0, 200).forEach(t => {
-      const row = document.createElement("div");
-      row.className = "rowItem";
-      row.setAttribute("role","button");
-      row.setAttribute("tabindex","0");
+    // ---- Helpers ----
+    const norm = (v) => String(v ?? "").trim();
+    const low  = (v) => norm(v).toLowerCase();
 
-      const top = document.createElement("div");
-      top.className = "rowTop";
+    function uniqSorted(arr){
+      const s = new Set(arr.map(norm).filter(Boolean));
+      return Array.from(s).sort((a,b) => a.localeCompare(b, "sv"));
+    }
 
-      const left = document.createElement("div");
+    // Minimal normalize for trainings (supports multiple shapes)
+    function normalizeTraining(raw){
+      const r = raw || {};
+      const title  = r.title ?? r.name ?? r.trainingTitle ?? r.label ?? "";
+      const module = r.module ?? r.modul ?? r.category ?? r.group ?? "";
+      const area   = r.area ?? r.omrade ?? r.section ?? "";
+      const id     = r.trainingId ?? r.id ?? r._id ?? r.key ?? "";
+      return {
+        _raw: r,
+        id: norm(id) || "",
+        title: norm(title) || "",
+        module: norm(module) || "",
+        area: norm(area) || ""
+      };
+    }
 
-      const title = document.createElement("div");
-      title.className = "rowTitle";
-      title.textContent = t.title || "—";
+    // ---- Source of trainings (prefer in-memory; fallback localStorage) ----
+    function readTrainings(){
+      // 1) reuse page state if exists
+      try{
+        if(window.STATE){
+          const cand =
+            window.STATE.trainingsAll ||
+            window.STATE.trainings ||
+            window.STATE.allTrainings ||
+            null;
 
-      const sub = document.createElement("div");
-      sub.className = "tiny";
-      sub.textContent = `${t.module || "—"} • ${t.area || "—"}`;
-
-      left.appendChild(title);
-      left.appendChild(sub);
-
-      top.appendChild(left);
-      row.appendChild(top);
-
-      function pick(){
-        try{
-          if(typeof window.selectTrainingForExport === "function"){
-            window.selectTrainingForExport(t._raw);
-          }else{
-            window.__TRAINING_SELECTED_FOR_EXPORT__ = t._raw;
+          if(Array.isArray(cand) && cand.length){
+            return cand.map(normalizeTraining);
           }
-        }catch{}
+        }
+      }catch{}
+
+      // 2) fallback localStorage
+      try{
+        const key = "AO-057_TRAININGS_V1";
+        const raw = localStorage.getItem(key);
+        if(!raw) return [];
+        const parsed = JSON.parse(raw);
+
+        const arr =
+          (Array.isArray(parsed) ? parsed : null) ||
+          (Array.isArray(parsed?.trainings) ? parsed.trainings : null) ||
+          (Array.isArray(parsed?.items) ? parsed.items : null) ||
+          (Array.isArray(parsed?.data) ? parsed.data : null) ||
+          [];
+
+        return arr.map(normalizeTraining);
+      }catch{
+        return [];
+      }
+    }
+
+    // ---- Render preview (respects existing renderer if present) ----
+    function renderPreview(list){
+      try{
+        if(typeof window.renderTrainingPreview === "function"){
+          window.renderTrainingPreview(list);
+          return;
+        }
+      }catch{}
+
+      // Safe fallback rendering (no innerHTML)
+      while(preview.firstChild) preview.removeChild(preview.firstChild);
+
+      if(!list.length){
+        const d = document.createElement("div");
+        d.className = "muted2";
+        d.textContent = "Inga träffar.";
+        preview.appendChild(d);
+        return;
       }
 
-      row.addEventListener("click", pick);
-      row.addEventListener("keydown", (e) => {
-        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); pick(); }
-      });
+      list.slice(0, 200).forEach(t => {
+        const row = document.createElement("div");
+        row.className = "rowItem";
+        row.setAttribute("role","button");
+        row.setAttribute("tabindex","0");
 
-      preview.appendChild(row);
-    });
-  }
+        const top = document.createElement("div");
+        top.className = "rowTop";
 
-  // ---- Populate module dropdown + area datalist ----
-  function getModuleValue(){
-    if(!elModule) return "";
-    const tag = String(elModule.tagName || "").toLowerCase();
-    return norm(elModule.value);
-  }
+        const left = document.createElement("div");
 
-  function setModuleOptions(modules){
-    const tag = String(elModule.tagName || "").toLowerCase();
-    if(tag === "select"){
-      const prev = norm(elModule.value);
-      elModule.innerHTML = "";
+        const title = document.createElement("div");
+        title.className = "rowTitle";
+        title.textContent = t.title || "—";
 
-      const optAll = document.createElement("option");
-      optAll.value = "";
-      optAll.textContent = "Alla moduler";
-      elModule.appendChild(optAll);
+        const sub = document.createElement("div");
+        sub.className = "tiny";
+        sub.textContent = `${t.module || "—"} • ${t.area || "—"}`;
 
-      modules.forEach(m => {
-        const opt = document.createElement("option");
-        opt.value = m;
-        opt.textContent = m;
-        elModule.appendChild(opt);
-      });
+        left.appendChild(title);
+        left.appendChild(sub);
 
-      elModule.value = (prev && modules.includes(prev)) ? prev : "";
-    }else{
-      if(dlMods){
-        dlMods.innerHTML = "";
-        modules.forEach(m => {
-          const o = document.createElement("option");
-          o.value = m;
-          dlMods.appendChild(o);
+        top.appendChild(left);
+        row.appendChild(top);
+
+        function pick(){
+          try{
+            if(typeof window.selectTrainingForExport === "function"){
+              window.selectTrainingForExport(t._raw);
+            }else{
+              window.__TRAINING_SELECTED_FOR_EXPORT__ = t._raw;
+            }
+          }catch{}
+        }
+
+        row.addEventListener("click", pick);
+        row.addEventListener("keydown", (e) => {
+          if(e.key === "Enter" || e.key === " "){ e.preventDefault(); pick(); }
         });
+
+        preview.appendChild(row);
+      });
+    }
+
+    // ---- Populate module dropdown + area datalist ----
+    function getModuleValue(){
+      const tag = String(elModule.tagName || "").toLowerCase();
+      return norm(elModule.value);
+    }
+
+    function setModuleOptions(modules){
+      const tag = String(elModule.tagName || "").toLowerCase();
+      if(tag === "select"){
+        const prev = norm(elModule.value);
+
+        while(elModule.firstChild) elModule.removeChild(elModule.firstChild);
+
+        const optAll = document.createElement("option");
+        optAll.value = "";
+        optAll.textContent = "Alla moduler";
+        elModule.appendChild(optAll);
+
+        modules.forEach(m => {
+          const opt = document.createElement("option");
+          opt.value = m;
+          opt.textContent = m;
+          elModule.appendChild(opt);
+        });
+
+        elModule.value = (prev && modules.includes(prev)) ? prev : "";
+      }else{
+        // input fallback: populate legacy datalist
+        if(dlMods){
+          while(dlMods.firstChild) dlMods.removeChild(dlMods.firstChild);
+          modules.forEach(m => {
+            const o = document.createElement("option");
+            o.value = m;
+            dlMods.appendChild(o);
+          });
+        }
       }
     }
-  }
 
-  function setAreaOptions(areas){
-    if(!dlAreas) return;
-    dlAreas.innerHTML = "";
-    areas.forEach(a => {
-      const o = document.createElement("option");
-      o.value = a;
-      dlAreas.appendChild(o);
-    });
-  }
-
-  // ---- Filtering ----
-  function filterTrainings(all){
-    const modSel = low(getModuleValue());
-    const areaQ  = low(elArea.value);
-    const freeQ  = low(elFree.value);
-
-    return all.filter(t => {
-      const tMod = low(t.module);
-      const tArea = low(t.area);
-      const tTitle = low(t.title);
-
-      if(modSel && tMod !== modSel) return false;
-      if(areaQ && !tArea.includes(areaQ)) return false;
-      if(freeQ && !tTitle.includes(freeQ)) return false;
-      return true;
-    });
-  }
-
-  // ---- Main refresh ----
-  let ALL = readTrainings();
-
-  function refreshOptions(){
-    const modules = uniqSorted(ALL.map(x => x.module).filter(Boolean));
-    setModuleOptions(modules);
-
-    const modSel = low(getModuleValue());
-    const areas = uniqSorted(
-      ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area).filter(Boolean)
-    );
-    setAreaOptions(areas);
-  }
-
-  function refreshList(){
-    const modSel = low(getModuleValue());
-    const areas = uniqSorted(
-      ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area).filter(Boolean)
-    );
-    setAreaOptions(areas);
-
-    renderPreview(filterTrainings(ALL));
-  }
-
-  function reloadAll(){
-    ALL = readTrainings();
-    refreshOptions();
-    refreshList();
-  }
-
-  // ---- Bind ----
-  function bind(){
-    elModule.addEventListener("change", () => {
-      try{ elArea.value = ""; }catch{}
-      refreshList();
-    });
-    elModule.addEventListener("input", () => { refreshList(); }); // supports input fallback
-    elArea.addEventListener("input", refreshList);
-    elFree.addEventListener("input", refreshList);
-
-    // Important: hook the "Uppdatera" button so dropdown fills even if trainings load later
-    if(btnReload){
-      btnReload.addEventListener("click", () => reloadAll());
+    function setAreaOptions(areas){
+      if(!dlAreas) return;
+      while(dlAreas.firstChild) dlAreas.removeChild(dlAreas.firstChild);
+      areas.forEach(a => {
+        const o = document.createElement("option");
+        o.value = a;
+        dlAreas.appendChild(o);
+      });
     }
+
+    // ---- Filtering ----
+    function filterTrainings(all){
+      const modSel = low(getModuleValue());
+      const areaQ  = low(elArea.value);
+      const freeQ  = low(elFree.value);
+
+      return all.filter(t => {
+        const tMod   = low(t.module);
+        const tArea  = low(t.area);
+        const tTitle = low(t.title);
+
+        // exact match for dropdown value (case-insensitive)
+        if(modSel && tMod !== modSel) return false;
+        if(areaQ && !tArea.includes(areaQ)) return false;
+        if(freeQ && !tTitle.includes(freeQ)) return false;
+        return true;
+      });
+    }
+
+    // ---- Main refresh ----
+    let ALL = readTrainings();
+
+    function refreshOptions(){
+      const modules = uniqSorted(ALL.map(x => x.module));
+      setModuleOptions(modules);
+
+      const modSel = low(getModuleValue());
+      const areas = uniqSorted(
+        ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area)
+      );
+      setAreaOptions(areas);
+    }
+
+    function refreshList(){
+      const modSel = low(getModuleValue());
+      const areas = uniqSorted(
+        ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area)
+      );
+      setAreaOptions(areas);
+
+      renderPreview(filterTrainings(ALL));
+    }
+
+    // ---- Bind ----
+    function bind(){
+      elModule.addEventListener("change", () => {
+        try{ elArea.value = ""; }catch{}
+        refreshList();
+      });
+      elModule.addEventListener("input", refreshList); // supports input fallback
+
+      elArea.addEventListener("input", refreshList);
+      elFree.addEventListener("input", refreshList);
+    }
+
+    refreshOptions();
+    bind();
+    refreshList();
+
+    // optional hook for "Uppdatera" button
+    window.__BLOCK13_RELOAD_TRAININGS__ = function(){
+      ALL = readTrainings();
+      refreshOptions();
+      refreshList();
+    };
   }
 
-  // ---- Initial ----
-  reloadAll();
-  bind();
-
-  // Late refresh (covers cases where other code fills STATE after our first run)
-  setTimeout(() => { try{ reloadAll(); }catch{} }, 250);
-  setTimeout(() => { try{ reloadAll(); }catch{} }, 1200);
-
-  // Optional external hook
-  window.__BLOCK13_RELOAD_TRAININGS__ = function(){
-    reloadAll();
-  };
+  // DOM-safe boot
+  if(document.readyState === "loading"){
+    document.addEventListener("DOMContentLoaded", init, { once: true });
+  }else{
+    init();
+  }
 })();
+
 
   /* =========================================
      BLOCK 14/17 – Item editor logic (inkl. All info panel)
