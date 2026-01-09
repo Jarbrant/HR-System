@@ -1,27 +1,30 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-UI-01 (PROD PATCH v1.9) | FIL-ID: admin/onboard-plans.html
+AO-ONBOARD-PLANS-UI-01 (PROD REWRITE v2.0) | FIL-ID: admin/onboard-plans.html
 Projekt: HR-System
-Syfte: ADMIN – Skapa/Redigera Onboarding Plans + Tidsaxel (Steg 1–4) UI-only
+Syfte: ADMIN – Onboarding Plans (AO-060) • Bygg plan genom att lägga till Trainings/Blocks i en Tidsaxel (enkel)
 
-PATCH v1.9 (UI + Robusthet):
-- NYTT: Steg-grid (4 kolumner) för tidsaxeln: Steg 1–4 (dayOffset 0–3)
-- UI förenklad: användaren ser direkt “steg 1–4” i en vy
-- Fail-closed: dayOffset måste vara 0–3 (planer med >3 blockeras för spara/verifiera tills fix)
-- Inline debug-kommentarer + tydligare status/warnings
-- Inga nya storage-keys/datamodell. Writes endast AO-060.
+NYTT v2.0 (enligt Anders):
+- Layout = 4 kolumner:
+  1) Tillgängliga utbildningar
+  2) Planens tidsaxel (EN kolumn, INGA Steg 2/3/4)
+  3) Tillgängliga block
+  4) Befintliga planer
+- Tidsaxeln är en enkel lista med ordning (order) + gateRequired. Ingen dayOffset UI.
+- Fortfarande schema-kompatibel: vi sparar dayOffset=0 för alla items (fail-closed).
+- Inga nya storage-keys/datamodell. Writes endast AO-060_PLANS_V1.
+- XSS-safe rendering (textContent).
 
 POLICY (LÅST):
 - UI-only • Fail-closed
-- sessionStorage först (auth) • fallback localStorage (auth) via AO-002
-- localStorage för data
-- XSS-escape på all rendering från storage (textContent)
-- Inga känsliga persondata
-- Inga nya storage-keys (denna sida skriver endast AO-060)
+- sessionStorage först (auth) • fallback localStorage via CORE (HRApp)
+- ADMIN-only
+- XSS-safe (textContent)
+- Inga nya storage-keys/datamodell
 - Hel-filsleverans
 
 Keys (LÅST):
 - Läser: AO-001_LOGIN_V1 (via HRApp), AO-057_TRAININGS_V1, AO-060_PLANS_V1
-- Läser (read-only, om finns): Block-bank (auto-detekterar känd nyckel, skriver aldrig)
+- Läser (read-only, om finns): Block-bank (auto-detekterar känd key, skriver aldrig)
 - Skriver: AO-060_PLANS_V1
 ============================================================ -->
 <!doctype html>
@@ -36,17 +39,14 @@ Keys (LÅST):
     :root{
       --gap: 12px;
 
-      /* Designmall (lokal UI) */
       --bg:#f6f7fb;
       --card:#ffffff;
       --ink:#0f172a;
       --muted:#64748b;
       --line:rgba(15,23,42,.12);
       --lineStrong:rgba(15,23,42,.18);
-
       --focus: rgba(11,95,255,.22);
 
-      /* tile shadow (lugnt men tydligt) */
       --tileShadowA: 0 1px 0 rgba(0,0,0,.04);
       --tileShadowB: 0 10px 22px rgba(15,23,42,.06);
       --tileShadow: var(--tileShadowA), var(--tileShadowB);
@@ -60,6 +60,14 @@ Keys (LÅST):
       color: var(--ink);
     }
 
+    .topbar{ display:flex; flex-direction:column; gap: 10px; margin-bottom: 10px; }
+    .titlebar{ display:flex; align-items:flex-start; justify-content:space-between; gap: 10px; flex-wrap:wrap; }
+    h1{ font-size: 18px; margin: 0; letter-spacing: .2px; }
+    h2{ font-size: 14px; margin: 0 0 10px 0; letter-spacing: .2px; }
+
+    .muted{ color: var(--muted); font-size: 12px; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
+
     .card{
       border: 1px solid var(--line);
       border-radius: 14px;
@@ -67,14 +75,6 @@ Keys (LÅST):
       background: var(--card);
       box-shadow: var(--tileShadow);
     }
-
-    .muted{ color: var(--muted); font-size: 12px; }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; }
-
-    .topbar{ display:flex; flex-direction:column; gap: 10px; margin-bottom: 10px; }
-    .titlebar{ display:flex; align-items:flex-start; justify-content:space-between; gap: 10px; flex-wrap:wrap; }
-    h1{ font-size: 18px; margin: 0; letter-spacing: .2px; }
-    h2{ font-size: 14px; margin: 0 0 10px 0; letter-spacing: .2px; }
 
     .nav{ display:flex; flex-wrap:wrap; gap: 8px; align-items:center; }
     .nav a{
@@ -95,29 +95,6 @@ Keys (LÅST):
 
     .toolbar{ display:flex; flex-wrap:wrap; gap: 8px; align-items:center; }
 
-    .row{ display:flex; gap: var(--gap); align-items:flex-start; }
-    .col{ flex: 1; min-width: 320px; }
-    .colRight{ flex: 1; min-width: 320px; }
-
-    .colStack{ display:flex; flex-direction:column; gap: var(--gap); }
-    .grid2{ display:grid; grid-template-columns: 1fr 1fr; gap: var(--gap); }
-    .grid3{ display:grid; grid-template-columns: 1fr 1fr 1fr; gap: var(--gap); }
-
-    label{ display:block; font-size: 12px; margin-bottom: 6px; color: var(--muted); }
-    input[type="text"], input[type="number"], select, input[type="search"]{
-      width:100%;
-      padding: 10px 10px;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      background: #fff;
-      color: var(--ink);
-      outline: none;
-    }
-    input[type="text"]:focus, input[type="number"]:focus, select:focus, input[type="search"]:focus{
-      border-color: rgba(11,95,255,.45);
-      box-shadow: 0 0 0 4px var(--focus);
-    }
-
     button{
       padding: 10px 12px;
       border-radius: 12px;
@@ -130,10 +107,8 @@ Keys (LÅST):
     button:hover{ box-shadow: var(--tileShadow); }
     button.primary{ background:#111; color:#fff; border-color:#111; box-shadow: 0 10px 22px rgba(0,0,0,.14); }
     button.primary:hover{ box-shadow: 0 14px 30px rgba(0,0,0,.18); }
-    button.danger{ background: #fff0f0; border-color: rgba(176,0,32,0.35); }
     button:disabled{ opacity:.55; cursor:not-allowed; box-shadow:none; }
 
-    /* “Knapp-länk” för Next */
     .btnlink{
       display:inline-flex;
       align-items:center;
@@ -152,10 +127,25 @@ Keys (LÅST):
     .btnlink.primary{ background:#111; color:#fff; border-color:#111; box-shadow: 0 10px 22px rgba(0,0,0,.14); }
     .btnlink.primary:hover{ box-shadow: 0 14px 30px rgba(0,0,0,.18); }
 
+    .error{ border-left: 4px solid #b00020; padding: 10px; background: #fff5f7; border-radius: 12px; }
+    .ok{ border-left: 4px solid #0b7a0b; padding: 10px; background: #f4fff4; border-radius: 12px; }
+    .warn{ border-left: 4px solid #b36b00; padding: 10px; background: #fff9f0; border-radius: 12px; }
+
+    /* ===== 4 KOLUMNER ===== */
+    .grid4{
+      display:grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: var(--gap);
+      align-items:start;
+      margin-top: 12px;
+    }
+    .colCard{ min-width: 0; }
+
     .list{ display:flex; flex-direction:column; gap: 10px; overflow:auto; padding-right: 2px; }
-    .list.trainings{ max-height: 46vh; }
-    .list.blocks{ max-height: 46vh; }
-    .list.plans{ max-height: 24vh; }
+    .list.trainings{ max-height: 70vh; }
+    .list.timeline{ max-height: 70vh; }
+    .list.blocks{ max-height: 70vh; }
+    .list.plans{ max-height: 70vh; }
 
     .item{
       border: 1px solid var(--line);
@@ -165,7 +155,7 @@ Keys (LÅST):
       box-shadow: 0 1px 0 rgba(0,0,0,.02);
     }
     .item:hover{ border-color: var(--lineStrong); box-shadow: var(--tileShadowHover); }
-    .itemRow{ display:flex; align-items:center; justify-content:space-between; gap: 10px; }
+    .itemRow{ display:flex; align-items:flex-start; justify-content:space-between; gap: 10px; }
 
     .pill{
       display:inline-block;
@@ -175,15 +165,33 @@ Keys (LÅST):
       border: 1px solid var(--line);
       background:#fff;
       color: var(--ink);
+      white-space:nowrap;
     }
     .pill.draft{ background:#fff7e6; }
     .pill.active{ background:#eaffea; }
     .pill.archived{ background:#f2f2f2; }
-    .pill.published{ background:#eef6ff; }
 
-    .error{ border-left: 4px solid #b00020; padding: 10px; background: #fff5f7; border-radius: 12px; }
-    .ok{ border-left: 4px solid #0b7a0b; padding: 10px; background: #f4fff4; border-radius: 12px; }
-    .warn{ border-left: 4px solid #b36b00; padding: 10px; background: #fff9f0; border-radius: 12px; }
+    label{ display:block; font-size: 12px; margin-bottom: 6px; color: var(--muted); }
+    input[type="text"], input[type="search"], select{
+      width:100%;
+      padding: 10px 10px;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+      color: var(--ink);
+      outline: none;
+    }
+    input[type="text"]:focus, input[type="search"]:focus, select:focus{
+      border-color: rgba(11,95,255,.45);
+      box-shadow: 0 0 0 4px var(--focus);
+    }
+
+    .filters3{
+      display:grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: var(--gap);
+      margin-bottom: 10px;
+    }
 
     .splitHeader{ display:flex; align-items:flex-start; justify-content:space-between; gap: 8px; margin-bottom: 8px; }
     .smallbtn{
@@ -195,50 +203,7 @@ Keys (LÅST):
     }
     .smallbtn:hover{ box-shadow: var(--tileShadow); }
     .smallbtn.danger{ background:#ffecec; }
-    .smallbtn.danger:hover{ box-shadow: var(--tileShadow); }
 
-    /* ====== STEG-GRID (4 kolumner) ====== */
-    .stepsGrid{
-      display:grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: var(--gap);
-    }
-    .stepCol{
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background:#fff;
-      box-shadow: 0 1px 0 rgba(0,0,0,.02);
-      overflow:hidden;
-    }
-    .stepHead{
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--line);
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap: 8px;
-      background: #fff;
-    }
-    .stepTitle{
-      font-size: 13px;
-      margin: 0;
-      letter-spacing:.2px;
-    }
-    .stepBody{
-      padding: 10px;
-      display:flex;
-      flex-direction:column;
-      gap: 10px;
-      min-height: 120px;
-      max-height: 56vh;
-      overflow:auto;
-    }
-    .stepHint{
-      font-size: 12px;
-      color: var(--muted);
-    }
-
-    /* Item-kort inne i steg */
     .timelineCard{
       border: 1px solid var(--line);
       border-radius: 14px;
@@ -248,32 +213,31 @@ Keys (LÅST):
     }
     .timelineCard:hover{ border-color: var(--lineStrong); box-shadow: var(--tileShadowHover); }
 
-    .timelineTop{
-      display:flex;
-      align-items:flex-start;
-      justify-content:space-between;
-      gap: 10px;
-    }
-    .timelineMeta{ font-size: 12px; }
-    .rightActions{ display:flex; gap: 6px; justify-content:flex-end; flex-wrap:wrap; }
+    .rightActions{ display:flex; gap: 6px; flex-wrap:wrap; justify-content:flex-end; }
 
     .divider{ height: 1px; background: var(--line); margin: 12px 0; }
-    .footerNote{ margin-top: 10px; }
 
-    @media (max-width: 980px){
-      .row{ flex-direction: column; }
-      .col, .colRight{ min-width: auto; }
-      .grid3{ grid-template-columns: 1fr; }
-      .grid2{ grid-template-columns: 1fr; }
+    .planForm{
+      display:grid;
+      grid-template-columns: 1fr;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
 
-      /* Mobil: steg staplas (enkel läsning) */
-      .stepsGrid{ grid-template-columns: 1fr; }
-      .stepBody{ max-height: 38vh; }
+    .inline{
+      display:flex;
+      gap: 10px;
+      align-items:center;
+      flex-wrap:wrap;
+    }
 
-      .rightActions{ justify-content:flex-start; }
-      .list.trainings{ max-height: 38vh; }
-      .list.blocks{ max-height: 38vh; }
-      .list.plans{ max-height: 22vh; }
+    @media (max-width: 1200px){
+      .grid4{ grid-template-columns: 1fr 1fr; }
+      .list.trainings, .list.timeline, .list.blocks, .list.plans{ max-height: 46vh; }
+    }
+    @media (max-width: 760px){
+      .grid4{ grid-template-columns: 1fr; }
+      .filters3{ grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -296,7 +260,7 @@ Keys (LÅST):
     <div class="titlebar">
       <div>
         <h1>Onboarding Plans (ADMIN)</h1>
-        <div class="muted">Skapa plan + bygg tidsaxel i 4 steg (Steg 1–4). Nästa steg: progress.</div>
+        <div class="muted">4 kolumner: Trainings → Tidsaxel → Blocks → Planer. (Enkel, men robust)</div>
       </div>
 
       <div class="toolbar" aria-label="Åtgärder">
@@ -310,82 +274,41 @@ Keys (LÅST):
 
   <div id="statusBox" class="card" aria-live="polite"></div>
 
-  <div class="row" style="margin-top:12px;">
-    <div class="col colStack" aria-label="Vänsterkolumn">
-      <!-- Trainings -->
-      <div class="card" aria-label="Tillgängliga utbildningar">
-        <div class="splitHeader">
-          <h2>Tillgängliga utbildningar</h2>
-          <div class="muted">Endast published/verified + blocks&gt;0</div>
-        </div>
+  <div class="grid4" aria-label="4-kolumn layout">
+    <!-- 1) TRAININGS -->
+    <div class="card colCard" aria-label="Tillgängliga utbildningar">
+      <div class="splitHeader">
+        <h2>Tillgängliga utbildningar</h2>
+        <div class="muted">published/verified + blocks&gt;0</div>
+      </div>
 
-        <div class="grid3" style="margin-bottom:10px;">
-          <div>
-            <label for="filterModule">Modul</label>
-            <select id="filterModule"></select>
-          </div>
-          <div>
-            <label for="filterArea">Område</label>
-            <select id="filterArea"></select>
-          </div>
-          <div>
-            <label for="searchTitle">Sök titel</label>
-            <input id="searchTitle" type="search" placeholder="Sök…" />
-          </div>
+      <div class="filters3">
+        <div>
+          <label for="filterModule">Modul</label>
+          <select id="filterModule"></select>
         </div>
-
-        <div id="trainingsBox" class="list trainings" role="list"></div>
-        <div class="footerNote muted">
-          Fail-closed: om trainings saknas/korrupt blockeras tillägg.
+        <div>
+          <label for="filterArea">Område</label>
+          <select id="filterArea"></select>
+        </div>
+        <div>
+          <label for="searchTitle">Sök titel</label>
+          <input id="searchTitle" type="search" placeholder="Sök…" />
         </div>
       </div>
 
-      <!-- Blocks (Block-bank) -->
-      <div class="card" aria-label="Tillgängliga block (Block-bank)">
-        <div class="splitHeader">
-          <h2>Tillgängliga block</h2>
-          <div class="muted" id="blocksMeta">Block-bank: —</div>
-        </div>
-
-        <div class="grid3" style="margin-bottom:10px;">
-          <div>
-            <label for="filterBlockModule">Modul</label>
-            <select id="filterBlockModule"></select>
-          </div>
-          <div>
-            <label for="filterBlockArea">Område</label>
-            <select id="filterBlockArea"></select>
-          </div>
-          <div>
-            <label for="searchBlockTitle">Sök titel</label>
-            <input id="searchBlockTitle" type="search" placeholder="Sök…" />
-          </div>
-        </div>
-
-        <div id="blocksBox" class="list blocks" role="list"></div>
-        <div class="footerNote muted">
-          Fail-closed: om block-bank saknas/korrupt blockeras block-tillägg. Planer med blockId kan inte sparas utan block-bank.
-        </div>
-      </div>
-
-      <!-- Befintliga planer -->
-      <div class="card" aria-label="Lista planer">
-        <div class="splitHeader">
-          <h2>Befintliga planer</h2>
-          <div class="muted">Klicka för att redigera</div>
-        </div>
-        <div id="plansList" class="list plans" role="list"></div>
-      </div>
+      <div id="trainingsBox" class="list trainings" role="list"></div>
+      <div class="muted">Fail-closed: om AO-057 saknas/korrupt blockeras tillägg.</div>
     </div>
 
-    <!-- RIGHT -->
-    <div class="colRight card" aria-label="Planens tidsaxel">
+    <!-- 2) TIMELINE -->
+    <div class="card colCard" aria-label="Planens tidsaxel">
       <div class="splitHeader">
         <h2>Planens tidsaxel</h2>
         <div class="muted" id="planMeta">—</div>
       </div>
 
-      <div class="grid2" style="margin-bottom:10px;">
+      <div class="planForm">
         <div>
           <label for="planTitle">Titel</label>
           <input id="planTitle" type="text" placeholder="t.ex. Onboarding Bas" />
@@ -402,13 +325,50 @@ Keys (LÅST):
 
       <div class="divider"></div>
 
-      <!-- NYTT: 4-stegs grid -->
-      <div id="timelineBox" role="list"></div>
-
-      <div class="footerNote muted">
-        Steg 1–4 är fasta. <span class="mono">dayOffset</span> måste vara 0–3 (fail-closed).
-        (↑/↓ flyttar endast inom samma steg, deterministiskt)
+      <div class="inline muted">
+        <span>Tips: Lägg till från vänster/höger. Flytta med ↑/↓. Ta bort med “Ta bort”.</span>
       </div>
+
+      <div id="timelineBox" class="list timeline" role="list"></div>
+
+      <div class="muted" style="margin-top:10px;">
+        Schema: alla items sparas med <span class="mono">dayOffset=0</span> (endast en tidsaxel på denna sida).
+      </div>
+    </div>
+
+    <!-- 3) BLOCKS -->
+    <div class="card colCard" aria-label="Tillgängliga block">
+      <div class="splitHeader">
+        <h2>Tillgängliga block</h2>
+        <div class="muted" id="blocksMeta">Block-bank: —</div>
+      </div>
+
+      <div class="filters3">
+        <div>
+          <label for="filterBlockModule">Modul</label>
+          <select id="filterBlockModule"></select>
+        </div>
+        <div>
+          <label for="filterBlockArea">Område</label>
+          <select id="filterBlockArea"></select>
+        </div>
+        <div>
+          <label for="searchBlockTitle">Sök titel</label>
+          <input id="searchBlockTitle" type="search" placeholder="Sök…" />
+        </div>
+      </div>
+
+      <div id="blocksBox" class="list blocks" role="list"></div>
+      <div class="muted">Fail-closed: om block-bank saknas/korrupt blockeras block-tillägg.</div>
+    </div>
+
+    <!-- 4) PLANS -->
+    <div class="card colCard" aria-label="Befintliga planer">
+      <div class="splitHeader">
+        <h2>Befintliga planer</h2>
+        <div class="muted">Klicka för att redigera</div>
+      </div>
+      <div id="plansList" class="list plans" role="list"></div>
     </div>
   </div>
 
@@ -420,58 +380,53 @@ Keys (LÅST):
 (function(){
   "use strict";
 
-  function clearNode(el){
-    if(!el) return;
-    while(el.firstChild) el.removeChild(el.firstChild);
+  function clearNode(el){ while(el && el.firstChild) el.removeChild(el.firstChild); }
+  function isPlainObject(v){ return !!v && typeof v === "object" && !Array.isArray(v); }
+  function normStr(v){ return String(v ?? "").trim(); }
+  function toInt(v){
+    const n = (typeof v === "number") ? v : Number(v);
+    if (!Number.isFinite(n)) return null;
+    if (Math.floor(n) !== n) return null;
+    return n;
+  }
+  function genId(prefix){
+    const p = String(prefix || "id_");
+    const t = Date.now().toString(16);
+    const r = Math.random().toString(16).slice(2, 10);
+    return p + t + "_" + r;
+  }
+
+  const statusBox = document.getElementById("statusBox");
+  function setStatus(type, msg){
+    statusBox.className = "card " + (type || "");
+    statusBox.textContent = String(msg || "");
   }
 
   // ============================
   // AUTH (ADMIN-only)
   // ============================
   if (!window.HRApp || typeof window.HRApp.requireAuth !== "function") {
-    const sb = document.getElementById("statusBox");
-    sb.className = "card error";
-    sb.textContent = "CORE saknas (HRApp). Kan inte köra sidan. (fail-closed)";
+    setStatus("error", "CORE saknas (HRApp). (fail-closed)");
     return;
   }
 
-  let _authResult = null;
-  try {
-    _authResult = window.HRApp.requireAuth({ allowRoles: ["ADMIN"] });
-  } catch (e) {
-    const sb = document.getElementById("statusBox");
-    sb.className = "card error";
-    sb.textContent = "Auth-guard kraschade i CORE. Kan inte fortsätta. (fail-closed)";
-    return;
-  }
+  let _auth = null;
+  try { _auth = window.HRApp.requireAuth({ allowRoles: ["ADMIN"] }); }
+  catch { setStatus("error", "Auth-guard kraschade i CORE. (fail-closed)"); return; }
 
-  // NOTE: requireAuth kan välja att navigera bort själv och returnera null
-  if (_authResult === null) return;
-
-  if (_authResult === false || (_authResult && typeof _authResult === "object" && _authResult.ok === false)) {
-    const sb = document.getElementById("statusBox");
-    sb.className = "card error";
-    sb.textContent = "Åtkomst nekad (requireAuth). (fail-closed)";
+  if (_auth === null) return;
+  if (_auth === false || (_auth && typeof _auth === "object" && _auth.ok === false)) {
+    setStatus("error", "Åtkomst nekad (ADMIN krävs). (fail-closed)");
     return;
   }
 
   if (typeof window.HRApp.getAuth === "function") {
     try {
       let a = null;
-      try { a = window.HRApp.getAuth(_authResult); } catch { a = window.HRApp.getAuth(); }
+      try { a = window.HRApp.getAuth(_auth); } catch { a = window.HRApp.getAuth(); }
       const role = a && typeof a === "object" ? String(a.role || "") : "";
-      if (role && role !== "ADMIN") {
-        const sb = document.getElementById("statusBox");
-        sb.className = "card error";
-        sb.textContent = "Fel roll (" + role + "). ADMIN krävs. (fail-closed)";
-        return;
-      }
-    } catch {
-      const sb = document.getElementById("statusBox");
-      sb.className = "card error";
-      sb.textContent = "Kunde inte verifiera roll via getAuth. (fail-closed)";
-      return;
-    }
+      if (role && role !== "ADMIN") { setStatus("error", "Fel roll (" + role + "). ADMIN krävs. (fail-closed)"); return; }
+    } catch { setStatus("error", "Kunde inte verifiera roll via getAuth. (fail-closed)"); return; }
   }
 
   // ============================
@@ -480,57 +435,26 @@ Keys (LÅST):
   const TRAININGS_KEY = "AO-057_TRAININGS_V1";
   const PLANS_KEY = "AO-060_PLANS_V1";
 
-  // Block-bank (read-only; auto-detektera första som finns och är OK)
-  // DEBUG: om inga blocks syns -> kontrollera vilken key som faktiskt används i din miljö.
+  // Block-bank (read-only; auto-detektera)
   const BLOCKS_KEY_CANDIDATES = [
     "AO-062_BLOCKS_V1",
     "AO-057_BLOCKS_V1",
     "AO-058_BLOCKS_V1",
-    "AO-0XX_BLOCKS_V1" // placeholder (om ni faktiskt använder det)
+    "AO-0XX_BLOCKS_V1"
   ];
-
-  // ============================
-  // STEG (LÅST UI)
-  // ============================
-  // Endast 4 steg på denna sida: dayOffset 0–3
-  const STEPS_MIN = 0;
-  const STEPS_MAX = 3;
-  const STEP_LABELS = ["Steg 1", "Steg 2", "Steg 3", "Steg 4"];
-
-  // ============================
-  // STATE
-  // ============================
-  let trainingsOk = false;
-  let trainings = []; // allowed trainings
-  let trainingSnapshotsById = Object.create(null);
-
-  let blocksOk = false;
-  let blocksKeyUsed = "";
-  let blocks = []; // allowed blocks (published)
-  let blocksById = Object.create(null);
-
-  let plansOk = true;
-  let plans = [];
-  let currentPlan = null;
-
-  let _lastWarnSig = "";
-  function warnOnce(signature, msg){
-    const sig = String(signature || "");
-    if (!sig) return;
-    if (_lastWarnSig === sig) return;
-    _lastWarnSig = sig;
-    setStatus("warn", msg);
-  }
 
   // ============================
   // DOM
   // ============================
-  const statusBox = document.getElementById("statusBox");
-
   const filterModule = document.getElementById("filterModule");
   const filterArea = document.getElementById("filterArea");
   const searchTitle = document.getElementById("searchTitle");
   const trainingsBox = document.getElementById("trainingsBox");
+
+  const planTitle = document.getElementById("planTitle");
+  const planStatus = document.getElementById("planStatus");
+  const planMeta = document.getElementById("planMeta");
+  const timelineBox = document.getElementById("timelineBox");
 
   const blocksMeta = document.getElementById("blocksMeta");
   const filterBlockModule = document.getElementById("filterBlockModule");
@@ -539,92 +463,50 @@ Keys (LÅST):
   const blocksBox = document.getElementById("blocksBox");
 
   const plansList = document.getElementById("plansList");
-  const timelineBox = document.getElementById("timelineBox");
-
-  const planTitle = document.getElementById("planTitle");
-  const planStatus = document.getElementById("planStatus");
-  const planMeta = document.getElementById("planMeta");
 
   const btnNewPlan = document.getElementById("btnNewPlan");
   const btnSavePlan = document.getElementById("btnSavePlan");
   const btnVerifyPlan = document.getElementById("btnVerifyPlan");
 
   // ============================
-  // HELPERS
+  // STORAGE SAFE PARSE
   // ============================
-  function setStatus(type, msg) {
-    statusBox.className = "card " + (type || "");
-    statusBox.textContent = String(msg || "");
-  }
+  function safeJsonParseFallback(raw){ try { return JSON.parse(raw); } catch { return null; } }
 
-  function safeJsonParseFallback(raw) {
-    try { return JSON.parse(raw); } catch { return null; }
-  }
-
-  function safeParseLocalStorage(key) {
-    try {
+  function safeParseLocalStorage(key){
+    try{
       const raw = localStorage.getItem(String(key || ""));
-      if (raw === null) return { ok: true, missing: true, data: null };
+      if (raw === null) return { ok:true, missing:true, data:null };
 
       let parsed = null;
       if (window.HRApp && typeof window.HRApp.safeJsonParse === "function") parsed = window.HRApp.safeJsonParse(raw);
       else parsed = safeJsonParseFallback(raw);
 
-      if (parsed === null) return { ok: false, error: "CORRUPT_JSON" };
-      return { ok: true, missing: false, data: parsed };
+      if (parsed === null) return { ok:false, error:"CORRUPT_JSON" };
+      return { ok:true, missing:false, data:parsed };
     } catch {
-      return { ok: false, error: "READ_FAILED" };
+      return { ok:false, error:"READ_FAILED" };
     }
   }
 
-  function isPlainObject(v) {
-    return !!v && typeof v === "object" && !Array.isArray(v);
-  }
+  // ============================
+  // STATE
+  // ============================
+  let trainingsOk = false;
+  let trainings = [];
+  let trainingSnapshotsById = Object.create(null);
 
-  function normStr(v) {
-    return String(v ?? "").trim();
-  }
+  let blocksOk = false;
+  let blocksKeyUsed = "";
+  let blocks = [];
+  let blocksById = Object.create(null);
 
-  function toInt(v) {
-    const n = (typeof v === "number") ? v : Number(v);
-    if (!Number.isFinite(n)) return null;
-    if (Math.floor(n) !== n) return null;
-    return n;
-  }
-
-  function genId(prefix) {
-    const p = String(prefix || "id_");
-    const t = Date.now().toString(16);
-    const r = Math.random().toString(16).slice(2, 10);
-    return p + t + "_" + r;
-  }
-
-  function pillClass(status) {
-    if (status === "active") return "pill active";
-    if (status === "archived") return "pill archived";
-    return "pill draft";
-  }
-
-  function isValidPlanStatus(s) {
-    return s === "draft" || s === "active" || s === "archived";
-  }
-
-  function isValidStepDayOffset(v){
-    const n = toInt(v);
-    return (n !== null && n >= STEPS_MIN && n <= STEPS_MAX);
-  }
-
-  function getItemKind(it){
-    if (!it || typeof it !== "object") return "unknown";
-    const hasBlock = !!normStr(it.blockId);
-    const hasTraining = !!normStr(it.trainingId);
-    if (hasBlock && !hasTraining) return "block";
-    if (hasTraining && !hasBlock) return "training";
-    return "unknown";
-  }
+  let plansOk = true;
+  let plans = [];
+  let currentPlan = null;
 
   // ============================
-  // SNAPSHOT (legacy; kept)
+  // SNAPSHOT (for training)
   // ============================
   function clampInt(v, lo, hi, def){
     const n = Number(v);
@@ -662,12 +544,8 @@ Keys (LÅST):
       : [];
 
     const out = {
-      kind,
-      title,
-      text,
-      taskAnswer,
-      scaleMin,
-      scaleMax,
+      kind, title, text,
+      taskAnswer, scaleMin, scaleMax,
       scaleMinLabel: normStr(b.scaleMinLabel).slice(0, 40),
       scaleMaxLabel: normStr(b.scaleMaxLabel).slice(0, 40),
       questionAnswer,
@@ -676,20 +554,15 @@ Keys (LÅST):
 
     if(kind === "document"){
       out.taskAnswer = "checkbox";
-      out.scaleMin = 1;
-      out.scaleMax = 5;
-      out.scaleMinLabel = "";
-      out.scaleMaxLabel = "";
-      out.questionAnswer = "text";
-      out.options = [];
+      out.scaleMin = 1; out.scaleMax = 5;
+      out.scaleMinLabel = ""; out.scaleMaxLabel = "";
+      out.questionAnswer = "text"; out.options = [];
     }
     if(kind === "info" || kind === "task"){
-      out.questionAnswer = "text";
-      out.options = [];
+      out.questionAnswer = "text"; out.options = [];
     }
     if(kind === "both"){
-      out.questionAnswer = "text";
-      out.options = [];
+      out.questionAnswer = "text"; out.options = [];
     }
 
     return out;
@@ -721,10 +594,9 @@ Keys (LÅST):
   }
 
   // ============================
-  // BLOCK-BANK parsing (read-only)
+  // BLOCK-BANK (read-only)
   // ============================
   function sanitizeBlocksArray(input){
-    // Expect array of blocks: {blockId,title,module,area,step,status,...}
     if (!Array.isArray(input)) return { ok:false, error:"BLOCKS_NOT_ARRAY" };
     const out = [];
     for (let i = 0; i < input.length; i++){
@@ -747,45 +619,28 @@ Keys (LÅST):
   }
 
   function loadBlocks(){
-    blocksOk = false;
-    blocksKeyUsed = "";
-    blocks = [];
-    blocksById = Object.create(null);
+    blocksOk = false; blocksKeyUsed = ""; blocks = []; blocksById = Object.create(null);
 
     for (let k = 0; k < BLOCKS_KEY_CANDIDATES.length; k++){
       const key = BLOCKS_KEY_CANDIDATES[k];
-
-      // DEBUG: Om du misstänker fel key -> kontrollera localStorage manuellt och matcha mot candidates.
       const res = safeParseLocalStorage(key);
 
-      if (!res.ok) {
-        // Fail-closed: om key finns men är oläsbar/korrupt -> stoppa direkt så du märker det.
-        blocksOk = false;
-        blocksKeyUsed = key;
-        return { ok:false, error: "Block-bank korrupt/oläsbar (" + key + ")" };
-      }
+      // Fail-closed om key finns men är korrupt
+      if (!res.ok) { blocksOk = false; blocksKeyUsed = key; return { ok:false, error:"Block-bank korrupt/oläsbar (" + key + ")" }; }
       if (res.missing) continue;
 
       const cleaned = sanitizeBlocksArray(res.data);
-      if (!cleaned.ok) {
-        blocksOk = false;
-        blocksKeyUsed = key;
-        return { ok:false, error: "Block-bank fel format (" + key + ")" };
-      }
+      if (!cleaned.ok) { blocksOk = false; blocksKeyUsed = key; return { ok:false, error:"Block-bank fel format (" + key + ")" }; }
 
       blocksKeyUsed = key;
       const allowed = cleaned.data.filter(b => b.status === "published");
       blocks = allowed;
       blocksOk = true;
 
-      for (let i = 0; i < allowed.length; i++){
-        blocksById[allowed[i].blockId] = allowed[i];
-      }
+      for (let i = 0; i < allowed.length; i++) blocksById[allowed[i].blockId] = allowed[i];
       return { ok:true };
     }
 
-    blocksOk = false;
-    blocksKeyUsed = "";
     return { ok:false, error:"Block-bank saknas (ingen key hittad)" };
   }
 
@@ -796,14 +651,68 @@ Keys (LÅST):
   }
 
   // ============================
-  // SCHEMA GUARD (AO-060) – supports trainingId XOR blockId
-  // + dayOffset måste vara 0–3 (Steg 1–4)
+  // TRAININGS (AO-057)
   // ============================
-  function sanitizePlansArray(input) {
-    if (!Array.isArray(input)) return { ok:false, error:"PLANS_NOT_ARRAY" };
+  function isAllowedTrainingStatusForPlans(status){
+    const st = normStr(status);
+    return (st === "published" || st === "verified");
+  }
+
+  function loadTrainings(){
+    trainingsOk = false; trainings = []; trainingSnapshotsById = Object.create(null);
+
+    const res = safeParseLocalStorage(TRAININGS_KEY);
+    if (!res.ok) return { ok:false, error:"AO-057 korrupt/oläsbar" };
+    if (res.missing) return { ok:false, error:"AO-057 saknas" };
+    if (!Array.isArray(res.data)) return { ok:false, error:"AO-057 fel format (inte array)" };
 
     const out = [];
-    for (let i = 0; i < input.length; i++) {
+    for (let i = 0; i < res.data.length; i++){
+      const t = res.data[i];
+      if (!isPlainObject(t)) continue;
+
+      const id = normStr(t.id);
+      const module = normStr(t.module);
+      const area = normStr(t.area);
+      const title = normStr(t.title);
+      const status = normStr(t.status);
+
+      const hasBlocks = Array.isArray(t.blocks) && t.blocks.length > 0;
+
+      if (!id || !module || !area || !title) continue;
+      if (!isAllowedTrainingStatusForPlans(status)) continue;
+      if (!hasBlocks) continue;
+
+      out.push({ id, module, area, title });
+
+      const snap = buildTrainingSnapshot(t);
+      if (snap && snap.id) trainingSnapshotsById[snap.id] = snap;
+    }
+
+    trainings = out;
+    trainingsOk = true;
+    return { ok:true };
+  }
+
+  function buildTrainingIndexById(){
+    const map = Object.create(null);
+    for (let i = 0; i < trainings.length; i++) map[trainings[i].id] = trainings[i];
+    return map;
+  }
+
+  // ============================
+  // PLANS (AO-060)
+  // ============================
+  function isValidPlanStatus(s){
+    return s === "draft" || s === "active" || s === "archived";
+  }
+
+  function sanitizePlansArray(input){
+    // Fail-closed schema guard för AO-060
+    if (!Array.isArray(input)) return { ok:false, error:"PLANS_NOT_ARRAY" };
+    const out = [];
+
+    for (let i = 0; i < input.length; i++){
       const p = input[i];
       if (!isPlainObject(p)) return { ok:false, error:"PLAN_NOT_OBJECT" };
 
@@ -822,20 +731,23 @@ Keys (LÅST):
       if (itemsIn === null) return { ok:false, error:"PLAN_ITEMS_NOT_ARRAY" };
 
       const itemsOut = [];
-      for (let j = 0; j < itemsIn.length; j++) {
+      for (let j = 0; j < itemsIn.length; j++){
         const it = itemsIn[j];
         if (!isPlainObject(it)) return { ok:false, error:"ITEM_NOT_OBJECT" };
 
         const trainingId = normStr(it.trainingId);
         const blockId = normStr(it.blockId);
+
+        // require trainingId XOR blockId
+        const kind = (blockId && !trainingId) ? "block" : ((trainingId && !blockId) ? "training" : "bad");
+        if (kind === "bad") return { ok:false, error:"ITEM_BAD_REF (trainingId XOR blockId)" };
+
         const dayOffset = toInt(it.dayOffset);
         const order = toInt(it.order);
         const gateRequired = it.gateRequired;
 
-        const kind = (blockId && !trainingId) ? "block" : ((trainingId && !blockId) ? "training" : "bad");
-        if (kind === "bad") return { ok:false, error:"ITEM_BAD_REF (require trainingId XOR blockId)" };
-
-        if (!isValidStepDayOffset(dayOffset)) return { ok:false, error:"ITEM_BAD_DAYOFFSET (0–3 required)" };
+        // Denna sida använder EN tidsaxel => dayOffset måste vara 0 alltid.
+        if (dayOffset !== 0) return { ok:false, error:"ITEM_BAD_DAYOFFSET (must be 0 on this page)" };
         if (order === null || order < 1) return { ok:false, error:"ITEM_BAD_ORDER" };
         if (typeof gateRequired !== "boolean") return { ok:false, error:"ITEM_BAD_GATEREQUIRED" };
 
@@ -843,14 +755,9 @@ Keys (LÅST):
         if (kind === "training" && it.trainingSnapshot !== undefined) {
           const snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
           if (snap) trainingSnapshot = snap;
-          else trainingSnapshot = null;
         }
 
-        const outItem = {
-          dayOffset: dayOffset,
-          order: order,
-          gateRequired: gateRequired === true
-        };
+        const outItem = { dayOffset: 0, order: order, gateRequired: gateRequired === true };
         if (kind === "training") {
           outItem.trainingId = trainingId;
           if (trainingSnapshot) outItem.trainingSnapshot = trainingSnapshot;
@@ -861,162 +768,20 @@ Keys (LÅST):
         itemsOut.push(outItem);
       }
 
-      out.push({
-        id: id,
-        title: title,
-        status: status,
-        createdAt: createdAt,
-        updatedAt: updatedAt,
-        items: itemsOut
-      });
+      out.push({ id, title, status, createdAt, updatedAt, items: itemsOut });
     }
 
     return { ok:true, data: out };
   }
 
-  // ============================
-  // ORDER MODEL
-  // ============================
-  function normalizeItemFields(it){
-    const trainingId = normStr(it && it.trainingId);
-    const blockId = normStr(it && it.blockId);
-    const dayOffset = toInt(it && it.dayOffset);
-    const order = toInt(it && it.order);
-    const gateRequired = (it && typeof it.gateRequired === "boolean") ? it.gateRequired : true;
-
-    const kind = (blockId && !trainingId) ? "block" : ((trainingId && !blockId) ? "training" : "bad");
-    if (kind === "bad") return null;
-
-    let trainingSnapshot = null;
-    if (kind === "training" && it && it.trainingSnapshot !== undefined) {
-      const snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
-      if (snap) trainingSnapshot = snap;
-    }
-
-    const out = {
-      // NOTE: vi behåller värdet i UI (även om ogiltigt) men spara/verify kommer fail-closed.
-      dayOffset: (dayOffset === null) ? 0 : dayOffset,
-      order: (order === null || order < 1) ? null : order,
-      gateRequired: gateRequired === true
-    };
-    if (kind === "training") {
-      out.trainingId = trainingId;
-      if (trainingSnapshot) out.trainingSnapshot = trainingSnapshot;
-    } else {
-      out.blockId = blockId;
-    }
-    return out;
-  }
-
-  function sortAndRenumberItems(items){
-    const inArr = Array.isArray(items) ? items : [];
-    const normalized = [];
-    for (let i = 0; i < inArr.length; i++){
-      const n = normalizeItemFields(inArr[i]);
-      if (n) normalized.push(n);
-    }
-
-    const withIdx = normalized.map((it, idx) => ({ it, idx }));
-    withIdx.sort((a, b) => {
-      const ad = toInt(a.it.dayOffset) ?? 0;
-      const bd = toInt(b.it.dayOffset) ?? 0;
-      if (ad !== bd) return ad - bd;
-
-      const ao = a.it.order;
-      const bo = b.it.order;
-
-      if (ao === null && bo === null) return a.idx - b.idx;
-      if (ao === null) return 1;
-      if (bo === null) return -1;
-      if (ao !== bo) return ao - bo;
-
-      return a.idx - b.idx;
-    });
-
-    return withIdx.map((x, i) => {
-      const base = {
-        dayOffset: Number(toInt(x.it.dayOffset) ?? 0),
-        order: i + 1,
-        gateRequired: x.it.gateRequired === true
-      };
-      if (normStr(x.it.trainingId)) {
-        base.trainingId = String(x.it.trainingId);
-        if (x.it.trainingSnapshot) base.trainingSnapshot = x.it.trainingSnapshot;
-      } else if (normStr(x.it.blockId)) {
-        base.blockId = String(x.it.blockId);
-      }
-      return base;
-    });
-  }
-
-  // ============================
-  // LOAD: Trainings (AO-057)
-  // ============================
-  function isAllowedTrainingStatusForPlans(status){
-    const st = normStr(status);
-    return (st === "published" || st === "verified");
-  }
-
-  function loadTrainings() {
-    trainingsOk = false;
-    trainings = [];
-    trainingSnapshotsById = Object.create(null);
-
-    const res = safeParseLocalStorage(TRAININGS_KEY);
-    if (!res.ok) return { ok: false, error: "AO-057 korrupt/oläsbar" };
-    if (res.missing) return { ok: false, error: "AO-057 saknas" };
-    if (!Array.isArray(res.data)) return { ok: false, error: "AO-057 har fel format (inte array)" };
-
-    const out = [];
-    for (let i = 0; i < res.data.length; i++) {
-      const t = res.data[i];
-      if (!isPlainObject(t)) continue;
-
-      const id = normStr(t.id);
-      const module = normStr(t.module);
-      const area = normStr(t.area);
-      const title = normStr(t.title);
-      const status = normStr(t.status);
-
-      const blocks0 = t.blocks;
-      const hasBlocks = Array.isArray(blocks0) && blocks0.length > 0;
-
-      if (!id || !module || !area || !title) continue;
-      if (!isAllowedTrainingStatusForPlans(status)) continue;
-      if (!hasBlocks) continue;
-
-      out.push({ id, module, area, title });
-
-      const snap = buildTrainingSnapshot(t);
-      if (snap && snap.id) trainingSnapshotsById[snap.id] = snap;
-    }
-
-    trainings = out;
-    trainingsOk = true;
-    return { ok: true };
-  }
-
-  function buildTrainingIndexById() {
-    const map = Object.create(null);
-    for (let i = 0; i < trainings.length; i++) map[trainings[i].id] = trainings[i];
-    return map;
-  }
-
-  // ============================
-  // LOAD: Plans (AO-060)
-  // ============================
-  function loadPlans() {
-    plansOk = true;
-    plans = [];
+  function loadPlans(){
+    plansOk = true; plans = [];
 
     if (window.HRApp.readPlans && typeof window.HRApp.readPlans === "function") {
       const r = window.HRApp.readPlans();
-      if (!r || r.ok !== true) {
-        plansOk = false;
-        return { ok: false, error: "AO-060 korrupt (readPlans fail-closed)" };
-      }
+      if (!r || r.ok !== true) { plansOk = false; return { ok:false, error:"AO-060 korrupt (readPlans fail-closed)" }; }
       plans = Array.isArray(r.data) ? r.data : [];
-      return { ok: true };
+      return { ok:true };
     }
 
     const res = safeParseLocalStorage(PLANS_KEY);
@@ -1028,19 +793,153 @@ Keys (LÅST):
   }
 
   // ============================
-  // UI: Filters (trainings)
+  // ORDER + DEDUPE
   // ============================
-  function populateTrainingFilters() {
-    function opt(el, value, text) {
-      const o = document.createElement("option");
-      o.value = value;
-      o.textContent = text;
-      el.appendChild(o);
+  function getItemKind(it){
+    if (!it || typeof it !== "object") return "unknown";
+    const hasBlock = !!normStr(it.blockId);
+    const hasTraining = !!normStr(it.trainingId);
+    if (hasBlock && !hasTraining) return "block";
+    if (hasTraining && !hasBlock) return "training";
+    return "unknown";
+  }
+
+  function sortAndRenumberItems(items){
+    const arr = Array.isArray(items) ? items : [];
+    const withIdx = arr.map((it, idx) => ({ it, idx }));
+    withIdx.sort((a, b) => {
+      const ao = toInt(a.it.order);
+      const bo = toInt(b.it.order);
+      if (ao === null && bo === null) return a.idx - b.idx;
+      if (ao === null) return 1;
+      if (bo === null) return -1;
+      if (ao !== bo) return ao - bo;
+      return a.idx - b.idx;
+    });
+    return withIdx.map((x, i) => {
+      const it = x.it;
+      const kind = getItemKind(it);
+      const out = {
+        dayOffset: 0, // EN tidsaxel
+        order: i + 1,
+        gateRequired: it.gateRequired === true
+      };
+      if (kind === "training") {
+        out.trainingId = String(it.trainingId);
+        if (it.trainingSnapshot) out.trainingSnapshot = it.trainingSnapshot;
+      } else if (kind === "block") {
+        out.blockId = String(it.blockId);
+      }
+      return out;
+    });
+  }
+
+  function normalizePlanForUi(plan){
+    if (!isPlainObject(plan)) return { ok:false, plan:null, meta:null };
+
+    const id = normStr(plan.id) || genId("p_");
+    const title = normStr(plan.title);
+    const statusRaw = normStr(plan.status) || "draft";
+    const status = isValidPlanStatus(statusRaw) ? statusRaw : "draft";
+    const createdAt = (typeof plan.createdAt === "number" && Number.isFinite(plan.createdAt)) ? plan.createdAt : Date.now();
+    const updatedAt = (typeof plan.updatedAt === "number" && Number.isFinite(plan.updatedAt)) ? plan.updatedAt : Date.now();
+
+    const itemsIn = Array.isArray(plan.items) ? plan.items : [];
+    const itemsOut = [];
+
+    // Vi accepterar legacy dayOffset men UI visar inte det; vi sätter det till 0 i UI.
+    for (let i = 0; i < itemsIn.length; i++){
+      const it = itemsIn[i];
+      if (!isPlainObject(it)) continue;
+
+      const kind = getItemKind(it);
+      if (kind === "unknown") continue;
+
+      const base = {
+        dayOffset: 0,
+        order: (toInt(it.order) && toInt(it.order) > 0) ? toInt(it.order) : null,
+        gateRequired: (typeof it.gateRequired === "boolean") ? it.gateRequired : true
+      };
+
+      if (kind === "training") {
+        base.trainingId = normStr(it.trainingId);
+        if (it.trainingSnapshot) {
+          const snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
+          if (snap) base.trainingSnapshot = snap;
+        }
+      } else {
+        base.blockId = normStr(it.blockId);
+      }
+
+      itemsOut.push(base);
     }
 
+    // Dedupe
+    const seenT = new Set();
+    const seenB = new Set();
+    const deduped = [];
+    let dedupeDropped = 0;
+
+    for (const it of itemsOut){
+      const kind = getItemKind(it);
+      if (kind === "training") {
+        if (!it.trainingId || seenT.has(it.trainingId)) { dedupeDropped++; continue; }
+        seenT.add(it.trainingId);
+      } else if (kind === "block") {
+        if (!it.blockId || seenB.has(it.blockId)) { dedupeDropped++; continue; }
+        seenB.add(it.blockId);
+      } else {
+        dedupeDropped++;
+        continue;
+      }
+      deduped.push(it);
+    }
+
+    const normalizedItems = sortAndRenumberItems(deduped);
+    let statusUi = status;
+    if (statusUi === "active" && normalizedItems.length === 0) statusUi = "draft";
+
+    return { ok:true, plan:{ id, title, status:statusUi, createdAt, updatedAt, items: normalizedItems }, meta:{ dedupeDropped } };
+  }
+
+  function getPlanById(id){
+    for (let i = 0; i < plans.length; i++){
+      if (String(plans[i].id || "") === String(id || "")) return plans[i];
+    }
+    return null;
+  }
+
+  function syncPlanFormFromState(){
+    if (!currentPlan){
+      planTitle.value = "";
+      planStatus.value = "draft";
+      planMeta.textContent = "—";
+      return;
+    }
+    planTitle.value = currentPlan.title || "";
+    planStatus.value = currentPlan.status || "draft";
+    planMeta.textContent = "id: " + currentPlan.id + " • items: " + String(currentPlan.items.length);
+  }
+
+  function syncStateFromForm(){
+    if (!currentPlan) return;
+    currentPlan.title = normStr(planTitle.value);
+    currentPlan.status = normStr(planStatus.value) || "draft";
+  }
+
+  // ============================
+  // FILTERS UI
+  // ============================
+  function opt(el, value, text){
+    const o = document.createElement("option");
+    o.value = value;
+    o.textContent = text;
+    el.appendChild(o);
+  }
+
+  function populateTrainingFilters(){
     clearNode(filterModule);
     clearNode(filterArea);
-
     opt(filterModule, "", "Alla moduler");
     opt(filterArea, "", "Alla områden");
 
@@ -1051,12 +950,11 @@ Keys (LÅST):
     for (const a of areas) opt(filterArea, a, a);
   }
 
-  function getTrainingFilterFn() {
+  function getTrainingFilterFn(){
     const m = normStr(filterModule.value);
     const a = normStr(filterArea.value);
     const q = normStr(searchTitle.value).toLowerCase();
-
-    return function(t) {
+    return function(t){
       if (m && t.module !== m) return false;
       if (a && t.area !== a) return false;
       if (q && !t.title.toLowerCase().includes(q)) return false;
@@ -1064,20 +962,9 @@ Keys (LÅST):
     };
   }
 
-  // ============================
-  // UI: Filters (blocks)
-  // ============================
   function populateBlockFilters(){
-    function opt(el, value, text){
-      const o = document.createElement("option");
-      o.value = value;
-      o.textContent = text;
-      el.appendChild(o);
-    }
-
     clearNode(filterBlockModule);
     clearNode(filterBlockArea);
-
     opt(filterBlockModule, "", "Alla moduler");
     opt(filterBlockArea, "", "Alla områden");
 
@@ -1101,23 +988,23 @@ Keys (LÅST):
   }
 
   // ============================
-  // UI: Render trainings list
+  // RENDER: Trainings
   // ============================
-  function renderTrainingsList() {
+  function renderTrainingsList(){
     clearNode(trainingsBox);
 
-    if (!trainingsOk) {
+    if (!trainingsOk){
       const e = document.createElement("div");
       e.className = "error";
-      e.textContent = "Tillgängliga utbildningar kan inte laddas (fail-closed). Kontrollera AO-057_TRAININGS_V1.";
+      e.textContent = "AO-057 saknas/korrupt. Trainings kan inte laddas. (fail-closed)";
       trainingsBox.appendChild(e);
       return;
     }
 
-    if (trainingsOk && trainings.length === 0) {
+    if (trainings.length === 0){
       const w = document.createElement("div");
       w.className = "warn";
-      w.textContent = "Det finns inga published/verified-utbildningar med blocks>0 ännu. (Inget att lägga till i plan)";
+      w.textContent = "Inga published/verified trainings med blocks>0 ännu.";
       trainingsBox.appendChild(w);
       return;
     }
@@ -1125,69 +1012,68 @@ Keys (LÅST):
     const fn = getTrainingFilterFn();
     const filtered = trainings.filter(fn);
 
-    if (filtered.length === 0) {
+    if (filtered.length === 0){
       const d = document.createElement("div");
       d.className = "muted";
-      d.textContent = "Inga matchande published/verified-utbildningar.";
+      d.textContent = "Inga matchande trainings.";
       trainingsBox.appendChild(d);
       return;
     }
 
-    for (const t of filtered) {
+    for (const t of filtered){
       const card = document.createElement("div");
       card.className = "item";
       card.setAttribute("role", "listitem");
 
-      const top = document.createElement("div");
-      top.className = "itemRow";
+      const row = document.createElement("div");
+      row.className = "itemRow";
 
       const left = document.createElement("div");
-      const line1 = document.createElement("div");
-      line1.className = "muted";
-      line1.textContent = t.module + " • " + t.area;
-      const line2 = document.createElement("div");
-      line2.textContent = t.title;
-      left.appendChild(line1);
-      left.appendChild(line2);
+      const l1 = document.createElement("div");
+      l1.className = "muted";
+      l1.textContent = t.module + " • " + t.area;
+      const l2 = document.createElement("div");
+      l2.textContent = t.title;
+
+      left.appendChild(l1);
+      left.appendChild(l2);
 
       const right = document.createElement("div");
       const btn = document.createElement("button");
       btn.className = "smallbtn";
-      btn.textContent = "+ Lägg till i plan";
-      btn.disabled = !currentPlan || !trainingsOk || !plansOk;
+      btn.textContent = "+ Lägg till";
+      btn.disabled = !currentPlan || !plansOk;
 
       btn.addEventListener("click", function(){
-        if (!currentPlan) { setStatus("error", "Ingen plan vald. Skapa eller välj en plan först."); return; }
-        if (!trainingsOk) { setStatus("error", "AO-057 saknas/korrupt. Tillägg blockeras (fail-closed)."); return; }
+        if (!currentPlan) { setStatus("error", "Ingen plan vald."); return; }
         if (!plansOk) { setStatus("error", "AO-060 är korrupt. Ändringar blockeras (fail-closed)."); return; }
-        addTrainingToCurrentPlan(t.id);
+        addTrainingToPlan(t.id);
       });
 
       right.appendChild(btn);
 
-      top.appendChild(left);
-      top.appendChild(right);
-      card.appendChild(top);
-
+      row.appendChild(left);
+      row.appendChild(right);
+      card.appendChild(row);
       trainingsBox.appendChild(card);
     }
   }
 
   // ============================
-  // UI: Render blocks list
+  // RENDER: Blocks
   // ============================
   function renderBlocksList(){
     clearNode(blocksBox);
 
-    if (!blocksOk) {
+    if (!blocksOk){
       const w = document.createElement("div");
       w.className = "warn";
-      w.textContent = "Block-bank saknas/korrupt. Block kan inte läggas till. (Read-only)";
+      w.textContent = "Block-bank saknas/korrupt. Block-tillägg blockeras.";
       blocksBox.appendChild(w);
       return;
     }
 
-    if (blocks.length === 0) {
+    if (blocks.length === 0){
       const d = document.createElement("div");
       d.className = "muted";
       d.textContent = "Inga published blocks i block-bank ännu.";
@@ -1198,7 +1084,7 @@ Keys (LÅST):
     const fn = getBlockFilterFn();
     const filtered = blocks.filter(fn);
 
-    if (filtered.length === 0) {
+    if (filtered.length === 0){
       const d = document.createElement("div");
       d.className = "muted";
       d.textContent = "Inga matchande blocks.";
@@ -1211,77 +1097,79 @@ Keys (LÅST):
       card.className = "item";
       card.setAttribute("role", "listitem");
 
-      const top = document.createElement("div");
-      top.className = "itemRow";
+      const row = document.createElement("div");
+      row.className = "itemRow";
 
       const left = document.createElement("div");
-      const line1 = document.createElement("div");
-      line1.className = "muted";
-      const metaParts = [];
-      if (b.module) metaParts.push(b.module);
-      if (b.area) metaParts.push(b.area);
-      if (b.step) metaParts.push(b.step);
-      line1.textContent = metaParts.length ? metaParts.join(" • ") : "—";
-      const line2 = document.createElement("div");
-      line2.textContent = b.title;
-      const line3 = document.createElement("div");
-      line3.className = "muted";
-      line3.textContent = "blockId: " + b.blockId;
+      const m1 = document.createElement("div");
+      m1.className = "muted";
+      const parts = [];
+      if (b.module) parts.push(b.module);
+      if (b.area) parts.push(b.area);
+      if (b.step) parts.push(b.step);
+      m1.textContent = parts.length ? parts.join(" • ") : "—";
+      const m2 = document.createElement("div");
+      m2.textContent = b.title;
+      const m3 = document.createElement("div");
+      m3.className = "muted";
+      m3.textContent = "blockId: " + b.blockId;
 
-      left.appendChild(line1);
-      left.appendChild(line2);
-      left.appendChild(line3);
+      left.appendChild(m1);
+      left.appendChild(m2);
+      left.appendChild(m3);
 
       const right = document.createElement("div");
       const btn = document.createElement("button");
       btn.className = "smallbtn";
-      btn.textContent = "+ Lägg till i plan";
+      btn.textContent = "+ Lägg till";
       btn.disabled = !currentPlan || !plansOk || !blocksOk;
 
       btn.addEventListener("click", function(){
-        if (!currentPlan) { setStatus("error", "Ingen plan vald. Skapa eller välj en plan först."); return; }
+        if (!currentPlan) { setStatus("error", "Ingen plan vald."); return; }
         if (!plansOk) { setStatus("error", "AO-060 är korrupt. Ändringar blockeras (fail-closed)."); return; }
-        if (!blocksOk) { setStatus("error", "Block-bank saknas/korrupt. Tillägg blockeras (fail-closed)."); return; }
-        addBlockToCurrentPlan(b.blockId);
+        if (!blocksOk) { setStatus("error", "Block-bank saknas/korrupt. (fail-closed)"); return; }
+        addBlockToPlan(b.blockId);
       });
 
       right.appendChild(btn);
 
-      top.appendChild(left);
-      top.appendChild(right);
-
-      card.appendChild(top);
+      row.appendChild(left);
+      row.appendChild(right);
+      card.appendChild(row);
       blocksBox.appendChild(card);
     }
   }
 
   // ============================
-  // UI: Plans list
+  // RENDER: Plans list
   // ============================
-  function attachPlanKeyboardActivation(el, onActivate) {
+  function pillClass(status){
+    if (status === "active") return "pill active";
+    if (status === "archived") return "pill archived";
+    return "pill draft";
+  }
+
+  function attachPlanKeyboardActivation(el, onActivate){
     el.tabIndex = 0;
     el.setAttribute("role", "button");
     el.addEventListener("keydown", function(ev){
       const k = ev.key;
-      if (k === "Enter" || k === " ") {
-        ev.preventDefault();
-        onActivate();
-      }
+      if (k === "Enter" || k === " ") { ev.preventDefault(); onActivate(); }
     });
   }
 
-  function renderPlansList() {
+  function renderPlansList(){
     clearNode(plansList);
 
-    if (!plansOk) {
+    if (!plansOk){
       const e = document.createElement("div");
       e.className = "error";
-      e.textContent = "Plans kan inte laddas eftersom AO-060_PLANS_V1 är korrupt (fail-closed).";
+      e.textContent = "AO-060 är korrupt. Planlista låst (fail-closed).";
       plansList.appendChild(e);
       return;
     }
 
-    if (plans.length === 0) {
+    if (plans.length === 0){
       const d = document.createElement("div");
       d.className = "muted";
       d.textContent = "Inga planer ännu. Klicka “Ny plan”.";
@@ -1289,7 +1177,7 @@ Keys (LÅST):
       return;
     }
 
-    for (const p of plans) {
+    for (const p of plans){
       const card = document.createElement("div");
       card.className = "item";
       card.setAttribute("role", "listitem");
@@ -1313,10 +1201,7 @@ Keys (LÅST):
       pill.textContent = String(p.status || "draft");
       right.appendChild(pill);
 
-      const activate = function(){
-        selectPlanById(String(p.id || ""));
-      };
-
+      const activate = function(){ selectPlanById(String(p.id || "")); };
       card.addEventListener("click", activate);
       attachPlanKeyboardActivation(card, activate);
 
@@ -1329,297 +1214,12 @@ Keys (LÅST):
   }
 
   // ============================
-  // PLAN: Normalization (UI-lager)
+  // TIMELINE (simple single list)
   // ============================
-  function normalizePlanForUi(plan) {
-    if (!isPlainObject(plan)) return { ok:false, plan:null, meta:null };
-
-    const id = normStr(plan.id) || genId("p_");
-    const title = normStr(plan.title);
-    const statusRaw = normStr(plan.status) || "draft";
-    const status = (statusRaw === "draft" || statusRaw === "active" || statusRaw === "archived") ? statusRaw : "draft";
-    const createdAt = (typeof plan.createdAt === "number" && Number.isFinite(plan.createdAt)) ? plan.createdAt : Date.now();
-    const updatedAt = (typeof plan.updatedAt === "number" && Number.isFinite(plan.updatedAt)) ? plan.updatedAt : Date.now();
-
-    const itemsIn = Array.isArray(plan.items) ? plan.items : [];
-    const itemsOut = [];
-
-    for (let i = 0; i < itemsIn.length; i++) {
-      const it = itemsIn[i];
-      const n = normalizeItemFields(it);
-      if (!n) continue;
-      itemsOut.push(n);
-    }
-
-    const seenT = new Set();
-    const seenB = new Set();
-    const deduped = [];
-    let dedupeDropped = 0;
-
-    for (const it of itemsOut) {
-      const kind = getItemKind(it);
-      if (kind === "training") {
-        if (seenT.has(it.trainingId)) { dedupeDropped++; continue; }
-        seenT.add(it.trainingId);
-      } else if (kind === "block") {
-        if (seenB.has(it.blockId)) { dedupeDropped++; continue; }
-        seenB.add(it.blockId);
-      } else {
-        dedupeDropped++;
-        continue;
-      }
-      deduped.push(it);
-    }
-
-    const normalizedItems = sortAndRenumberItems(deduped);
-
-    let statusUi = status;
-    if (statusUi === "active" && normalizedItems.length === 0) statusUi = "draft";
-
-    return {
-      ok: true,
-      plan: {
-        id,
-        title,
-        status: statusUi,
-        createdAt,
-        updatedAt,
-        items: normalizedItems
-      },
-      meta: {
-        dedupeDropped,
-        activeEmptyDowngraded: (String(plan.status || "") === "active" && normalizedItems.length === 0)
-      }
-    };
-  }
-
-  function getPlanById(id) {
-    for (let i = 0; i < plans.length; i++) {
-      if (String(plans[i].id || "") === String(id || "")) return plans[i];
-    }
-    return null;
-  }
-
-  function syncPlanFormFromState() {
-    if (!currentPlan) {
-      planTitle.value = "";
-      planStatus.value = "draft";
-      planMeta.textContent = "—";
-      return;
-    }
-    planTitle.value = currentPlan.title || "";
-    planStatus.value = currentPlan.status || "draft";
-    planMeta.textContent = "id: " + currentPlan.id + " • items: " + currentPlan.items.length;
-  }
-
-  function syncStateFromForm() {
-    if (!currentPlan) return;
-    currentPlan.title = normStr(planTitle.value);
-    currentPlan.status = normStr(planStatus.value) || "draft";
-  }
-
-  function autoSortAndRenumber() {
-    if (!currentPlan) return;
-    currentPlan.items = sortAndRenumberItems(currentPlan.items);
-    syncPlanFormFromState();
-  }
-
-  function selectPlanById(id) {
-    if (!plansOk) { setStatus("error", "AO-060 är korrupt. Kan inte välja plan (fail-closed)."); return; }
-    const raw = getPlanById(id);
-    if (!raw) { setStatus("error", "Plan hittades inte."); return; }
-
-    const norm = normalizePlanForUi(raw);
-    if (!norm.ok || !norm.plan) { setStatus("error", "Plan kunde inte normaliseras (fail-closed)."); return; }
-
-    currentPlan = norm.plan;
-
-    if (norm.meta && norm.meta.dedupeDropped > 0) {
-      warnOnce(
-        "dedupe:" + String(currentPlan.id) + ":" + String(norm.meta.dedupeDropped),
-        "Plan innehöll dubletter/ogiltiga items. UI har ignorerat " + String(norm.meta.dedupeDropped) + " st. (Ingen write förrän du sparar)"
-      );
-    }
-
-    if (norm.meta && norm.meta.activeEmptyDowngraded) {
-      warnOnce(
-        "activeEmpty:" + String(currentPlan.id),
-        "Plan var 'active' men saknar items. UI har satt status till 'draft'. (Ingen write förrän du sparar)"
-      );
-    } else if (!(norm.meta && norm.meta.dedupeDropped > 0)) {
-      setStatus("ok", "Plan laddad: " + (currentPlan.title || "(utan titel)"));
-    }
-
-    // DEBUG/FAIL-CLOSED: varna direkt om dayOffset ligger utanför 0–3 (Steg 1–4)
-    let badSteps = 0;
-    for (let i = 0; i < currentPlan.items.length; i++){
-      const d = toInt(currentPlan.items[i].dayOffset);
-      if (!isValidStepDayOffset(d)) badSteps++;
-    }
-    if (badSteps > 0) {
-      warnOnce(
-        "badSteps:" + String(currentPlan.id) + ":" + String(badSteps),
-        "Varning: Planen har " + String(badSteps) + " item(s) med dayOffset utanför 0–3. Spara/Verifiera blockeras tills du ändrar dem."
-      );
-    }
-
-    if (trainingsOk) {
-      const idxById = buildTrainingIndexById();
-      let unknownT = 0;
-      for (let i = 0; i < currentPlan.items.length; i++) {
-        if (getItemKind(currentPlan.items[i]) !== "training") continue;
-        const tid = String(currentPlan.items[i].trainingId || "");
-        if (!idxById[tid]) unknownT++;
-      }
-      if (unknownT > 0) {
-        warnOnce(
-          "unknownTraining:" + String(currentPlan.id) + ":" + String(unknownT),
-          "Varning: Planen innehåller " + String(unknownT) + " training item(s) som inte är allowed. Spara blockeras tills det är fixat."
-        );
-      }
-    }
-
-    let hasBlockItems = false;
-    for (let i = 0; i < currentPlan.items.length; i++){
-      if (getItemKind(currentPlan.items[i]) === "block") { hasBlockItems = true; break; }
-    }
-    if (hasBlockItems && !blocksOk) {
-      warnOnce(
-        "blockNeedBank:" + String(currentPlan.id),
-        "Varning: Planen innehåller blockId men block-bank saknas/korrupt. Spara/Verifiera blockeras (fail-closed)."
-      );
-    } else if (hasBlockItems && blocksOk) {
-      const idxB = buildBlocksIndexById();
-      let unknownB = 0;
-      for (let i = 0; i < currentPlan.items.length; i++){
-        if (getItemKind(currentPlan.items[i]) !== "block") continue;
-        const bid = String(currentPlan.items[i].blockId || "");
-        if (!idxB[bid]) unknownB++;
-      }
-      if (unknownB > 0) {
-        warnOnce(
-          "unknownBlock:" + String(currentPlan.id) + ":" + String(unknownB),
-          "Varning: Planen innehåller " + String(unknownB) + " block item(s) som inte finns som published i block-bank. Spara blockeras (fail-closed)."
-        );
-      }
-    }
-
-    syncPlanFormFromState();
-    renderTrainingsList();
-    renderBlocksList();
-    renderTimeline();
-  }
-
-  // ============================
-  // Timeline editing (add/remove/move)
-  // ============================
-  function addTrainingToCurrentPlan(trainingId) {
-    if (!currentPlan) return;
-
-    for (let i = 0; i < currentPlan.items.length; i++) {
-      if (getItemKind(currentPlan.items[i]) === "training" && currentPlan.items[i].trainingId === trainingId) {
-        setStatus("warn", "Dubblett: training finns redan i plan. (Inget tillagt)");
-        return;
-      }
-    }
-
-    const idx = trainings.findIndex(t => t.id === trainingId);
-    if (idx < 0) {
-      setStatus("error", "Training finns inte i listan (published/verified + blocks>0). (fail-closed)");
-      return;
-    }
-
-    const snap = trainingSnapshotsById[trainingId] ? sanitizeSnapshotForStorage(trainingSnapshotsById[trainingId]) : null;
-
-    const item = {
-      trainingId: trainingId,
-      dayOffset: 0, // Steg 1
-      order: currentPlan.items.length + 1,
-      gateRequired: true
-    };
-    if (snap) item.trainingSnapshot = snap;
-
-    currentPlan.items.push(item);
-
-    autoSortAndRenumber();
-    setStatus("ok", "Tillagd i Steg 1.");
-    renderTimeline();
-    renderTrainingsList();
-  }
-
-  function addBlockToCurrentPlan(blockId){
-    if (!currentPlan) return;
-
-    for (let i = 0; i < currentPlan.items.length; i++){
-      if (getItemKind(currentPlan.items[i]) === "block" && currentPlan.items[i].blockId === blockId){
-        setStatus("warn", "Dubblett: block finns redan i plan. (Inget tillagt)");
-        return;
-      }
-    }
-
-    if (!blocksOk) { setStatus("error", "Block-bank saknas/korrupt. Tillägg blockeras (fail-closed)."); return; }
-    if (!blocksById[blockId]) { setStatus("error", "BlockId finns inte som published i block-bank. (fail-closed)"); return; }
-
-    const item = {
-      blockId: String(blockId),
-      dayOffset: 0, // Steg 1
-      order: currentPlan.items.length + 1,
-      gateRequired: true
-    };
-
-    currentPlan.items.push(item);
-
-    autoSortAndRenumber();
-    setStatus("ok", "Block tillagt i Steg 1.");
-    renderTimeline();
-    renderBlocksList();
-  }
-
-  function moveItem(index, dir) {
-    if (!currentPlan) return;
-
-    autoSortAndRenumber();
-
-    const i = index;
-    const j = i + dir;
-    if (j < 0 || j >= currentPlan.items.length) return;
-
-    const dayI = toInt(currentPlan.items[i].dayOffset) ?? 0;
-    const dayJ = toInt(currentPlan.items[j].dayOffset) ?? 0;
-
-    // Flytt endast inom samma steg (dayOffset)
-    if (dayI !== dayJ) return;
-
-    const a = currentPlan.items[i];
-    const b = currentPlan.items[j];
-
-    const tmpOrder = a.order;
-    a.order = b.order;
-    b.order = tmpOrder;
-
-    currentPlan.items[i] = b;
-    currentPlan.items[j] = a;
-
-    autoSortAndRenumber();
-    renderTimeline();
-  }
-
-  function removeItem(index) {
-    if (!currentPlan) return;
-    currentPlan.items.splice(index, 1);
-    autoSortAndRenumber();
-    renderTimeline();
-    renderTrainingsList();
-    renderBlocksList();
-  }
-
-  // ============================
-  // Timeline (4-stegs grid)
-  // ============================
-  function renderTimeline() {
+  function renderTimeline(){
     clearNode(timelineBox);
 
-    if (!currentPlan) {
+    if (!currentPlan){
       const d = document.createElement("div");
       d.className = "muted";
       d.textContent = "Ingen plan vald. Skapa en ny plan eller välj en befintlig.";
@@ -1627,128 +1227,68 @@ Keys (LÅST):
       return;
     }
 
-    autoSortAndRenumber();
+    currentPlan.items = sortAndRenumberItems(currentPlan.items);
+    syncPlanFormFromState();
 
     const idxTraining = trainingsOk ? buildTrainingIndexById() : Object.create(null);
     const idxBlock = blocksOk ? buildBlocksIndexById() : Object.create(null);
 
-    // Skapa 4 kolumner alltid (Steg 1–4)
-    const grid = document.createElement("div");
-    grid.className = "stepsGrid";
-    grid.setAttribute("role", "list");
-
-    const colBodies = [];
-    for (let s = 0; s < 4; s++){
-      const col = document.createElement("div");
-      col.className = "stepCol";
-
-      const head = document.createElement("div");
-      head.className = "stepHead";
-
-      const title = document.createElement("div");
-      title.className = "stepTitle";
-      title.textContent = STEP_LABELS[s];
-
-      const count = document.createElement("div");
-      count.className = "muted";
-      count.id = "stepCount_" + s;
-      count.textContent = "0";
-
-      head.appendChild(title);
-      head.appendChild(count);
-
-      const body = document.createElement("div");
-      body.className = "stepBody";
-      body.setAttribute("aria-label", STEP_LABELS[s]);
-
-      const hint = document.createElement("div");
-      hint.className = "stepHint";
-      hint.textContent = "Tomt steg. Lägg till från vänster.";
-      body.appendChild(hint);
-
-      col.appendChild(head);
-      col.appendChild(body);
-
-      colBodies.push(body);
-      grid.appendChild(col);
-    }
-
-    if (currentPlan.items.length === 0) {
-      timelineBox.appendChild(grid);
+    if (currentPlan.items.length === 0){
+      const w = document.createElement("div");
+      w.className = "warn";
+      w.textContent = "Tidsaxeln är tom. Lägg till trainings/blocks.";
+      timelineBox.appendChild(w);
       return;
     }
 
-    // Håll reda på antal per steg för header
-    const stepCounts = [0,0,0,0];
-
-    // Render items (i planens sorterade ordning). Vi placerar dem i kolumn baserat på dayOffset.
-    for (let i = 0; i < currentPlan.items.length; i++) {
+    for (let i = 0; i < currentPlan.items.length; i++){
       const it = currentPlan.items[i];
       const kind = getItemKind(it);
-
-      const t = (kind === "training") ? (idxTraining[it.trainingId] || null) : null;
-      const b = (kind === "block") ? (idxBlock[it.blockId] || null) : null;
-
-      const day = toInt(it.dayOffset);
-      const isDayOk = isValidStepDayOffset(day);
-
-      // UI-visning: om ogiltigt dayOffset -> visa i Steg 4 men markera tydligt (fail-closed vid spara)
-      const colIndex = isDayOk ? day : 3;
-
-      // Ta bort "Tomt steg"-hint vid första item i kolumnen
-      if (colBodies[colIndex].firstChild && colBodies[colIndex].firstChild.classList && colBodies[colIndex].firstChild.classList.contains("stepHint")) {
-        colBodies[colIndex].removeChild(colBodies[colIndex].firstChild);
-      }
 
       const card = document.createElement("div");
       card.className = "timelineCard";
       card.setAttribute("role", "listitem");
 
-      const top = document.createElement("div");
-      top.className = "timelineTop";
+      const row = document.createElement("div");
+      row.className = "itemRow";
 
       const left = document.createElement("div");
-      left.className = "timelineMeta";
 
-      const line1 = document.createElement("div");
-      line1.className = "muted";
+      const l1 = document.createElement("div");
+      l1.className = "muted";
 
-      const line2 = document.createElement("div");
-      const line3 = document.createElement("div");
-      line3.className = "muted";
+      const l2 = document.createElement("div");
 
-      if (!isDayOk) {
-        // DEBUG: här syns data-problem direkt för admin.
-        line1.textContent = "Ogiltigt dayOffset (" + String(day) + ") • måste vara 0–3 (Steg 1–4)";
-      } else if (kind === "training") {
-        line1.textContent = t ? (t.module + " • " + t.area) : "Okänd trainingId (fail-closed vid spara)";
-      } else if (kind === "block") {
+      const l3 = document.createElement("div");
+      l3.className = "muted";
+
+      if (kind === "training"){
+        const t = idxTraining[String(it.trainingId || "")] || null;
+        l1.textContent = t ? (t.module + " • " + t.area) : "Okänd trainingId (fail-closed vid spara)";
+        l2.textContent = t ? t.title : ("trainingId: " + String(it.trainingId || ""));
+        l3.textContent = "type: training • order: " + String(it.order);
+      } else if (kind === "block"){
+        const b = idxBlock[String(it.blockId || "")] || null;
         if (b) {
           const parts = [];
           if (b.module) parts.push(b.module);
           if (b.area) parts.push(b.area);
           if (b.step) parts.push(b.step);
-          line1.textContent = parts.length ? parts.join(" • ") : "Block";
+          l1.textContent = parts.length ? parts.join(" • ") : "Block";
+          l2.textContent = b.title;
+          l3.textContent = "type: block • blockId: " + b.blockId + " • order: " + String(it.order);
         } else {
-          line1.textContent = "Okänd blockId (fail-closed vid spara)";
+          l1.textContent = "Okänd blockId (fail-closed vid spara)";
+          l2.textContent = "blockId: " + String(it.blockId || "");
+          l3.textContent = "type: block • order: " + String(it.order);
         }
       } else {
-        line1.textContent = "Ogiltigt item (fail-closed vid spara)";
+        l1.textContent = "Ogiltigt item (fail-closed vid spara)";
+        l2.textContent = "—";
+        l3.textContent = "order: " + String(it.order);
       }
 
-      if (kind === "training") {
-        line2.textContent = t ? t.title : ("trainingId: " + it.trainingId);
-      } else if (kind === "block") {
-        line2.textContent = b ? b.title : ("blockId: " + it.blockId);
-      } else {
-        line2.textContent = "—";
-      }
-
-      // Avancerat men enkelt: visa exakt ordning + dayOffset, men inga extra koncept.
-      line3.textContent =
-        "dayOffset: " + String(it.dayOffset) +
-        " • order: " + String(it.order);
-
+      // gateRequired toggle (enkelt men avancerat)
       const gateWrap = document.createElement("div");
       gateWrap.style.marginTop = "8px";
       const gateLabel = document.createElement("label");
@@ -1758,69 +1298,33 @@ Keys (LÅST):
       const gate = document.createElement("input");
       gate.type = "checkbox";
       gate.checked = (it.gateRequired === true);
-      gate.addEventListener("change", function(){
-        it.gateRequired = gate.checked === true;
-      });
+      gate.addEventListener("change", function(){ it.gateRequired = gate.checked === true; });
       const gateText = document.createElement("span");
       gateText.textContent = "gateRequired";
       gateLabel.appendChild(gate);
       gateLabel.appendChild(gateText);
       gateWrap.appendChild(gateLabel);
 
-      // dayOffset input (0–3)
-      const dayWrap = document.createElement("div");
-      dayWrap.style.marginTop = "10px";
-
-      const lab = document.createElement("label");
-      lab.textContent = "Steg (0–3)";
-      lab.setAttribute("for", "day_" + i);
-
-      const inp = document.createElement("input");
-      inp.type = "number";
-      inp.min = String(STEPS_MIN);
-      inp.max = String(STEPS_MAX);
-      inp.step = "1";
-      inp.id = "day_" + i;
-      inp.value = String(it.dayOffset ?? 0);
-      inp.addEventListener("change", function(){
-        const v = toInt(inp.value);
-        if (!isValidStepDayOffset(v)) {
-          inp.value = String(it.dayOffset ?? 0);
-          setStatus("warn", "Steg måste vara heltal 0–3. (Inget ändrat)");
-          return;
-        }
-        it.dayOffset = v;
-        autoSortAndRenumber();
-        renderTimeline();
-      });
-
-      dayWrap.appendChild(lab);
-      dayWrap.appendChild(inp);
-
-      left.appendChild(line1);
-      left.appendChild(line2);
-      left.appendChild(line3);
+      left.appendChild(l1);
+      left.appendChild(l2);
+      left.appendChild(l3);
       left.appendChild(gateWrap);
-      left.appendChild(dayWrap);
 
       const right = document.createElement("div");
       right.className = "rightActions";
 
-      const prevSameDay = (i > 0) && ((toInt(currentPlan.items[i-1].dayOffset) ?? 0) === (toInt(currentPlan.items[i].dayOffset) ?? 0));
-      const nextSameDay = (i < currentPlan.items.length - 1) && ((toInt(currentPlan.items[i+1].dayOffset) ?? 0) === (toInt(currentPlan.items[i].dayOffset) ?? 0));
-
       const up = document.createElement("button");
       up.className = "smallbtn";
       up.textContent = "↑";
-      up.disabled = !prevSameDay;
-      up.title = "Flytta upp (endast inom samma steg)";
+      up.title = "Flytta upp";
+      up.disabled = (i === 0);
       up.addEventListener("click", function(){ moveItem(i, -1); });
 
       const down = document.createElement("button");
       down.className = "smallbtn";
       down.textContent = "↓";
-      down.disabled = !nextSameDay;
-      down.title = "Flytta ner (endast inom samma steg)";
+      down.title = "Flytta ner";
+      down.disabled = (i === currentPlan.items.length - 1);
       down.addEventListener("click", function(){ moveItem(i, +1); });
 
       const del = document.createElement("button");
@@ -1833,30 +1337,136 @@ Keys (LÅST):
       right.appendChild(down);
       right.appendChild(del);
 
-      top.appendChild(left);
-      top.appendChild(right);
-      card.appendChild(top);
+      row.appendChild(left);
+      row.appendChild(right);
 
-      colBodies[colIndex].appendChild(card);
-
-      if (isDayOk) stepCounts[colIndex] += 1;
-      else stepCounts[colIndex] += 1; // visas i steg 4 men är ändå count i header
+      card.appendChild(row);
+      timelineBox.appendChild(card);
     }
+  }
 
-    // Uppdatera counts i headers
-    for (let s = 0; s < 4; s++){
-      const id = "stepCount_" + s;
-      const el = grid.querySelector("#" + CSS.escape(id));
-      if (el) el.textContent = String(stepCounts[s]);
-    }
+  function moveItem(index, dir){
+    if (!currentPlan) return;
+    currentPlan.items = sortAndRenumberItems(currentPlan.items);
 
-    timelineBox.appendChild(grid);
+    const i = index;
+    const j = i + dir;
+    if (j < 0 || j >= currentPlan.items.length) return;
+
+    // swap order by swapping items, then renumber
+    const tmp = currentPlan.items[i];
+    currentPlan.items[i] = currentPlan.items[j];
+    currentPlan.items[j] = tmp;
+
+    currentPlan.items = sortAndRenumberItems(currentPlan.items);
+    renderTimeline();
+  }
+
+  function removeItem(index){
+    if (!currentPlan) return;
+    currentPlan.items.splice(index, 1);
+    currentPlan.items = sortAndRenumberItems(currentPlan.items);
+    renderTimeline();
+    renderTrainingsList();
+    renderBlocksList();
   }
 
   // ============================
-  // VALIDATION (save / verify)
+  // ADD ITEMS
   // ============================
-  function validateCurrentPlanBeforeSave(setActiveOnVerify) {
+  function addTrainingToPlan(trainingId){
+    if (!currentPlan) return;
+
+    for (let i = 0; i < currentPlan.items.length; i++){
+      if (getItemKind(currentPlan.items[i]) === "training" && String(currentPlan.items[i].trainingId) === String(trainingId)){
+        setStatus("warn", "Dubblett: training finns redan i plan.");
+        return;
+      }
+    }
+
+    const idx = trainings.findIndex(t => t.id === trainingId);
+    if (idx < 0){ setStatus("error", "Training är inte allowed (published/verified + blocks>0). (fail-closed)"); return; }
+
+    const snap = trainingSnapshotsById[trainingId] ? sanitizeSnapshotForStorage(trainingSnapshotsById[trainingId]) : null;
+
+    const item = {
+      trainingId: String(trainingId),
+      dayOffset: 0,
+      order: (currentPlan.items.length + 1),
+      gateRequired: true
+    };
+    if (snap) item.trainingSnapshot = snap;
+
+    currentPlan.items.push(item);
+    currentPlan.items = sortAndRenumberItems(currentPlan.items);
+
+    setStatus("ok", "Tillagd i tidsaxeln.");
+    renderTimeline();
+    renderTrainingsList();
+  }
+
+  function addBlockToPlan(blockId){
+    if (!currentPlan) return;
+
+    if (!blocksOk){ setStatus("error", "Block-bank saknas/korrupt. (fail-closed)"); return; }
+    if (!blocksById[String(blockId)]){ setStatus("error", "BlockId finns inte som published i block-bank. (fail-closed)"); return; }
+
+    for (let i = 0; i < currentPlan.items.length; i++){
+      if (getItemKind(currentPlan.items[i]) === "block" && String(currentPlan.items[i].blockId) === String(blockId)){
+        setStatus("warn", "Dubblett: block finns redan i plan.");
+        return;
+      }
+    }
+
+    const item = {
+      blockId: String(blockId),
+      dayOffset: 0,
+      order: (currentPlan.items.length + 1),
+      gateRequired: true
+    };
+
+    currentPlan.items.push(item);
+    currentPlan.items = sortAndRenumberItems(currentPlan.items);
+
+    setStatus("ok", "Block tillagt i tidsaxeln.");
+    renderTimeline();
+    renderBlocksList();
+  }
+
+  // ============================
+  // SELECT PLAN
+  // ============================
+  function selectPlanById(id){
+    if (!plansOk){ setStatus("error", "AO-060 är korrupt. (fail-closed)"); return; }
+    const raw = getPlanById(id);
+    if (!raw){ setStatus("error", "Plan hittades inte."); return; }
+
+    const norm = normalizePlanForUi(raw);
+    if (!norm.ok || !norm.plan){ setStatus("error", "Plan kunde inte normaliseras. (fail-closed)"); return; }
+
+    currentPlan = norm.plan;
+
+    // Extra fail-closed: om planen innehåller block men block-bank saknas, blockera spara/verifiera
+    let planHasBlocks = false;
+    for (let i = 0; i < currentPlan.items.length; i++){
+      if (getItemKind(currentPlan.items[i]) === "block"){ planHasBlocks = true; break; }
+    }
+    if (planHasBlocks && !blocksOk){
+      setStatus("warn", "Plan innehåller blockId men block-bank saknas/korrupt. Spara/Verifiera blockeras.");
+    } else {
+      setStatus("ok", "Plan laddad: " + (currentPlan.title || "(utan titel)"));
+    }
+
+    syncPlanFormFromState();
+    renderTimeline();
+    renderTrainingsList();
+    renderBlocksList();
+  }
+
+  // ============================
+  // VALIDATE + SAVE
+  // ============================
+  function validateCurrentPlanBeforeSave(setActiveOnVerify){
     if (!currentPlan) return { ok:false, error:"Ingen plan vald" };
     if (!trainingsOk) return { ok:false, error:"AO-057 saknas/korrupt — spar blockeras (fail-closed)" };
     if (!plansOk) return { ok:false, error:"AO-060 korrupt — spar blockeras (fail-closed)" };
@@ -1872,7 +1482,7 @@ Keys (LÅST):
     const requireItems = (setActiveOnVerify === true) ? true : (st === "active");
     if (requireItems && currentPlan.items.length < 1) return { ok:false, error:"Active kräver minst 1 item" };
 
-    autoSortAndRenumber();
+    currentPlan.items = sortAndRenumberItems(currentPlan.items);
 
     const idxTraining = buildTrainingIndexById();
     const idxBlock = blocksOk ? buildBlocksIndexById() : Object.create(null);
@@ -1883,54 +1493,47 @@ Keys (LÅST):
 
     let planHasBlocks = false;
     for (let i = 0; i < currentPlan.items.length; i++){
-      if (getItemKind(currentPlan.items[i]) === "block") { planHasBlocks = true; break; }
+      if (getItemKind(currentPlan.items[i]) === "block"){ planHasBlocks = true; break; }
     }
-    if (planHasBlocks && !blocksOk) {
-      return { ok:false, error:"Plan innehåller blockId men block-bank saknas/korrupt. (fail-closed)" };
-    }
+    if (planHasBlocks && !blocksOk) return { ok:false, error:"Plan innehåller blocks men block-bank saknas/korrupt. (fail-closed)" };
 
-    for (let i = 0; i < currentPlan.items.length; i++) {
+    for (let i = 0; i < currentPlan.items.length; i++){
       const it = currentPlan.items[i];
       const kind = getItemKind(it);
-      if (kind === "unknown") return { ok:false, error:"Item har ogiltig referens (trainingId XOR blockId krävs)" };
+      if (kind === "unknown") return { ok:false, error:"Ogiltigt item (trainingId XOR blockId krävs)" };
 
-      if (kind === "training") {
-        const trainingId = normStr(it.trainingId);
-        if (!trainingId) return { ok:false, error:"Training-item saknar trainingId" };
-        if (!idxTraining[trainingId]) return { ok:false, error:"Item refererar trainingId som ej är allowed: " + trainingId };
-        if (seenT.has(trainingId)) return { ok:false, error:"Dubblett trainingId i plan" };
-        seenT.add(trainingId);
-      }
-
-      if (kind === "block") {
-        const blockId = normStr(it.blockId);
-        if (!blockId) return { ok:false, error:"Block-item saknar blockId" };
-        if (!idxBlock[blockId]) return { ok:false, error:"Item refererar blockId som ej finns som published i block-bank: " + blockId };
-        if (seenB.has(blockId)) return { ok:false, error:"Dubblett blockId i plan" };
-        seenB.add(blockId);
-      }
-
-      const dayOffset = toInt(it.dayOffset);
-      if (!isValidStepDayOffset(dayOffset)) return { ok:false, error:"Steg/dayOffset måste vara heltal 0–3 (Steg 1–4)" };
+      // En tidsaxel => dayOffset måste vara 0
+      if (toInt(it.dayOffset) !== 0) return { ok:false, error:"dayOffset måste vara 0 (denna sida har bara en tidsaxel)" };
 
       const order = toInt(it.order);
       if (order === null || order < 1) return { ok:false, error:"order måste vara heltal ≥ 1" };
-      if (seenOrder.has(order)) return { ok:false, error:"order måste vara unik per plan" };
+      if (seenOrder.has(order)) return { ok:false, error:"order måste vara unik" };
       seenOrder.add(order);
 
       if (typeof it.gateRequired !== "boolean") return { ok:false, error:"gateRequired måste vara boolean" };
+
+      if (kind === "training") {
+        const tid = normStr(it.trainingId);
+        if (!tid) return { ok:false, error:"trainingId saknas" };
+        if (!idxTraining[tid]) return { ok:false, error:"trainingId ej allowed: " + tid };
+        if (seenT.has(tid)) return { ok:false, error:"Dubblett trainingId" };
+        seenT.add(tid);
+      } else if (kind === "block") {
+        const bid = normStr(it.blockId);
+        if (!bid) return { ok:false, error:"blockId saknas" };
+        if (!idxBlock[bid]) return { ok:false, error:"blockId ej published i block-bank: " + bid };
+        if (seenB.has(bid)) return { ok:false, error:"Dubblett blockId" };
+        seenB.add(bid);
+      }
     }
 
     return { ok:true };
   }
 
-  // ============================
-  // SAVE (writes AO-060 only)
-  // ============================
-  function commitPlanToPlansArray(nextPlan) {
+  function commitPlanToPlansArray(nextPlan){
     const out = plans.slice();
     let idx = -1;
-    for (let i = 0; i < out.length; i++) {
+    for (let i = 0; i < out.length; i++){
       if (String(out[i].id || "") === String(nextPlan.id || "")) { idx = i; break; }
     }
     if (idx >= 0) out[idx] = nextPlan;
@@ -1938,17 +1541,17 @@ Keys (LÅST):
     return out;
   }
 
-  function saveAllPlans(outArray) {
+  function saveAllPlans(outArray){
     const cleaned = sanitizePlansArray(outArray);
     if (!cleaned.ok) return { ok:false, error:"SCHEMA_GUARD:" + cleaned.error };
 
     if (window.HRApp.savePlans && typeof window.HRApp.savePlans === "function") {
       const r = window.HRApp.savePlans(cleaned.data);
-      if (!r || r.ok !== true) return { ok:false, error: (r && r.error) ? r.error : "WRITE_FAILED" };
+      if (!r || r.ok !== true) return { ok:false, error:(r && r.error) ? r.error : "WRITE_FAILED" };
       return { ok:true };
     }
 
-    try {
+    try{
       localStorage.setItem(PLANS_KEY, JSON.stringify(cleaned.data));
       return { ok:true };
     } catch {
@@ -1956,7 +1559,7 @@ Keys (LÅST):
     }
   }
 
-  function onSaveClicked() {
+  function onSaveClicked(){
     const v = validateCurrentPlanBeforeSave(false);
     if (!v.ok) { setStatus("error", v.error); return; }
 
@@ -1964,7 +1567,7 @@ Keys (LÅST):
     const rawExisting = getPlanById(currentPlan.id);
     const createdAt = rawExisting && typeof rawExisting.createdAt === "number" ? rawExisting.createdAt : now;
 
-    autoSortAndRenumber();
+    currentPlan.items = sortAndRenumberItems(currentPlan.items);
 
     const toSave = {
       id: String(currentPlan.id),
@@ -1974,20 +1577,14 @@ Keys (LÅST):
       updatedAt: Number(now),
       items: currentPlan.items.map(it => {
         const kind = getItemKind(it);
-        const outIt = {
-          dayOffset: Number(toInt(it.dayOffset) ?? 0),
-          order: Number(toInt(it.order) ?? 1),
-          gateRequired: it.gateRequired === true
-        };
+        const outIt = { dayOffset: 0, order: Number(toInt(it.order) ?? 1), gateRequired: it.gateRequired === true };
 
         if (kind === "training") {
           outIt.trainingId = String(it.trainingId);
-
           let snap = null;
           if (it.trainingSnapshot) snap = sanitizeSnapshotForStorage(it.trainingSnapshot);
           if (!snap && trainingSnapshotsById[outIt.trainingId]) snap = sanitizeSnapshotForStorage(trainingSnapshotsById[outIt.trainingId]);
           if (snap) outIt.trainingSnapshot = snap;
-
         } else if (kind === "block") {
           outIt.blockId = String(it.blockId);
         }
@@ -2008,11 +1605,10 @@ Keys (LÅST):
     selectPlanById(toSave.id);
   }
 
-  function onVerifyClicked() {
+  function onVerifyClicked(){
     const v = validateCurrentPlanBeforeSave(true);
     if (!v.ok) { setStatus("error", "Verifiering misslyckades: " + v.error); return; }
 
-    syncStateFromForm();
     currentPlan.status = "active";
     planStatus.value = "active";
     setStatus("ok", "Verifiering OK. Status satt till 'active' i UI. Klicka Spara för att skriva.");
@@ -2021,19 +1617,12 @@ Keys (LÅST):
   // ============================
   // NEW PLAN
   // ============================
-  function newPlan() {
-    if (!plansOk) { setStatus("error", "AO-060 är korrupt. Ny plan blockeras (fail-closed)."); return; }
+  function newPlan(){
+    if (!plansOk){ setStatus("error", "AO-060 är korrupt. Ny plan blockeras (fail-closed)."); return; }
 
     const now = Date.now();
     const id = genId("p_");
-    currentPlan = {
-      id: id,
-      title: "",
-      status: "draft",
-      createdAt: now,
-      updatedAt: now,
-      items: []
-    };
+    currentPlan = { id, title:"", status:"draft", createdAt: now, updatedAt: now, items: [] };
 
     setStatus("ok", "Ny plan skapad (ej sparad än).");
     syncPlanFormFromState();
@@ -2043,44 +1632,15 @@ Keys (LÅST):
   }
 
   // ============================
-  // EVENTS
+  // INIT + META
   // ============================
-  btnNewPlan.addEventListener("click", newPlan);
-  btnSavePlan.addEventListener("click", onSaveClicked);
-  btnVerifyPlan.addEventListener("click", onVerifyClicked);
-
-  planTitle.addEventListener("input", function(){ if (currentPlan) { currentPlan.title = normStr(planTitle.value); }});
-  planStatus.addEventListener("change", function(){
-    if (!currentPlan) return;
-    currentPlan.status = normStr(planStatus.value);
-    syncPlanFormFromState();
-  });
-
-  filterModule.addEventListener("change", renderTrainingsList);
-  filterArea.addEventListener("change", renderTrainingsList);
-  searchTitle.addEventListener("input", renderTrainingsList);
-
-  filterBlockModule.addEventListener("change", renderBlocksList);
-  filterBlockArea.addEventListener("change", renderBlocksList);
-  searchBlockTitle.addEventListener("input", renderBlocksList);
-
-  // ============================
-  // INIT
-  // ============================
-  (function init(){
-    // DEBUG: ordning är viktig för tydlig status:
-    // - trainings (AO-057) styr om training-tillägg är tillåtet
-    // - plans (AO-060) styr om sida kan spara
-    // - blocks bank (read-only) styr om block-tillägg + save-validering för block
+  function init(){
     const tRes = loadTrainings();
     const pRes = loadPlans();
     const bRes = loadBlocks();
 
-    if (blocksOk) {
-      blocksMeta.textContent = "Block-bank: OK (" + blocksKeyUsed + ") • published: " + String(blocks.length);
-    } else {
-      blocksMeta.textContent = "Block-bank: saknas/ej OK";
-    }
+    if (blocksOk) blocksMeta.textContent = "Block-bank: OK (" + blocksKeyUsed + ") • published: " + String(blocks.length);
+    else blocksMeta.textContent = "Block-bank: saknas/ej OK";
 
     if (!tRes.ok && !pRes.ok) setStatus("error", (tRes.error || "") + " • " + (pRes.error || ""));
     else if (!pRes.ok) setStatus("error", pRes.error);
@@ -2096,7 +1656,7 @@ Keys (LÅST):
     renderBlocksList();
     renderPlansList();
 
-    if (plansOk && plans.length > 0) {
+    if (plansOk && plans.length > 0){
       const firstId = String(plans[0].id || "");
       if (firstId) selectPlanById(firstId);
       else { currentPlan = null; syncPlanFormFromState(); renderTimeline(); }
@@ -2106,39 +1666,50 @@ Keys (LÅST):
       renderTimeline();
     }
 
-    if (!plansOk) {
+    if (!plansOk){
       btnNewPlan.disabled = true;
       btnSavePlan.disabled = true;
       btnVerifyPlan.disabled = true;
     }
-  })();
+
+    // Events
+    btnNewPlan.addEventListener("click", newPlan);
+    btnSavePlan.addEventListener("click", onSaveClicked);
+    btnVerifyPlan.addEventListener("click", onVerifyClicked);
+
+    planTitle.addEventListener("input", function(){ if (currentPlan) currentPlan.title = normStr(planTitle.value); });
+    planStatus.addEventListener("change", function(){ if (currentPlan) { currentPlan.status = normStr(planStatus.value); syncPlanFormFromState(); } });
+
+    filterModule.addEventListener("change", renderTrainingsList);
+    filterArea.addEventListener("change", renderTrainingsList);
+    searchTitle.addEventListener("input", renderTrainingsList);
+
+    filterBlockModule.addEventListener("change", renderBlocksList);
+    filterBlockArea.addEventListener("change", renderBlocksList);
+    searchBlockTitle.addEventListener("input", renderBlocksList);
+  }
+
+  init();
 
 })();
 </script>
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- PATCH v1.9: Tidsaxel som 4-kolumners Steg-grid (Steg 1–4).
-- PATCH v1.9: dayOffset valideras som 0–3 (fail-closed vid spara/verifiera).
-- PATCH v1.9: Tydligare varningar för planer med dayOffset utanför 0–3.
+- v2.0: Ny layout i 4 kolumner enligt önskemål (Trainings / Timeline / Blocks / Planer).
+- v2.0: Tidsaxel förenklad till EN lista (ingen steg 2/3/4 UI).
+- v2.0: Schema-guard: dayOffset måste vara 0 på denna sida (fail-closed).
+- v2.0: Behåller gateRequired + ordning (↑/↓) + remove.
 - Inga nya keys; writes endast AO-060_PLANS_V1.
 ============================================================ -->
 
 <!-- ============================================================
-Testnoteringar (exakta klicksteg)
-1) Öppna sidan → höger: se 4 kolumner (Steg 1–4).
-2) Skapa ny plan → lägg till training/block → ska hamna i Steg 1.
-3) Ändra “Steg (0–3)” på ett item → item flyttar kolumn.
-4) Spara → ladda om → kvar.
-5) (Fail-closed) Sätt dayOffset till 4 → ska inte accepteras, revert + varning.
-============================================================ -->
-
-<!-- ============================================================
-QA-check (P0/P1/P2)
-P0: Inga nya storage-keys/datamodell — OK
-P0: Fail-closed: dayOffset 0–3 krävs — OK
-P1: Block-bank fortsatt read-only + validering vid spara — OK
-P2: UI förbättrad: stegöversikt i en vy — OK
+Testnoteringar
+1) Öppna sidan: se 4 kolumner.
+2) Ny plan: lägg till training (kol 1) → syns i tidsaxel (kol 2).
+3) Lägg till block (kol 3) → syns i tidsaxel.
+4) Flytta ↑/↓, Ta bort.
+5) Verifiera → status active i UI, Spara → reload → kvar.
 ============================================================ -->
 </body>
 </html>
