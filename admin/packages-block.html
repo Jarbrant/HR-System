@@ -1605,6 +1605,9 @@ POLICY (LÅST):
    - No new storage keys
    ========================================= */
 
+/* =========================================
+   BLOCK 13/17 – Training filter (robust + DOM-ready)
+   ========================================= */
 (function(){
   function init(){
     // ---- DOM (IDs are locked by BLOCK 5) ----
@@ -1615,9 +1618,9 @@ POLICY (LÅST):
     const dlMods   = document.getElementById("dlTrainModules"); // DATALIST (legacy, optional)
     const preview  = document.getElementById("trainPreview");
 
-    // Fail-closed (but do not crash page)
+    // Fail-closed (no crash)
     if(!preview || !elModule || !elArea || !elFree){
-      try { console.warn("[BLOCK13] Missing DOM hooks for training filter. Skipping bind."); } catch {}
+      try { console.warn("[BLOCK13] Missing DOM hooks. Skipping bind."); } catch {}
       return;
     }
 
@@ -1630,13 +1633,69 @@ POLICY (LÅST):
       return Array.from(s).sort((a,b) => a.localeCompare(b, "sv"));
     }
 
-    // Minimal normalize for trainings (supports multiple shapes)
+    // Find “best” array inside unknown wrapper shapes
+    function findArrayDeep(parsed){
+      if(Array.isArray(parsed)) return parsed;
+
+      // common known wrappers
+      const directCandidates = [
+        parsed?.trainings,
+        parsed?.items,
+        parsed?.data,
+        parsed?.list,
+        parsed?.rows,
+        parsed?.blocks
+      ];
+      for(const c of directCandidates){
+        if(Array.isArray(c)) return c;
+      }
+
+      // nested common wrappers
+      const nestedCandidates = [
+        parsed?.trainings?.items,
+        parsed?.trainings?.trainings,
+        parsed?.data?.items,
+        parsed?.data?.trainings
+      ];
+      for(const c of nestedCandidates){
+        if(Array.isArray(c)) return c;
+      }
+
+      // last resort: scan first-level object values for an array
+      if(parsed && typeof parsed === "object"){
+        for(const k of Object.keys(parsed)){
+          const v = parsed[k];
+          if(Array.isArray(v)) return v;
+          if(v && typeof v === "object"){
+            // one level deeper
+            for(const kk of Object.keys(v)){
+              const vv = v[kk];
+              if(Array.isArray(vv)) return vv;
+            }
+          }
+        }
+      }
+
+      return [];
+    }
+
     function normalizeTraining(raw){
       const r = raw || {};
-      const title  = r.title ?? r.name ?? r.trainingTitle ?? r.label ?? "";
-      const module = r.module ?? r.modul ?? r.category ?? r.group ?? "";
-      const area   = r.area ?? r.omrade ?? r.section ?? "";
-      const id     = r.trainingId ?? r.id ?? r._id ?? r.key ?? "";
+
+      // title candidates
+      const title =
+        r.title ?? r.name ?? r.trainingTitle ?? r.label ?? r.heading ?? "";
+
+      // module candidates
+      const module =
+        r.module ?? r.modul ?? r.category ?? r.group ?? r.mod ?? r.moduleName ?? "";
+
+      // area candidates
+      const area =
+        r.area ?? r.omrade ?? r.section ?? r.subcategory ?? r.areaName ?? "";
+
+      const id = r.trainingId ?? r.id ?? r._id ?? r.key ?? "";
+
       return {
         _raw: r,
         id: norm(id) || "",
@@ -1646,20 +1705,20 @@ POLICY (LÅST):
       };
     }
 
-    // ---- Source of trainings (prefer in-memory; fallback localStorage) ----
+    // ---- Read trainings ----
     function readTrainings(){
-      // 1) reuse page state if exists
+      // 1) reuse in-memory (if page already has it)
       try{
-        if(window.STATE){
-          const cand =
-            window.STATE.trainingsAll ||
-            window.STATE.trainings ||
-            window.STATE.allTrainings ||
-            null;
+        const S = window.STATE;
+        const cand =
+          S?.trainingsAll ||
+          S?.trainings ||
+          S?.allTrainings ||
+          S?.trainingsNormalized ||
+          null;
 
-          if(Array.isArray(cand) && cand.length){
-            return cand.map(normalizeTraining);
-          }
+        if(Array.isArray(cand) && cand.length){
+          return cand.map(normalizeTraining);
         }
       }catch{}
 
@@ -1669,22 +1728,16 @@ POLICY (LÅST):
         const raw = localStorage.getItem(key);
         if(!raw) return [];
         const parsed = JSON.parse(raw);
-
-        const arr =
-          (Array.isArray(parsed) ? parsed : null) ||
-          (Array.isArray(parsed?.trainings) ? parsed.trainings : null) ||
-          (Array.isArray(parsed?.items) ? parsed.items : null) ||
-          (Array.isArray(parsed?.data) ? parsed.data : null) ||
-          [];
-
-        return arr.map(normalizeTraining);
+        const arr = findArrayDeep(parsed);
+        return (Array.isArray(arr) ? arr : []).map(normalizeTraining);
       }catch{
         return [];
       }
     }
 
-    // ---- Render preview (respects existing renderer if present) ----
+    // ---- Rendering (safe, minimal) ----
     function renderPreview(list){
+      // if existing renderer exists, use it
       try{
         if(typeof window.renderTrainingPreview === "function"){
           window.renderTrainingPreview(list);
@@ -1692,7 +1745,7 @@ POLICY (LÅST):
         }
       }catch{}
 
-      // Safe fallback rendering (no innerHTML)
+      // safe clear
       while(preview.firstChild) preview.removeChild(preview.firstChild);
 
       if(!list.length){
@@ -1747,18 +1800,18 @@ POLICY (LÅST):
       });
     }
 
-    // ---- Populate module dropdown + area datalist ----
+    // ---- Options ----
     function getModuleValue(){
       const tag = String(elModule.tagName || "").toLowerCase();
-      return norm(elModule.value);
+      return norm(elModule.value || "");
     }
 
     function setModuleOptions(modules){
       const tag = String(elModule.tagName || "").toLowerCase();
+
       if(tag === "select"){
         const prev = norm(elModule.value);
-
-        while(elModule.firstChild) elModule.removeChild(elModule.firstChild);
+        elModule.innerHTML = "";
 
         const optAll = document.createElement("option");
         optAll.value = "";
@@ -1776,7 +1829,7 @@ POLICY (LÅST):
       }else{
         // input fallback: populate legacy datalist
         if(dlMods){
-          while(dlMods.firstChild) dlMods.removeChild(dlMods.firstChild);
+          dlMods.innerHTML = "";
           modules.forEach(m => {
             const o = document.createElement("option");
             o.value = m;
@@ -1788,7 +1841,7 @@ POLICY (LÅST):
 
     function setAreaOptions(areas){
       if(!dlAreas) return;
-      while(dlAreas.firstChild) dlAreas.removeChild(dlAreas.firstChild);
+      dlAreas.innerHTML = "";
       areas.forEach(a => {
         const o = document.createElement("option");
         o.value = a;
@@ -1803,11 +1856,11 @@ POLICY (LÅST):
       const freeQ  = low(elFree.value);
 
       return all.filter(t => {
-        const tMod   = low(t.module);
-        const tArea  = low(t.area);
+        const tMod = low(t.module);
+        const tArea = low(t.area);
         const tTitle = low(t.title);
 
-        // exact match for dropdown value (case-insensitive)
+        // exact module match when selected
         if(modSel && tMod !== modSel) return false;
         if(areaQ && !tArea.includes(areaQ)) return false;
         if(freeQ && !tTitle.includes(freeQ)) return false;
@@ -1815,16 +1868,16 @@ POLICY (LÅST):
       });
     }
 
-    // ---- Main refresh ----
+    // ---- Main ----
     let ALL = readTrainings();
 
     function refreshOptions(){
-      const modules = uniqSorted(ALL.map(x => x.module));
+      const modules = uniqSorted(ALL.map(x => x.module).filter(Boolean));
       setModuleOptions(modules);
 
       const modSel = low(getModuleValue());
       const areas = uniqSorted(
-        ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area)
+        ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area).filter(Boolean)
       );
       setAreaOptions(areas);
     }
@@ -1832,45 +1885,49 @@ POLICY (LÅST):
     function refreshList(){
       const modSel = low(getModuleValue());
       const areas = uniqSorted(
-        ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area)
+        ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area).filter(Boolean)
       );
       setAreaOptions(areas);
 
-      renderPreview(filterTrainings(ALL));
+      const filtered = filterTrainings(ALL);
+      renderPreview(filtered);
     }
 
-    // ---- Bind ----
     function bind(){
       elModule.addEventListener("change", () => {
         try{ elArea.value = ""; }catch{}
         refreshList();
       });
       elModule.addEventListener("input", refreshList); // supports input fallback
-
       elArea.addEventListener("input", refreshList);
       elFree.addEventListener("input", refreshList);
     }
 
+    // init
     refreshOptions();
     bind();
     refreshList();
 
-    // optional hook for "Uppdatera" button
+    // Optional hook for "Uppdatera"
     window.__BLOCK13_RELOAD_TRAININGS__ = function(){
       ALL = readTrainings();
       refreshOptions();
       refreshList();
     };
+
+    // Quick debug (safe)
+    try{
+      console.log("[BLOCK13] trainings:", ALL.length, "modules:", uniqSorted(ALL.map(x=>x.module).filter(Boolean)).length);
+    }catch{}
   }
 
-  // DOM-safe boot
+  // Ensure DOM exists
   if(document.readyState === "loading"){
-    document.addEventListener("DOMContentLoaded", init, { once: true });
+    document.addEventListener("DOMContentLoaded", init);
   }else{
     init();
   }
 })();
-
 
   /* =========================================
      BLOCK 14/17 – Item editor logic (inkl. All info panel)
