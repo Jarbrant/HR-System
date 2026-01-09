@@ -2662,8 +2662,8 @@ POLICY (LÅST):
     renderTrainingHits();
     setExportUiState();
   }
-
-  function exportSelectedTraining(){
+ 
+   function exportSelectedTraining(){
     if(STATE.locked){ setMsg("err","Låst (för säkerhet)."); return; }
     if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte exportera."); return; }
     if(STATE.trainingsCorrupt){ setMsg("err", `Låst för säkerhet: ${TRAININGS_KEY} är trasig.`); return; }
@@ -2683,7 +2683,6 @@ POLICY (LÅST):
     const t = STATE.trainings[idx];
     const newBlock = normalizeTrainingToExportBlock(t, empNo);
 
-    // Dedupe: om ett block med exakt samma title+module+area+step redan finns och är draft → fråga användaren
     const all = (Array.isArray(stBlocks.blocks) ? stBlocks.blocks : []).map(normalizeBlock);
     const dup = all.find(b =>
       normText(b.title,80) === normText(newBlock.title,80) &&
@@ -2693,47 +2692,35 @@ POLICY (LÅST):
       normStatus(b.status) === "draft"
     );
 
-     if(dup){
-      const ok = confirm(
-        "Det finns redan ett utkast i block-banken med samma titel/modul/område/steg. Skapa ändå ett nytt block?"
-      );
+    if(dup){
+      const ok = confirm("Det finns redan ett utkast i block-banken med samma titel/modul/område/steg. Skapa ändå ett nytt block?");
       if(!ok) return;
     }
 
-    // Lägg till blocket
     all.push(newBlock);
 
-    // Spara
     const res = saveBlocks(all);
     if(!res || !res.ok){
       setMsg("err", res?.err || "Kunde inte spara exporten.");
       return;
     }
 
-    // ------------------------------
     // Refresh UI (robust)
-    // ------------------------------
     STATE.all = all;
 
-    // Rendera listan först
     renderBlockList();
     computeVisible();
 
     const newId = String(newBlock.blockId);
-    let isVisible = Array.isArray(STATE.visible)
-      && STATE.visible.some(b => String(b.blockId) === newId);
+    let isVisible = Array.isArray(STATE.visible) && STATE.visible.some(b => String(b.blockId) === newId);
 
-    // Om blocket inte syns p.g.a. filter → försök visa det
     if(!isVisible){
       let changed = false;
 
-      // Statusfilter blockerar ofta utkast
       if(filterStatus && filterStatus.value && filterStatus.value !== "all"){
         filterStatus.value = "all";
         changed = true;
       }
-
-      // Sökfilter kan också blockera
       if(qBlocks && qBlocks.value.trim()){
         qBlocks.value = "";
         changed = true;
@@ -2742,32 +2729,61 @@ POLICY (LÅST):
       if(changed){
         renderBlockList();
         computeVisible();
-        isVisible = Array.isArray(STATE.visible)
-          && STATE.visible.some(b => String(b.blockId) === newId);
+        isVisible = Array.isArray(STATE.visible) && STATE.visible.some(b => String(b.blockId) === newId);
       }
     }
 
-    // Auto-select om möjligt
     if(isVisible){
-      STATE.selectedId = newId;
-      try{
-        selectBlock(newBlock.blockId);
-      }catch{
-        try{ selectBlock(newId); }catch{}
-      }
+      try{ selectBlock(newBlock.blockId); }catch{}
       setMsg("ok", "Export klar: nytt block (utkast) skapat.");
     }else{
-      // Blocket finns men syns inte → tydlig info
       setMsg(
         "warn",
         "Export klar: blocket skapades men syns inte p.g.a. aktiva filter. Visa 'Alla' och rensa sök för att se det."
-         
-    // Export UI initial
-    setExportUiState();
+      );
+    }
+  }
+
+  /* =========================================
+     BLOCK 17/17 – Bootstrap + events
+     ========================================= */
+
+  // Blocklist filters
+  qBlocks.addEventListener("input", () => { renderBlockList(); });
+  filterStatus.addEventListener("change", () => { renderBlockList(); });
+
+  // Export events
+  qTrainModule.addEventListener("input", () => { fillDatalists(); renderTrainingHits(); });
+  qTrainArea.addEventListener("input", () => { renderTrainingHits(); });
+  qTrainFree.addEventListener("input", () => { renderTrainingHits(); });
+
+  btnReloadTrainings.addEventListener("click", () => { setMsg("", ""); reloadTrainings(); });
+  btnExportTraining.addEventListener("click", () => { setMsg("", ""); exportSelectedTraining(); });
+
+  // Init blocks
+  (function init(){
+    STATE.lockReasons = [];
+
+    const st = loadBlocksState();
+    if(st.corrupt){
+      STATE.lockReasons.push(`Låst för säkerhet: ${BLOCKS_KEY} är korrupt.`);
+      STATE.all = [];
+    }else{
+      STATE.all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
+    }
+
+    applyLockFromState();
+    setMsg("", "");
+
+    hideEditor();
+    renderBlockList();
+    reloadTrainings();
+    setDirty(false);
     updatePublishButton();
   })();
 
-})();  // end IIFE
+})();
+ 
 </script>
 </body>
 </html>
