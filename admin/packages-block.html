@@ -1602,74 +1602,287 @@ POLICY (LÅST):
   /* =========================================
      BLOCK 13/17 – Rendering blocklist + selectBlock + editor
      ========================================= */
-function renderBlockList(){
-  computeVisible();
-  clear(blockList);
+/* =========================================
+   BLOCK 13/17 – Training filter (module dropdown + area list + free search)
+   - Robust: works if qTrainModule is SELECT (preferred) or INPUT (fallback)
+   - No new storage keys
+   ========================================= */
 
-  countBlocks.textContent = `${STATE.visible.length} st`;
+(function(){
+  // ---- DOM (IDs are locked by BLOCK 5) ----
+  const elModule = document.getElementById("qTrainModule");   // SELECT (preferred) or INPUT (fallback)
+  const elArea   = document.getElementById("qTrainArea");     // INPUT (with datalist)
+  const elFree   = document.getElementById("qTrainFree");     // INPUT
+  const dlAreas  = document.getElementById("dlTrainAreas");   // DATALIST (areas)
+  const dlMods   = document.getElementById("dlTrainModules"); // DATALIST (legacy, optional)
+  const preview  = document.getElementById("trainPreview");
 
-  if(STATE.visible.length === 0){
-    const d = document.createElement("div");
-    d.className = "muted2";
-    d.textContent = "Inga block (eller inget matchar filter/sök).";
-    blockList.appendChild(d);
+  // If these are missing we fail-closed (but we do NOT crash the page)
+  if(!preview || !elModule || !elArea || !elFree){
+    try { console.warn("[BLOCK13] Missing DOM hooks for training filter. Skipping bind."); } catch {}
     return;
   }
 
-  STATE.visible.slice(0, 400).forEach(b => {
-    const row = document.createElement("div");
-    row.className = "rowItem" + (String(b.blockId) === String(STATE.selectedId) ? " active" : "");
-    row.setAttribute("role","button");
-    row.setAttribute("tabindex","0");
+  // ---- Helpers ----
+  const norm = (v) => String(v ?? "").trim();
+  const low  = (v) => norm(v).toLowerCase();
 
-    // ✅ NYTT (a11y): markerar vilket block som är valt
-    row.setAttribute(
-      "aria-current",
-      (String(b.blockId) === String(STATE.selectedId)) ? "true" : "false"
-    );
+  function uniqSorted(arr){
+    const s = new Set(arr.map(norm).filter(Boolean));
+    return Array.from(s).sort((a,b) => a.localeCompare(b, "sv"));
+  }
 
-    const top = document.createElement("div");
-    top.className = "rowTop";
+  function asArray(x){
+    return Array.isArray(x) ? x : (x ? [x] : []);
+  }
 
-    const left = document.createElement("div");
+  // Minimal normalize for trainings (supports multiple shapes)
+  function normalizeTraining(raw){
+    const r = raw || {};
+    const title  = r.title ?? r.name ?? r.trainingTitle ?? r.label ?? "";
+    const module = r.module ?? r.modul ?? r.category ?? r.group ?? "";
+    const area   = r.area ?? r.omrade ?? r.section ?? "";
+    const id     = r.trainingId ?? r.id ?? r._id ?? r.key ?? "";
+    return {
+      _raw: r,
+      id: norm(id) || "",
+      title: norm(title) || "",
+      module: norm(module) || "",
+      area: norm(area) || ""
+    };
+  }
 
-    const title = document.createElement("div");
-    title.className = "rowTitle";
-    title.textContent = b.title || "—";
+  // ---- Source of trainings (prefer existing in-memory if present) ----
+  // Tries common places; if not found it reads AO-057_TRAININGS_V1 directly.
+  function readTrainings(){
+    // 1) If your page already keeps trainings in STATE, we reuse it.
+    try{
+      if(window.STATE){
+        const cand =
+          window.STATE.trainingsAll ||
+          window.STATE.trainings ||
+          window.STATE.allTrainings ||
+          null;
 
-    const sub = document.createElement("div");
-    sub.className = "tiny";
-    sub.textContent = `${b.module || "—"} • ${b.area || "—"}`;
-
-    left.appendChild(title);
-    left.appendChild(sub);
-
-    const right = document.createElement("div");
-    const st = normStatus(b.status);
-    const p = document.createElement("span");
-    p.className = "pill " + (st === "published" ? "ok" : "warn");
-    p.textContent = (st === "published") ? "Publicerad" : "Utkast";
-    right.appendChild(p);
-
-    top.appendChild(left);
-    top.appendChild(right);
-
-    row.appendChild(top);
-
-    function openIt(){
-      if(STATE.dirty){
-        if(!confirm("Du har osparade ändringar. Byta block ändå?")) return;
+        if(Array.isArray(cand) && cand.length){
+          return cand.map(normalizeTraining);
+        }
       }
-      selectBlock(b.blockId);
+    }catch{}
+
+    // 2) Fallback: read localStorage AO-057_TRAININGS_V1
+    try{
+      const key = "AO-057_TRAININGS_V1";
+      const raw = localStorage.getItem(key);
+      if(!raw) return [];
+      const parsed = JSON.parse(raw);
+
+      // Supports shapes: array OR wrapper with trainings/items/blocks/etc
+      const arr =
+        (Array.isArray(parsed) ? parsed : null) ||
+        (Array.isArray(parsed?.trainings) ? parsed.trainings : null) ||
+        (Array.isArray(parsed?.items) ? parsed.items : null) ||
+        (Array.isArray(parsed?.data) ? parsed.data : null) ||
+        [];
+
+      return arr.map(normalizeTraining);
+    }catch{
+      return [];
     }
-    row.addEventListener("click", openIt);
-    row.addEventListener("keydown", (e) => {
-      if(e.key === "Enter" || e.key === " "){ e.preventDefault(); openIt(); }
+  }
+
+  // ---- Render preview (uses existing renderer if present; else minimal) ----
+  function renderPreview(list){
+    // If your file already has a renderer we respect it
+    try{
+      if(typeof window.renderTrainingPreview === "function"){
+        window.renderTrainingPreview(list);
+        return;
+      }
+    }catch{}
+
+    // Minimal safe fallback rendering
+    preview.innerHTML = "";
+    if(!list.length){
+      const d = document.createElement("div");
+      d.className = "muted2";
+      d.textContent = "Inga träffar.";
+      preview.appendChild(d);
+      return;
+    }
+
+    list.slice(0, 200).forEach(t => {
+      const row = document.createElement("div");
+      row.className = "rowItem";
+      row.setAttribute("role","button");
+      row.setAttribute("tabindex","0");
+
+      const top = document.createElement("div");
+      top.className = "rowTop";
+
+      const left = document.createElement("div");
+
+      const title = document.createElement("div");
+      title.className = "rowTitle";
+      title.textContent = t.title || "—";
+
+      const sub = document.createElement("div");
+      sub.className = "tiny";
+      sub.textContent = `${t.module || "—"} • ${t.area || "—"}`;
+
+      left.appendChild(title);
+      left.appendChild(sub);
+
+      top.appendChild(left);
+      row.appendChild(top);
+
+      // If your page expects a selected training, we try to call a known hook
+      function pick(){
+        try{
+          if(typeof window.selectTrainingForExport === "function"){
+            window.selectTrainingForExport(t._raw);
+          }else{
+            // fallback: store on window for export button logic (if it checks it)
+            window.__TRAINING_SELECTED_FOR_EXPORT__ = t._raw;
+          }
+        }catch{}
+      }
+
+      row.addEventListener("click", pick);
+      row.addEventListener("keydown", (e) => {
+        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); pick(); }
+      });
+
+      preview.appendChild(row);
+    });
+  }
+
+  // ---- Populate module dropdown + area datalist ----
+  function getModuleValue(){
+    if(!elModule) return "";
+    const tag = String(elModule.tagName || "").toLowerCase();
+    if(tag === "select") return norm(elModule.value);
+    // fallback input
+    return norm(elModule.value);
+  }
+
+  function setModuleOptions(modules){
+    const tag = String(elModule.tagName || "").toLowerCase();
+    if(tag === "select"){
+      // Keep current selection if possible
+      const prev = norm(elModule.value);
+      elModule.innerHTML = "";
+
+      const optAll = document.createElement("option");
+      optAll.value = "";
+      optAll.textContent = "Alla moduler";
+      elModule.appendChild(optAll);
+
+      modules.forEach(m => {
+        const opt = document.createElement("option");
+        opt.value = m;
+        opt.textContent = m;
+        elModule.appendChild(opt);
+      });
+
+      // restore
+      const canRestore = prev && modules.includes(prev);
+      elModule.value = canRestore ? prev : "";
+    }else{
+      // If it's an input, keep legacy datalist populated (optional)
+      if(dlMods){
+        dlMods.innerHTML = "";
+        modules.forEach(m => {
+          const o = document.createElement("option");
+          o.value = m;
+          dlMods.appendChild(o);
+        });
+      }
+    }
+  }
+
+  function setAreaOptions(areas){
+    if(!dlAreas) return;
+    dlAreas.innerHTML = "";
+    areas.forEach(a => {
+      const o = document.createElement("option");
+      o.value = a;
+      dlAreas.appendChild(o);
+    });
+  }
+
+  // ---- Filtering ----
+  function filterTrainings(all){
+    const modSel = low(getModuleValue());         // dropdown or input
+    const areaQ  = low(elArea.value);
+    const freeQ  = low(elFree.value);
+
+    return all.filter(t => {
+      const tMod = low(t.module);
+      const tArea = low(t.area);
+      const tTitle = low(t.title);
+
+      if(modSel && tMod !== modSel) return false;     // exact match for dropdown value
+      if(areaQ && !tArea.includes(areaQ)) return false;
+      if(freeQ && !tTitle.includes(freeQ)) return false;
+      return true;
+    });
+  }
+
+  // ---- Main refresh ----
+  let ALL = readTrainings();
+
+  function refreshOptions(){
+    const modules = uniqSorted(ALL.map(x => x.module));
+    setModuleOptions(modules);
+
+    // Areas depend on selected module
+    const modSel = low(getModuleValue());
+    const areas = uniqSorted(
+      ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area)
+    );
+    setAreaOptions(areas);
+  }
+
+  function refreshList(){
+    // Always keep area options in sync with selected module
+    const modSel = low(getModuleValue());
+    const areas = uniqSorted(
+      ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area)
+    );
+    setAreaOptions(areas);
+
+    const filtered = filterTrainings(ALL);
+    renderPreview(filtered);
+  }
+
+  // ---- Bind ----
+  function bind(){
+    // module changes → reset area + refresh
+    elModule.addEventListener("change", () => {
+      try{ elArea.value = ""; }catch{}
+      refreshList();
+    });
+    elModule.addEventListener("input", () => { // supports input fallback
+      refreshList();
     });
 
-    blockList.appendChild(row);
-  });
-}
+    elArea.addEventListener("input", refreshList);
+    elFree.addEventListener("input", refreshList);
+  }
+
+  // ---- Initial ----
+  refreshOptions();
+  bind();
+  refreshList();
+
+  // Expose a tiny hook for "Uppdatera" button if you have one (optional)
+  window.__BLOCK13_RELOAD_TRAININGS__ = function(){
+    ALL = readTrainings();
+    refreshOptions();
+    refreshList();
+  };
+})();
 
   /* =========================================
      BLOCK 14/17 – Item editor logic (inkl. All info panel)
