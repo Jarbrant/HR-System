@@ -1,12 +1,11 @@
 <!-- ============================================================
-AO-ONBOARD-PLANS-UI-01 (PROD REWRITE v2.2 PATCH) | FIL-ID: admin/onboard-plans.html
+AO-ONBOARD-PLANS-UI-01 (PROD REWRITE v2.3 PATCH) | FIL-ID: admin/onboard-plans.html
 Projekt: HR-System
 Syfte: ADMIN – Onboarding Plans (AO-060) • Bygg plan genom att lägga till Trainings/Blocks i en Tidsaxel (enkel)
 
-PATCH v2.2 (enligt Anders):
-- Trainings: utbildningar som redan finns i vald plan markeras grönt + knapp låses ("Redan i plan").
-- Layout: hårdsäkrat lika breda kolumner (4x 1fr + min-width:0 överallt som behövs).
-- Plans: sökfunktion i "Befintliga planer" (filter på titel + id).
+PATCH v2.3 (BUGFIX Anders):
+- Blocks: robust auto-detektering av block-bank key i localStorage (read-only) om candidates inte matchar.
+- Fail-closed: om en explicit candidate-key finns men är korrupt -> stoppar block (som tidigare), men missade keys hittas via scan.
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -73,7 +72,7 @@ Keys (LÅST):
       padding: 14px;
       background: var(--card);
       box-shadow: var(--tileShadow);
-      min-width: 0; /* IMPORTANT: allow grid columns to stay equal */
+      min-width: 0;
     }
 
     .nav{ display:flex; flex-wrap:wrap; gap: 8px; align-items:center; }
@@ -147,10 +146,9 @@ Keys (LÅST):
     .ok{ border-left: 4px solid #0b7a0b; padding: 10px; background: #f4fff4; border-radius: 12px; }
     .warn{ border-left: 4px solid #b36b00; padding: 10px; background: #fff9f0; border-radius: 12px; }
 
-    /* ===== 4 KOLUMNER (lika stora) ===== */
     .grid4{
       display:grid;
-      grid-template-columns: 1fr 1fr 1fr 1fr; /* explicit, equal */
+      grid-template-columns: 1fr 1fr 1fr 1fr;
       gap: var(--gap);
       align-items:start;
       margin-top: 12px;
@@ -175,7 +173,6 @@ Keys (LÅST):
     }
     .item:hover{ border-color: var(--lineStrong); box-shadow: var(--tileShadowHover); }
 
-    /* v2.2: green marker for "already in plan" */
     .item.selected{
       border-color: var(--successLine);
       background: var(--successBg);
@@ -407,7 +404,6 @@ Keys (LÅST):
         <div class="muted">Klicka för att redigera</div>
       </div>
 
-      <!-- v2.2: plans search -->
       <div class="filtersStack" aria-label="Sök planer">
         <div>
           <label for="searchPlans">Sök plan</label>
@@ -483,11 +479,14 @@ Keys (LÅST):
   const PLANS_KEY = "AO-060_PLANS_V1";
 
   // Block-bank (read-only; auto-detektera)
+  // v2.3: ta bort placeholder och lägg till fler realistiska keys
   const BLOCKS_KEY_CANDIDATES = [
     "AO-062_BLOCKS_V1",
-    "AO-057_BLOCKS_V1",
+    "AO-061_BLOCKS_V1",
+    "AO-060_BLOCKS_V1",
+    "AO-059_BLOCKS_V1",
     "AO-058_BLOCKS_V1",
-    "AO-0XX_BLOCKS_V1"
+    "AO-057_BLOCKS_V1"
   ];
 
   // ============================
@@ -681,38 +680,81 @@ Keys (LÅST):
     return { ok:true, data: out };
   }
 
+  function isLikelyBlocksKey(key){
+    const k = String(key || "");
+    if (!k) return false;
+    if (k.indexOf("BLOCKS") === -1) return false;
+    // typiska mönster: AO-061_BLOCKS_V1, AO-062_BLOCKS_V2, etc.
+    if (/^AO-\d{3}_BLOCKS_V\d+$/i.test(k)) return true;
+    // fallback: accepterar andra "_BLOCKS_" varianter, men vi validerar innehållet innan vi använder
+    if (k.indexOf("_BLOCKS_") !== -1) return true;
+    return false;
+  }
+
+  function indexBlocksAndAreas(arr){
+    blocks = arr;
+    blocksById = Object.create(null);
+    blocksAreasByModule = Object.create(null);
+
+    for (let i = 0; i < arr.length; i++) {
+      const it = arr[i];
+      blocksById[it.blockId] = it;
+      const m = normStr(it.module);
+      const a = normStr(it.area);
+      if (m) {
+        if (!blocksAreasByModule[m]) blocksAreasByModule[m] = new Set();
+        if (a) blocksAreasByModule[m].add(a);
+      }
+    }
+  }
+
+  function tryLoadBlocksFromKey(key){
+    const res = safeParseLocalStorage(key);
+    if (!res.ok) return { ok:false, fatal:true, error:"Block-bank korrupt/oläsbar (" + key + ")" };
+    if (res.missing) return { ok:false, fatal:false, error:"MISSING" };
+
+    const cleaned = sanitizeBlocksArray(res.data);
+    if (!cleaned.ok) return { ok:false, fatal:true, error:"Block-bank fel format (" + key + ")" };
+
+    const allowed = cleaned.data.filter(b => b.status === "published");
+    blocksKeyUsed = key;
+    blocksOk = true;
+    indexBlocksAndAreas(allowed);
+    return { ok:true };
+  }
+
   function loadBlocks(){
     blocksOk = false; blocksKeyUsed = ""; blocks = []; blocksById = Object.create(null);
     blocksAreasByModule = Object.create(null);
 
-    for (let k = 0; k < BLOCKS_KEY_CANDIDATES.length; k++){
-      const key = BLOCKS_KEY_CANDIDATES[k];
-      const res = safeParseLocalStorage(key);
-
-      if (!res.ok) { blocksOk = false; blocksKeyUsed = key; return { ok:false, error:"Block-bank korrupt/oläsbar (" + key + ")" }; }
-      if (res.missing) continue;
-
-      const cleaned = sanitizeBlocksArray(res.data);
-      if (!cleaned.ok) { blocksOk = false; blocksKeyUsed = key; return { ok:false, error:"Block-bank fel format (" + key + ")" }; }
-
-      blocksKeyUsed = key;
-      const allowed = cleaned.data.filter(b => b.status === "published");
-      blocks = allowed;
-      blocksOk = true;
-
-      for (let i = 0; i < allowed.length; i++) {
-        blocksById[allowed[i].blockId] = allowed[i];
-        const m = normStr(allowed[i].module);
-        const a = normStr(allowed[i].area);
-        if (m) {
-          if (!blocksAreasByModule[m]) blocksAreasByModule[m] = new Set();
-          if (a) blocksAreasByModule[m].add(a);
-        }
-      }
-      return { ok:true };
+    // 1) Först: explicit candidates (fail-closed om någon av dessa finns men är korrupt)
+    for (let i = 0; i < BLOCKS_KEY_CANDIDATES.length; i++){
+      const key = BLOCKS_KEY_CANDIDATES[i];
+      const r = tryLoadBlocksFromKey(key);
+      if (r.ok) return { ok:true };
+      if (r.fatal) { blocksOk = false; blocksKeyUsed = key; return { ok:false, error:r.error }; }
+      // missing -> fortsätt
     }
 
-    return { ok:false, error:"Block-bank saknas (ingen key hittad)" };
+    // 2) Sen: scan localStorage efter annan blocks-key (read-only)
+    //    Vi använder bara en key som klarar sanitize + published-filter.
+    try{
+      const keys = Object.keys(localStorage || {});
+      for (let i = 0; i < keys.length; i++){
+        const key = keys[i];
+        if (!isLikelyBlocksKey(key)) continue;
+        if (BLOCKS_KEY_CANDIDATES.indexOf(key) !== -1) continue;
+
+        const r = tryLoadBlocksFromKey(key);
+        if (r.ok) return { ok:true };
+        // här: om den key vi hittade i scan är korrupt, vi fortsätter leta efter en annan som är valid.
+        // fail-closed gäller fortfarande: blocksOk förblir false om ingen valid hittas.
+      }
+    } catch {
+      // ignore
+    }
+
+    return { ok:false, error:"Block-bank saknas (ingen giltig key hittad)" };
   }
 
   function buildBlocksIndexById(){
@@ -1004,7 +1046,7 @@ Keys (LÅST):
   }
 
   // ============================
-  // FILTERS UI (stacked)
+  // FILTERS UI
   // ============================
   function opt(el, value, text){
     const o = document.createElement("option");
@@ -1506,7 +1548,7 @@ Keys (LÅST):
 
     currentPlan.items = sortAndRenumberItems(currentPlan.items);
     renderTimeline();
-    renderTrainingsList(); // v2.2: keep green markers in sync
+    renderTrainingsList();
   }
 
   function removeItem(index){
@@ -1514,7 +1556,7 @@ Keys (LÅST):
     currentPlan.items.splice(index, 1);
     currentPlan.items = sortAndRenumberItems(currentPlan.items);
     renderTimeline();
-    renderTrainingsList(); // v2.2: unlock + remove green marker
+    renderTrainingsList();
     renderBlocksList();
   }
 
@@ -1603,7 +1645,7 @@ Keys (LÅST):
 
     syncPlanFormFromState();
     renderTimeline();
-    renderTrainingsList(); // v2.2: apply green markers
+    renderTrainingsList();
     renderBlocksList();
   }
 
@@ -1760,7 +1802,7 @@ Keys (LÅST):
     setStatus("ok", "Ny plan skapad (ej sparad än).");
     syncPlanFormFromState();
     renderTimeline();
-    renderTrainingsList(); // v2.2: markers refresh
+    renderTrainingsList();
     renderBlocksList();
   }
 
@@ -1837,7 +1879,6 @@ Keys (LÅST):
     filterBlockArea.addEventListener("change", renderBlocksList);
     searchBlockTitle.addEventListener("input", renderBlocksList);
 
-    // v2.2: plan search
     searchPlans.addEventListener("input", renderPlansList);
   }
 
@@ -1848,17 +1889,17 @@ Keys (LÅST):
 
 <!-- ============================================================
 Ändringslogg (≤ 8 rader)
-- v2.2: Trainings markerar grönt om utbildning redan finns i vald plan (låser knappen).
-- v2.2: Hårdsäkrat lika breda kolumner (min-width:0 + explicit 1fr x4).
-- v2.2: Sök i “Befintliga planer” (titel/id).
+- v2.3: Blocks auto-scan i localStorage efter giltig *_BLOCKS_* key om candidates inte matchar.
+- v2.3: Kandidatlista uppdaterad (tog bort placeholder AO-0XX, la till AO-061/AO-060 etc).
+- v2.3: Read-only och schema-guard kvar: sanitize + published-filter krävs innan block visas/används.
 ============================================================ -->
 
 <!-- ============================================================
 Testnoteringar (exakta klicksteg)
-1) Skapa/välj plan. Lägg till en utbildning.
-2) Gå tillbaka till kolumn 1 → samma utbildning ska vara grön + “Redan i plan” + knapp låst.
-3) Ta bort utbildningen i tidsaxeln → grön markering försvinner, knappen blir aktiv igen.
-4) Kolumn 4 → skriv i sök (del av titel eller id) → listan filtreras direkt.
+1) Öppna sidan → kontrollera Kolumn 3 “Block-bank: OK (DIN_KEY)” om block finns i localStorage.
+2) Välj modul i kolumn 3 → block ska lista sig.
+3) Klicka “+ Lägg till” på ett block → ska hamna i tidsaxeln.
+4) Spara plan → ska lyckas om blockId finns i den hittade block-banken.
 ============================================================ -->
 </body>
 </html>
