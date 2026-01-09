@@ -1613,6 +1613,7 @@ POLICY (LÅST):
   const dlAreas  = document.getElementById("dlTrainAreas");   // DATALIST (areas)
   const dlMods   = document.getElementById("dlTrainModules"); // DATALIST (legacy, optional)
   const preview  = document.getElementById("trainPreview");
+  const btnReload = document.getElementById("btnReloadTrainings"); // exists in BLOCK 5
 
   // If these are missing we fail-closed (but we do NOT crash the page)
   if(!preview || !elModule || !elArea || !elFree){
@@ -1629,17 +1630,24 @@ POLICY (LÅST):
     return Array.from(s).sort((a,b) => a.localeCompare(b, "sv"));
   }
 
-  function asArray(x){
-    return Array.isArray(x) ? x : (x ? [x] : []);
-  }
-
-  // Minimal normalize for trainings (supports multiple shapes)
+  // More tolerant normalize for trainings (supports multiple shapes/fieldnames)
   function normalizeTraining(raw){
     const r = raw || {};
-    const title  = r.title ?? r.name ?? r.trainingTitle ?? r.label ?? "";
-    const module = r.module ?? r.modul ?? r.category ?? r.group ?? "";
-    const area   = r.area ?? r.omrade ?? r.section ?? "";
-    const id     = r.trainingId ?? r.id ?? r._id ?? r.key ?? "";
+    const meta = (r.meta && typeof r.meta === "object") ? r.meta : {};
+    const title  =
+      r.title ?? r.name ?? r.trainingTitle ?? r.label ?? meta.title ?? meta.name ?? "";
+
+    const module =
+      r.module ?? r.modul ?? r.moduleName ?? r.modulName ?? r.category ?? r.group ??
+      meta.module ?? meta.modul ?? meta.moduleName ?? meta.modulName ?? "";
+
+    const area   =
+      r.area ?? r.omrade ?? r.areaName ?? r.section ??
+      meta.area ?? meta.omrade ?? meta.areaName ?? "";
+
+    const id     =
+      r.trainingId ?? r.id ?? r._id ?? r.key ?? meta.id ?? meta.trainingId ?? "";
+
     return {
       _raw: r,
       id: norm(id) || "",
@@ -1649,16 +1657,16 @@ POLICY (LÅST):
     };
   }
 
-  // ---- Source of trainings (prefer existing in-memory if present) ----
-  // Tries common places; if not found it reads AO-057_TRAININGS_V1 directly.
+  // ---- Source of trainings ----
   function readTrainings(){
-    // 1) If your page already keeps trainings in STATE, we reuse it.
+    // 1) Prefer in-memory if present
     try{
       if(window.STATE){
         const cand =
           window.STATE.trainingsAll ||
           window.STATE.trainings ||
           window.STATE.allTrainings ||
+          window.STATE._trainings ||
           null;
 
         if(Array.isArray(cand) && cand.length){
@@ -1674,12 +1682,13 @@ POLICY (LÅST):
       if(!raw) return [];
       const parsed = JSON.parse(raw);
 
-      // Supports shapes: array OR wrapper with trainings/items/blocks/etc
+      // Supports shapes: array OR wrapper
       const arr =
         (Array.isArray(parsed) ? parsed : null) ||
         (Array.isArray(parsed?.trainings) ? parsed.trainings : null) ||
         (Array.isArray(parsed?.items) ? parsed.items : null) ||
         (Array.isArray(parsed?.data) ? parsed.data : null) ||
+        (Array.isArray(parsed?.blocks) ? parsed.blocks : null) ||   // <-- extra shape
         [];
 
       return arr.map(normalizeTraining);
@@ -1688,7 +1697,7 @@ POLICY (LÅST):
     }
   }
 
-  // ---- Render preview (uses existing renderer if present; else minimal) ----
+  // ---- Render preview ----
   function renderPreview(list){
     // If your file already has a renderer we respect it
     try{
@@ -1733,13 +1742,11 @@ POLICY (LÅST):
       top.appendChild(left);
       row.appendChild(top);
 
-      // If your page expects a selected training, we try to call a known hook
       function pick(){
         try{
           if(typeof window.selectTrainingForExport === "function"){
             window.selectTrainingForExport(t._raw);
           }else{
-            // fallback: store on window for export button logic (if it checks it)
             window.__TRAINING_SELECTED_FOR_EXPORT__ = t._raw;
           }
         }catch{}
@@ -1758,15 +1765,12 @@ POLICY (LÅST):
   function getModuleValue(){
     if(!elModule) return "";
     const tag = String(elModule.tagName || "").toLowerCase();
-    if(tag === "select") return norm(elModule.value);
-    // fallback input
     return norm(elModule.value);
   }
 
   function setModuleOptions(modules){
     const tag = String(elModule.tagName || "").toLowerCase();
     if(tag === "select"){
-      // Keep current selection if possible
       const prev = norm(elModule.value);
       elModule.innerHTML = "";
 
@@ -1782,11 +1786,8 @@ POLICY (LÅST):
         elModule.appendChild(opt);
       });
 
-      // restore
-      const canRestore = prev && modules.includes(prev);
-      elModule.value = canRestore ? prev : "";
+      elModule.value = (prev && modules.includes(prev)) ? prev : "";
     }else{
-      // If it's an input, keep legacy datalist populated (optional)
       if(dlMods){
         dlMods.innerHTML = "";
         modules.forEach(m => {
@@ -1810,7 +1811,7 @@ POLICY (LÅST):
 
   // ---- Filtering ----
   function filterTrainings(all){
-    const modSel = low(getModuleValue());         // dropdown or input
+    const modSel = low(getModuleValue());
     const areaQ  = low(elArea.value);
     const freeQ  = low(elFree.value);
 
@@ -1819,7 +1820,7 @@ POLICY (LÅST):
       const tArea = low(t.area);
       const tTitle = low(t.title);
 
-      if(modSel && tMod !== modSel) return false;     // exact match for dropdown value
+      if(modSel && tMod !== modSel) return false;
       if(areaQ && !tArea.includes(areaQ)) return false;
       if(freeQ && !tTitle.includes(freeQ)) return false;
       return true;
@@ -1830,54 +1831,59 @@ POLICY (LÅST):
   let ALL = readTrainings();
 
   function refreshOptions(){
-    const modules = uniqSorted(ALL.map(x => x.module));
+    const modules = uniqSorted(ALL.map(x => x.module).filter(Boolean));
     setModuleOptions(modules);
 
-    // Areas depend on selected module
     const modSel = low(getModuleValue());
     const areas = uniqSorted(
-      ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area)
+      ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area).filter(Boolean)
     );
     setAreaOptions(areas);
   }
 
   function refreshList(){
-    // Always keep area options in sync with selected module
     const modSel = low(getModuleValue());
     const areas = uniqSorted(
-      ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area)
+      ALL.filter(x => !modSel || low(x.module) === modSel).map(x => x.area).filter(Boolean)
     );
     setAreaOptions(areas);
 
-    const filtered = filterTrainings(ALL);
-    renderPreview(filtered);
+    renderPreview(filterTrainings(ALL));
+  }
+
+  function reloadAll(){
+    ALL = readTrainings();
+    refreshOptions();
+    refreshList();
   }
 
   // ---- Bind ----
   function bind(){
-    // module changes → reset area + refresh
     elModule.addEventListener("change", () => {
       try{ elArea.value = ""; }catch{}
       refreshList();
     });
-    elModule.addEventListener("input", () => { // supports input fallback
-      refreshList();
-    });
-
+    elModule.addEventListener("input", () => { refreshList(); }); // supports input fallback
     elArea.addEventListener("input", refreshList);
     elFree.addEventListener("input", refreshList);
+
+    // Important: hook the "Uppdatera" button so dropdown fills even if trainings load later
+    if(btnReload){
+      btnReload.addEventListener("click", () => reloadAll());
+    }
   }
 
   // ---- Initial ----
-  refreshOptions();
+  reloadAll();
   bind();
-  refreshList();
 
-  // Expose a tiny hook for "Uppdatera" button if you have one (optional)
+  // Late refresh (covers cases where other code fills STATE after our first run)
+  setTimeout(() => { try{ reloadAll(); }catch{} }, 250);
+  setTimeout(() => { try{ reloadAll(); }catch{} }, 1200);
+
+  // Optional external hook
   window.__BLOCK13_RELOAD_TRAININGS__ = function(){
-    ALL = readTrainings();
-    refreshOptions();
-    refreshList();
+    reloadAll();
   };
 })();
 
