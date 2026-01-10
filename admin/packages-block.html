@@ -1176,39 +1176,46 @@ POLICY (LÅST):
 
 })();
 </script>
-
-  /* =========================================
+<!-- =========================================
      BLOCK 12/17 – STATE + lock/dirty + pills
-     ========================================= */
+     ========================================= -->
 <script>
 /* =========================================================
-   AO-12 — BLOCK 12/17
-   STATE-optimering: selectedBlock / selectedItem / item-dirty
+   AO-12 — BLOCK 12/17 (PROD)
+   STATE – EN källa för:
+   - selectedBlock
+   - selectedItem
+   - selectedItemType
+   - dirty per item + block
    UI-only • fail-closed • inga nya storage-keys
    ========================================================= */
 
+"use strict";
+
+/* =========================
+   STATE (EN källa)
+   ========================= */
 const STATE = {
   locked: false,
   lockReasons: [],
 
-  // Blocklistor
+  // Blockdata
   all: [],
   visible: [],
 
-  // Selektion (EN källa)
+  // Selektion
   selectedBlock: "",          // blockId
   selectedItem: null,         // itemId | null
-  selectedItemType: "",       // "document" | "question" | "task" | ""
+  selectedItemType: "",       // document | question | task | ""
 
-  // Edit-state
+  // Edit
   edit: null,                 // aktivt block (normaliserat)
-  rawSelected: null,
 
-  // Dirty (inkrementell)
+  // Dirty
   dirtyBlock: false,
-  dirtyItems: {},             // { [itemId]: true }
+  dirtyItems: Object.create(null),
 
-  // Trainings (oförändrat)
+  // Trainings (read-path)
   trainingsOk: true,
   trainingsCorrupt: false,
   trainingsMissing: false,
@@ -1217,12 +1224,13 @@ const STATE = {
   trainingVisibleIndexes: []
 };
 
-// --------- helpers: ids & typer ----------
+/* =========================
+   Helpers: item-id & type
+   ========================= */
 function getItemIdSafe(it){
   if(!it || typeof it !== "object") return "";
   if(it.kind === "question") return String(it.questionId || "");
   if(it.kind === "task") return String(it.taskId || "");
-  // document saknar id → stabil pseudo-id baserat på index sätts vid selection
   return String(it._docId || "");
 }
 
@@ -1231,20 +1239,27 @@ function getItemTypeSafe(it){
   return (k === "document" || k === "question" || k === "task") ? k : "";
 }
 
-// --------- selection ----------
+/* =========================
+   Selection
+   ========================= */
 function selectBlock(block){
   if(!block || typeof block !== "object"){
     STATE.selectedBlock = "";
     STATE.edit = null;
     resetItemSelection();
+    resetDirtyForBlock();
+    updateDirtyUI();
     return;
   }
+
   STATE.selectedBlock = String(block.blockId || "");
   STATE.edit = block;
+
   resetItemSelection();
   resetDirtyForBlock();
-  setSelectionPill();
-  updatePublishButton();
+
+  if(typeof setSelectionPill === "function") setSelectionPill();
+  updateDirtyUI();
 }
 
 function selectItem(it, index){
@@ -1253,7 +1268,7 @@ function selectItem(it, index){
     return;
   }
 
-  // säkerställ stabilt id för document
+  // stabilt pseudo-id för document
   if(it.kind === "document" && !it._docId){
     it._docId = "doc_" + String(index);
   }
@@ -1267,9 +1282,10 @@ function resetItemSelection(){
   STATE.selectedItemType = "";
 }
 
-// --------- dirty per item ----------
+/* =========================
+   Dirty (inkrementell)
+   ========================= */
 function markItemDirty(it){
-  if(!it) return;
   const id = getItemIdSafe(it);
   if(!id) return;
 
@@ -1279,7 +1295,6 @@ function markItemDirty(it){
 }
 
 function clearItemDirty(it){
-  if(!it) return;
   const id = getItemIdSafe(it);
   if(!id) return;
 
@@ -1289,36 +1304,48 @@ function clearItemDirty(it){
 }
 
 function resetDirtyForBlock(){
-  STATE.dirtyItems = {};
+  STATE.dirtyItems = Object.create(null);
   STATE.dirtyBlock = false;
-  updateDirtyUI();
 }
 
-// --------- UI koppling (ersätter setDirty) ----------
+/* =========================
+   UI – pills & actions
+   ========================= */
 function updateDirtyUI(){
   const isDirty = STATE.dirtyBlock === true;
-
-  elState.textContent = isDirty ? "Status: Osparade ändringar" : "Status: OK";
-  elState.className = "pill " + (isDirty ? "warn" : "ok");
-
   const canWrite = (!STATE.locked && !isSystemAdmin);
-  btnSave.disabled = !(canWrite && isDirty && STATE.edit);
 
-  // Edit är fokus-hjälp
-  btnEdit.disabled = !STATE.edit;
+  if(typeof elState !== "undefined"){
+    elState.textContent = isDirty ? "Status: Osparade ändringar" : "Status: OK";
+    elState.className = "pill " + (isDirty ? "warn" : "ok");
+  }
+
+  if(typeof btnSave !== "undefined"){
+    btnSave.disabled = !(canWrite && isDirty && STATE.edit);
+  }
+
+  if(typeof btnEdit !== "undefined"){
+    btnEdit.disabled = !STATE.edit;
+  }
 
   updatePublishButton();
 }
 
-// --------- publish-logik (använder item-dirty) ----------
+/* =========================
+   Publish-logik
+   ========================= */
 function updatePublishButton(){
+  if(typeof btnPublish === "undefined") return;
+
   const b = STATE.edit;
   const canWrite = (!STATE.locked && !isSystemAdmin);
 
   if(!b || !canWrite){
     btnPublish.disabled = true;
     btnPublish.textContent = "Publicera";
-    btnPublish.title = isSystemAdmin ? "Steward-läge (read-only)." : "Välj ett block först.";
+    btnPublish.title = isSystemAdmin
+      ? "Steward-läge (read-only)."
+      : "Välj ett block först.";
     return;
   }
 
@@ -1330,52 +1357,62 @@ function updatePublishButton(){
   }
 
   const st = normStatus(b.status || "draft");
-  btnPublish.textContent = (st === "published") ? "Publicera uppdatering" : "Publicera";
+  btnPublish.textContent =
+    (st === "published") ? "Publicera uppdatering" : "Publicera";
 
-  const chk = validateForPublish(b);
-  if(!chk.ok){
-    btnPublish.disabled = true;
-    btnPublish.title = "Kan inte publicera: " + chk.reasons.join(" ");
-    return;
+  if(typeof validateForPublish === "function"){
+    const chk = validateForPublish(b);
+    if(!chk.ok){
+      btnPublish.disabled = true;
+      btnPublish.title = "Kan inte publicera: " + chk.reasons.join(" ");
+      return;
+    }
   }
 
   btnPublish.disabled = false;
-  btnPublish.title = (st === "published")
-    ? "Publicera uppdatering: uppdaterar verifiering."
-    : "Publicera: status=published + verifiering.";
+  btnPublish.title =
+    (st === "published")
+      ? "Publicera uppdatering: uppdaterar verifiering."
+      : "Publicera: status=published + verifiering.";
 }
 
-// --------- lock ----------
+/* =========================
+   Lock / mode
+   ========================= */
 function setModePill(){
+  if(typeof elMode === "undefined") return;
+
   if(STATE.locked){
     elMode.textContent = "Läge: Låst (för säkerhet)";
     elMode.className = "pill bad";
     return;
   }
+
   if(isSystemAdmin){
     elMode.textContent = "Läge: Steward (read-only)";
     elMode.className = "pill warn";
     return;
   }
+
   elMode.textContent = "Läge: Editor";
   elMode.className = "pill ok";
 }
 
 function applyLockFromState(){
   STATE.locked = (STATE.lockReasons.length > 0);
-  showLockBox(STATE.lockReasons);
+  if(typeof showLockBox === "function"){
+    showLockBox(STATE.lockReasons);
+  }
   setModePill();
   updateDirtyUI();
 }
 </script>
 
+
   /* =========================================
      BLOCK 13/17 – Block list render + selection (RESTORED CORE)
      ========================================= */
  
-<!-- /* =========================================
-   BLOCK 1/17 – AO-header + policy (MASTER)
-   ========================================= */ -->
 <!-- ============================================================
 AO-BLOCK-PIPELINE-01 (MASTER) | BLOCK 2/5 | FIL-ID: admin/packages-block.html
 Projekt: HR-System
