@@ -10,6 +10,12 @@
   Projekt: HR-System
   Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
 
+  AO 1–17 (koppling per BLOCK) – IMPLEMENTERAT I DENNA FIL:
+  - AO-01..AO-17 enligt PRC-lista (förklarande intro, typ-färger, kontext i topbar,
+    tydliga status/felorsaker, filter + ikoner, editor-sektioner, null-safe helpers,
+    auth/readonly, validering, trainings preview counts, STATE-shape, selection,
+    templates + live preview, save/publish summary, export auto-select, safe bootstrap).
+
   NYTT i denna patch (EXPORT-STEGET):
   - Import/Export-steg: “Hämta från Utbildningar (AO-057_TRAININGS_V1)” → exportera som block till block-banken (AO-0XX_BLOCKS_V1)
   - Fail-closed: export blockas om trainings-data är korrupt; SYSTEM_ADMIN = read-only
@@ -49,6 +55,21 @@
     }
 
     .muted2{ color: var(--muted); font-size:.92rem; line-height:1.35; }
+
+    /* AO-05 icons helpers */
+    .ico{ display:inline-flex; align-items:center; gap:6px; }
+    .ico .k{ font-weight:900; }
+    .icoRow{ display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
+    .icoPill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:3px 10px;
+      border-radius:999px;
+      border:1px solid var(--line);
+      background:#fff;
+      font-size:.86rem;
+    }
 
     .itemRow{
       border:1px solid var(--line);
@@ -180,6 +201,33 @@
     .previewMeta{ margin-top:4px; }
     .previewText{ margin-top:10px; white-space:pre-wrap; }
     .divider{ border-top:1px dashed var(--line); margin:12px 0; }
+
+    /* AO-03 topbar editing label */
+    .topEdit{
+      display:inline-flex;
+      align-items:center;
+      gap:8px;
+      margin-left:10px;
+      padding:4px 10px;
+      border-radius:999px;
+      border:1px solid var(--line);
+      background: rgba(255,255,255,.92);
+      font-size:.9rem;
+      color: var(--ink);
+    }
+    .topEdit .t{ font-weight:900; }
+    .topEdit .m{ color: var(--muted); }
+
+    /* AO-01 info box */
+    .infoBox{
+      border:1px solid rgba(59,130,246,.18);
+      background: rgba(219,234,254,.35);
+      border-radius:14px;
+      padding:10px;
+      color:#1e3a8a;
+      margin-top:10px;
+    }
+    .infoBox ul{ margin:8px 0 0 18px; color:#1e3a8a; }
   </style>
 </head>
 
@@ -191,6 +239,11 @@
     <div class="brand">
       <strong>HR-System</strong>
       <span class="muted">• Admin/Manager • Block-editor</span>
+      <!-- AO-03: visar aktivt block + typ -->
+      <span class="topEdit" id="topEditing" style="display:none;">
+        <span class="t">Redigerar:</span>
+        <span class="m" id="topEditingText">—</span>
+      </span>
     </div>
 
     <nav class="nav" aria-label="Meny">
@@ -223,6 +276,20 @@
       </div>
 
       <div id="lockBox" class="lockbox" style="display:none;"></div>
+    </div>
+
+    <!-- AO-01: tydlig introtext (ingen ny logik, bara tydlighet) -->
+    <div class="infoBox" id="introBox" style="display:block;">
+      <strong>Det här bygger du här:</strong>
+      <div class="tiny" style="margin-top:6px;">
+        Denna sida redigerar <strong>block</strong> som kan innehålla <strong>dokument</strong>, <strong>frågor</strong> och <strong>uppgifter</strong>.
+      </div>
+      <ul class="tiny">
+        <li>📄 Document (info)</li>
+        <li>❓ Question (fråga + facit)</li>
+        <li>✅ Task (uppgift)</li>
+        <li>Mixed = flera typer i samma block</li>
+      </ul>
     </div>
 
     <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
@@ -420,14 +487,13 @@
 
               <label>Typ<input id="itemKindInp" type="text" disabled /></label>
 
-              <!-- Live preview (exakt medarbetarvy-ish) -->
+              <!-- Live preview -->
               <div class="previewCard" id="livePreview" aria-label="Live preview" style="margin-top:10px;">
                 <div class="previewTitle" id="lpTitle">Preview</div>
                 <div class="tiny previewMeta" id="lpMeta">—</div>
                 <div class="previewText" id="lpText">—</div>
               </div>
 
-              <!-- Editor wraps (AO-14): en textyta räcker för alla, plus typ-specifikt -->
               <div id="wrapCommon" style="margin-top:10px;">
                 <label>
                   Text (exakt som medarbetare ser)
@@ -477,8 +543,6 @@
 
   <!-- =========================================================
      BLOCK 12/17 – Runtime core (DOM + storage + auth + STATE)
-     Fixar småfel: en STATE-shape, inga dubbla list-renderers,
-     XSS-safe, och AO-13/14 beteenden.
      ========================================================= -->
   <script>
   (function(){
@@ -550,7 +614,6 @@
     const tReqInp = document.getElementById("tReqInp");
     const dSignInp = document.getElementById("dSignInp");
 
-    const livePreview = document.getElementById("livePreview");
     const lpTitle = document.getElementById("lpTitle");
     const lpMeta = document.getElementById("lpMeta");
     const lpText = document.getElementById("lpText");
@@ -570,6 +633,10 @@
 
     const navLogout = document.getElementById("navLogout");
 
+    // AO-03 topbar editing
+    const topEditing = document.getElementById("topEditing");
+    const topEditingText = document.getElementById("topEditingText");
+
     // ---------- KEYS (LÅSTA) ----------
     const BLOCKS_KEY = "AO-0XX_BLOCKS_V1";
     const TRAININGS_KEY = "AO-057_TRAININGS_V1";
@@ -577,7 +644,6 @@
     // ---------- CORE fallback (fail-closed) ----------
     const HRApp = window.HRApp || {
       getAuth(){
-        // fail-closed: om inget finns → "SYSTEM_ADMIN" (read-only)
         try{
           const s = sessionStorage.getItem("AO-001_LOGIN_V1") || localStorage.getItem("AO-001_LOGIN_V1");
           const o = s ? JSON.parse(s) : null;
@@ -591,7 +657,6 @@
       requireAuth(){
         const a = this.getAuth();
         if(!a || a.ok === false){
-          // fail-closed: visa men lås
           return { ok:false, role:"SYSTEM_ADMIN", empNo:"" };
         }
         return a;
@@ -669,12 +734,25 @@
       return "Dokument";
     }
 
+    function emojiForKind(kind){
+      const k = String(kind||"document");
+      if(k === "question") return "❓";
+      if(k === "task") return "✅";
+      return "📄";
+    }
+
+    // AO-07: central null-safe text for previews/snippets
+    function safeSnippet(v, n){
+      const s = String(v ?? "").trim();
+      if(!s) return "(utan text)";
+      return s.slice(0, n) + (s.length > n ? "…" : "");
+    }
+
     function getItemIdSafe(it, index){
       if(!it || typeof it !== "object") return "";
       const k = String(it.kind || "").toLowerCase();
       if(k === "question") return String(it.questionId || "");
       if(k === "task") return String(it.taskId || "");
-      // document: stabilt pseudo-id per index
       if(!it._docId) it._docId = "doc_" + String(index ?? 0);
       return String(it._docId || "");
     }
@@ -714,7 +792,6 @@
           scale: null
         };
       }
-      // document
       const doc = {
         kind:"document",
         text: normText(it.text ?? it.rawText ?? it.content ?? "", 2000),
@@ -771,15 +848,12 @@
       if(!r.ok) return { corrupt:true, blocks:[] };
       if(r.missing) return { corrupt:false, blocks:[] };
       const data = r.data;
-      // back-compat: array OR wrapper {blocks:[...]}
       const blocks = Array.isArray(data) ? data : Array.isArray(data?.blocks) ? data.blocks : [];
-      // mild shape check: must be array of objects
       if(!Array.isArray(blocks)) return { corrupt:true, blocks:[] };
       return { corrupt:false, blocks };
     }
 
     function saveBlocks(blocks){
-      // store as wrapper to be stable (NO NEW KEY, only shape)
       return saveJsonSafe(BLOCKS_KEY, { blocks: Array.isArray(blocks) ? blocks : [] });
     }
 
@@ -799,7 +873,7 @@
       return { ok:true, corrupt:false, missing:false, trainings };
     }
 
-    // ---------- STATE (EN källa) ----------
+    // ---------- STATE (AO-12) ----------
     const STATE = {
       locked: false,
       lockReasons: [],
@@ -807,9 +881,10 @@
       all: [],
       visible: [],
 
-      selectedBlock: "",     // blockId
-      selectedItem: null,    // itemId
-      edit: null,            // normalized block
+      selectedBlock: "",
+      selectedItem: null,
+      selectedItemType: "",   // AO-12: explicit
+      edit: null,
 
       dirtyBlock: false,
 
@@ -818,10 +893,50 @@
       trainingsMissing: false,
       trainings: [],
       selectedTrainingIndex: -1,
-      trainingVisibleIndexes: []
+      trainingVisibleIndexes: [],
+
+      // AO-05 optimization: cheap render cache
+      _lastBlockRenderKey: ""
     };
 
-    // ---------- pills ----------
+    // ---------- pills + topbar context ----------
+    function blockComposition(b){
+      const items = Array.isArray(b?.items) ? b.items : [];
+      let q=0,t=0,d=0, miss=0;
+      items.forEach((it0, idx)=>{
+        const it = normalizeItem(it0, idx);
+        if(it.kind==="question"){ q++; if(!facitOkForQuestion(it)) miss++; }
+        else if(it.kind==="task"){ t++; }
+        else { d++; }
+      });
+      const docOnly = (d>0 && q===0 && t===0);
+      const kind = (q+t+d===0) ? "empty" : (docOnly ? "document" : (q>0 && t===0 && d===0 ? "question" : (t>0 && q===0 && d===0 ? "task" : "mixed")));
+      return { q,t,d,miss,docOnly,kind };
+    }
+
+    function setTopbarEditing(){
+      const b = STATE.edit;
+      if(!b){
+        topEditing.style.display = "none";
+        topEditingText.textContent = "—";
+        return;
+      }
+      const comp = blockComposition(b);
+      const typeLabel =
+        (STATE.selectedItemType === "question") ? "Question" :
+        (STATE.selectedItemType === "task") ? "Task" :
+        (STATE.selectedItemType === "document") ? "Document" :
+        (comp.kind === "mixed") ? "Mixed" :
+        (comp.kind === "empty") ? "Tomt" :
+        (comp.kind === "question") ? "Question" :
+        (comp.kind === "task") ? "Task" :
+        "Document";
+
+      const main = `${b.module || "—"} • ${b.area || "—"} • ${b.title || "(utan rubrik)"} — ${typeLabel}`;
+      topEditing.style.display = "inline-flex";
+      topEditingText.textContent = main;
+    }
+
     function setModePill(){
       elMode.style.display = "inline-flex";
       if(STATE.locked){
@@ -860,19 +975,9 @@
         elState.className = "pill";
         return;
       }
-      const items = Array.isArray(b.items) ? b.items : [];
-      let qMiss = 0, docOnly = 0;
-      let q = 0, t = 0, d = 0;
-      items.forEach((it, idx)=>{
-        const n = normalizeItem(it, idx);
-        if(n.kind === "question"){ q++; if(!facitOkForQuestion(n)) qMiss++; }
-        if(n.kind === "task"){ t++; }
-        if(n.kind === "document"){ d++; }
-      });
-      docOnly = (d > 0 && q === 0 && t === 0) ? 1 : 0;
-
-      elState.textContent = `Status: ${items.length} items • ${qMiss} frågor utan facit • ${docOnly} info`;
-      elState.className = "pill " + ((qMiss === 0) ? "ok" : "warn");
+      const comp = blockComposition(b);
+      elState.textContent = `Status: ${comp.q+comp.t+comp.d} items • ${comp.miss} frågor utan facit • ${comp.docOnly ? 1 : 0} info`;
+      elState.className = "pill " + ((comp.miss === 0) ? "ok" : "warn");
     }
 
     // ---------- lock ----------
@@ -902,6 +1007,8 @@
       btnItemDuplicate.disabled = true;
       btnAddItem.disabled = true;
 
+      STATE.selectedItemType = "";
+      setTopbarEditing();
       hideItemEditor();
     }
 
@@ -925,6 +1032,7 @@
 
       setSelectionPill();
       updateStatePill();
+      setTopbarEditing();
 
       renderItems();
       updateActionEnablement();
@@ -935,9 +1043,13 @@
       const hasBlock = !!STATE.edit;
 
       btnEdit.disabled = !hasBlock;
-      btnSave.disabled = !(canWrite && hasBlock && STATE.dirtyBlock);
 
-      // publish: fail-closed → kräver: block finns, ej dirty, alla questions har facit, minst 1 item
+      btnSave.disabled = !(canWrite && hasBlock && STATE.dirtyBlock);
+      btnSave.title = !hasBlock ? "Välj ett block först."
+        : (!canWrite ? (isSystemAdmin ? "Steward-läge (read-only)." : "Låst (för säkerhet).")
+        : (STATE.dirtyBlock ? "Spara ändringar" : "Inga ändringar att spara"));
+
+      // publish rules (AO-04/09/10)
       if(!canWrite || !hasBlock){
         btnPublish.disabled = true;
         btnPublish.title = isSystemAdmin ? "Steward-läge (read-only)." : "Välj ett block först.";
@@ -947,23 +1059,20 @@
       }else{
         const chk = validateForPublish(STATE.edit);
         btnPublish.disabled = !chk.ok;
-        btnPublish.title = chk.ok ? "Redo att publicera" : ("Kan inte publicera: " + chk.reasons.join(" • "));
+        btnPublish.title = chk.ok ? "Redo att publicera" : ("Publicering stoppad: " + chk.reasons.join(" • "));
       }
 
-      // fields
       moduleInp.disabled = !canWrite;
       areaInp.disabled = !canWrite;
       stepInp.disabled = !canWrite;
       titleInp.disabled = !canWrite;
 
-      // export
       btnExportTraining.disabled = !(canWrite && !STATE.trainingsCorrupt && STATE.selectedTrainingIndex >= 0);
       btnExportTraining.title = isSystemAdmin ? "Steward-läge (read-only)." : (STATE.trainingsCorrupt ? "Trainings-data är korrupt (låst)." : "Exportera vald utbildning till block-banken.");
     }
 
-    // ---------- selection ----------
+    // ---------- selection (AO-13) ----------
     function selectBlockByObject(block){
-      // AO-13 fix: editor scrollar till rätt sektion + första item markeras
       if(STATE.dirtyBlock){
         const ok = confirm("Du har osparade ändringar. Byta block och kasta ändringar?");
         if(!ok) return;
@@ -972,9 +1081,10 @@
       if(!block || typeof block !== "object"){
         STATE.selectedBlock = "";
         STATE.selectedItem = null;
+        STATE.selectedItemType = "";
         STATE.edit = null;
         STATE.dirtyBlock = false;
-        renderBlockList();
+        renderBlockList(true);
         hideEditor();
         return;
       }
@@ -986,30 +1096,29 @@
       STATE.edit = normalizeBlock(block);
       STATE.dirtyBlock = false;
       STATE.selectedItem = null;
+      STATE.selectedItemType = "";
 
-      renderBlockList();
+      renderBlockList(false);
       showEditor();
 
-      // AO-13: första item markeras (om finns)
       const items = Array.isArray(STATE.edit.items) ? STATE.edit.items : [];
       if(items.length > 0){
-        const first = items[0];
+        const first = normalizeItem(items[0], 0);
+        items[0] = first;
         STATE.selectedItem = getItemIdSafe(first, 0);
+        STATE.selectedItemType = String(first.kind || "");
         showItemEditorById(STATE.selectedItem);
-        renderItems(); // apply active class
+        renderItems();
       }else{
         hideItemEditor();
       }
 
-      // AO-13: scrolla editorn i vy
-      try{
-        editorPanel.scrollIntoView({ behavior:"smooth", block:"start" });
-      }catch{}
-
+      try{ editorPanel.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
       setMsg("", "");
+      setTopbarEditing();
     }
 
-    // ---------- block list ----------
+    // ---------- block list (AO-05 + opt) ----------
     function computeVisible(){
       const q = String(qBlocks?.value || "").trim().toLowerCase();
       const f = String(filterStatus?.value || "all");
@@ -1022,23 +1131,19 @@
         const st = normStatus(b.status);
         if(f !== "all" && st !== f) continue;
 
-        // content filters (AO-05 i din “hela sanningen” blandade två renderers → vi gör det här istället)
-        const items = Array.isArray(b.items) ? b.items : [];
-        let hasQ=false, hasD=false, missKey=false;
-        items.forEach((it, idx)=>{
-          const n = normalizeItem(it, idx);
-          if(n.kind === "question"){ hasQ = true; if(!facitOkForQuestion(n)) missKey = true; }
-          if(n.kind === "document"){ hasD = true; }
-        });
-        if(fHasQ.checked && !hasQ) continue;
-        if(fHasD.checked && !hasD) continue;
-        if(fNoKey.checked && !missKey) continue;
+        const comp = blockComposition(b);
+
+        if(fHasQ.checked && comp.q === 0) continue;
+        if(fHasD.checked && comp.d === 0) continue;
+        if(fNoKey.checked && comp.miss === 0) continue;
 
         if(q){
           const hay = [b.title||"", b.module||"", b.area||"", b.step||"", b.blockId||""].join(" ").toLowerCase();
           if(!hay.includes(q)) continue;
         }
 
+        // store comp for faster render
+        b.__comp = comp;
         out.push(b);
       }
 
@@ -1046,63 +1151,109 @@
       STATE.visible = out;
     }
 
-    function renderBlockList(){
+    function buildRenderKey(){
       computeVisible();
-      clear(blockList);
+      const ids = (STATE.visible || []).map(b => `${b.blockId}:${b.status}`).join("|");
+      const f = [
+        String(filterStatus?.value||""),
+        String(qBlocks?.value||""),
+        fHasQ?.checked ? "q" : "",
+        fHasD?.checked ? "d" : "",
+        fNoKey?.checked ? "m" : ""
+      ].join(",");
+      return ids + "||" + f;
+    }
 
+    function renderBlockList(forceFull){
+      const key = buildRenderKey();
       const nAll = Array.isArray(STATE.all) ? STATE.all.length : 0;
       const nVis = Array.isArray(STATE.visible) ? STATE.visible.length : 0;
       countBlocks.textContent = `${nVis} / ${nAll}`;
 
-      if(nVis === 0){
-        const d = document.createElement("div");
-        d.className = "muted2";
-        d.textContent = nAll ? "Inga träffar (justera sök/filter)." : "Inga block ännu.";
-        blockList.appendChild(d);
-        return;
-      }
+      const needsFull = !!forceFull || key !== STATE._lastBlockRenderKey;
 
-      STATE.visible.slice(0, 400).forEach(b => {
-        const row = document.createElement("div");
-        row.className = "rowItem" + (String(b.blockId) === String(STATE.selectedBlock) ? " active" : "");
-        row.setAttribute("role","button");
-        row.setAttribute("tabindex","0");
+      if(needsFull){
+        STATE._lastBlockRenderKey = key;
+        clear(blockList);
 
-        const top = document.createElement("div");
-        top.className = "rowTop";
+        if(nVis === 0){
+          const d = document.createElement("div");
+          d.className = "muted2";
+          d.textContent = nAll ? "Inga träffar (justera sök/filter)." : "Inga block ännu.";
+          blockList.appendChild(d);
+          return;
+        }
 
-        const left = document.createElement("div");
-        const title = document.createElement("div");
-        title.className = "rowTitle";
-        title.textContent = b.title || "(utan rubrik)";
+        STATE.visible.slice(0, 400).forEach(b => {
+          const row = document.createElement("div");
+          row.className = "rowItem" + (String(b.blockId) === String(STATE.selectedBlock) ? " active" : "");
+          row.setAttribute("role","button");
+          row.setAttribute("tabindex","0");
+          row.dataset.blockid = String(b.blockId||"");
 
-        const meta = document.createElement("div");
-        meta.className = "tiny";
-        const st = normStatus(b.status);
-        const nItems = Array.isArray(b.items) ? b.items.length : 0;
-        meta.textContent = `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"} • ${nItems} item(s)`;
+          const top = document.createElement("div");
+          top.className = "rowTop";
 
-        left.appendChild(title);
-        left.appendChild(meta);
+          const left = document.createElement("div");
+          const title = document.createElement("div");
+          title.className = "rowTitle";
+          title.textContent = b.title || "(utan rubrik)";
 
-        const right = document.createElement("div");
-        const pill = document.createElement("span");
-        pill.className = "pill " + (st === "published" ? "ok" : "warn");
-        pill.textContent = blockStatusLabel(st);
-        right.appendChild(pill);
+          const meta = document.createElement("div");
+          meta.className = "tiny";
+          const st = normStatus(b.status);
+          const comp = b.__comp || blockComposition(b);
+          meta.textContent = `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"} • ${comp.q+comp.t+comp.d} item(s)`;
 
-        top.appendChild(left);
-        top.appendChild(right);
-        row.appendChild(top);
+          // AO-05: icons per type
+          const ico = document.createElement("div");
+          ico.className = "icoRow";
+          const pQ = document.createElement("span"); pQ.className = "icoPill"; pQ.textContent = `❓ ${comp.q}`;
+          const pD = document.createElement("span"); pD.className = "icoPill"; pD.textContent = `📄 ${comp.d}`;
+          const pT = document.createElement("span"); pT.className = "icoPill"; pT.textContent = `✅ ${comp.t}`;
+          const pM = document.createElement("span"); pM.className = "icoPill"; pM.textContent = `🧩 ${comp.kind === "mixed" ? "Mixed" : (comp.kind === "empty" ? "Tomt" : "Single")}`;
+          ico.appendChild(pQ); ico.appendChild(pD); ico.appendChild(pT); ico.appendChild(pM);
 
-        function choose(){ selectBlockByObject(b); }
-        row.addEventListener("click", choose);
-        row.addEventListener("keydown", (e)=>{
-          if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
+          left.appendChild(title);
+          left.appendChild(meta);
+          left.appendChild(ico);
+
+          const right = document.createElement("div");
+          const pill = document.createElement("span");
+          pill.className = "pill " + (st === "published" ? "ok" : "warn");
+          pill.textContent = blockStatusLabel(st);
+          right.appendChild(pill);
+
+          // AO-04: highlight missing facit quickly
+          if(comp.miss > 0){
+            const miss = document.createElement("span");
+            miss.className = "qaPill bad";
+            miss.style.marginTop = "6px";
+            miss.textContent = `Facit saknas: ${comp.miss}`;
+            right.appendChild(miss);
+          }
+
+          top.appendChild(left);
+          top.appendChild(right);
+          row.appendChild(top);
+
+          function choose(){ selectBlockByObject(b); }
+          row.addEventListener("click", choose);
+          row.addEventListener("keydown", (e)=>{
+            if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
+          });
+
+          blockList.appendChild(row);
         });
-
-        blockList.appendChild(row);
-      });
+      }else{
+        // cheap active update only
+        const rows = blockList.querySelectorAll(".rowItem");
+        rows.forEach(r=>{
+          const id = String(r.dataset.blockid || "");
+          if(id && id === String(STATE.selectedBlock)) r.classList.add("active");
+          else r.classList.remove("active");
+        });
+      }
     }
 
     // ---------- item editor (AO-14) ----------
@@ -1139,7 +1290,7 @@
     }
 
     function updateLivePreview(it){
-      if(!it){ return; }
+      if(!it) return;
       const k = String(it.kind||"document");
       const title =
         (k === "question") ? "Fråga" :
@@ -1177,7 +1328,8 @@
       }
 
       const items = Array.isArray(b.items) ? b.items : [];
-      itemsSummary.textContent = `${items.length} item(s)`;
+      const comp = blockComposition(b);
+      itemsSummary.textContent = `${items.length} item(s) • ❓ ${comp.q} • 📄 ${comp.d} • ✅ ${comp.t}`;
 
       if(items.length === 0){
         const d = document.createElement("div");
@@ -1204,12 +1356,11 @@
         const left = document.createElement("div");
         const title = document.createElement("div");
         title.className = "itemTitle";
-        title.textContent = `${idx+1}) ${itemKindLabel(it)}`;
+        title.textContent = `${idx+1}) ${emojiForKind(it.kind)} ${itemKindLabel(it)}`;
 
         const meta = document.createElement("div");
         meta.className = "itemMeta2";
-        const tx = String(it.text || "").trim();
-        meta.textContent = tx ? tx.slice(0, 120) + (tx.length > 120 ? "…" : "") : "(utan text)";
+        meta.textContent = safeSnippet(it.text, 120);
 
         left.appendChild(title);
         left.appendChild(meta);
@@ -1229,8 +1380,10 @@
 
         function choose(){
           STATE.selectedItem = id;
+          STATE.selectedItemType = String(it.kind || "");
           showItemEditorById(id);
           renderItems();
+          setTopbarEditing();
         }
         row.addEventListener("click", choose);
         row.addEventListener("keydown", (e)=>{
@@ -1249,7 +1402,6 @@
       btnItemDuplicate.disabled = !(canWrite && hasSel);
       btnAddItem.disabled = !canWrite;
 
-      // templates always disabled in read-only
       btnTemplateStandard.disabled = !canWrite;
       btnTemplateYesNo.disabled = !canWrite;
       btnTemplateInfo.disabled = !canWrite;
@@ -1276,7 +1428,7 @@
       return { items, idx, it: items[idx] };
     }
 
-    function showItemEditorById(id){
+    function showItemEditorById(){
       const ref = getSelectedItemRef();
       if(!ref){ hideItemEditor(); return; }
       const it = normalizeItem(ref.it, ref.idx);
@@ -1285,7 +1437,6 @@
       itemEditor.style.display = "block";
       itemKindInp.value = itemKindLabel(it);
 
-      // show correct wraps
       wrapQuestion.style.display = (it.kind === "question") ? "block" : "none";
       wrapTask.style.display = (it.kind === "task") ? "block" : "none";
       wrapDocument.style.display = (it.kind === "document") ? "block" : "none";
@@ -1305,7 +1456,6 @@
         dSignInp.checked = (it.requiresSign !== false);
       }
 
-      // disable in read-only
       const canWrite = (!STATE.locked && !isSystemAdmin);
       itemTextInp.disabled = !canWrite;
       qOptionsInp.disabled = !canWrite;
@@ -1316,6 +1466,7 @@
       updateLivePreview(it);
       updateStatePill();
       setSelectionPill();
+      setTopbarEditing();
       updateActionEnablement();
     }
 
@@ -1328,6 +1479,7 @@
       b.title  = normText(titleInp.value, 80);
       statusInp.value = blockStatusLabel(b.status);
       statusTag.textContent = blockStatusLabel(b.status);
+      setTopbarEditing();
     }
 
     function applyItemEditorToState(){
@@ -1347,7 +1499,6 @@
         it.options = uniq.slice(0,10);
         it.answerKey = normText(qFacitInp.value || "", 200);
 
-        // if options exist → facit must match
         if(it.options.length >= 2 && it.answerKey && !it.options.includes(it.answerKey)){
           it.answerKey = "";
         }
@@ -1364,9 +1515,11 @@
 
       ref.items[ref.idx] = normalizeItem(it, ref.idx);
 
+      STATE.selectedItemType = String(ref.items[ref.idx]?.kind || "");
       setFacitPillFor(ref.items[ref.idx]);
       updateLivePreview(ref.items[ref.idx]);
       updateStatePill();
+      setTopbarEditing();
     }
 
     function markDirty(){
@@ -1374,7 +1527,7 @@
       updateActionEnablement();
     }
 
-    // ---------- publish validation ----------
+    // ---------- validation (AO-09/10) ----------
     function validateForPublish(block){
       const b = block && typeof block === "object" ? block : null;
       const reasons = [];
@@ -1386,17 +1539,17 @@
       items.forEach((it0, idx)=>{
         const it = normalizeItem(it0, idx);
         if(it.kind === "question" && !facitOkForQuestion(it)){
-          reasons.push(`Item ${idx+1}: Fråga saknar facit.`);
+          reasons.push(`❓ Item ${idx+1}: Fråga saknar facit`);
         }
         if(it.kind === "document" && !String(it.text||"").trim()){
-          reasons.push(`Item ${idx+1}: Dokument är tomt.`);
+          reasons.push(`📄 Item ${idx+1}: Dokument är tomt`);
         }
       });
 
       return { ok: reasons.length === 0, reasons };
     }
 
-    // ---------- save/publish core ----------
+    // ---------- save/publish ----------
     function syncEditBackToAll(){
       const edit = STATE.edit;
       if(!edit) return { ok:false, err:"Ingen vald block." };
@@ -1434,34 +1587,24 @@
       STATE.edit.updatedAt = Date.now();
 
       const chk = validateForPublish(STATE.edit);
-      // save får gå igenom även om publish ej ok – men fel ska synas
-      if(!chk.ok){
-        showLockBox(chk.reasons);
-      }else{
-        showLockBox([]);
-      }
+      if(!chk.ok) showLockBox(chk.reasons);
+      else showLockBox([]);
 
       const res = syncEditBackToAll();
       if(!res.ok){ setMsg("err", res.err); return; }
 
       STATE.dirtyBlock = false;
-      renderBlockList();
+      renderBlockList(true);
       showEditor();
       setMsg("ok","Sparat.");
     }
 
     function computePublishSummary(block){
-      const items = Array.isArray(block?.items) ? block.items : [];
-      let q = 0, d = 0, t = 0;
-      items.forEach(it=>{
-        if(it.kind === "question") q++;
-        else if(it.kind === "document") d++;
-        else if(it.kind === "task") t++;
-      });
+      const comp = blockComposition(block);
       const parts = [];
-      if(q) parts.push(`${q} ${q === 1 ? "fråga" : "frågor"}`);
-      if(t) parts.push(`${t} uppgift(er)`);
-      if(d) parts.push(`${d} dokument`);
+      if(comp.q) parts.push(`${comp.q} ${comp.q === 1 ? "fråga" : "frågor"}`);
+      if(comp.t) parts.push(`${comp.t} uppgift(er)`);
+      if(comp.d) parts.push(`${comp.d} dokument`);
       return parts.join(", ") || "Inga items";
     }
 
@@ -1496,7 +1639,7 @@
       const when = new Date(STATE.edit.verifiedAt).toLocaleString("sv-SE");
 
       showLockBox([]);
-      renderBlockList();
+      renderBlockList(true);
       showEditor();
 
       setMsg("ok", `Publicerad. ${summary}. Verifierad av ${who} • ${when}`);
@@ -1546,7 +1689,9 @@
       }
       b.items.push(normalizeItem(it, b.items.length));
       STATE.selectedItem = getItemIdSafe(b.items[b.items.length-1], b.items.length-1);
+      STATE.selectedItemType = String(b.items[b.items.length-1]?.kind || "");
       STATE.dirtyBlock = true;
+
       renderItems();
       showItemEditorById(STATE.selectedItem);
       markDirty();
@@ -1568,11 +1713,10 @@
       if(copy.kind === "document"){ delete copy._docId; }
 
       ref.items.splice(ref.idx + 1, 0, normalizeItem(copy, ref.idx + 1));
-
-      // re-stabilize doc ids
       ref.items.forEach((x,i)=>normalizeItem(x,i));
 
       STATE.selectedItem = getItemIdSafe(ref.items[ref.idx+1], ref.idx+1);
+      STATE.selectedItemType = String(ref.items[ref.idx+1]?.kind || "");
       STATE.dirtyBlock = true;
 
       renderItems();
@@ -1596,10 +1740,10 @@
       items[i] = items[j];
       items[j] = tmp;
 
-      // re-stabilize doc ids
       items.forEach((x,k)=>normalizeItem(x,k));
 
       STATE.selectedItem = getItemIdSafe(items[j], j);
+      STATE.selectedItemType = String(items[j]?.kind || "");
       STATE.dirtyBlock = true;
 
       renderItems();
@@ -1622,14 +1766,15 @@
 
       STATE.dirtyBlock = true;
 
-      // select next best
       const nextIdx = Math.min(i, items.length - 1);
       if(nextIdx >= 0){
         STATE.selectedItem = getItemIdSafe(items[nextIdx], nextIdx);
+        STATE.selectedItemType = String(items[nextIdx]?.kind || "");
         renderItems();
         showItemEditorById(STATE.selectedItem);
       }else{
         STATE.selectedItem = null;
+        STATE.selectedItemType = "";
         renderItems();
         hideItemEditor();
       }
@@ -1637,7 +1782,7 @@
       markDirty();
     }
 
-    // ---------- trainings helpers (read-path + export) ----------
+    // ---------- trainings helpers (AO-11) ----------
     function trainingTitle(t){
       const o = t && typeof t === "object" ? t : {};
       return String(o.title || o.name || o.trainingTitle || "—").trim() || "—";
@@ -1655,10 +1800,6 @@
 
     function extractTrainingBlocks(t){
       const o = t && typeof t === "object" ? t : {};
-      // back-compat:
-      // - t.blocks
-      // - t.content.blocks
-      // - t.items (already items) -> treat as single block
       const blocks =
         Array.isArray(o.blocks) ? o.blocks :
         Array.isArray(o.content?.blocks) ? o.content.blocks :
@@ -1672,11 +1813,19 @@
         Array.isArray(o.content) ? o.content :
         null;
 
-      if(Array.isArray(items)) return [{ blockId: genId("tmp"), title: trainingTitle(t), module: trainingMeta(t).module, area: trainingMeta(t).area, step: trainingMeta(t).step, items }];
+      if(Array.isArray(items)) return [{
+        blockId: genId("tmp"),
+        title: trainingTitle(t),
+        module: trainingMeta(t).module,
+        area: trainingMeta(t).area,
+        step: trainingMeta(t).step,
+        items
+      }];
+
       return [];
     }
 
-    function normalizeTrainingToExportBlock(t, empNo){
+    function normalizeTrainingToExportBlock(t){
       const meta = trainingMeta(t);
       const title = trainingTitle(t);
 
@@ -1687,7 +1836,6 @@
         const nb = normalizeBlock(b);
         (Array.isArray(nb.items) ? nb.items : []).forEach((it, idx)=>{
           const n = normalizeItem(it, idx);
-          // export: bara kända typer
           if(n.kind === "document" || n.kind === "question" || n.kind === "task"){
             items.push(n);
           }
@@ -1711,19 +1859,25 @@
     }
 
     function countTrainingItems(t){
-      let itemsCount = 0;
+      let q=0,d=0,task=0;
       try{
         const blocks = extractTrainingBlocks(t);
         blocks.forEach(b=>{
           const nb = normalizeBlock(b);
-          itemsCount += (Array.isArray(nb.items) ? nb.items.length : 0);
+          (nb.items||[]).forEach((it0, idx)=>{
+            const it = normalizeItem(it0, idx);
+            if(it.kind==="question") q++;
+            else if(it.kind==="task") task++;
+            else d++;
+          });
         });
       }catch{}
-      return { itemsCount };
+      const itemsCount = q+d+task;
+      const docOnly = (itemsCount>0 && d>0 && q===0 && task===0);
+      return { itemsCount, q, d, task, docOnly };
     }
 
     function fillDatalists(){
-      // modules list in select
       const mods = new Set();
       const areas = new Set();
 
@@ -1733,7 +1887,6 @@
         if(m.area) areas.add(m.area);
       });
 
-      // reset select
       while(qTrainModule.options.length > 1) qTrainModule.remove(1);
       [...mods].sort((a,b)=>a.localeCompare(b,"sv")).forEach(m=>{
         const op = document.createElement("option");
@@ -1742,7 +1895,6 @@
         qTrainModule.appendChild(op);
       });
 
-      // datalist for areas
       clear(dlTrainAreas);
       [...areas].sort((a,b)=>a.localeCompare(b,"sv")).forEach(a=>{
         const op = document.createElement("option");
@@ -1780,7 +1932,6 @@
     }
 
     function renderExportPreviewForTraining(idx){
-      if(!trainPreviewDetail) return;
       trainPreviewDetail.style.display = "none";
       clear(trainPreviewDetail);
 
@@ -1789,7 +1940,7 @@
 
       let block;
       try{
-        block = normalizeTrainingToExportBlock(t, empNo);
+        block = normalizeTrainingToExportBlock(t);
       }catch{
         const d = document.createElement("div");
         d.className = "muted2";
@@ -1799,23 +1950,23 @@
         return;
       }
 
-      const items = Array.isArray(block.items) ? block.items : [];
+      const comp = blockComposition(block);
       const head = document.createElement("div");
       head.className = "tiny";
-      head.textContent = `Export-preview: ${items.length} item(s)`;
+      head.textContent = `Export-preview: ${comp.q+comp.d+comp.t} item(s) • ❓ ${comp.q} • 📄 ${comp.d} • ✅ ${comp.t} ${comp.docOnly ? "• (info-only)" : ""}`;
       trainPreviewDetail.appendChild(head);
 
-      items.slice(0, 30).forEach((it) => {
+      (block.items || []).slice(0, 30).forEach((it) => {
         const row = document.createElement("div");
         row.className = "exportItemRow";
 
         const p = document.createElement("span");
         p.className = "pill " + (it.kind === "question" ? "ok" : "warn");
-        p.textContent = it.kind;
+        p.textContent = `${emojiForKind(it.kind)} ${it.kind}`;
 
         const tx = document.createElement("span");
         tx.className = "tiny";
-        tx.textContent = String(it.text || "").slice(0, 120) || "(utan text)";
+        tx.textContent = safeSnippet(it.text, 120);
 
         row.appendChild(p);
         row.appendChild(tx);
@@ -1902,7 +2053,7 @@
           meta.module ? ("Modul: " + meta.module) : "Modul: —",
           meta.area ? ("Område: " + meta.area) : "Område: —",
           meta.step ? ("Steg: " + meta.step) : "Steg: —",
-          `Hittat: ${cnt.itemsCount} item(s)`
+          `Hittat: ${cnt.itemsCount} item(s) • ❓ ${cnt.q} • 📄 ${cnt.d} • ✅ ${cnt.task}` + (cnt.docOnly ? " • (info-only)" : "")
         ].join("\n");
 
         left.appendChild(tt);
@@ -1952,7 +2103,7 @@
       }
 
       const t = STATE.trainings[idx];
-      const newBlock = normalizeTrainingToExportBlock(t, empNo);
+      const newBlock = normalizeTrainingToExportBlock(t);
 
       const all = (Array.isArray(stBlocks.blocks) ? stBlocks.blocks : []).map(normalizeBlock);
       all.push(newBlock);
@@ -1965,19 +2116,16 @@
 
       STATE.all = all;
 
-      // ensure visibility
       if(filterStatus && filterStatus.value !== "all") filterStatus.value = "all";
       if(qBlocks && qBlocks.value.trim()) qBlocks.value = "";
       if(fHasQ) fHasQ.checked = false;
       if(fHasD) fHasD.checked = false;
       if(fNoKey) fNoKey.checked = false;
 
-      renderBlockList();
+      renderBlockList(true);
 
-      // auto-select + scroll + highlight + first item selected (AO-13)
       try{ selectBlockByObject(newBlock); }catch{}
-
-      setMsg("ok", "Export klar: nytt block (utkast) skapat.");
+      setMsg("ok", "Export klar: nytt block (utkast) skapat och valt.");
     }
 
     // ---------- events ----------
@@ -1985,7 +2133,7 @@
       applyEditorToBlock();
       STATE.dirtyBlock = true;
       markDirty();
-      renderBlockList();
+      renderBlockList(false);
       showEditor();
     }
 
@@ -1994,46 +2142,20 @@
     stepInp.addEventListener("input", onBlockFieldChange);
     titleInp.addEventListener("input", onBlockFieldChange);
 
-    itemTextInp.addEventListener("input", ()=>{
+    function onItemChange(){
       applyItemEditorToState();
       markDirty();
       renderItems();
       showItemEditorById(STATE.selectedItem);
       updateStatePill();
       updateActionEnablement();
-    });
+    }
 
-    qOptionsInp.addEventListener("input", ()=>{
-      applyItemEditorToState();
-      markDirty();
-      renderItems();
-      showItemEditorById(STATE.selectedItem);
-      updateActionEnablement();
-    });
-
-    qFacitInp.addEventListener("input", ()=>{
-      applyItemEditorToState();
-      markDirty();
-      renderItems();
-      showItemEditorById(STATE.selectedItem);
-      updateActionEnablement();
-    });
-
-    tReqInp.addEventListener("change", ()=>{
-      applyItemEditorToState();
-      markDirty();
-      renderItems();
-      showItemEditorById(STATE.selectedItem);
-      updateActionEnablement();
-    });
-
-    dSignInp.addEventListener("change", ()=>{
-      applyItemEditorToState();
-      markDirty();
-      renderItems();
-      showItemEditorById(STATE.selectedItem);
-      updateActionEnablement();
-    });
+    itemTextInp.addEventListener("input", onItemChange);
+    qOptionsInp.addEventListener("input", onItemChange);
+    qFacitInp.addEventListener("input", onItemChange);
+    tReqInp.addEventListener("change", onItemChange);
+    dSignInp.addEventListener("change", onItemChange);
 
     btnAddItem.addEventListener("click", ()=> addItem(String(addItemKind.value || "document")));
     btnItemDuplicate.addEventListener("click", duplicateSelectedItem);
@@ -2043,13 +2165,13 @@
 
     btnTemplateStandard.addEventListener("click", ()=>{
       addItem("question");
-      // overwrite new last item with template
       const b = STATE.edit; if(!b) return;
       const items = Array.isArray(b.items) ? b.items : [];
       const idx = items.length - 1;
       const it = normalizeItem(createItemFromTemplate("standard-question"), idx);
       items[idx] = it;
       STATE.selectedItem = getItemIdSafe(it, idx);
+      STATE.selectedItemType = String(it.kind||"");
       STATE.dirtyBlock = true;
       renderItems();
       showItemEditorById(STATE.selectedItem);
@@ -2064,6 +2186,7 @@
       const it = normalizeItem(createItemFromTemplate("yes-no"), idx);
       items[idx] = it;
       STATE.selectedItem = getItemIdSafe(it, idx);
+      STATE.selectedItemType = String(it.kind||"");
       STATE.dirtyBlock = true;
       renderItems();
       showItemEditorById(STATE.selectedItem);
@@ -2078,6 +2201,7 @@
       const it = normalizeItem(createItemFromTemplate("info"), idx);
       items[idx] = it;
       STATE.selectedItem = getItemIdSafe(it, idx);
+      STATE.selectedItemType = String(it.kind||"");
       STATE.dirtyBlock = true;
       renderItems();
       showItemEditorById(STATE.selectedItem);
@@ -2113,13 +2237,13 @@
         tDeb = setTimeout(()=>fn.apply(null,args), ms);
       };
     }
-    const renderDeb = debounce(()=>{ renderBlockList(); }, 180);
+    const renderDeb = debounce(()=>{ renderBlockList(true); }, 180);
 
     qBlocks.addEventListener("input", renderDeb);
-    filterStatus.addEventListener("change", renderBlockList);
-    fHasQ.addEventListener("change", renderBlockList);
-    fHasD.addEventListener("change", renderBlockList);
-    fNoKey.addEventListener("change", renderBlockList);
+    filterStatus.addEventListener("change", ()=>renderBlockList(true));
+    fHasQ.addEventListener("change", ()=>renderBlockList(true));
+    fHasD.addEventListener("change", ()=>renderBlockList(true));
+    fNoKey.addEventListener("change", ()=>renderBlockList(true));
 
     // focused mode
     btnFocus.addEventListener("click", ()=>{
@@ -2137,7 +2261,7 @@
       exportBody.style.display = open ? "none" : "block";
     });
 
-    // info toggle (minimal)
+    // info toggle
     btnToggleInfo.addEventListener("click", ()=>{
       const showing = btnToggleInfo.dataset.on === "1";
       btnToggleInfo.dataset.on = showing ? "0" : "1";
@@ -2178,7 +2302,7 @@
       clear(blockList);
       const wrap = document.createElement("div");
       wrap.className = "muted2";
-      wrap.textContent = "Inget innehåll ännu. Exportera från utbildning eller skapa block via annan sida.";
+      wrap.textContent = "Tomt läge: Skapa nytt block eller exportera från utbildning.";
       blockList.appendChild(wrap);
       hideEditor();
     }
@@ -2205,9 +2329,8 @@
         return;
       }
 
-      renderBlockList();
+      renderBlockList(true);
 
-      // auto-select first visible block (AO-13: selectBlockByObject handles first item + scroll)
       try{
         computeVisible();
         const first = Array.isArray(STATE.visible) ? STATE.visible[0] : null;
@@ -2245,7 +2368,6 @@
       setModePill();
 
       if(isSystemAdmin){
-        // read-only hint
         setMsg("warn", "Read-only (Systemansvarig): Ändringar är låsta.");
       }
 
@@ -2254,6 +2376,7 @@
 
       updateStatePill();
       setSelectionPill();
+      setTopbarEditing();
       updateActionEnablement();
     }
 
@@ -2266,7 +2389,6 @@
       }
     });
 
-    // expose minimal for debugging
     window.__PKG_BLOCK__ = { STATE, BLOCKS_KEY, TRAININGS_KEY };
   })();
   </script>
