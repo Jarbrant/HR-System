@@ -1,3057 +1,1633 @@
 <!-- ============================================================
-AO-TRAININGS-AI-DOCMODE-01 | FIL-ID: admin/trainings.html
-Projekt: HR-System
+AO-TRAININGS-PATCH-01 (PROD AUTOPATCH v2.2.0) | FIL-ID: admin/trainings.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN – Skapa/Redigera utbildningar (återanvändbart innehåll) + AI-stöd
-UI-flow (enkelt): “Vad → vilken → vem → hur ofta” (den här sidan bygger “Vad/vilken” = modul/område + utbildning)
 
 POLICY (LÅST):
 - UI-only • Fail-closed • localStorage-first (data), sessionStorage först (auth) • fallback localStorage
-- XSS-escape på all rendering från storage (använd textContent, aldrig osäker innerHTML)
-- Inga nya storage-keys (endast AO-057_TRAININGS_V1 för utbildningar, AO-001_LOGIN_V1 för auth)
+- XSS-escape på all rendering från storage (textContent, aldrig osäker innerHTML)
+- Inga nya storage-keys (endast AO-057_TRAININGS_V1 för utbildningar, AO-001_LOGIN_V1 för auth, UI-04-CONFIG/UI-03-APP)
 - ADMIN-only (SYSTEM_ADMIN hanteras ej här enligt önskemål)
-- Ingen “vem/vilka” / inga assignments här (det kommer i egen sida senare)
+- Ingen “vem/vilka” / inga assignments här (kommer i egen sida)
 - Publish fail-closed: status=published kräver blocks.length > 0
 ============================================================ -->
 
 <!doctype html>
 <html lang="sv">
 <head>
-  <!-- =========================================
-     BLOCK 1/10 – HTML-Huvud & Grundläggande Metadata
-     (Tekniskt oförändrat + mental startpunkt via title/description)
-     ========================================= -->
+  <!-- =========================
+       BLOCK 1/10 – HTML-Huvud & Grundläggande Metadata
+  ========================== -->
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HR-System – Admin • Utbildningar</title>
-  <meta name="description" content="Här skapar du utbildningar och innehåll: modul, område, utbildning och block. Tilldelning görs i separat sida." />
-
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
+  <!-- =========================
+       BLOCK 2/10 – CSS-stilar (sid-specifika)
+  ========================== -->
   <style>
-    .muted2{ color: var(--muted); font-size:.92rem; line-height:1.35; }
-    .pill{
-      display:inline-flex; align-items:center; gap:6px; padding:4px 10px;
-      border:1px solid var(--line); border-radius:999px; background:#fff;
-      font-size:.88rem; color: var(--muted); white-space:nowrap;
+    :root{
+      --bg:#f6f7fb;
+      --card:#ffffff;
+      --ink:#111827;
+      --muted:#6b7280;
+      --line:#e5e7eb;
+      --shadow:0 6px 18px rgba(17,24,39,.08);
+      --shadow2:0 10px 26px rgba(17,24,39,.10);
+      --radius:16px;
+
+      --ok:#16a34a;
+      --warn:#d97706;
+      --bad:#dc2626;
+
+      --chip:#eef2ff;
+      --chipInk:#3730a3;
+
+      --blockInfo:#0ea5e9;
+      --blockTask:#22c55e;
+      --blockQuiz:#f59e0b;
+      --blockDoc:#a855f7;
+      --blockPersona:#f43f5e;
     }
-    .pill.ok{ background: rgba(167,243,208,.18); border-color: rgba(16,185,129,.28); color:#065f46; }
-    .pill.warn{ background: rgba(254,243,199,.65); border-color: rgba(245,158,11,.30); color:#7c2d12; }
-    .pill.bad{ background: rgba(254,242,242,.9); border-color: rgba(239,68,68,.30); color:#7f1d1d; }
-    .tiny{ font-size:.88rem; color: var(--muted); line-height:1.25; }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: .92rem; color: var(--muted); }
+
+    body{ background:var(--bg); color:var(--ink); }
+    .wrap{ max-width:1180px; margin:0 auto; padding:18px 14px 40px; }
+
+    .muted2{ color:var(--muted); font-size:13px; line-height:1.35; }
+    .tiny{ font-size:12px; }
+    .pill{
+      display:inline-flex; align-items:center; gap:8px;
+      padding:6px 10px; border-radius:999px;
+      background:#fff; border:1px solid var(--line);
+      box-shadow:0 2px 10px rgba(17,24,39,.06);
+      font-size:12px;
+    }
+    .pillDot{ width:10px; height:10px; border-radius:999px; background:#9ca3af; display:inline-block; }
+    .pill.ok .pillDot{ background:var(--ok); }
+    .pill.warn .pillDot{ background:var(--warn); }
+    .pill.bad .pillDot{ background:var(--bad); }
+
+    .topbar{
+      display:flex; gap:10px; justify-content:space-between; align-items:center;
+      padding:14px 16px; border:1px solid var(--line); background:#fff;
+      border-radius:var(--radius); box-shadow:var(--shadow);
+    }
+    .topbar .left{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .topbar .right{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+
+    .navRow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .navRow a{
+      text-decoration:none; color:var(--ink);
+      background:#fff; border:1px solid var(--line);
+      padding:8px 10px; border-radius:999px;
+      box-shadow:0 2px 10px rgba(17,24,39,.06);
+      font-size:13px;
+    }
+    .navRow a:hover{ box-shadow:var(--shadow2); }
+
+    .logoutBtn{
+      background: #fee2e2;
+      border:1px solid #fecaca;
+      color:#7f1d1d;
+      padding:8px 12px;
+      border-radius:999px;
+      cursor:pointer;
+      font-weight:600;
+    }
+    .logoutBtn:hover{ box-shadow:var(--shadow2); }
 
     .grid{
       display:grid;
-      grid-template-columns: 380px 1fr;
-      gap: 14px;
-      align-items:start;
+      grid-template-columns: 420px 1fr;
+      gap:14px;
+      margin-top:14px;
     }
-    @media (max-width: 980px){ .grid{ grid-template-columns: 1fr; } }
-
-    .sideCard{ position: sticky; top: 10px; }
-    @media (max-width: 980px){ .sideCard{ position: static; } }
-
-    /* PATCH (UI): gör editorn mer “halv-bred” på stora skärmar (utan att ändra kopplingar) */
-    .editorCard{
-      max-width: 920px; /* lugnare, mer “admin-proffsig” */
-      justify-self: start;
+    @media (max-width: 980px){
+      .grid{ grid-template-columns: 1fr; }
     }
-    @media (max-width: 980px){ .editorCard{ max-width: none; } }
 
-    .searchRow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-    input[type="text"], textarea, select, input[type="number"]{ width:100%; margin-top:6px; }
-    textarea{ min-height: 84px; resize: vertical; }
-
-    .listBox{
+    .sideCard, .editorCard{
+      background:var(--card);
       border:1px solid var(--line);
-      border-radius: var(--r14);
-      background:#fff;
-      overflow:hidden;
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:14px;
     }
-    .listHead{
-      padding:10px;
-      border-bottom:1px solid var(--line);
-      background: rgba(250,250,250,.92);
-      display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;
-    }
-    .miniBtn{
-      border: 1px solid var(--line);
-      background: #fff;
-      border-radius: 12px;
-      padding: 8px 10px;
-      cursor:pointer;
-      user-select:none;
-      font-weight: 900;
-      font-size: 13px;
-      line-height: 1;
-      text-decoration: none;
-      color: inherit;
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      gap:6px;
-    }
-    .miniBtn:hover{ background:#fafafa; }
-    .miniBtn:disabled{ opacity:.55; cursor:not-allowed; }
-    .miniBtn.danger{ border-color: rgba(239,68,68,.35); }
-    .miniBtn.danger:hover{ background: rgba(254,242,242,.8); }
+    .sideCard h2, .editorCard h2{ margin:0 0 6px; font-size:16px; }
+    .sideCard h3, .editorCard h3{ margin:12px 0 6px; font-size:14px; }
 
-    .rows{
-      padding:10px;
+    .searchRow{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+    .searchRow input, .searchRow select, .searchRow textarea{
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:10px 12px;
+      background:#fff;
+      outline:none;
+      width:100%;
+      max-width:100%;
+      font-size:14px;
+    }
+    .searchRow .wAuto{ width:auto; min-width:140px; }
+    .searchRow .grow{ flex:1; min-width:220px; }
+    .searchRow button{
+      border:1px solid var(--line);
+      background:#fff;
+      padding:10px 12px;
+      border-radius:12px;
+      cursor:pointer;
+      font-weight:600;
+    }
+    .searchRow button:hover{ box-shadow:var(--shadow2); }
+
+    .list{
+      margin-top:10px;
+      border-top:1px solid var(--line);
+      padding-top:10px;
       display:flex;
       flex-direction:column;
-      gap:8px;
+      gap:10px;
     }
-    .rowItem{
+
+    .trainRow{
       border:1px solid var(--line);
-      border-radius: 14px;
-      padding:10px;
+      border-radius:14px;
+      padding:10px 10px;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      box-shadow:0 2px 10px rgba(17,24,39,.05);
       background:#fff;
+    }
+    .trainRow:hover{ box-shadow:var(--shadow2); }
+    .trainRow .meta{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; }
+    .chip{
+      display:inline-flex; align-items:center;
+      padding:5px 9px;
+      border-radius:999px;
+      background:var(--chip);
+      color:var(--chipInk);
+      font-size:12px;
+      border:1px solid rgba(55,48,163,.15);
+    }
+    .trainRow .title{ font-weight:800; }
+    .trainRow .right{ display:flex; gap:8px; align-items:center; }
+    .miniBtn{
+      border:1px solid var(--line);
+      background:#fff;
+      padding:8px 10px;
+      border-radius:12px;
       cursor:pointer;
-      box-shadow: var(--shadow-soft);
-      transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+      font-weight:700;
+      font-size:12px;
     }
-    .rowItem:hover{
-      transform: translateY(-1px);
-      box-shadow: 0 8px 22px rgba(17,17,17,.10);
-      filter: brightness(1.02);
+    .miniBtn:hover{ box-shadow:var(--shadow2); }
+    .miniBtn.danger{
+      background:#fff1f2;
+      border-color:#fecdd3;
+      color:#9f1239;
     }
-    .rowItem.active{ outline: 2px solid rgba(59,130,246,.35); }
-    .rowTop{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
-    .rowTitle{ font-weight: 950; line-height: 1.2; }
-    .rowMeta{ margin-top:6px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    .tag{
-      display:inline-flex; align-items:center; gap:6px; padding:2px 8px;
-      border:1px solid var(--line); border-radius:999px; background: rgba(250,250,250,.92);
-      font-size:.85rem; color: var(--muted); white-space: nowrap;
-    }
-
-    .msg{
-      margin-top:10px;
-      padding:10px 12px;
-      border-radius: var(--r14);
-      border:1px solid var(--line);
-      background:#fff;
-      display:none;
-    }
-    .msg.ok{ border-color: rgba(16,185,129,.30); background: rgba(167,243,208,.14); color:#065f46; display:block; }
-    .msg.err{ border-color: rgba(239,68,68,.30); background: rgba(254,242,242,.85); color:#7f1d1d; display:block; }
-    .msg.warn{ border-color: rgba(245,158,11,.30); background: rgba(254,243,199,.35); color:#7c2d12; display:block; }
-
-    .sectionTitle{
-      display:flex; align-items:center; justify-content:space-between; gap:10px;
-      margin: 6px 0 10px;
-    }
-    .sectionTitle h2{ margin:0; font-size: 1.02rem; font-weight: 950; }
-    label{ display:block; font-weight: 900; }
 
     .row2{
       display:grid;
       grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      align-items:end;
+      gap:10px;
     }
-    @media (max-width: 980px){ .row2{ grid-template-columns: 1fr; } }
-
-    .row3{
-      display:grid;
-      grid-template-columns: 1fr 1fr 1fr;
-      gap: 10px;
-      align-items:end;
+    @media (max-width: 820px){
+      .row2{ grid-template-columns: 1fr; }
     }
-    @media (max-width: 980px){ .row3{ grid-template-columns: 1fr; } }
 
-    .subCard{
+    .label{ font-size:12px; color:var(--muted); margin:8px 0 6px; }
+    .input, .textarea, .select{
+      width:100%;
       border:1px solid var(--line);
-      border-radius: var(--r14);
-      background: rgba(250,250,250,.6);
-      padding:10px;
-      margin-top:10px;
-    }
-    .subCard h3{ margin:0 0 6px; font-size: .98rem; font-weight: 950; }
-
-    /* PATCH (UI): Grundinfo - “bredvid” + fält under varandra */
-    .basicInfoGrid{
-      display:grid;
-      grid-template-columns: 1fr 320px;
-      gap: 10px;
-      align-items:start;
-    }
-    @media (max-width: 980px){
-      .basicInfoGrid{ grid-template-columns: 1fr; }
-    }
-    .basicPreview{
-      border:1px solid var(--line);
-      border-radius: var(--r14);
+      border-radius:12px;
+      padding:10px 12px;
       background:#fff;
-      padding:10px;
-      box-shadow: var(--shadow-soft);
+      outline:none;
+      font-size:14px;
     }
-    .basicPreview .h{ font-weight:950; line-height:1.2; }
-    .basicPreview .s{ margin-top:6px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    .basicPreview .d{ margin-top:8px; }
-    .basicPreview .d .tiny{ color: var(--muted); }
-    .basicPreview .empty{ color: var(--muted); }
+    .textarea{ min-height:96px; resize:vertical; }
 
-    .blocksWrap{
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      background:#fff;
-      overflow:hidden;
+    .previewBox{
+      border:1px dashed var(--line);
+      border-radius:14px;
+      padding:12px;
+      background:#fafafa;
     }
-    .blocksHead{
-      padding: 10px;
-      border-bottom:1px solid var(--line);
-      background: rgba(250,250,250,.92);
+
+    .blocksBar{
       display:flex;
       gap:10px;
-      align-items:center;
-      justify-content:space-between;
       flex-wrap:wrap;
+      align-items:center;
+      margin-top:10px;
     }
+    .btn{
+      border:1px solid var(--line);
+      background:#fff;
+      padding:10px 12px;
+      border-radius:12px;
+      cursor:pointer;
+      font-weight:800;
+    }
+    .btn:hover{ box-shadow:var(--shadow2); }
+    .btn.primary{
+      background:#111827;
+      color:#fff;
+      border-color:#111827;
+    }
+    .btn.secondary{
+      background:#f3f4f6;
+      border-color:#e5e7eb;
+      color:#111827;
+    }
+    .btn.disabled, .btn:disabled{ opacity:.55; cursor:not-allowed; box-shadow:none !important; }
+
+    .toggleRow{
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+      margin-top:10px;
+      padding:10px;
+      border:1px solid var(--line);
+      border-radius:14px;
+      background:#fff;
+    }
+    .toggleRow label{ display:flex; gap:8px; align-items:center; cursor:pointer; }
+
     .blocksList{
-      padding: 10px;
+      margin-top:10px;
       display:flex;
-      flex-direction: column;
+      flex-direction:column;
       gap:10px;
     }
     .blockCard{
       border:1px solid var(--line);
-      border-radius: var(--r14);
+      border-radius:14px;
+      padding:10px;
       background:#fff;
-      padding: 10px;
-      box-shadow: var(--shadow-soft);
+      box-shadow:0 2px 10px rgba(17,24,39,.05);
     }
-    .blockTop{
+    .blockHead{
+      display:flex; gap:10px; justify-content:space-between; align-items:flex-start; flex-wrap:wrap;
+    }
+    .blockLeft{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .blockTypeDot{
+      width:12px; height:12px; border-radius:999px;
+      background:#9ca3af;
+    }
+    .blockType.info .blockTypeDot{ background:var(--blockInfo); }
+    .blockType.task .blockTypeDot{ background:var(--blockTask); }
+    .blockType.quiz .blockTypeDot{ background:var(--blockQuiz); }
+    .blockType.doc .blockTypeDot{ background:var(--blockDoc); }
+    .blockType.persona .blockTypeDot{ background:var(--blockPersona); }
+
+    .blockTitle{ font-weight:900; }
+    .blockSub{ font-size:12px; color:var(--muted); margin-top:3px; }
+    .blockActions{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
+    .inlineRow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+    .inlineRow .grow{ flex:1; min-width:220px; }
+    .inlineRow .wSmall{ width:160px; }
+
+    .dangerText{ color:var(--bad); }
+    .warnText{ color:var(--warn); }
+
+    .footerRow{
+      position:sticky;
+      bottom:10px;
+      margin-top:14px;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      padding:12px;
+      border-radius:16px;
+      border:1px solid var(--line);
+      background:rgba(255,255,255,.92);
+      backdrop-filter: blur(8px);
+      box-shadow: var(--shadow2);
+    }
+    .debugBox{
+      margin-top:14px;
+      border:1px solid var(--line);
+      border-radius:14px;
+      background:#fff;
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+    .debugBox summary{
+      cursor:pointer;
+      padding:12px 14px;
+      font-weight:900;
+    }
+    pre{ margin:0; padding:12px 14px; white-space:pre-wrap; word-break:break-word; border-top:1px solid var(--line); background:#fafafa; }
+
+    .hintBar{
+      margin-top:10px;
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:10px 12px;
+      background:#fff;
       display:flex;
       gap:10px;
       align-items:flex-start;
       justify-content:space-between;
       flex-wrap:wrap;
     }
-    .blockTitle{
-      font-weight: 950;
-      display:flex;
-      gap:8px;
-      align-items:center;
-      flex-wrap:wrap;
-      line-height:1.2;
-    }
-    .blockActions{
-      display:flex;
-      gap:8px;
-      align-items:center;
-      flex-wrap:wrap;
-      justify-content:flex-end;
-    }
-    .blockBody{
-      margin-top:10px;
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap:10px;
-      align-items:start;
-    }
-    @media (max-width: 980px){ .blockBody{ grid-template-columns: 1fr; } }
-    .orderBtns{ display:flex; gap:6px; align-items:center; }
-
-    .footerRow{
-      margin-top: 12px;
-      display:flex;
-      gap:10px;
-      flex-wrap:wrap;
-      align-items:center;
-      justify-content:space-between;
-    }
-    .footerRow .left{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-
-    details{ margin-top:10px; }
-    details > summary{ cursor:pointer; font-weight:900; color: var(--muted); }
-    pre{
-      white-space: pre-wrap;
-      word-break: break-word;
-      background: rgba(17,17,17,.04);
-      border: 1px solid var(--line);
-      border-radius: var(--r14);
-      padding: 10px;
-      overflow:auto;
-    }
   </style>
+
+  <script defer src="../UI/UI-03-APP.js"></script>
+  <script defer src="../UI/UI-04-CONFIG.js"></script>
 </head>
 
 <body>
-<header class="top">
-  <div class="brand">
-    <strong>HR-System</strong>
-    <span class="muted">• Admin • Utbildningar</span>
-  </div>
+  <div class="wrap">
 
-  <nav class="nav" aria-label="Meny">
-    <a href="./home.html">Hem</a>
-    <a href="./tasks.html">Uppgifter</a>
-    <a href="./questions.html">Frågor</a>
-    <a href="./docs.html">Dokument</a>
-    <a href="./reports.html">Felrapporter</a>
-    <a href="./answers.html">Svar</a>
-    <a href="./trainings.html" aria-current="page">Utbildningar</a>
-    <a href="./integrations.html">Integrationer</a>
-    <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
-  </nav>
-</header>
+    <!-- =========================
+         BLOCK 3/10 – Sida Header
+    ========================== -->
+    <header class="topbar" aria-label="Adminnavigation">
+      <div class="left">
+        <div class="navRow" aria-label="Navigation">
+          <a href="./home.html" title="Admin start">Hem</a>
+          <a href="./trainings.html" title="Utbildningar (denna sida)" aria-current="page">Utbildningar</a>
+          <a href="./packages-block.html" title="Paket (blockbibliotek)">Paket</a>
+          <a href="../system/assignments.html" title="Access & assignments">Access</a>
+          <a href="../system/org.html" title="Organisation">Org</a>
+        </div>
 
-<main class="container">
-  <div class="row space-between wrap" style="align-items:flex-start;">
-    <div>
-      <h1 class="tight">Utbildningar</h1>
-      <p class="muted2">Skapa/Redigera återanvändbart innehåll. Den här sidan hanterar <strong>Modul</strong> + <strong>Område</strong> + <strong>Utbildning</strong> + <strong>Block</strong>. Tilldelning (vem/vilka) kommer i separat sida.</p>
-      <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-        <span class="pill" id="whoPill">Inloggad: —</span>
-        <span class="pill" id="statePill">Status: —</span>
-        <span class="pill" id="savePill">Sparat: —</span>
-      </div>
-    </div>
+        <span class="pill ok" id="statePill" aria-label="Status">
+          <span class="pillDot" aria-hidden="true"></span>
+          <span id="stateText">Status: OK</span>
+        </span>
 
-    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
-      <button class="btn secondary" id="btnNew" type="button">+ Ny utbildning</button>
-      <button class="btn" id="btnSave" type="button">Spara</button>
-    </div>
-  </div>
-
-  <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
-
-  <div class="grid" style="margin-top:12px;">
-    <!-- LEFT: list -->
-    <section class="card sideCard" aria-label="Lista">
-      <div class="sectionTitle">
-        <h2>Översikt</h2>
-        <div class="tiny">Välj en utbildning för att redigera.</div>
+        <span class="pill" id="whoPill" aria-label="Inloggad användare">
+          <span class="pillDot" aria-hidden="true"></span>
+          <span id="whoText">—</span>
+        </span>
       </div>
 
-      <div class="searchRow">
-        <label style="flex:1; margin:0;">
-          Sök
-          <input id="q" type="text" placeholder="Sök titel, modul, område…" autocomplete="off" />
-        </label>
-        <label style="min-width: 160px; margin:0;">
-          Filter status
-          <select id="filterStatus">
-            <option value="">Alla</option>
+      <div class="right">
+        <button class="logoutBtn" id="btnLogout" type="button" title="Logga ut (röd) – rensar session">
+          Logga ut
+        </button>
+      </div>
+    </header>
+
+    <!-- =========================
+         BLOCK 4/10 – Sida Huvud (Main)
+    ========================== -->
+    <main class="grid" aria-label="Utbildningar">
+      <!-- LEFT: list -->
+      <section class="sideCard" aria-label="Utbildningslista">
+        <h2>Utbildningar</h2>
+        <div class="muted2">Sök, filtrera och välj utbildning. “Visa alla” visar även sådant som inte matchar sök.</div>
+
+        <div class="searchRow" aria-label="Sök och filter">
+          <input id="q" class="grow" type="search" placeholder="Sök titel / modul / område…" autocomplete="off" />
+          <select id="fStatus" class="wAuto" title="Filter status">
+            <option value="">Alla status</option>
             <option value="draft">Utkast</option>
             <option value="published">Publicerad</option>
           </select>
-        </label>
-      </div>
+          <button id="btnShowAll" type="button" title="Visa alla utbildningar">Visa alla</button>
+        </div>
 
-      <div class="listBox" style="margin-top:10px;">
-        <div class="listHead">
-          <div class="tiny"><span id="countText">—</span></div>
-          <div style="display:flex; gap:8px; flex-wrap:wrap;">
-            <button class="miniBtn" id="btnClone" type="button" disabled title="Kopiera vald utbildning">Kopiera</button>
-            <button class="miniBtn danger" id="btnDelete" type="button" disabled title="Ta bort vald utbildning">Ta bort</button>
+        <div class="toggleRow" aria-label="Snabbfilter för problem">
+          <label title="Visar bara block med problem i vald utbildning (kräver vald utbildning)">
+            <input id="onlyProblems" type="checkbox" />
+            <span>Visa bara problem</span>
+          </label>
+          <span class="muted2 tiny" id="problemsHint">Välj en utbildning för att aktivera problemvy.</span>
+        </div>
+
+        <div class="hintBar" aria-label="Info om publicering">
+          <div class="muted2">
+            <b>Fail-closed:</b> Publicering kräver minst 1 block. Block utan rubrik flaggas som problem.
           </div>
-        </div>
-        <div class="rows" id="listRows">
-          <div class="muted2">Laddar…</div>
-        </div>
-      </div>
-
-      <div class="tiny" style="margin-top:10px;">
-        Tips: Område-förslag byggs från tidigare skapade utbildningar inom vald modul.
-      </div>
-    </section>
-
-    <!-- RIGHT: editor -->
-    <section class="card editorCard" aria-label="Editor">
-      <div class="sectionTitle">
-        <h2>Skapa / Redigera</h2>
-        <div class="tiny">Ordning: <strong>Modul → Område → Rubrik → Beskrivning/Mål → Block</strong></div>
-      </div>
-
-      <section class="subCard" aria-label="Modul och område">
-        <h3>1) Välj modul och område</h3>
-
-        <div class="row2">
-          <label>
-            Modul <span class="tiny">(obligatoriskt)</span>
-            <select id="moduleSel"></select>
-          </label>
-
-          <label>
-            Område <span class="tiny">(obligatoriskt)</span>
-            <select id="areaSel"></select>
-            <div class="tiny" id="areaHint">—</div>
-          </label>
+          <button id="btnNew" class="btn" type="button" title="Skapa ny utbildning (utkast)">Skapa ny</button>
         </div>
 
-        <div id="areaNewWrap" style="display:none; margin-top:10px;">
-          <label>
-            Nytt område <span class="tiny">(skapas inom vald modul)</span>
-            <input id="areaInp" type="text" placeholder="T.ex. Hygien, Ergonomi…" maxlength="60" autocomplete="off" />
-          </label>
-        </div>
+        <div class="list" id="list" aria-label="Lista med utbildningar"></div>
       </section>
 
-      <section class="subCard" aria-label="Grundinfo">
-        <h3>2) Rubrik, status, beskrivning</h3>
+      <!-- RIGHT: editor -->
+      <section class="editorCard" aria-label="Redigera utbildning">
+        <h2>Redigera</h2>
+        <div class="muted2">Välj en utbildning till vänster. Ändringar markeras som osparade tills du sparar.</div>
 
-        <div class="basicInfoGrid" style="margin-top:8px;">
+        <!-- =========================
+             BLOCK 5/10 – Modul/Område Väljare
+        ========================== -->
+        <h3>Modul & område</h3>
+        <div class="row2" aria-label="Modul och område">
           <div>
-            <label>
-              Rubrik <span class="tiny">(obligatoriskt)</span>
-              <input id="titleInp" type="text" placeholder="T.ex. Steg 1 – Grundhygien" maxlength="90" autocomplete="off" />
-            </label>
+            <div class="label">Modul</div>
+            <input class="input" id="mod" placeholder="t.ex. Arbetsmiljö & säkerhet" />
+          </div>
+          <div>
+            <div class="label">Område</div>
+            <input class="input" id="area" placeholder="t.ex. Ergonomi" />
+          </div>
+        </div>
+        <div class="muted2 tiny" style="margin-top:8px;">
+          Tips: håll det kort. Modul = kategori. Område = underkategori.
+        </div>
 
-            <div style="margin-top:10px;">
-              <label>
-                Status <span class="tiny">(publish kräver block)</span>
-                <select id="statusSel">
-                  <option value="draft">Utkast</option>
-                  <option value="published">Publicerad</option>
-                </select>
-                <div class="tiny" id="publishHint">—</div>
-              </label>
-            </div>
+        <!-- =========================
+             BLOCK 6/10 – Grundinformation & Förhandsvisning
+        ========================== -->
+        <h3>Grundinfo</h3>
+        <div class="row2" aria-label="Titel och status">
+          <div>
+            <div class="label">Titel</div>
+            <input class="input" id="title" placeholder="t.ex. Ergonomi – Grund" />
+          </div>
+          <div>
+            <div class="label">Status</div>
+            <select class="select" id="status">
+              <option value="draft">Utkast</option>
+              <option value="published">Publicerad</option>
+            </select>
+          </div>
+        </div>
 
-            <div style="margin-top:10px;">
-              <label>
-                Beskrivning <span class="tiny">(kort, max 240)</span>
-                <textarea id="descInp" maxlength="240" placeholder="Syfte + innehåll i kort form…"></textarea>
-              </label>
+        <div class="row2" aria-label="Beskrivning och preview" style="margin-top:10px;">
+          <div>
+            <div class="label">Beskrivning</div>
+            <textarea class="textarea" id="desc" placeholder="Kort beskrivning av utbildningen…"></textarea>
+          </div>
+          <div>
+            <div class="label">Förhandsvisning</div>
+            <div class="previewBox" id="preview">
+              <div class="muted2">Ingen utbildning vald.</div>
             </div>
           </div>
-
-          <aside class="basicPreview" aria-label="Förhandsvisning">
-            <div class="tiny" style="margin-bottom:6px;">Översikt (förhandsvisning)</div>
-            <div class="h" id="prevTitle">—</div>
-            <div class="s">
-              <span class="pill" id="prevStatusPill">—</span>
-            </div>
-            <div class="d">
-              <div class="tiny" style="margin-bottom:6px;">Beskrivning</div>
-              <div id="prevDesc" class="empty">—</div>
-            </div>
-          </aside>
         </div>
-      </section>
 
-      <section class="subCard" aria-label="Mål">
-        <h3>3) Mål</h3>
-        <div class="tiny">Skriv ett mål per rad (enkelt att redigera).</div>
-        <label style="margin-top:8px;">
-          Mål (rad per mål)
-          <textarea id="goalsInp" maxlength="900" placeholder="Förstå…&#10;Kunna…&#10;Identifiera…"></textarea>
-        </label>
-      </section>
+        <!-- =========================
+             BLOCK 7/10 – Mål för Utbildningen
+        ========================== -->
+        <h3>Mål</h3>
+        <div class="muted2 tiny">Skriv ett mål per rad. Tomma rader ignoreras.</div>
+        <textarea class="textarea" id="goals" placeholder="- Förstå grunderna…&#10;- Kunna tillämpa…"></textarea>
 
-      <section class="subCard" aria-label="AI">
-        <h3>4) AI – skapa block</h3>
-        <div class="tiny">AI fyller <strong>beskrivning</strong>, <strong>mål</strong> (om tomt) och <strong>block</strong>. Du kan alltid redigera efteråt.</div>
+        <!-- =========================
+             BLOCK 8/10 – AI-Skapande av Block (UI – ingen worker-implementation här)
+        ========================== -->
+        <h3>AI (blockskapande)</h3>
+        <div class="muted2">
+          Den här sidan visar UI för AI-val, men själva worker/AI-koppling hanteras separat.
+          (Fail-closed: inga writes sker om worker saknas.)
+        </div>
 
-        <div class="row3" style="margin-top:8px;">
-          <label>
-            AI-läge <span class="tiny">(default: Utbildning)</span>
-            <select id="aiMode">
-              <option value="training" selected>Utbildning</option>
+        <div class="row2" style="margin-top:10px;">
+          <div>
+            <div class="label">AI-läge</div>
+            <select class="select" id="aiMode">
+              <option value="training">Utbildning</option>
               <option value="document">Dokument</option>
             </select>
-          </label>
-
-          <label>
-            Antal block <span class="tiny">(1–12)</span>
-            <input id="aiBlockCount" type="number" min="1" max="12" step="1" inputmode="numeric" />
-          </label>
-
-          <label>
-            AI-topic (valfritt)
-            <input id="aiTopic" type="text" maxlength="90" placeholder="Lämna tomt → använder rubriken" autocomplete="off" />
-          </label>
+          </div>
+          <div>
+            <div class="label">Antal block</div>
+            <select class="select" id="aiCount">
+              <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option>
+              <option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option>
+            </select>
+          </div>
         </div>
 
-        <div class="row space-between wrap" style="margin-top:10px;">
-          <div class="row wrap" style="align-items:center;">
-            <button class="btn secondary" id="btnAiTest" type="button">Testa worker</button>
-            <button class="btn" id="btnAiGenerate" type="button">Skapa med AI</button>
-          </div>
-          <div class="tiny" id="aiStatus">—</div>
+        <div class="blocksBar">
+          <button class="btn secondary" id="btnTestWorker" type="button">Testa worker</button>
+          <button class="btn" id="btnGenBlocks" type="button">Generera block</button>
+          <span class="muted2 tiny" id="aiHint">Om worker saknas: knapparna gör inget (fail-closed).</span>
         </div>
 
-        <details>
-          <summary>AI-inställning (endpoint)</summary>
-          <div class="tiny" style="margin-top:8px;">
-            Default: <span class="mono" id="aiDefault">—</span><br/>
-            Du kan override via URL: <span class="mono">?ai=https://din-worker.workers.dev</span>
+        <!-- =========================
+             BLOCK 9/10 – Blockhantering
+        ========================== -->
+        <h3>Block</h3>
+
+        <div class="blocksBar" aria-label="Lägg till block">
+          <button class="btn" id="addInfo" type="button">+ Information</button>
+          <button class="btn" id="addTask" type="button">+ Uppgift</button>
+          <button class="btn" id="addQuiz" type="button">+ Fråga/Quiz</button>
+          <button class="btn" id="addDoc" type="button">+ Dokument</button>
+        </div>
+
+        <div class="toggleRow" aria-label="Mallbibliotek och progressiva steg">
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <button class="btn secondary" id="btnTpl1" type="button" title="Skapar Teori + Uppgift + Quiz som 3 block (placeholder)">Snabbmall: Teori + Uppgift + Quiz</button>
+            <button class="btn secondary" id="btnTpl2" type="button" title="Skapar Scenario-block (placeholder)">Snabbmall: Scenario (Case)</button>
+            <button class="btn secondary" id="btnTpl3" type="button" title="Skapar Dokument + Kontrollfrågor (placeholder)">Snabbmall: Dokument + Kontrollfrågor</button>
           </div>
+
+          <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-left:auto;">
+            <button class="btn" id="btnProgressive" type="button" title="Numrerar blocktitlar som Steg 1..N (endast titeltext, ändrar inte datamodell)">Gör kursen progressiv</button>
+            <span class="muted2 tiny">Numrerar titel-text (ingen ny data).</span>
+          </div>
+        </div>
+
+        <div class="blocksList" id="blocksList" aria-label="Blocklista"></div>
+
+        <!-- =========================
+             BLOCK 10/10 – Footer & Debug
+        ========================== -->
+        <div class="footerRow" aria-label="Spara och publicera">
+          <div class="left" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+            <button class="miniBtn danger" id="btnRevert" type="button" title="Återställer osparade ändringar för vald utbildning">
+              Ångra osparat
+            </button>
+            <span class="tiny muted2" id="revertHint">
+              Ångra osparat återställer ändringar som inte sparats. Detta kan inte ångras (förrän du gör om ändringarna).
+            </span>
+          </div>
+
+          <div class="left" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+            <button class="btn secondary" id="btnSaveDraft" type="button" title="Sparar som utkast">
+              Spara som utkast
+            </button>
+            <button class="btn primary" id="btnSavePublish" type="button" title="Sparar och publicerar (fail-closed)">
+              Spara & publicera
+            </button>
+          </div>
+        </div>
+
+        <details class="debugBox" id="debugBox">
+          <summary>Debug (sparad data)</summary>
+          <pre id="debugPre">—</pre>
         </details>
       </section>
-
-      <section class="subCard" aria-label="Block">
-        <h3>5) Block</h3>
-
-        <div class="blocksWrap" style="margin-top:8px;">
-          <div class="blocksHead">
-            <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-              <label style="margin:0; min-width: 260px;">
-                Lägg till block
-                <select id="addKind">
-                  <option value="info">Information</option>
-                  <option value="task">Uppgift</option>
-                  <option value="question">Fråga</option>
-                  <option value="both">Uppgift + Fråga</option>
-                  <option value="document">Dokument</option>
-                </select>
-              </label>
-              <button class="miniBtn" id="btnAddBlock" type="button">+ Lägg till</button>
-              <button class="miniBtn" id="btnAddDefaults" type="button" title="Lägg till standarduppsättning">+ Standard</button>
-
-              <label style="margin:0; min-width: 220px;">
-                Sök block
-                <input id="blockSearch" type="text" placeholder="Sök i titel/text…" autocomplete="off" />
-              </label>
-              <button class="miniBtn" id="btnShowAllBlocks" type="button" title="Visa hela listan">Visa alla</button>
-            </div>
-
-            <div class="tiny">
-              <span id="blocksInfo">—</span>
-            </div>
-          </div>
-
-          <div class="blocksList" id="blocksList" aria-live="polite"></div>
-        </div>
-
-        <div class="tiny" style="margin-top:8px;">
-          Publish-regel: <strong>Publicerad</strong> kräver minst 1 block.
-        </div>
-      </section>
-
-      <div class="footerRow">
-        <div class="left">
-          <button class="miniBtn danger" id="btnRevert" type="button">Ångra osparat</button>
-        </div>
-        <div class="left">
-          <button class="btn secondary" id="btnSaveDraft" type="button">Spara som utkast</button>
-          <button class="btn" id="btnSavePublish" type="button">Spara & publicera</button>
-        </div>
-      </div>
-
-      <details id="debugDetails">
-        <summary>Visa sparad data (debug)</summary>
-        <div class="tiny">Visar exakt objekt som skrivs till storage (för felsök).</div>
-        <pre id="debugPre">{}</pre>
-      </details>
-    </section>
+    </main>
   </div>
-</main>
 
-<script>
-/* ============================================================
-  AO-TRAININGS-AI-DOCMODE-01 (PROD PATCH)
-  UI-only • Fail-closed • NO NEW STORAGE KEYS
-  Keys: AO-001_LOGIN_V1 (auth) • AO-057_TRAININGS_V1 (data)
-  XSS-safe rendering: textContent only
-============================================================ */
-(function(){
-  "use strict";
+  <script>
+  (function(){
+    "use strict";
 
-  const KEY_AUTH = "AO-001_LOGIN_V1";
-  const KEY_TRAIN = "AO-057_TRAININGS_V1";
-
-  // --------- DOM
-  const $ = (id) => document.getElementById(id);
-
-  const elWho = $("whoPill");
-  const elState = $("statePill");
-  const elSave = $("savePill");
-  const elMsg = $("msgBox");
-
-  const elQ = $("q");
-  const elFilterStatus = $("filterStatus");
-  const elCount = $("countText");
-  const elRows = $("listRows");
-
-  const btnNew = $("btnNew");
-  const btnSave = $("btnSave");
-  const btnClone = $("btnClone");
-  const btnDelete = $("btnDelete");
-  const btnRevert = $("btnRevert");
-  const btnSaveDraft = $("btnSaveDraft");
-  const btnSavePublish = $("btnSavePublish");
-
-  const moduleSel = $("moduleSel");
-  const areaSel = $("areaSel");
-  const areaNewWrap = $("areaNewWrap");
-  const areaInp = $("areaInp");
-  const areaHint = $("areaHint");
-
-  const titleInp = $("titleInp");
-  const statusSel = $("statusSel");
-  const descInp = $("descInp");
-  const goalsInp = $("goalsInp");
-  const publishHint = $("publishHint");
-
-  const prevTitle = $("prevTitle");
-  const prevStatusPill = $("prevStatusPill");
-  const prevDesc = $("prevDesc");
-
-  const addKind = $("addKind");
-  const btnAddBlock = $("btnAddBlock");
-  const btnAddDefaults = $("btnAddDefaults");
-  const blockSearch = $("blockSearch");
-  const btnShowAllBlocks = $("btnShowAllBlocks");
-  const blocksInfo = $("blocksInfo");
-  const blocksList = $("blocksList");
-
-  const debugPre = $("debugPre");
-
-  const aiMode = $("aiMode");
-  const aiBlockCount = $("aiBlockCount");
-  const aiTopic = $("aiTopic");
-  const btnAiTest = $("btnAiTest");
-  const btnAiGenerate = $("btnAiGenerate");
-  const aiStatus = $("aiStatus");
-  const aiDefault = $("aiDefault");
-
-  const navLogout = $("navLogout");
-
-  // --------- STATE (minimal, robust)
-  const STATE = {
-    locked: false,
-    lockReasons: [],
-    all: [],
-    visible: [],
-    selectedId: "",
-    edit: null,
-    dirty: false,
-    showAllBlocks: false
-  };
-
-  // --------- Helpers
-  function nowIso(){
-    try { return new Date().toISOString(); } catch(_){ return ""; }
-  }
-  function uid(prefix){
-    // deterministic enough for UI-only; no external deps
-    return (prefix || "id") + "_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
-  }
-  function safeStr(x, max){
-    const s = (x == null) ? "" : String(x);
-    if (typeof max === "number" && max > 0) return s.slice(0, max);
-    return s;
-  }
-  function setMsg(kind, text){
-    elMsg.className = "msg " + (kind || "");
-    elMsg.textContent = text || "";
-    elMsg.style.display = text ? "block" : "none";
-  }
-  function setPill(el, kind, text){
-    el.className = "pill " + (kind || "");
-    el.textContent = text || "—";
-  }
-  function setDirty(on){
-    STATE.dirty = !!on;
-    setPill(elState, STATE.dirty ? "warn" : "ok", STATE.dirty ? "Status: Osparade ändringar" : "Status: OK");
-
-    const canWrite = !STATE.locked; // ADMIN only; SYSTEM_ADMIN hanteras ej här (policy)
-    btnSave.disabled = !(canWrite && STATE.dirty && STATE.edit);
-    btnSaveDraft.disabled = !(canWrite && STATE.dirty && STATE.edit);
-    btnSavePublish.disabled = !(canWrite && STATE.dirty && STATE.edit);
-    btnRevert.disabled = !(STATE.dirty && STATE.edit);
-  }
-
-  function readAuth(){
-    // sessionStorage först, fallback localStorage
-    const raw = sessionStorage.getItem(KEY_AUTH) || localStorage.getItem(KEY_AUTH);
-    if (!raw) return null;
-    try { return JSON.parse(raw); } catch(_){ return null; }
-  }
-
-  function requireAuth(){
-    // Use HRApp if present, else minimal guard.
-    if (window.HRApp && typeof window.HRApp.requireAuth === "function"){
-      const ok = window.HRApp.requireAuth({ allowRoles: ["ADMIN"] });
-      if (!ok) return null;
-      // If HRApp returns payload, prefer it
-      const a = (window.HRApp.getAuth && window.HRApp.getAuth()) || readAuth();
-      return a || null;
+    // ---------- Fail-closed helpers ----------
+    function safeJsonParse(s, fallback){
+      try { return JSON.parse(s); } catch(e){ return fallback; }
     }
-    const a = readAuth();
-    if (!a || !a.role) return null;
-    if (String(a.role).toUpperCase() !== "ADMIN") return null;
-    return a;
-  }
-
-  function loadTrainingsRaw(){
-    const raw = localStorage.getItem(KEY_TRAIN);
-    if (!raw) return { list: [], ok: true, missing: true };
-    try {
-      const data = JSON.parse(raw);
-      // Accept array or wrapper
-      const list = Array.isArray(data) ? data : (Array.isArray(data.trainings) ? data.trainings : []);
-      return { list, ok: true, missing: false };
-    } catch(e){
-      return { list: [], ok: false, missing: false };
+    function isStr(x){ return typeof x === "string"; }
+    function cleanStr(x){ return isStr(x) ? x.trim() : ""; }
+    function nowId(prefix){
+      const r = Math.random().toString(16).slice(2);
+      return (prefix || "id_") + Date.now().toString(16) + "_" + r;
     }
-  }
 
-  function saveTrainingsRaw(list){
-    // Keep existing wrapper shape if present, else array
-    const raw = localStorage.getItem(KEY_TRAIN);
-    if (raw){
+    // ---------- Core deps (fail-closed) ----------
+    const HR = (window.HRApp && typeof window.HRApp === "object") ? window.HRApp : null;
+
+    function requireAuthAdmin(){
+      if(!HR || typeof HR.requireAuth !== "function"){
+        return { ok:false, reason:"Saknar HRApp.requireAuth (UI-03-APP.js)" };
+      }
+      // Fail-closed: require auth; role-check if available
       try{
-        const data = JSON.parse(raw);
-        if (data && !Array.isArray(data) && typeof data === "object"){
-          data.trainings = list;
-          localStorage.setItem(KEY_TRAIN, JSON.stringify(data));
-          return;
-        }
-      } catch(_){}
-    }
-    localStorage.setItem(KEY_TRAIN, JSON.stringify(list));
-  }
-
-  function normalizeTraining(t){
-    const id = safeStr(t && (t.id || t.trainingId), 120) || uid("tr");
-    const module = safeStr(t && t.module, 60);
-    const area = safeStr(t && t.area, 60);
-    const title = safeStr(t && t.title, 90);
-    const status = (t && t.status === "published") ? "published" : "draft";
-    const desc = safeStr(t && t.desc, 240);
-    const goals = Array.isArray(t && t.goals) ? t.goals.map(x=>safeStr(x, 140)).filter(Boolean) : [];
-    const blocks = Array.isArray(t && t.blocks) ? t.blocks : [];
-    // Keep blocks as-is (do not change data model), but ensure array
-    return {
-      id, module, area, title, status, desc,
-      goals,
-      blocks,
-      updatedAt: safeStr(t && t.updatedAt, 40) || "",
-      createdAt: safeStr(t && t.createdAt, 40) || ""
-    };
-  }
-
-  function computeAreasByModule(all){
-    const map = new Map();
-    for (const t of all){
-      const m = safeStr(t.module, 60);
-      const a = safeStr(t.area, 60);
-      if (!m || !a) continue;
-      if (!map.has(m)) map.set(m, new Set());
-      map.get(m).add(a);
-    }
-    return map;
-  }
-
-  function uniqueModules(all){
-    const set = new Set();
-    for (const t of all){
-      const m = safeStr(t.module, 60);
-      if (m) set.add(m);
-    }
-    return Array.from(set).sort((a,b)=>a.localeCompare(b, "sv"));
-  }
-
-  function setSelectOptions(selectEl, values, placeholder){
-    while (selectEl.firstChild) selectEl.removeChild(selectEl.firstChild);
-    if (placeholder){
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = placeholder;
-      selectEl.appendChild(opt);
-    }
-    for (const v of values){
-      const opt = document.createElement("option");
-      opt.value = v;
-      opt.textContent = v;
-      selectEl.appendChild(opt);
-    }
-  }
-
-  function trainingLabel(t){
-    const parts = [];
-    if (t.title) parts.push(t.title);
-    const meta = [];
-    if (t.module) meta.push(t.module);
-    if (t.area) meta.push(t.area);
-    return { title: parts.join(""), meta: meta.join(" • ") };
-  }
-
-  function matchesQuery(t, q){
-    if (!q) return true;
-    const s = (t.title + " " + t.module + " " + t.area).toLowerCase();
-    return s.includes(q.toLowerCase());
-  }
-
-  function applyFilters(){
-    const q = safeStr(elQ.value, 120).trim();
-    const st = safeStr(elFilterStatus.value, 20).trim();
-    const v = STATE.all.filter(t => matchesQuery(t, q) && (!st || t.status === st));
-    STATE.visible = v;
-    elCount.textContent = v.length + " st";
-  }
-
-  function renderList(){
-    applyFilters();
-    while (elRows.firstChild) elRows.removeChild(elRows.firstChild);
-
-    if (!STATE.visible.length){
-      const div = document.createElement("div");
-      div.className = "muted2";
-      div.textContent = STATE.all.length ? "Inga träffar." : "Inga utbildningar ännu. Klicka “+ Ny utbildning”.";
-      elRows.appendChild(div);
-      btnClone.disabled = true;
-      btnDelete.disabled = true;
-      return;
-    }
-
-    for (const t of STATE.visible){
-      const row = document.createElement("div");
-      row.className = "rowItem" + (t.id === STATE.selectedId ? " active" : "");
-      row.setAttribute("role", "button");
-      row.setAttribute("tabindex", "0");
-
-      const top = document.createElement("div");
-      top.className = "rowTop";
-
-      const left = document.createElement("div");
-      const tt = document.createElement("div");
-      tt.className = "rowTitle";
-      tt.textContent = safeStr(t.title || "—", 120);
-      left.appendChild(tt);
-
-      const meta = document.createElement("div");
-      meta.className = "rowMeta";
-
-      const tag1 = document.createElement("span");
-      tag1.className = "tag";
-      tag1.textContent = t.status === "published" ? "Publicerad" : "Utkast";
-      meta.appendChild(tag1);
-
-      if (t.module){
-        const tagM = document.createElement("span");
-        tagM.className = "tag";
-        tagM.textContent = t.module;
-        meta.appendChild(tagM);
+        const auth = HR.requireAuth({ allow:["ADMIN","SYSTEM_ADMIN"] });
+        return { ok:true, auth:auth };
+      }catch(err){
+        return { ok:false, reason: (err && err.message) ? err.message : "Auth block (fail-closed)" };
       }
-      if (t.area){
-        const tagA = document.createElement("span");
-        tagA.className = "tag";
-        tagA.textContent = t.area;
-        meta.appendChild(tagA);
-      }
-
-      const tagB = document.createElement("span");
-      tagB.className = "tag";
-      const bc = Array.isArray(t.blocks) ? t.blocks.length : 0;
-      tagB.textContent = bc + " block";
-      meta.appendChild(tagB);
-
-      left.appendChild(meta);
-
-      const right = document.createElement("div");
-      right.className = "tiny";
-      right.textContent = t.updatedAt ? ("Uppd: " + t.updatedAt.slice(0,10)) : "";
-
-      top.appendChild(left);
-      top.appendChild(right);
-      row.appendChild(top);
-
-      function pick(){
-        selectTraining(t.id);
-      }
-
-      row.addEventListener("click", pick);
-      row.addEventListener("keydown", (e)=>{
-        if (e.key === "Enter" || e.key === " "){
-          e.preventDefault();
-          pick();
-        }
-      });
-
-      elRows.appendChild(row);
     }
 
-    btnClone.disabled = !STATE.selectedId;
-    btnDelete.disabled = !STATE.selectedId;
-  }
+    // ---------- Storage keys (LÅST) ----------
+    const KEY_TRAININGS = "AO-057_TRAININGS_V1";
 
-  function fillEditor(t){
-    // Module options based on existing data (no new model)
-    const modules = uniqueModules(STATE.all);
-    setSelectOptions(moduleSel, modules, "Välj…");
-
-    // If module not in list (new), allow free via “Nytt område” only; module stays selectable by typing is not allowed (select).
-    if (t.module && !modules.includes(t.module)){
-      // add it to options to preserve existing data
-      const augmented = modules.concat([t.module]).sort((a,b)=>a.localeCompare(b, "sv"));
-      setSelectOptions(moduleSel, augmented, "Välj…");
-    }
-    moduleSel.value = t.module || "";
-
-    const areasByMod = computeAreasByModule(STATE.all);
-    const areas = t.module && areasByMod.get(t.module) ? Array.from(areasByMod.get(t.module)).sort((a,b)=>a.localeCompare(b, "sv")) : [];
-    setSelectOptions(areaSel, areas, "Välj…");
-    areaSel.value = t.area || "";
-    areaHint.textContent = t.module ? ("Områden från tidigare utbildningar i “" + t.module + "”.") : "Välj modul först.";
-
-    // New area UI
-    const areaExists = !!(t.area && areas.includes(t.area));
-    areaNewWrap.style.display = (t.module && (!t.area || !areaExists) && areaSel.value === "") ? "block" : "none";
-    areaInp.value = (!areaExists && t.area) ? t.area : "";
-
-    titleInp.value = t.title || "";
-    statusSel.value = t.status || "draft";
-    descInp.value = t.desc || "";
-    goalsInp.value = (t.goals || []).join("\n");
-
-    updatePreview();
-    updatePublishRuleHint();
-    renderBlocks();
-    updateDebug();
-  }
-
-  function updatePreview(){
-    prevTitle.textContent = safeStr(titleInp.value, 120) || "—";
-    const st = statusSel.value === "published" ? "published" : "draft";
-    setPill(prevStatusPill, st === "published" ? "ok" : "warn", st === "published" ? "Publicerad" : "Utkast");
-
-    const d = safeStr(descInp.value, 240).trim();
-    prevDesc.textContent = d || "—";
-    prevDesc.className = d ? "" : "empty";
-  }
-
-  function updatePublishRuleHint(){
-    if (!STATE.edit){
-      publishHint.textContent = "—";
-      return;
-    }
-    const bc = Array.isArray(STATE.edit.blocks) ? STATE.edit.blocks.length : 0;
-    const wantPublished = statusSel.value === "published";
-    if (wantPublished && bc <= 0){
-      publishHint.textContent = "Fail-closed: Publicering kräver minst 1 block.";
-    } else if (wantPublished && bc > 0){
-      publishHint.textContent = "OK: Minst 1 block finns.";
-    } else {
-      publishHint.textContent = "Utkast kan sparas utan block.";
-    }
-  }
-
-  function selectTraining(id){
-    const t = STATE.all.find(x=>x.id===id);
-    if (!t) return;
-    if (STATE.dirty){
-      setMsg("warn", "Du har osparade ändringar. Spara eller Ångra innan du byter utbildning.");
-      return;
-    }
-    STATE.selectedId = id;
-    // Create editable clone
-    STATE.edit = JSON.parse(JSON.stringify(t));
-    setDirty(false);
-    setMsg("", "");
-    fillEditor(STATE.edit);
-    renderList();
-    btnClone.disabled = false;
-    btnDelete.disabled = false;
-  }
-
-  function newTraining(){
-    if (STATE.dirty){
-      setMsg("warn", "Du har osparade ändringar. Spara eller Ångra innan du skapar ny.");
-      return;
-    }
-    const t = normalizeTraining({
-      id: uid("tr"),
-      module: "",
-      area: "",
-      title: "",
-      status: "draft",
-      desc: "",
-      goals: [],
-      blocks: [],
-      createdAt: nowIso(),
-      updatedAt: nowIso()
-    });
-    STATE.selectedId = t.id;
-    STATE.edit = JSON.parse(JSON.stringify(t));
-    setDirty(true);
-    setMsg("ok", "Ny utbildning skapad (inte sparad ännu).");
-    fillEditor(STATE.edit);
-    renderList();
-  }
-
-  function gatherEditorIntoEdit(){
-    if (!STATE.edit) return;
-    STATE.edit.module = safeStr(moduleSel.value, 60).trim();
-
-    // Area: either select or free input (if new wrap visible)
-    let area = safeStr(areaSel.value, 60).trim();
-    if (!area && areaNewWrap.style.display !== "none"){
-      area = safeStr(areaInp.value, 60).trim();
-    }
-    STATE.edit.area = area;
-
-    STATE.edit.title = safeStr(titleInp.value, 90).trim();
-    STATE.edit.desc = safeStr(descInp.value, 240).trim();
-
-    const goalsRaw = safeStr(goalsInp.value, 1200);
-    const goals = goalsRaw.split("\n").map(s=>safeStr(s, 140).trim()).filter(Boolean);
-    STATE.edit.goals = goals;
-
-    const st = (statusSel.value === "published") ? "published" : "draft";
-    STATE.edit.status = st;
-  }
-
-  function validateEdit(){
-    if (!STATE.edit) return { ok:false, msg:"Ingen vald utbildning." };
-    gatherEditorIntoEdit();
-
-    if (!STATE.edit.module) return { ok:false, msg:"Modul är obligatoriskt." };
-    if (!STATE.edit.area) return { ok:false, msg:"Område är obligatoriskt." };
-    if (!STATE.edit.title) return { ok:false, msg:"Rubrik är obligatoriskt." };
-
-    // Publish rule
-    const bc = Array.isArray(STATE.edit.blocks) ? STATE.edit.blocks.length : 0;
-    if (STATE.edit.status === "published" && bc <= 0){
-      STATE.edit.status = "draft"; // fail-closed downgrade
-      statusSel.value = "draft";
-      updatePublishRuleHint();
-      return { ok:false, msg:"Fail-closed: Du kan inte publicera utan block. Status satt till Utkast." };
-    }
-    return { ok:true, msg:"OK" };
-  }
-
-  function commitSave(){
-    const v = validateEdit();
-    if (!v.ok){
-      setMsg("err", v.msg);
-      setPill(elSave, "warn", "Sparat: Nej");
-      return;
+    // Backward compat: trainings may be array or wrapper
+    function loadTrainingsRaw(){
+      const s = localStorage.getItem(KEY_TRAININGS);
+      if(!s) return { wrapper:null, list:[], corrupt:false, missing:true };
+      const j = safeJsonParse(s, null);
+      if(!j) return { wrapper:null, list:[], corrupt:true, missing:false };
+      if(Array.isArray(j)) return { wrapper:{ trainings:j }, list:j, corrupt:false, missing:false };
+      if(j && Array.isArray(j.trainings)) return { wrapper:j, list:j.trainings, corrupt:false, missing:false };
+      return { wrapper:null, list:[], corrupt:true, missing:false };
     }
 
-    const idx = STATE.all.findIndex(x=>x.id===STATE.edit.id);
-    const saved = normalizeTraining(Object.assign({}, STATE.edit, { updatedAt: nowIso() }));
-    if (idx >= 0) STATE.all[idx] = saved;
-    else STATE.all.unshift(saved);
-
-    saveTrainingsRaw(STATE.all);
-    setDirty(false);
-    setMsg("ok", "Sparat.");
-    setPill(elSave, "ok", "Sparat: " + new Date().toLocaleString("sv-SE"));
-    STATE.selectedId = saved.id;
-    STATE.edit = JSON.parse(JSON.stringify(saved));
-    fillEditor(STATE.edit);
-    renderList();
-  }
-
-  function revertEdit(){
-    if (!STATE.edit) return;
-    const orig = STATE.all.find(x=>x.id===STATE.edit.id);
-    if (!orig){
-      // new unsaved
-      STATE.edit = null;
-      STATE.selectedId = "";
-      setDirty(false);
-      setMsg("ok", "Ångrat (ny utbildning togs bort eftersom den inte var sparad).");
-      clearEditor();
-      renderList();
-      return;
-    }
-    STATE.edit = JSON.parse(JSON.stringify(orig));
-    setDirty(false);
-    setMsg("ok", "Ångrat osparade ändringar.");
-    fillEditor(STATE.edit);
-    renderList();
-  }
-
-  function clearEditor(){
-    setSelectOptions(moduleSel, uniqueModules(STATE.all), "Välj…");
-    setSelectOptions(areaSel, [], "Välj…");
-    areaNewWrap.style.display = "none";
-    areaInp.value = "";
-    titleInp.value = "";
-    statusSel.value = "draft";
-    descInp.value = "";
-    goalsInp.value = "";
-    while (blocksList.firstChild) blocksList.removeChild(blocksList.firstChild);
-    blocksInfo.textContent = "—";
-    blocksSearchStateReset();
-    updatePreview();
-    updateDebug();
-  }
-
-  function blocksSearchStateReset(){
-    STATE.showAllBlocks = false;
-    btnShowAllBlocks.textContent = "Visa alla";
-    blockSearch.value = "";
-  }
-
-  function renderBlocks(){
-    while (blocksList.firstChild) blocksList.removeChild(blocksList.firstChild);
-
-    if (!STATE.edit){
-      blocksInfo.textContent = "—";
-      return;
+    function saveTrainingsWrapper(wrapper){
+      // fail-closed: only save if wrapper has trainings array
+      if(!wrapper || !Array.isArray(wrapper.trainings)) return false;
+      localStorage.setItem(KEY_TRAININGS, JSON.stringify(wrapper));
+      return true;
     }
 
-    const blocks = Array.isArray(STATE.edit.blocks) ? STATE.edit.blocks : [];
-    const q = safeStr(blockSearch.value, 120).trim().toLowerCase();
-    const showAll = STATE.showAllBlocks;
-
-    const visible = [];
-    for (let i=0;i<blocks.length;i++){
-      const b = blocks[i];
-      const title = safeStr(b && (b.title || b.h || b.name), 140);
-      const text = safeStr(b && (b.text || b.body || b.content), 220);
-      const hay = (title + " " + text).toLowerCase();
-
-      if (!showAll){
-        // default: hide list unless user searches OR hits Visa alla
-        if (!q) continue;
-      }
-      if (q && !hay.includes(q)) continue;
-      visible.push({ b, i, title, text });
-    }
-
-    const total = blocks.length;
-    blocksInfo.textContent = total + " block" + (q ? (" • filter: " + visible.length) : "");
-
-    if (!showAll && !q){
-      const hint = document.createElement("div");
-      hint.className = "muted2";
-      hint.textContent = "Blocklistan är gömd. Sök i block eller klicka “Visa alla”.";
-      blocksList.appendChild(hint);
-      updatePublishRuleHint();
-      return;
-    }
-
-    if (!visible.length){
-      const hint = document.createElement("div");
-      hint.className = "muted2";
-      hint.textContent = total ? "Inga matchande block." : "Inga block ännu. Lägg till via “+ Lägg till”.";
-      blocksList.appendChild(hint);
-      updatePublishRuleHint();
-      return;
-    }
-
-    for (const it of visible){
-      const card = document.createElement("div");
-      card.className = "blockCard";
-
-      const top = document.createElement("div");
-      top.className = "blockTop";
-
-      const left = document.createElement("div");
-      left.className = "blockTitle";
-      const t = document.createElement("span");
-      t.textContent = safeStr(it.title || "Block", 160);
-      left.appendChild(t);
-
-      const kind = safeStr(it.b && it.b.kind, 30) || safeStr(it.b && it.b.type, 30) || "";
-      if (kind){
-        const tag = document.createElement("span");
-        tag.className = "tag";
-        tag.textContent = kind;
-        left.appendChild(tag);
-      }
-
-      const right = document.createElement("div");
-      right.className = "blockActions";
-
-      const orderWrap = document.createElement("div");
-      orderWrap.className = "orderBtns";
-
-      const btnUp = document.createElement("button");
-      btnUp.className = "miniBtn";
-      btnUp.type = "button";
-      btnUp.textContent = "↑";
-      btnUp.title = "Flytta upp";
-      btnUp.disabled = it.i <= 0;
-
-      const btnDown = document.createElement("button");
-      btnDown.className = "miniBtn";
-      btnDown.type = "button";
-      btnDown.textContent = "↓";
-      btnDown.title = "Flytta ner";
-      btnDown.disabled = it.i >= (blocks.length - 1);
-
-      const btnDel = document.createElement("button");
-      btnDel.className = "miniBtn danger";
-      btnDel.type = "button";
-      btnDel.textContent = "Ta bort";
-      btnDel.title = "Ta bort block";
-
-      btnUp.addEventListener("click", ()=>{
-        if (it.i <= 0) return;
-        const tmp = blocks[it.i-1];
-        blocks[it.i-1] = blocks[it.i];
-        blocks[it.i] = tmp;
-        setDirty(true);
-        renderBlocks();
-        updatePublishRuleHint();
-        updateDebug();
-      });
-      btnDown.addEventListener("click", ()=>{
-        if (it.i >= blocks.length-1) return;
-        const tmp = blocks[it.i+1];
-        blocks[it.i+1] = blocks[it.i];
-        blocks[it.i] = tmp;
-        setDirty(true);
-        renderBlocks();
-        updatePublishRuleHint();
-        updateDebug();
-      });
-      btnDel.addEventListener("click", ()=>{
-        blocks.splice(it.i, 1);
-        setDirty(true);
-        renderBlocks();
-        updatePublishRuleHint();
-        updateDebug();
-      });
-
-      orderWrap.appendChild(btnUp);
-      orderWrap.appendChild(btnDown);
-
-      right.appendChild(orderWrap);
-      right.appendChild(btnDel);
-
-      top.appendChild(left);
-      top.appendChild(right);
-
-      const body = document.createElement("div");
-      body.className = "blockBody";
-
-      const col1 = document.createElement("div");
-      const l1 = document.createElement("div");
-      l1.className = "tiny";
-      l1.textContent = "Titel";
-      const v1 = document.createElement("div");
-      v1.textContent = safeStr(it.title || "—", 220);
-      col1.appendChild(l1);
-      col1.appendChild(v1);
-
-      const col2 = document.createElement("div");
-      const l2 = document.createElement("div");
-      l2.className = "tiny";
-      l2.textContent = "Text (förhandsvisning)";
-      const v2 = document.createElement("div");
-      v2.textContent = safeStr(it.text || "—", 280);
-      col2.appendChild(l2);
-      col2.appendChild(v2);
-
-      body.appendChild(col1);
-      body.appendChild(col2);
-
-      card.appendChild(top);
-      card.appendChild(body);
-
-      blocksList.appendChild(card);
-    }
-
-    updatePublishRuleHint();
-  }
-
-  function addBlock(kind){
-    if (!STATE.edit) return;
-    const blocks = Array.isArray(STATE.edit.blocks) ? STATE.edit.blocks : (STATE.edit.blocks = []);
-    const k = safeStr(kind, 30) || "info";
-
-    // Keep model minimal; DO NOT introduce new schema requirements
-    blocks.push({
-      id: uid("b"),
-      kind: k,
-      title: k === "document" ? "Dokument" :
-             k === "task" ? "Uppgift" :
-             k === "question" ? "Fråga" :
-             k === "both" ? "Uppgift + Fråga" : "Information",
-      text: "—"
-    });
-
-    setDirty(true);
-    renderBlocks();
-    updatePublishRuleHint();
-    updateDebug();
-  }
-
-  function addDefaults(){
-    // minimal “standarduppsättning” utan ny UX
-    addBlock("info");
-    addBlock("task");
-    addBlock("question");
-  }
-
-  function updateDebug(){
-    if (!STATE.edit){
-      debugPre.textContent = "{}";
-      return;
-    }
-    // show exact object that will be saved (XSS-safe)
-    try{
-      debugPre.textContent = JSON.stringify(STATE.edit, null, 2);
-    } catch(_){
-      debugPre.textContent = "{ }";
-    }
-  }
-
-  // --------- AI worker endpoint (read from URL ?ai=)
-  function getAiEndpoint(){
-    const u = new URL(window.location.href);
-    const p = u.searchParams.get("ai");
-    if (p) return p;
-    // fallback to HRApp config if exists
-    if (window.HRApp && window.HRApp.config && window.HRApp.config.aiEndpoint) return String(window.HRApp.config.aiEndpoint);
-    return ""; // empty => fail-closed
-  }
-
-  function setAiStatus(text, kind){
-    aiStatus.textContent = text || "—";
-    aiStatus.className = "tiny" + (kind ? (" " + kind) : "");
-  }
-
-  async function aiTest(){
-    const ep = getAiEndpoint();
-    if (!ep){
-      setAiStatus("Ingen AI-endpoint. Lägg till ?ai=https://... för att testa.", "warn");
-      return;
-    }
-    setAiStatus("Testar…", "");
-    try{
-      const r = await fetch(ep, { method:"GET" });
-      setAiStatus("Svar: " + r.status, r.ok ? "ok" : "warn");
-    } catch(e){
-      setAiStatus("Fel vid fetch: " + (e && e.message ? e.message : "okänt"), "warn");
-    }
-  }
-
-  async function aiGenerate(){
-    if (!STATE.edit){
-      setMsg("warn", "Välj eller skapa en utbildning först.");
-      return;
-    }
-    const ep = getAiEndpoint();
-    if (!ep){
-      setAiStatus("Ingen AI-endpoint. Lägg till ?ai=https://... för att använda AI.", "warn");
-      return;
-    }
-
-    gatherEditorIntoEdit();
-    const topic = safeStr(aiTopic.value, 90).trim() || safeStr(STATE.edit.title, 90) || "Utbildning";
-    const mode = (aiMode.value === "document") ? "document" : "training";
-    let n = parseInt(aiBlockCount.value, 10);
-    if (!Number.isFinite(n) || n < 1) n = 6;
-    if (n > 12) n = 12;
-
-    const payload = {
-      mode,
-      topic,
-      count: n
+    // ---------- STATE ----------
+    const STATE = {
+      locked:false,
+      lockReasons:[],
+      wrapper:null,
+      all:[],
+      visible:[],
+      selectedId:"",
+      edit:null,
+      rawSelected:null,
+      dirty:false,
+      trainingsOk:true,
+      trainingsCorrupt:false,
+      trainingsMissing:false
     };
 
-    setAiStatus("Genererar…", "");
-    try{
-      const r = await fetch(ep, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      const txt = await r.text();
-      if (!r.ok){
-        setAiStatus("AI fel: " + r.status, "warn");
-        setMsg("err", "AI-worker svarade " + r.status + ". Kontrollera endpoint.");
-        return;
+    // ---------- Elements ----------
+    const elStatePill = document.getElementById("statePill");
+    const elStateText = document.getElementById("stateText");
+    const elWhoText = document.getElementById("whoText");
+    const btnLogout = document.getElementById("btnLogout");
+
+    const elQ = document.getElementById("q");
+    const elFStatus = document.getElementById("fStatus");
+    const btnShowAll = document.getElementById("btnShowAll");
+    const elList = document.getElementById("list");
+
+    const cbOnlyProblems = document.getElementById("onlyProblems");
+    const elProblemsHint = document.getElementById("problemsHint");
+    const btnNew = document.getElementById("btnNew");
+
+    const elMod = document.getElementById("mod");
+    const elArea = document.getElementById("area");
+    const elTitle = document.getElementById("title");
+    const elStatus = document.getElementById("status");
+    const elDesc = document.getElementById("desc");
+    const elGoals = document.getElementById("goals");
+    const elPreview = document.getElementById("preview");
+
+    const elAiMode = document.getElementById("aiMode");
+    const elAiCount = document.getElementById("aiCount");
+    const btnTestWorker = document.getElementById("btnTestWorker");
+    const btnGenBlocks = document.getElementById("btnGenBlocks");
+
+    const btnAddInfo = document.getElementById("addInfo");
+    const btnAddTask = document.getElementById("addTask");
+    const btnAddQuiz = document.getElementById("addQuiz");
+    const btnAddDoc = document.getElementById("addDoc");
+
+    const btnTpl1 = document.getElementById("btnTpl1");
+    const btnTpl2 = document.getElementById("btnTpl2");
+    const btnTpl3 = document.getElementById("btnTpl3");
+    const btnProgressive = document.getElementById("btnProgressive");
+
+    const elBlocksList = document.getElementById("blocksList");
+
+    const btnRevert = document.getElementById("btnRevert");
+    const btnSaveDraft = document.getElementById("btnSaveDraft");
+    const btnSavePublish = document.getElementById("btnSavePublish");
+
+    const elDebugPre = document.getElementById("debugPre");
+    const elDebugBox = document.getElementById("debugBox");
+
+    // ---------- UI state ----------
+    function setLocked(on, reason){
+      STATE.locked = !!on;
+      STATE.lockReasons = [];
+      if(reason) STATE.lockReasons.push(reason);
+      syncButtons();
+    }
+
+    function setDirty(on){
+      STATE.dirty = !!on;
+      if(STATE.locked){
+        elStateText.textContent = "Status: Låst";
+        elStatePill.className = "pill bad";
+      }else{
+        elStateText.textContent = STATE.dirty ? "Status: Osparade ändringar" : "Status: OK";
+        elStatePill.className = "pill " + (STATE.dirty ? "warn" : "ok");
       }
-      // Expect JSON; fail-closed if parse fails
-      let data = null;
-      try { data = JSON.parse(txt); } catch(_){ data = null; }
-      if (!data || typeof data !== "object"){
-        setAiStatus("AI: oväntat svar (ej JSON)", "warn");
-        setMsg("err", "AI gav oväntat svar. (Fail-closed: ingen data applicerad)");
+      syncButtons();
+    }
+
+    function syncButtons(){
+      const canWrite = (!STATE.locked && !!STATE.edit);
+      btnSaveDraft.disabled = !(canWrite && STATE.dirty);
+      // publish fail-closed: must have blocks.length>0 AND passes validate
+      const pubOk = canWrite && STATE.dirty && canPublish(STATE.edit);
+      btnSavePublish.disabled = !pubOk;
+
+      btnRevert.disabled = !(canWrite && STATE.dirty);
+
+      const hasSel = !!STATE.edit;
+      btnAddInfo.disabled = !hasSel || STATE.locked;
+      btnAddTask.disabled = !hasSel || STATE.locked;
+      btnAddQuiz.disabled = !hasSel || STATE.locked;
+      btnAddDoc.disabled = !hasSel || STATE.locked;
+
+      btnTpl1.disabled = !hasSel || STATE.locked;
+      btnTpl2.disabled = !hasSel || STATE.locked;
+      btnTpl3.disabled = !hasSel || STATE.locked;
+      btnProgressive.disabled = !hasSel || STATE.locked;
+
+      cbOnlyProblems.disabled = !hasSel;
+      elProblemsHint.textContent = hasSel ? "Aktiv: filtrerar block med problem i blocklistan." : "Välj en utbildning för att aktivera problemvy.";
+    }
+
+    // ---------- Data normalize (keep compatible; no new top-level keys required) ----------
+    function normalizeTraining(t){
+      // Important: do not enforce/introduce new schema beyond safe defaults in UI.
+      const out = (t && typeof t === "object") ? t : {};
+      if(!Array.isArray(out.blocks)) out.blocks = [];
+      // allow either title/name for display
+      if(!isStr(out.title) && isStr(out.name)) out.title = out.name;
+      if(!isStr(out.status)) out.status = "draft";
+      if(!isStr(out.module)) out.module = "";
+      if(!isStr(out.area)) out.area = "";
+      if(!isStr(out.desc)) out.desc = "";
+      // goals can be string or array – keep both; UI edits as string but saves as string only if it existed as string,
+      // else saves as array if existed as array. (No forced model change.)
+      return out;
+    }
+
+    function readGoalsToText(t){
+      if(!t) return "";
+      if(Array.isArray(t.goals)) return t.goals.filter(Boolean).map(String).join("\n");
+      if(isStr(t.goals)) return t.goals;
+      return "";
+    }
+    function writeGoalsFromText(t, text){
+      const v = (text || "").split("\n").map(s => s.trim()).filter(Boolean);
+      // preserve existing type if possible
+      if(Array.isArray(t.goals)){
+        t.goals = v;
+      }else if(isStr(t.goals)){
+        t.goals = v.join("\n");
+      }else{
+        // default: store as array (most robust), but only if needed; this could be considered "model expand".
+        // To avoid that, store nothing if empty, else store as string (least structural change).
+        t.goals = v.length ? v.join("\n") : "";
+      }
+    }
+
+    // ---------- Validate ----------
+    function blockHasProblem(b){
+      if(!b || typeof b !== "object") return true;
+      const title = cleanStr(b.title);
+      if(!title) return true;
+      return false;
+    }
+
+    function canPublish(t){
+      if(!t || typeof t !== "object") return false;
+      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+      if(blocks.length <= 0) return false;
+      // Fail-closed: no empty titles
+      for(const b of blocks){
+        if(blockHasProblem(b)) return false;
+      }
+      return true;
+    }
+
+    // ---------- List filtering ----------
+    function computeVisible(){
+      const q = cleanStr(elQ.value).toLowerCase();
+      const st = cleanStr(elFStatus.value);
+
+      let list = STATE.all.slice();
+      if(st){
+        list = list.filter(t => (cleanStr(t.status) === st));
+      }
+      if(q){
+        list = list.filter(t => {
+          const a = (cleanStr(t.title) + " " + cleanStr(t.module) + " " + cleanStr(t.area)).toLowerCase();
+          return a.includes(q);
+        });
+      }
+      STATE.visible = list;
+    }
+
+    // ---------- Render list ----------
+    function statusDotClass(t){
+      const st = cleanStr(t.status);
+      if(st === "published") return "ok";
+      if(st === "draft") return "warn";
+      return "bad";
+    }
+
+    function trainingProblemsCount(t){
+      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+      let n = 0;
+      for(const b of blocks){ if(blockHasProblem(b)) n++; }
+      // Publish requirement: blocks length > 0
+      if(blocks.length === 0) n = Math.max(n, 1);
+      return n;
+    }
+
+    function renderList(){
+      elList.textContent = "";
+      const list = STATE.visible;
+
+      if(!STATE.trainingsOk){
+        const div = document.createElement("div");
+        div.className = "muted2 dangerText";
+        if(STATE.trainingsMissing){
+          div.textContent = "Inga utbildningar hittades (AO-057_TRAININGS_V1 saknas). Skapa en ny.";
+        }else if(STATE.trainingsCorrupt){
+          div.textContent = "Data är korrupt (AO-057_TRAININGS_V1). Sidan låses fail-closed.";
+        }else{
+          div.textContent = "Okänt fel vid läsning av utbildningar.";
+        }
+        elList.appendChild(div);
+      }
+
+      if(list.length === 0){
+        const div = document.createElement("div");
+        div.className = "muted2";
+        div.textContent = "Inga träffar.";
+        elList.appendChild(div);
         return;
       }
 
-      // Apply only if present; do not require schema
-      if (!safeStr(descInp.value, 240).trim() && data.desc){
-        descInp.value = safeStr(data.desc, 240);
-      }
-      if (!safeStr(goalsInp.value, 1200).trim() && Array.isArray(data.goals)){
-        goalsInp.value = data.goals.map(x=>safeStr(x, 140)).filter(Boolean).join("\n");
-      }
-      if (Array.isArray(data.blocks)){
-        // Replace blocks with generated blocks (common expectation for “Skapa med AI”)
-        STATE.edit.blocks = data.blocks;
-      }
+      for(const t of list){
+        const row = document.createElement("div");
+        row.className = "trainRow";
+        row.setAttribute("role","button");
+        row.tabIndex = 0;
 
-      setDirty(true);
-      updatePreview();
+        const left = document.createElement("div");
+        const title = document.createElement("div");
+        title.className = "title";
+        title.textContent = cleanStr(t.title) || "Namnlös utbildning";
+        left.appendChild(title);
+
+        const meta = document.createElement("div");
+        meta.className = "meta";
+
+        const pillSt = document.createElement("span");
+        pillSt.className = "pill " + statusDotClass(t);
+        const dot = document.createElement("span");
+        dot.className = "pillDot";
+        dot.setAttribute("aria-hidden","true");
+        const stTxt = document.createElement("span");
+        stTxt.textContent = "Status: " + (cleanStr(t.status) || "—");
+        pillSt.appendChild(dot);
+        pillSt.appendChild(stTxt);
+
+        const chipMod = document.createElement("span");
+        chipMod.className = "chip";
+        chipMod.textContent = cleanStr(t.module) ? ("Modul: " + cleanStr(t.module)) : "Modul: —";
+
+        const chipArea = document.createElement("span");
+        chipArea.className = "chip";
+        chipArea.textContent = cleanStr(t.area) ? ("Område: " + cleanStr(t.area)) : "Område: —";
+
+        const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+        const chipBlocks = document.createElement("span");
+        chipBlocks.className = "chip";
+        chipBlocks.textContent = "Block: " + blocks.length;
+
+        const pCount = trainingProblemsCount(t);
+        const chipProb = document.createElement("span");
+        chipProb.className = "chip";
+        chipProb.textContent = pCount ? ("Problem: " + pCount) : "Problem: 0";
+        if(pCount){
+          chipProb.style.background = "#fff7ed";
+          chipProb.style.borderColor = "#fed7aa";
+          chipProb.style.color = "#9a3412";
+        }else{
+          chipProb.style.background = "#ecfdf5";
+          chipProb.style.borderColor = "#bbf7d0";
+          chipProb.style.color = "#166534";
+        }
+
+        meta.appendChild(pillSt);
+        meta.appendChild(chipMod);
+        meta.appendChild(chipArea);
+        meta.appendChild(chipBlocks);
+        meta.appendChild(chipProb);
+
+        left.appendChild(meta);
+
+        const right = document.createElement("div");
+        right.className = "right";
+
+        const btnOpen = document.createElement("button");
+        btnOpen.className = "miniBtn";
+        btnOpen.type = "button";
+        btnOpen.textContent = "Öppna";
+        btnOpen.addEventListener("click", (e)=>{ e.stopPropagation(); selectTraining(t.id); });
+
+        right.appendChild(btnOpen);
+
+        row.appendChild(left);
+        row.appendChild(right);
+
+        row.addEventListener("click", ()=> selectTraining(t.id));
+        row.addEventListener("keydown", (e)=>{
+          if(e.key === "Enter" || e.key === " "){
+            e.preventDefault();
+            selectTraining(t.id);
+          }
+        });
+
+        elList.appendChild(row);
+      }
+    }
+
+    // ---------- Editor bind ----------
+    function fillEditorFrom(t){
+      elMod.value = cleanStr(t.module);
+      elArea.value = cleanStr(t.area);
+      elTitle.value = cleanStr(t.title);
+      elStatus.value = (cleanStr(t.status) === "published") ? "published" : "draft";
+      elDesc.value = cleanStr(t.desc);
+      elGoals.value = readGoalsToText(t);
+      renderPreview(t);
       renderBlocks();
-      updatePublishRuleHint();
-      updateDebug();
-      setAiStatus("Klar.", "ok");
-      setMsg("ok", "AI skapade innehåll. Granska och spara när du är nöjd.");
-    } catch(e){
-      setAiStatus("AI fel: " + (e && e.message ? e.message : "okänt"), "warn");
-      setMsg("err", "AI-anrop misslyckades. (Fail-closed: ingen data applicerad)");
+      renderDebug();
+      syncButtons();
     }
-  }
 
-  // --------- Bind events
-  function bind(){
-    elQ.addEventListener("input", ()=>{ renderList(); });
-    elFilterStatus.addEventListener("change", ()=>{ renderList(); });
-
-    btnNew.addEventListener("click", newTraining);
-    btnSave.addEventListener("click", commitSave);
-    btnSaveDraft.addEventListener("click", ()=>{
-      if (!STATE.edit) return;
-      statusSel.value = "draft";
-      setDirty(true);
-      commitSave();
-    });
-    btnSavePublish.addEventListener("click", ()=>{
-      if (!STATE.edit) return;
-      statusSel.value = "published";
-      setDirty(true);
-      commitSave();
-    });
-    btnRevert.addEventListener("click", revertEdit);
-
-    btnClone.addEventListener("click", ()=>{
-      if (!STATE.edit || !STATE.selectedId) return;
-      if (STATE.dirty){
-        setMsg("warn", "Spara eller Ångra innan du kopierar.");
+    function renderPreview(t){
+      elPreview.textContent = "";
+      if(!t){
+        const d = document.createElement("div");
+        d.className = "muted2";
+        d.textContent = "Ingen utbildning vald.";
+        elPreview.appendChild(d);
         return;
       }
-      const copy = JSON.parse(JSON.stringify(STATE.edit));
-      copy.id = uid("tr");
-      copy.title = (copy.title ? (copy.title + " (kopia)") : "Kopia");
-      copy.status = "draft";
-      copy.createdAt = nowIso();
-      copy.updatedAt = nowIso();
-      STATE.selectedId = copy.id;
-      STATE.edit = normalizeTraining(copy);
-      setDirty(true);
-      setMsg("ok", "Kopia skapad (inte sparad ännu).");
-      fillEditor(STATE.edit);
-      renderList();
-    });
 
-    btnDelete.addEventListener("click", ()=>{
-      if (!STATE.selectedId) return;
-      if (STATE.dirty){
-        setMsg("warn", "Spara eller Ångra innan du tar bort.");
-        return;
+      const h = document.createElement("div");
+      h.style.fontWeight = "900";
+      h.textContent = cleanStr(t.title) || "Namnlös utbildning";
+      elPreview.appendChild(h);
+
+      const st = document.createElement("div");
+      st.className = "muted2 tiny";
+      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+      const p = trainingProblemsCount(t);
+      st.textContent =
+        "Status: " + (cleanStr(t.status) || "—") +
+        " • Modul: " + (cleanStr(t.module) || "—") +
+        " • Område: " + (cleanStr(t.area) || "—") +
+        " • Block: " + blocks.length +
+        " • Problem: " + p;
+      elPreview.appendChild(st);
+
+      const d = document.createElement("div");
+      d.style.marginTop = "8px";
+      d.className = "muted2";
+      d.textContent = cleanStr(t.desc) || "—";
+      elPreview.appendChild(d);
+
+      const g = readGoalsToText(t).trim();
+      if(g){
+        const ul = document.createElement("ul");
+        ul.style.margin = "10px 0 0 18px";
+        ul.style.padding = "0";
+        for(const line of g.split("\n").map(s=>s.trim()).filter(Boolean)){
+          const li = document.createElement("li");
+          li.textContent = line.replace(/^-+\s*/,"");
+          ul.appendChild(li);
+        }
+        elPreview.appendChild(ul);
       }
-      const idx = STATE.all.findIndex(x=>x.id===STATE.selectedId);
-      if (idx < 0) return;
-      const title = STATE.all[idx].title || "utbildning";
-      const ok = window.confirm("Ta bort “" + title + "”? Detta kan inte ångras.");
-      if (!ok) return;
-      STATE.all.splice(idx, 1);
-      saveTrainingsRaw(STATE.all);
-      STATE.selectedId = "";
-      STATE.edit = null;
-      setDirty(false);
-      setMsg("ok", "Borttagen.");
-      clearEditor();
-      renderList();
-    });
+    }
 
-    moduleSel.addEventListener("change", ()=>{
-      if (!STATE.edit) return;
-      // refresh areas when module changes
-      setDirty(true);
-      // clear area selection on module change (safe)
-      areaSel.value = "";
-      areaInp.value = "";
-      fillEditor(Object.assign(STATE.edit, { module: moduleSel.value, area: "" }));
-    });
-    areaSel.addEventListener("change", ()=>{
-      if (!STATE.edit) return;
-      setDirty(true);
-      // if selected, hide new area input
-      areaNewWrap.style.display = areaSel.value ? "none" : areaNewWrap.style.display;
-      updatePreview(); updatePublishRuleHint(); updateDebug();
-    });
-    areaInp.addEventListener("input", ()=>{ if(STATE.edit){ setDirty(true); updatePreview(); updateDebug(); } });
-
-    [titleInp, statusSel, descInp, goalsInp].forEach(el=>{
+    function bindEditorChange(el, fn){
       el.addEventListener("input", ()=>{
-        if (!STATE.edit) return;
+        if(!STATE.edit || STATE.locked) return;
+        fn();
         setDirty(true);
-        updatePreview();
-        updatePublishRuleHint();
-        updateDebug();
       });
       el.addEventListener("change", ()=>{
-        if (!STATE.edit) return;
+        if(!STATE.edit || STATE.locked) return;
+        fn();
         setDirty(true);
-        updatePreview();
-        updatePublishRuleHint();
-        updateDebug();
-      });
-    });
-
-    btnAddBlock.addEventListener("click", ()=> addBlock(addKind.value));
-    btnAddDefaults.addEventListener("click", addDefaults);
-
-    blockSearch.addEventListener("input", ()=>{
-      renderBlocks();
-    });
-    btnShowAllBlocks.addEventListener("click", ()=>{
-      STATE.showAllBlocks = !STATE.showAllBlocks;
-      btnShowAllBlocks.textContent = STATE.showAllBlocks ? "Göm igen" : "Visa alla";
-      renderBlocks();
-    });
-
-    btnAiTest.addEventListener("click", aiTest);
-    btnAiGenerate.addEventListener("click", aiGenerate);
-
-    if (navLogout){
-      navLogout.addEventListener("click", (e)=>{
-        e.preventDefault();
-        // Do not introduce new behavior; best effort logout for this page
-        try{
-          if (window.HRApp && typeof window.HRApp.logout === "function"){
-            window.HRApp.logout();
-            return;
-          }
-        } catch(_){}
-        // minimal: remove auth from session only; keep local fallback as-is to avoid breaking system-wide policy
-        try { sessionStorage.removeItem(KEY_AUTH); } catch(_){}
-        window.location.href = "../index.html";
       });
     }
-  }
 
-  function init(){
-    const auth = requireAuth();
-    if (!auth){
-      // fail-closed: show message and stop
-      setMsg("err", "Fail-closed: Du är inte inloggad som ADMIN.");
-      setPill(elWho, "bad", "Inloggad: —");
-      STATE.locked = true;
-      setDirty(false);
-      clearEditor();
+    function applyEditorToEdit(){
+      const t = STATE.edit;
+      if(!t) return;
+
+      t.module = cleanStr(elMod.value);
+      t.area = cleanStr(elArea.value);
+      t.title = cleanStr(elTitle.value);
+      t.status = (elStatus.value === "published") ? "published" : "draft";
+      t.desc = cleanStr(elDesc.value);
+      writeGoalsFromText(t, elGoals.value);
+
+      // publish fail-closed: if set to published but not valid, force draft in UI
+      if(t.status === "published" && !canPublish(t)){
+        t.status = "draft";
+        elStatus.value = "draft";
+      }
+
+      renderPreview(t);
       renderList();
-      return;
+      renderBlocks();
+      renderDebug();
+      syncButtons();
     }
 
-    const who = safeStr((auth.empNo || auth.user || auth.email || auth.name || ""), 80);
-    setPill(elWho, "ok", "Inloggad: " + (who || "ADMIN"));
-    setPill(elSave, "", "Sparat: —");
+    // ---------- Blocks ----------
+    function kindLabel(k){
+      const v = cleanStr(k);
+      if(v === "info") return "Information";
+      if(v === "task") return "Uppgift";
+      if(v === "quiz") return "Fråga/Quiz";
+      if(v === "doc") return "Dokument";
+      if(v === "persona") return "Personlighet/Reflektion";
+      return "Block";
+    }
 
-    const ep = getAiEndpoint();
-    aiDefault.textContent = ep || "(ingen)";
+    function kindClass(k){
+      const v = cleanStr(k);
+      if(v === "info") return "info";
+      if(v === "task") return "task";
+      if(v === "quiz") return "quiz";
+      if(v === "doc") return "doc";
+      if(v === "persona") return "persona";
+      return "info";
+    }
 
-    const pack = loadTrainingsRaw();
-    if (!pack.ok){
-      setMsg("err", "Fail-closed: Utbildningsdata är korrupt i storage (" + KEY_TRAIN + ").");
-      STATE.locked = true;
-      setDirty(false);
-      clearEditor();
-      STATE.all = [];
+    function addBlock(kind, title, text){
+      if(!STATE.edit || STATE.locked) return;
+      const t = STATE.edit;
+      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+      const b = {
+        id: nowId("blk_"),
+        kind: cleanStr(kind) || "info",
+        title: cleanStr(title) || (kindLabel(kind) + " (rubrik)"),
+        text: isStr(text) ? text : ""
+      };
+      blocks.push(b);
+      t.blocks = blocks;
+      setDirty(true);
+      renderPreview(t);
+      renderBlocks();
       renderList();
-      return;
+      renderDebug();
     }
 
-    STATE.all = pack.list.map(normalizeTraining);
-    setMsg("", "");
-    setDirty(false);
-    clearEditor();
-    renderList();
-  }
-
-  bind();
-  init();
-})();
-</script>
-/* ============================================================
-BLOCK 2/10 – CSS & visuell semantik
-Syfte: Snabb visuell förståelse per blocktyp + tydliga fokus-states
-Ingen UX-/layoutändring
-============================================================ */
-
-/* --- Bas: alla blockkort --- */
-.blockCard{
-  position: relative;
-  border-left-width: 4px; /* används för semantikfärg */
-}
-
-/* --- Blocktyper --- */
-/* document – neutral */
-.blockCard.is-document{
-  border-left-color: var(--line);
-}
-
-/* task – grön */
-.blockCard.is-task{
-  border-left-color: rgba(16,185,129,.75);
-  background: linear-gradient(0deg,
-    rgba(167,243,208,.08),
-    rgba(167,243,208,.08)
-  ), #fff;
-}
-
-/* question – blå */
-.blockCard.is-question{
-  border-left-color: rgba(59,130,246,.75);
-  background: linear-gradient(0deg,
-    rgba(191,219,254,.12),
-    rgba(191,219,254,.12)
-  ), #fff;
-}
-
-/* both – kombi (diskret dubbelaccent) */
-.blockCard.is-both{
-  border-left-color: rgba(16,185,129,.75);
-}
-.blockCard.is-both::after{
-  content:"";
-  position:absolute;
-  left:0;
-  top:0;
-  bottom:0;
-  width:2px;
-  background: rgba(59,130,246,.75);
-}
-
-/* --- Aktiv / redigerad block --- */
-.blockCard.is-active{
-  outline: 2px solid rgba(59,130,246,.35);
-  outline-offset: 2px;
-}
-
-/* --- Fokus-states (keyboard-first) --- */
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible,
-button:focus-visible,
-.miniBtn:focus-visible{
-  outline: 2px solid rgba(59,130,246,.55);
-  outline-offset: 2px;
-  box-shadow: 0 0 0 3px rgba(59,130,246,.15);
-}
-
-/* --- Hover förstärker endast läsbarhet --- */
-.blockCard:hover{
-  filter: brightness(1.02);
-}
-
-</body>
-</html>
-
-<!-- =========================================
-   BLOCK 3/10 – HTML-Huvud & Grundläggande Metadata
-   ========================================= -->
-<header class="top">
-  <div class="brand">
-    <strong>HR-System</strong>
-    <span class="muted">• Admin</span>
-    <span class="muted2" id="navContext" aria-label="Kontext">• Du redigerar: <strong>Utbildningar</strong></span>
-  </div>
-
-  <div class="topRight" aria-label="Status och åtgärder">
-    <span id="authPill" class="pill ok" role="status" aria-live="polite">Auth: OK</span>
-  </div>
-
-  <nav class="nav" aria-label="Meny">
-    <a href="./home.html">Hem</a>
-    <a href="./tasks.html">Uppgifter</a>
-    <a href="./questions.html">Frågor</a>
-    <a href="./docs.html">Dokument</a>
-    <a href="./reports.html">Felrapporter</a>
-    <a href="./answers.html">Svar</a>
-    <a href="./trainings.html" aria-current="page">Utbildningar</a>
-    <a href="./integrations.html">Integrationer</a>
-
-    <a href="#" id="navLogout" style="margin-left:auto;" aria-label="Logga ut">Logga ut</a>
-  </nav>
-</header>
-
-<main class="container">
-
-  <!-- =========================================
-     BLOCK 4/10 – Sida Huvud (Main)
-     ========================================= -->
- <div class="row space-between wrap" style="align-items:flex-start;">
-  <div>
-    <h1 class="tight">Utbildningar</h1>
-
-    <p class="muted2" id="pageHelpText">
-      Här bygger du utbildningar som består av teori, uppgifter, frågor och dokument.
-    </p>
-
-    <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-      <span class="pill" id="whoPill">Inloggad: —</span>
-      <span class="pill ok" id="pageStatusPill">Status: OK</span>
-    </div>
-  </div>
-
-  <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:flex-end;">
-    <button class="btn secondary" id="btnNew" type="button">+ Ny utbildning</button>
-    <button class="btn" id="btnSave" type="button">Spara</button>
-  </div>
-</div>
-
-  <!-- =========================================
-     BLOCK 5/10 – Grundinformation & Förhandsvisning
-     ========================================= -->
- <section class="card sideCard" aria-label="Lista">
-  <div class="sectionTitle">
-    <h2>Översikt</h2>
-    <div class="tiny">Hitta och välj en utbildning för att redigera.</div>
-  </div>
-
-  <div class="searchRow">
-    <label style="flex:1; margin:0;">
-      Sök
-      <input id="q" type="text" placeholder="Sök titel, modul, område…" autocomplete="off" />
-    </label>
-    <label style="min-width: 160px; margin:0;">
-      Filter status
-      <select id="filterStatus">
-        <option value="">Alla</option>
-        <option value="draft">Utkast</option>
-        <option value="published">Publicerad</option>
-      </select>
-    </label>
-  </div>
-
-  <div class="listBox" style="margin-top:10px;">
-    <div class="listHead">
-      <div class="tiny"><span id="countText">—</span></div>
-      <div style="display:flex; gap:8px; flex-wrap:wrap;">
-        <button class="miniBtn" id="btnClone" type="button" disabled title="Kopiera vald utbildning">Kopiera</button>
-        <button class="miniBtn danger" id="btnDelete" type="button" disabled title="Ta bort vald utbildning">Ta bort</button>
-      </div>
-    </div>
-
-    <div class="rows" id="listRows" role="listbox" aria-label="Utbildningar" aria-live="polite">
-      <!-- Tomläge: inga utbildningar alls -->
-      <div id="emptyNone" class="muted2" hidden>
-        <strong>Inga utbildningar ännu.</strong><br>
-        Skapa en ny utbildning med <strong>“Ny utbildning”</strong>.
-      </div>
-
-      <!-- Tomläge: 0 träffar pga sök/filter -->
-      <div id="emptyNoHits" class="muted2" hidden>
-        <strong>0 träffar.</strong><br>
-        Inga utbildningar matchar din sökning. Rensa sök/filter för att se alla.
-      </div>
-
-      <!-- Default under init -->
-      <div id="listLoading" class="muted2">Laddar…</div>
-
-      <!-- Rader renderas här av JS -->
-    </div>
-  </div>
-
-  <div class="tiny" style="margin-top:10px;">
-    Tips: Område-förslag byggs från tidigare skapade utbildningar inom vald modul.
-  </div>
-</section>
-
-      <!-- =========================================
-         BLOCK 6/10 – Modul/Område Väljare
-         ========================================= -->
-   <section class="subCard" aria-label="Modul, område och tidsram">
-  <h3>1) Välj modul och område</h3>
-
-  <div class="row2">
-    <label>
-      Modul <span class="tiny">(obligatoriskt)</span>
-      <select id="moduleSel"></select>
-    </label>
-
-    <label>
-      Område <span class="tiny">(obligatoriskt)</span>
-      <select id="areaSel"></select>
-      <div class="tiny" id="areaHint">—</div>
-    </label>
-  </div>
-
-  <!-- Trygg "skapa nytt område" -->
-  <div id="areaNewWrap" style="display:none; margin-top:10px;">
-    <div class="row2">
-      <label style="flex:1;">
-        Nytt område <span class="tiny">(skapas inom vald modul)</span>
-        <input id="areaInp" type="text" placeholder="T.ex. Hygien, Ergonomi…" maxlength="60" autocomplete="off" />
-      </label>
-
-      <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
-        <button class="btn secondary" id="btnAreaAdd" type="button">Lägg till område</button>
-        <span class="tiny" id="areaAddMsg" role="status" aria-live="polite"></span>
-      </div>
-    </div>
-  </div>
-
-  <hr style="margin:14px 0; opacity:.25;">
-
-  <h3 style="margin-top:0;">2) Tidsram (kursnivå)</h3>
-
-  <div class="row2">
-    <label>
-      Uppskattad total tid <span class="tiny">(minuter)</span>
-      <input id="estTotalMin" type="number" min="0" max="600" step="5" placeholder="t.ex. 45" />
-    </label>
-
-    <label>
-      Rekommenderat tempo
-      <select id="paceSel">
-        <option value="lugn">Lugn</option>
-        <option value="normal" selected>Normal</option>
-        <option value="intensiv">Intensiv</option>
-      </select>
-    </label>
-  </div>
-
-  <p class="tiny" id="paceHelp" style="margin-top:8px;">
-    Detta används för att ge en tydlig förväntan om längd och tempo. Det kan även stödja planering, uppföljning och progressiva steg i senare moduler.
-  </p>
-</section>
-
-
-      <!-- =========================================
-         BLOCK 7/10 – Grundinfo
-         ========================================= -->
-    <section class="subCard" aria-label="Grundinfo">
-  <h3>2) Rubrik, status, beskrivning</h3>
-
-  <div class="basicInfoGrid" style="margin-top:8px;">
-    <div>
-      <label>
-        Rubrik <span class="tiny">(obligatoriskt)</span>
-        <input id="titleInp" type="text" placeholder="T.ex. Steg 1 – Grundhygien" maxlength="90" autocomplete="off" />
-      </label>
-
-      <div style="margin-top:10px;">
-        <label>
-          Status
-          <select id="statusSel">
-            <option value="draft">Utkast</option>
-            <option value="published">Publicerad</option>
-          </select>
-
-          <div class="tiny" id="publishHint">
-            Publish-regel: <strong>Rubrik</strong> måste vara ifylld och kursen måste ha <strong>minst 1 block</strong>.
-          </div>
-        </label>
-      </div>
-
-      <div style="margin-top:10px;">
-        <label>
-          Beskrivning <span class="tiny">(kort, max 240)</span>
-          <textarea id="descInp" maxlength="240" placeholder="Syfte + innehåll i kort form…"></textarea>
-        </label>
-      </div>
-    </div>
-
-    <aside class="basicPreview" aria-label="Förhandsvisning">
-      <div class="tiny" style="margin-bottom:6px;">Översikt (förhandsvisning)</div>
-
-      <div class="h" id="prevTitle">—</div>
-
-      <div class="s" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-        <span class="pill" id="prevStatusPill">—</span>
-        <span class="pill" id="prevBlocksPill" title="Antal block i kursen">Block: —</span>
-      </div>
-
-      <div class="tiny" style="margin-top:8px;">
-        <span id="prevLevels" class="muted2">Nivåer: —</span>
-        <span class="muted2">•</span>
-        <span id="prevReflections" class="muted2">Reflektion: —</span>
-      </div>
-
-      <div class="d" style="margin-top:10px;">
-        <div class="tiny" style="margin-bottom:6px;">Beskrivning</div>
-        <div id="prevDesc" class="empty">—</div>
-      </div>
-    </aside>
-  </div>
-</section>
-     
-      <!-- =========================================
-         BLOCK 8/10 – Mål
-         ========================================= -->
-     <section class="subCard" aria-label="Mål">
-  <h3>3) Mål</h3>
-
-  <div class="tiny">
-    Skriv ett mål per rad. Valfritt: börja raden med <strong>L1:</strong> … <strong>L5:</strong> för att ange nivå.
-  </div>
-
-  <label style="margin-top:8px;">
-    Mål (rad per mål)
-    <textarea
-      id="goalsInp"
-      maxlength="900"
-      placeholder="L1: Förstå grunderna för …&#10;L3: Tillämpa rutinen i ett verkligt arbetspass …&#10;L5: Reflektera över risker och förbättringar i …"></textarea>
-  </label>
-
-  <div class="tiny" style="margin-top:8px;">
-    Exempel (blanda gärna):
-    <div class="muted2" style="margin-top:4px;">
-      <div>• L1: Förstå …</div>
-      <div>• L3: Tillämpa …</div>
-      <div>• L5: Reflektera …</div>
-    </div>
-  </div>
-</section>
-
-      <!-- =========================================
-         BLOCK 9/10 – AI
-         ========================================= -->
-    <!-- =========================================
-   BLOCK 9/10 – Blocksektionen (KÄRNAN)
-   ========================================= -->
-<section class="subCard" aria-label="Block">
-  <h3>5) Block</h3>
-
-  <div class="blocksWrap" style="margin-top:8px;">
-    <div class="blocksHead">
-      <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-        <!-- 9A: Skapa block (bas) -->
-        <label style="margin:0; min-width: 280px;">
-          Skapa block
-          <select id="addKind">
-            <option value="info">Info (teori)</option>
-            <option value="task">Task (uppgift)</option>
-            <option value="question">Question (fråga)</option>
-            <option value="both">Both (uppgift + fråga)</option>
-            <option value="document">Document (krav/policy)</option>
-          </select>
-          <div class="tiny muted2">Välj typ → “Lägg till” skapar ett nytt block i listan.</div>
-        </label>
-
-        <button class="miniBtn" id="btnAddBlock" type="button">+ Lägg till</button>
-        <button class="miniBtn" id="btnAddDefaults" type="button" title="Lägg till standarduppsättning">+ Standard</button>
-
-        <!-- 9B: Snabbmallar -->
-        <div class="row wrap" style="gap:8px; align-items:center;">
-          <span class="tiny muted2" style="margin-right:2px;">Snabbmallar:</span>
-          <button class="miniBtn" type="button" id="btnTplTheoryTaskQuiz" title="Skapar teori + uppgift + quiz">Teori + Uppgift + Quiz</button>
-          <button class="miniBtn" type="button" id="btnTplScenario" title="Skapar ett scenario/case-block">Scenario (Case)</button>
-          <button class="miniBtn" type="button" id="btnTplDocCtrl" title="Skapar dokument/krav + kontrollfrågor">Dokument + Kontrollfrågor</button>
-        </div>
-
-        <!-- 9C: Progressiva steg -->
-        <button class="miniBtn" id="btnMakeProgressive" type="button" title="Numrerar blocktitlar som Steg 1…N (stabilt om du kör igen)">
-          Gör kursen progressiv
-        </button>
-
-        <!-- Sök / visa alla -->
-        <label style="margin:0; min-width: 220px;">
-          Sök block
-          <input id="blockSearch" type="text" placeholder="Sök i titel/text…" autocomplete="off" />
-        </label>
-        <button class="miniBtn" id="btnShowAllBlocks" type="button" title="Visa hela listan">Visa alla</button>
-      </div>
-
-      <div class="tiny">
-        <span id="blocksInfo">—</span>
-        <span class="muted2">•</span>
-        <span class="muted2">Hint: Rek max <strong>1–2</strong> reflektionsfrågor per kurs.</span>
-      </div>
-    </div>
-
-    <div class="blocksList" id="blocksList" aria-live="polite"></div>
-  </div>
-
-  <div class="tiny" style="margin-top:8px;">
-    Publish-regel: <strong>Publicerad</strong> kräver minst 1 block.
-  </div>
-</section>
-
-<script>
-(function(){
-  "use strict";
-
-  // ---- Helpers (fail-closed, no assumptions) ----
-  const $ = (id) => document.getElementById(id);
-  const el = {
-    addKind: $("addKind"),
-    btnAddBlock: $("btnAddBlock"),
-    btnAddDefaults: $("btnAddDefaults"),
-    btnTplTheoryTaskQuiz: $("btnTplTheoryTaskQuiz"),
-    btnTplScenario: $("btnTplScenario"),
-    btnTplDocCtrl: $("btnTplDocCtrl"),
-    btnMakeProgressive: $("btnMakeProgressive"),
-    blockSearch: $("blockSearch"),
-    btnShowAllBlocks: $("btnShowAllBlocks"),
-    blocksInfo: $("blocksInfo"),
-    blocksList: $("blocksList"),
-
-    // AI (9F)
-    aiMode: $("aiMode"),
-    aiStatus: $("aiStatus"),
-    btnAiTest: $("btnAiTest"),
-    btnAiGenerate: $("btnAiGenerate"),
-
-    // BLOCK 10
-    btnRevert: $("btnRevert"),
-    btnSaveDraft: $("btnSaveDraft"),
-    btnSavePublish: $("btnSavePublish"),
-    saveOutcome: $("saveOutcome"),
-    debugPre: $("debugPre"),
-    debugDetails: $("debugDetails")
-  };
-
-  const hasState = (typeof window.STATE === "object" && window.STATE);
-  const setDirtySafe = (on) => {
-    try{
-      if (typeof window.setDirty === "function") window.setDirty(!!on);
-      else if (hasState) window.STATE.dirty = !!on;
-    }catch(_){}
-  };
-
-  // UI-only meta store if datamodell saknar meta-container (för att inte ändra storage-modell av misstag)
-  const MEM_META = new Map(); // key: block.id -> {minutes,difficulty,scene,stepMinutes}
-
-  function sayOutcome(text, kind){
-    // kind: ok|warn|err (text only, ingen ny CSS krävs)
-    if (!el.saveOutcome) return;
-    el.saveOutcome.textContent = text || "—";
-    el.saveOutcome.dataset.kind = kind || "";
-  }
-
-  function safeClone(obj){
-    // Debug: exakt objekt (deep clone för att inte råka mutera)
-    try { return JSON.parse(JSON.stringify(obj)); } catch(_) { return obj; }
-  }
-
-  function updateDebug(){
-    if (!el.debugPre) return;
-    const edit = getEdit();
-    const payload = edit ? safeClone(edit) : { error: "STATE.edit saknas (fail-closed)" };
-    try{
-      el.debugPre.textContent = JSON.stringify(payload, null, 2);
-    }catch(_){
-      el.debugPre.textContent = String(payload);
+    function removeBlock(blockId){
+      if(!STATE.edit || STATE.locked) return;
+      const t = STATE.edit;
+      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+      const ix = blocks.findIndex(x => x && x.id === blockId);
+      if(ix < 0) return;
+      blocks.splice(ix, 1);
+      t.blocks = blocks;
+      setDirty(true);
+      renderPreview(t);
+      renderBlocks();
+      renderList();
+      renderDebug();
     }
-  }
 
-  function getEdit(){
-    if (!hasState) return null;
-    return window.STATE.edit || null;
-  }
-
-  function ensureBlocks(){
-    const edit = getEdit();
-    if (!edit) return null;
-
-    // Fail-closed: vi skapar INTE blocks om datamodellen inte redan har fältet,
-    // men om blocks finns och är array så kör vi.
-    if (!("blocks" in edit)) return null;
-    if (!Array.isArray(edit.blocks)) return null;
-    return edit.blocks;
-  }
-
-  function xssText(s){
-    // Vi renderar alltid via textContent; denna finns bara för säker normalisering.
-    return (s == null ? "" : String(s));
-  }
-
-  function uid(){
-    return "blk_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
-  }
-
-  function kindLabel(k){
-    switch(String(k||"")){
-      case "info": return "Info";
-      case "task": return "Task";
-      case "question": return "Question";
-      case "both": return "Both";
-      case "document": return "Document";
-      default: return "Block";
+    function moveBlock(blockId, dir){
+      if(!STATE.edit || STATE.locked) return;
+      const t = STATE.edit;
+      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+      const ix = blocks.findIndex(x => x && x.id === blockId);
+      if(ix < 0) return;
+      const ni = ix + dir;
+      if(ni < 0 || ni >= blocks.length) return;
+      const tmp = blocks[ix];
+      blocks[ix] = blocks[ni];
+      blocks[ni] = tmp;
+      t.blocks = blocks;
+      setDirty(true);
+      renderBlocks();
+      renderPreview(t);
+      renderList();
+      renderDebug();
     }
-  }
 
-  function isReflectionItem(it){
-    // Reflektion = bara en flagga. Inga diagnoser/profiler.
-    if (!it || typeof it !== "object") return false;
-    return !!(it.isReflection || it.reflection === true || it.kind === "reflection");
-  }
+    function renderBlocks(){
+      elBlocksList.textContent = "";
 
-  function hasLevels(blocks){
-    for (const b of blocks){
-      if (!b || typeof b !== "object") continue;
-      if (typeof b.difficulty === "number" || typeof b.level === "number") return true;
-      if (b.meta && (typeof b.meta.difficulty === "number" || typeof b.meta.level === "number")) return true;
-      const items = Array.isArray(b.items) ? b.items : (Array.isArray(b.questions) ? b.questions : null);
-      if (items){
-        for (const it of items){
-          if (!it || typeof it !== "object") continue;
-          if (typeof it.difficulty === "number" || typeof it.level === "number") return true;
+      const t = STATE.edit;
+      if(!t){
+        const d = document.createElement("div");
+        d.className = "muted2";
+        d.textContent = "Välj en utbildning för att se block.";
+        elBlocksList.appendChild(d);
+        return;
+      }
+
+      const blocks = Array.isArray(t.blocks) ? t.blocks : [];
+      if(blocks.length === 0){
+        const d = document.createElement("div");
+        d.className = "muted2 warnText";
+        d.textContent = "Inga block ännu. Lägg till minst ett block för att kunna publicera.";
+        elBlocksList.appendChild(d);
+        return;
+      }
+
+      const onlyProblems = !!cbOnlyProblems.checked;
+
+      for(const b of blocks){
+        const problem = blockHasProblem(b) || (cleanStr(t.status)==="published" && blockHasProblem(b));
+        if(onlyProblems && !problem) continue;
+
+        const card = document.createElement("div");
+        card.className = "blockCard";
+
+        const head = document.createElement("div");
+        head.className = "blockHead";
+
+        const left = document.createElement("div");
+        left.className = "blockLeft";
+
+        const typeWrap = document.createElement("div");
+        typeWrap.className = "blockType " + kindClass(b.kind);
+        const dot = document.createElement("span");
+        dot.className = "blockTypeDot";
+        dot.setAttribute("aria-hidden","true");
+        typeWrap.appendChild(dot);
+
+        const titleWrap = document.createElement("div");
+        const t1 = document.createElement("div");
+        t1.className = "blockTitle";
+        t1.textContent = cleanStr(b.title) || "— (saknar rubrik)";
+        titleWrap.appendChild(t1);
+
+        const sub = document.createElement("div");
+        sub.className = "blockSub";
+        const k = kindLabel(b.kind);
+        const txtLen = (isStr(b.text) ? b.text.length : 0);
+        sub.textContent = k + " • text: " + txtLen + " tecken" + (problem ? " • PROBLEM" : "");
+        if(problem) sub.classList.add("dangerText");
+        titleWrap.appendChild(sub);
+
+        left.appendChild(typeWrap);
+        left.appendChild(titleWrap);
+
+        const actions = document.createElement("div");
+        actions.className = "blockActions";
+
+        const btnUp = document.createElement("button");
+        btnUp.className = "miniBtn";
+        btnUp.type = "button";
+        btnUp.textContent = "↑";
+        btnUp.title = "Flytta upp";
+        btnUp.addEventListener("click", ()=> moveBlock(b.id, -1));
+
+        const btnDown = document.createElement("button");
+        btnDown.className = "miniBtn";
+        btnDown.type = "button";
+        btnDown.textContent = "↓";
+        btnDown.title = "Flytta ner";
+        btnDown.addEventListener("click", ()=> moveBlock(b.id, +1));
+
+        const btnDel = document.createElement("button");
+        btnDel.className = "miniBtn danger";
+        btnDel.type = "button";
+        btnDel.textContent = "Ta bort";
+        btnDel.title = "Ta bort block";
+        btnDel.addEventListener("click", ()=> removeBlock(b.id));
+
+        actions.appendChild(btnUp);
+        actions.appendChild(btnDown);
+        actions.appendChild(btnDel);
+
+        head.appendChild(left);
+        head.appendChild(actions);
+        card.appendChild(head);
+
+        // Editor fields
+        const row = document.createElement("div");
+        row.className = "inlineRow";
+
+        const inTitle = document.createElement("input");
+        inTitle.className = "input grow";
+        inTitle.placeholder = "Rubrik (krävs)";
+        inTitle.value = cleanStr(b.title);
+        inTitle.addEventListener("input", ()=>{
+          if(STATE.locked) return;
+          b.title = cleanStr(inTitle.value);
+          setDirty(true);
+          renderPreview(STATE.edit);
+          renderList();
+          // inline update
+          t1.textContent = cleanStr(b.title) || "— (saknar rubrik)";
+          sub.textContent = kindLabel(b.kind) + " • text: " + ((isStr(b.text)?b.text.length:0)) + " tecken" + (blockHasProblem(b) ? " • PROBLEM" : "");
+          sub.className = "blockSub" + (blockHasProblem(b) ? " dangerText" : "");
+          syncButtons();
+          renderDebug();
+        });
+
+        const selKind = document.createElement("select");
+        selKind.className = "select wSmall";
+        const opts = [
+          ["info","Information"],
+          ["task","Uppgift"],
+          ["quiz","Fråga/Quiz"],
+          ["doc","Dokument"],
+          ["persona","Personlighet/Reflektion"]
+        ];
+        for(const [val,lab] of opts){
+          const o = document.createElement("option");
+          o.value = val; o.textContent = lab;
+          selKind.appendChild(o);
         }
+        selKind.value = cleanStr(b.kind) || "info";
+        selKind.addEventListener("change", ()=>{
+          if(STATE.locked) return;
+          b.kind = cleanStr(selKind.value) || "info";
+          typeWrap.className = "blockType " + kindClass(b.kind);
+          sub.textContent = kindLabel(b.kind) + " • text: " + ((isStr(b.text)?b.text.length:0)) + " tecken" + (blockHasProblem(b) ? " • PROBLEM" : "");
+          setDirty(true);
+          renderPreview(STATE.edit);
+          renderList();
+          renderDebug();
+          syncButtons();
+        });
+
+        row.appendChild(inTitle);
+        row.appendChild(selKind);
+        card.appendChild(row);
+
+        const ta = document.createElement("textarea");
+        ta.className = "textarea";
+        ta.placeholder = "Text / instruktion / innehåll…";
+        ta.value = isStr(b.text) ? b.text : "";
+        ta.addEventListener("input", ()=>{
+          if(STATE.locked) return;
+          b.text = ta.value;
+          setDirty(true);
+          sub.textContent = kindLabel(b.kind) + " • text: " + ((isStr(b.text)?b.text.length:0)) + " tecken" + (blockHasProblem(b) ? " • PROBLEM" : "");
+          renderPreview(STATE.edit);
+          renderList();
+          renderDebug();
+          syncButtons();
+        });
+        card.appendChild(ta);
+
+        // Light support for “personality/reflection” mixing WITHOUT model change:
+        // If an existing block has items/questions array already (from earlier), show small tools.
+        const items = (b && Array.isArray(b.items)) ? b.items : null;
+        if(items && (cleanStr(b.kind)==="quiz" || cleanStr(b.kind)==="persona")){
+          const tools = document.createElement("div");
+          tools.className = "inlineRow";
+          const hint = document.createElement("div");
+          hint.className = "muted2 tiny";
+          hint.textContent = "Extra: detta block har items[] (frågor). Du kan markera 1–2 som personlighet/reflektion.";
+          tools.appendChild(hint);
+
+          const btnAddPersona = document.createElement("button");
+          btnAddPersona.className = "miniBtn";
+          btnAddPersona.type = "button";
+          btnAddPersona.textContent = "Lägg in 1 reflektion";
+          btnAddPersona.title = "Lägger till en reflektionsfråga i items[] (om stöds)";
+          btnAddPersona.addEventListener("click", ()=>{
+            if(STATE.locked) return;
+            // fail-closed: only push if items exists
+            b.items.push({
+              id: nowId("it_"),
+              type: "reflection",
+              q: "Reflektion: Vilket alternativ beskriver dig bäst i jobbet?",
+              a: ["Jag tar initiativ", "Jag planerar noggrant", "Jag hjälper andra", "Jag gillar tydliga instruktioner"],
+              correctIndex: -1
+            });
+            setDirty(true);
+            renderDebug();
+          });
+
+          tools.appendChild(btnAddPersona);
+          card.appendChild(tools);
+        }else{
+          const note = document.createElement("div");
+          note.className = "muted2 tiny";
+          note.textContent = "Obs: Fråge-items hanteras bara om de redan finns i blocket (ingen datamodell-expansion här).";
+          card.appendChild(note);
+        }
+
+        elBlocksList.appendChild(card);
+      }
+
+      if(cbOnlyProblems.checked && elBlocksList.childElementCount === 0){
+        const d = document.createElement("div");
+        d.className = "muted2";
+        d.textContent = "Inga problem hittades i blocken.";
+        elBlocksList.appendChild(d);
       }
     }
-    return false;
-  }
 
-  function countReflections(blocks){
-    let n = 0;
-    for (const b of blocks){
-      const items = Array.isArray(b.items) ? b.items : (Array.isArray(b.questions) ? b.questions : null);
-      if (!items) continue;
-      for (const it of items){
-        if (isReflectionItem(it)) n++;
+    // ---------- Templates / Progressive ----------
+    function applyTemplate(which){
+      if(!STATE.edit || STATE.locked) return;
+
+      if(which === 1){
+        addBlock("info", "Teori (rubrik)", "Kort teori här…");
+        addBlock("task", "Uppgift (rubrik)", "Beskriv uppgiften här…");
+        addBlock("quiz", "Quiz (rubrik)", "Lägg frågor här (om items[] stöds i din datamodell).");
+        return;
+      }
+      if(which === 2){
+        addBlock("task", "Scenario (Case) – rubrik", "Beskriv situationen. Vad gör du? Varför?");
+        return;
+      }
+      if(which === 3){
+        addBlock("doc", "Dokument (Kravtext) – rubrik", "Klistra in kravtext/policy här…");
+        addBlock("quiz", "Kontrollfrågor – rubrik", "Kontrollfrågor kopplade till dokumentet…");
+        return;
       }
     }
-    return n;
-  }
 
-  // ---- 9D/9E editor rendering ----
-  function render(){
-    const blocks = ensureBlocks();
-    if (!el.blocksList) return;
-
-    if (!blocks){
-      el.blocksList.textContent = "";
-      const div = document.createElement("div");
-      div.className = "muted2";
-      div.textContent = "Fail-closed: Ingen vald utbildning eller blocks saknas i datamodellen. Välj/skapa en utbildning först.";
-      el.blocksList.appendChild(div);
-      if (el.blocksInfo) el.blocksInfo.textContent = "Block: —";
-      updateDebug();
-      return;
+    function makeProgressive(){
+      if(!STATE.edit || STATE.locked) return;
+      const blocks = Array.isArray(STATE.edit.blocks) ? STATE.edit.blocks : [];
+      let i = 1;
+      for(const b of blocks){
+        const t = cleanStr(b.title);
+        // if already has "Steg N" keep but normalize index
+        const stripped = t.replace(/^Steg\s*\d+\s*[:–-]\s*/i, "");
+        b.title = "Steg " + i + " – " + (stripped || kindLabel(b.kind));
+        i++;
+      }
+      setDirty(true);
+      renderBlocks();
+      renderPreview(STATE.edit);
+      renderList();
+      renderDebug();
     }
 
-    const q = (el.blockSearch && el.blockSearch.value ? el.blockSearch.value.trim().toLowerCase() : "");
-    const showAll = (el.btnShowAllBlocks && el.btnShowAllBlocks.dataset.showall === "1");
+    // ---------- Select training ----------
+    function selectTraining(id){
+      const t = STATE.all.find(x => x && x.id === id);
+      if(!t) return;
 
-    // Filter: göm listan tills sök eller visa alla
-    if (!showAll && !q){
-      el.blocksList.textContent = "";
-      const div = document.createElement("div");
-      div.className = "muted2";
-      div.textContent = "Listan är gömd. Sök eller klicka “Visa alla”.";
-      el.blocksList.appendChild(div);
-      if (el.blocksInfo) el.blocksInfo.textContent = "Block: " + blocks.length + " (gömd)";
-      updateDebug();
-      return;
+      // if dirty, do not auto-switch; fail-closed: require revert/save first
+      if(STATE.dirty && STATE.selectedId && STATE.selectedId !== id){
+        // soft warn (no modal) – keep current selection
+        elStateText.textContent = "Status: Osparade ändringar (byt inte utbildning än)";
+        elStatePill.className = "pill warn";
+        return;
+      }
+
+      STATE.selectedId = id;
+      STATE.rawSelected = t;
+
+      // edit buffer = deep clone to avoid writes until save
+      STATE.edit = normalizeTraining(safeJsonParse(JSON.stringify(t), t));
+
+      fillEditorFrom(STATE.edit);
+      setDirty(false);
     }
 
-    const rows = [];
-    for (let i=0;i<blocks.length;i++){
-      const b = blocks[i];
-      const title = xssText(b && b.title);
-      const text  = xssText(b && (b.text ?? b.body ?? b.content ?? ""));
-      const hay = (title + " " + text + " " + xssText(b && b.kind)).toLowerCase();
-      if (q && !hay.includes(q)) continue;
-      rows.push({i, b});
-    }
+    // ---------- Create training ----------
+    function createNewTraining(){
+      if(STATE.locked) return;
 
-    // Tom-läge vid sök
-    el.blocksList.textContent = "";
-    if (q && rows.length === 0){
-      const div = document.createElement("div");
-      div.className = "muted2";
-      div.textContent = "0 träffar på block. Rensa sök eller klicka “Visa alla”.";
-      el.blocksList.appendChild(div);
-      if (el.blocksInfo) el.blocksInfo.textContent = "Block: " + blocks.length + " • 0 träffar";
-      updateDebug();
-      return;
-    }
+      if(STATE.dirty){
+        elStateText.textContent = "Status: Spara/ångra innan du skapar ny (fail-closed)";
+        elStatePill.className = "pill warn";
+        return;
+      }
 
-    // Header info
-    const reflCount = countReflections(blocks);
-    const levelsYes = hasLevels(blocks) ? "Ja" : "Nej";
-    if (el.blocksInfo){
-      el.blocksInfo.textContent = "Block: " + blocks.length + " • Nivåer: " + levelsYes + " • Reflektion: " + reflCount;
-    }
-
-    for (const row of rows){
-      el.blocksList.appendChild(renderBlockRow(row.i, row.b, blocks));
-    }
-
-    updateDebug();
-  }
-
-  function renderBlockRow(idx, block, blocks){
-    const wrap = document.createElement("div");
-    wrap.className = "blockRow";
-
-    const b = (block && typeof block === "object") ? block : {};
-    const id = xssText(b.id || b.blockId || "");
-    const safeId = id || ("#"+(idx+1));
-
-    // Basic view
-    const head = document.createElement("div");
-    head.style.display = "flex";
-    head.style.gap = "10px";
-    head.style.flexWrap = "wrap";
-    head.style.alignItems = "center";
-    head.style.justifyContent = "space-between";
-
-    const left = document.createElement("div");
-    left.style.display = "flex";
-    left.style.gap = "10px";
-    left.style.alignItems = "center";
-    left.style.flexWrap = "wrap";
-
-    const pill = document.createElement("span");
-    pill.className = "pill";
-    pill.textContent = kindLabel(b.kind);
-
-    const title = document.createElement("strong");
-    title.textContent = (xssText(b.title).trim() ? xssText(b.title) : "(utan titel)");
-
-    const metaTiny = document.createElement("span");
-    metaTiny.className = "tiny muted2";
-    metaTiny.textContent = "ID: " + safeId;
-
-    left.appendChild(pill);
-    left.appendChild(title);
-    left.appendChild(metaTiny);
-
-    const right = document.createElement("div");
-    right.style.display = "flex";
-    right.style.gap = "8px";
-    right.style.flexWrap = "wrap";
-    right.style.alignItems = "center";
-
-    const btnUp = document.createElement("button");
-    btnUp.className = "miniBtn";
-    btnUp.type = "button";
-    btnUp.textContent = "↑";
-    btnUp.title = "Flytta upp";
-    btnUp.disabled = (idx === 0);
-
-    const btnDown = document.createElement("button");
-    btnDown.className = "miniBtn";
-    btnDown.type = "button";
-    btnDown.textContent = "↓";
-    btnDown.title = "Flytta ner";
-    btnDown.disabled = (idx === blocks.length - 1);
-
-    const btnDel = document.createElement("button");
-    btnDel.className = "miniBtn danger";
-    btnDel.type = "button";
-    btnDel.textContent = "Ta bort";
-    btnDel.title = "Ta bort block";
-
-    const btnToggle = document.createElement("button");
-    btnToggle.className = "miniBtn";
-    btnToggle.type = "button";
-    btnToggle.textContent = "Redigera";
-    btnToggle.title = "Öppna block-editor";
-
-    right.appendChild(btnUp);
-    right.appendChild(btnDown);
-    right.appendChild(btnToggle);
-    right.appendChild(btnDel);
-
-    head.appendChild(left);
-    head.appendChild(right);
-
-    // Editor (details)
-    const details = document.createElement("details");
-    details.style.marginTop = "8px";
-    const summary = document.createElement("summary");
-    summary.textContent = "Block-editor";
-    details.appendChild(summary);
-
-    const editor = document.createElement("div");
-    editor.style.marginTop = "8px";
-    editor.style.display = "grid";
-    editor.style.gap = "10px";
-
-    // 9D: Grundfält
-    const row1 = document.createElement("div");
-    row1.style.display = "grid";
-    row1.style.gridTemplateColumns = "1fr 160px";
-    row1.style.gap = "10px";
-
-    const labTitle = document.createElement("label");
-    labTitle.textContent = "Titel";
-    const inpTitle = document.createElement("input");
-    inpTitle.type = "text";
-    inpTitle.maxLength = 120;
-    inpTitle.value = xssText(b.title);
-    labTitle.appendChild(inpTitle);
-
-    const labKind = document.createElement("label");
-    labKind.textContent = "Typ";
-    const selKind = document.createElement("select");
-    selKind.innerHTML = "";
-    [
-      ["info","Info"],
-      ["task","Task"],
-      ["question","Question"],
-      ["both","Both"],
-      ["document","Document"]
-    ].forEach(([v,t])=>{
-      const o = document.createElement("option");
-      o.value = v; o.textContent = t;
-      if (String(b.kind||"") === v) o.selected = true;
-      selKind.appendChild(o);
-    });
-    labKind.appendChild(selKind);
-
-    row1.appendChild(labTitle);
-    row1.appendChild(labKind);
-
-    const labText = document.createElement("label");
-    labText.textContent = "Text";
-    const taText = document.createElement("textarea");
-    taText.maxLength = 2000;
-    taText.value = xssText(b.text ?? b.body ?? b.content ?? "");
-    labText.appendChild(taText);
-
-    // 9D: Avancerat (fälls ut)
-    const adv = document.createElement("details");
-    const advSum = document.createElement("summary");
-    advSum.textContent = "Avancerat";
-    adv.appendChild(advSum);
-
-    const advGrid = document.createElement("div");
-    advGrid.style.marginTop = "8px";
-    advGrid.style.display = "grid";
-    advGrid.style.gridTemplateColumns = "1fr 1fr 1fr";
-    advGrid.style.gap = "10px";
-
-    const meta = (b.meta && typeof b.meta === "object") ? b.meta : null;
-    const mem = MEM_META.get(b.id || b.blockId || ("idx:"+idx)) || {};
-
-    const getMetaVal = (k, fallback="") => {
-      if (meta && (k in meta)) return meta[k];
-      if (k in mem) return mem[k];
-      return fallback;
-    };
-
-    const labMin = document.createElement("label");
-    labMin.textContent = "Tidsåtgång (min)";
-    const inpMin = document.createElement("input");
-    inpMin.type = "number"; inpMin.min = "0"; inpMin.max = "240"; inpMin.step = "5";
-    const vMin = getMetaVal("minutes", "");
-    inpMin.value = (vMin === 0 ? "0" : (vMin ? String(vMin) : ""));
-    labMin.appendChild(inpMin);
-
-    const labDiff = document.createElement("label");
-    labDiff.textContent = "Svårighetsgrad (1–5)";
-    const inpDiff = document.createElement("input");
-    inpDiff.type = "number"; inpDiff.min = "1"; inpDiff.max = "5"; inpDiff.step = "1";
-    const vDiff = getMetaVal("difficulty", "");
-    inpDiff.value = (vDiff ? String(vDiff) : "");
-    labDiff.appendChild(inpDiff);
-
-    const labScene = document.createElement("label");
-    labScene.textContent = "Scen/Steg (valfritt)";
-    const inpScene = document.createElement("input");
-    inpScene.type = "text"; inpScene.maxLength = 60;
-    inpScene.value = xssText(getMetaVal("scene", ""));
-    labScene.appendChild(inpScene);
-
-    advGrid.appendChild(labMin);
-    advGrid.appendChild(labDiff);
-    advGrid.appendChild(labScene);
-    adv.appendChild(advGrid);
-
-    // 9E: Frågor & Quiz editor (endast om blocktyp innehåller frågor)
-    const quizWrap = document.createElement("details");
-    const quizSum = document.createElement("summary");
-    quizSum.textContent = "Frågor & Quiz";
-    quizWrap.appendChild(quizSum);
-
-    const quizBody = document.createElement("div");
-    quizBody.style.marginTop = "8px";
-    quizBody.style.display = "grid";
-    quizBody.style.gap = "10px";
-
-    const itemsKey = Array.isArray(b.items) ? "items" : (Array.isArray(b.questions) ? "questions" : null);
-    const items = itemsKey ? b[itemsKey] : null;
-
-    const quizInfo = document.createElement("div");
-    quizInfo.className = "tiny muted2";
-    quizInfo.textContent = itemsKey
-      ? ("Detta block har " + items.length + " fråga/or. Reflektionsfrågor: " + items.filter(isReflectionItem).length)
-      : "Detta block saknar fråge-array i datan. (UI visar editor först när datan finns.)";
-    quizBody.appendChild(quizInfo);
-
-    if (itemsKey){
-      const btnAddQ = document.createElement("button");
-      btnAddQ.className = "miniBtn";
-      btnAddQ.type = "button";
-      btnAddQ.textContent = "+ Lägg till fråga";
-      btnAddQ.title = "Lägger till en kunskapsfråga";
-      quizBody.appendChild(btnAddQ);
-
-      const btnAddR = document.createElement("button");
-      btnAddR.className = "miniBtn";
-      btnAddR.type = "button";
-      btnAddR.textContent = "+ Lägg till reflektionsfråga";
-      btnAddR.title = "Ingen rätt/fel. Obligatorisk feedbacktext.";
-      quizBody.appendChild(btnAddR);
-
-      const list = document.createElement("div");
-      list.style.display = "grid";
-      list.style.gap = "10px";
-      quizBody.appendChild(list);
-
-      items.forEach((it, qi)=>{
-        list.appendChild(renderQuestionEditor(it, qi, items));
-      });
-
-      btnAddQ.addEventListener("click", ()=>{
-        items.push({
-          id: "q_" + uid(),
-          prompt: "Fråga…",
-          answerType: "choice",
-          choices: ["Alternativ A","Alternativ B","Alternativ C"],
-          correctIndex: 0,
-          feedbackCorrect: "Bra!",
-          feedbackWrong: "Titta igen på innehållet och försök igen.",
-          reflection: false
-        });
-        setDirtySafe(true);
-        sayOutcome("Ändrat: fråga tillagd (osparat).", "warn");
-        render();
-      });
-
-      btnAddR.addEventListener("click", ()=>{
-        items.push({
-          id: "r_" + uid(),
-          prompt: "Reflektionsfråga…",
-          answerType: "text",
-          reflection: true,
-          feedback: "Tack — skriv gärna en kort reflektion om hur du tänker och varför."
-        });
-        setDirtySafe(true);
-        sayOutcome("Ändrat: reflektionsfråga tillagd (osparat).", "warn");
-        render();
-      });
-    }
-
-    quizWrap.appendChild(quizBody);
-
-    // Save buttons per block
-    const rowBtns = document.createElement("div");
-    rowBtns.style.display = "flex";
-    rowBtns.style.gap = "10px";
-    rowBtns.style.flexWrap = "wrap";
-    rowBtns.style.alignItems = "center";
-
-    const btnApply = document.createElement("button");
-    btnApply.className = "btn";
-    btnApply.type = "button";
-    btnApply.textContent = "Spara block";
-    btnApply.title = "Sparar ändringar i blocket (dirty=true).";
-
-    const applyMsg = document.createElement("span");
-    applyMsg.className = "tiny muted2";
-    applyMsg.textContent = "—";
-
-    rowBtns.appendChild(btnApply);
-    rowBtns.appendChild(applyMsg);
-
-    // Compose editor
-    editor.appendChild(row1);
-    editor.appendChild(labText);
-    editor.appendChild(adv);
-    editor.appendChild(quizWrap);
-    editor.appendChild(rowBtns);
-    details.appendChild(editor);
-
-    wrap.appendChild(head);
-    wrap.appendChild(details);
-
-    // ---- Events (move/delete/toggle/apply) ----
-    btnToggle.addEventListener("click", ()=>{
-      details.open = !details.open;
-      btnToggle.textContent = details.open ? "Stäng" : "Redigera";
-    });
-
-    btnUp.addEventListener("click", ()=>{
-      if (idx<=0) return;
-      const t = blocks[idx-1]; blocks[idx-1] = blocks[idx]; blocks[idx] = t;
-      setDirtySafe(true);
-      sayOutcome("Ändrat: block flyttat (osparat).", "warn");
-      render();
-    });
-
-    btnDown.addEventListener("click", ()=>{
-      if (idx>=blocks.length-1) return;
-      const t = blocks[idx+1]; blocks[idx+1] = blocks[idx]; blocks[idx] = t;
-      setDirtySafe(true);
-      sayOutcome("Ändrat: block flyttat (osparat).", "warn");
-      render();
-    });
-
-    btnDel.addEventListener("click", ()=>{
-      if (!confirm("Ta bort blocket? Detta kan inte ångras (förrän du Ångrar osparat).")) return;
-      blocks.splice(idx,1);
-      setDirtySafe(true);
-      sayOutcome("Ändrat: block borttaget (osparat).", "warn");
-      render();
-    });
-
-    btnApply.addEventListener("click", ()=>{
-      // Grundfält
-      b.title = inpTitle.value.trim();
-      b.kind = selKind.value;
-
-      // Textfält (respektera befintligt fältnamn)
-      if ("text" in b) b.text = taText.value;
-      else if ("body" in b) b.body = taText.value;
-      else if ("content" in b) b.content = taText.value;
-      else b.text = taText.value;
-
-      // Avancerat: persist endast om meta-container finns, annars UI-only minne
-      const key = b.id || b.blockId || ("idx:"+idx);
-      const nextMeta = {
-        minutes: (inpMin.value ? Number(inpMin.value) : ""),
-        difficulty: (inpDiff.value ? Number(inpDiff.value) : ""),
-        scene: inpScene.value.trim()
+      const t = {
+        id: nowId("trn_"),
+        title: "Ny utbildning",
+        status: "draft",
+        module: "",
+        area: "",
+        desc: "",
+        // goals intentionally omitted unless user writes (avoids model injection)
+        blocks: []
       };
 
-      if (b.meta && typeof b.meta === "object"){
-        if (nextMeta.minutes !== "") b.meta.minutes = nextMeta.minutes; else delete b.meta.minutes;
-        if (nextMeta.difficulty !== "") b.meta.difficulty = nextMeta.difficulty; else delete b.meta.difficulty;
-        if (nextMeta.scene) b.meta.scene = nextMeta.scene; else delete b.meta.scene;
-      }else{
-        MEM_META.set(key, nextMeta);
+      // push into base list + wrapper
+      STATE.all.unshift(t);
+      if(!STATE.wrapper) STATE.wrapper = { trainings: STATE.all };
+      STATE.wrapper.trainings = STATE.all;
+
+      computeVisible();
+      renderList();
+      selectTraining(t.id);
+      setDirty(true); // new unsaved state
+    }
+
+    // ---------- Save / revert ----------
+    function mergeEditBack(){
+      const id = STATE.selectedId;
+      if(!id || !STATE.edit) return false;
+
+      const ix = STATE.all.findIndex(x => x && x.id === id);
+      if(ix < 0) return false;
+
+      // Replace entire training object with edited copy
+      STATE.all[ix] = STATE.edit;
+
+      // Keep wrapper pointing to STATE.all
+      if(!STATE.wrapper) STATE.wrapper = { trainings: STATE.all };
+      STATE.wrapper.trainings = STATE.all;
+
+      return true;
+    }
+
+    function saveDraft(){
+      if(STATE.locked || !STATE.edit) return;
+      // enforce draft status
+      STATE.edit.status = "draft";
+      elStatus.value = "draft";
+      applyEditorToEdit();
+      if(!mergeEditBack()) return;
+      const ok = saveTrainingsWrapper(STATE.wrapper);
+      if(!ok){
+        setLocked(true, "Kunde inte spara (fail-closed).");
+        return;
+      }
+      setDirty(false);
+      renderDebug();
+    }
+
+    function savePublish(){
+      if(STATE.locked || !STATE.edit) return;
+
+      // enforce publish rules
+      STATE.edit.status = "published";
+      if(!canPublish(STATE.edit)){
+        // fail-closed: do not publish
+        STATE.edit.status = "draft";
+        elStatus.value = "draft";
+        applyEditorToEdit();
+        elStateText.textContent = "Status: Kan inte publicera (kräver block + rubriker)";
+        elStatePill.className = "pill warn";
+        syncButtons();
+        return;
       }
 
-      // Reflektionsfrågor: enforce feedback + remove right/wrong
-      const itemsKey2 = Array.isArray(b.items) ? "items" : (Array.isArray(b.questions) ? "questions" : null);
-      if (itemsKey2){
-        for (const it of b[itemsKey2]){
-          if (isReflectionItem(it)){
-            if (!it.feedback || !String(it.feedback).trim()){
-              it.feedback = "Tack — skriv gärna en kort reflektion om hur du tänker och varför.";
-            }
-            delete it.correctIndex;
-            delete it.feedbackCorrect;
-            delete it.feedbackWrong;
+      applyEditorToEdit();
+      if(!mergeEditBack()) return;
+
+      const ok = saveTrainingsWrapper(STATE.wrapper);
+      if(!ok){
+        setLocked(true, "Kunde inte spara (fail-closed).");
+        return;
+      }
+
+      setDirty(false);
+      renderDebug();
+    }
+
+    function revert(){
+      if(!STATE.rawSelected) return;
+      // restore from rawSelected snapshot (from STATE.all)
+      STATE.edit = normalizeTraining(safeJsonParse(JSON.stringify(STATE.rawSelected), STATE.rawSelected));
+      fillEditorFrom(STATE.edit);
+      setDirty(false);
+    }
+
+    // ---------- Debug ----------
+    function renderDebug(){
+      const raw = loadTrainingsRaw();
+      const dbg = {
+        key: KEY_TRAININGS,
+        missing: raw.missing,
+        corrupt: raw.corrupt,
+        count: STATE.all.length,
+        selectedId: STATE.selectedId || null,
+        dirty: STATE.dirty,
+        locked: STATE.locked,
+        sampleSelected: STATE.edit ? {
+          id: STATE.edit.id,
+          title: STATE.edit.title,
+          status: STATE.edit.status,
+          module: STATE.edit.module,
+          area: STATE.edit.area,
+          blocks: Array.isArray(STATE.edit.blocks) ? STATE.edit.blocks.length : 0
+        } : null
+      };
+      elDebugPre.textContent = JSON.stringify(dbg, null, 2);
+    }
+
+    // ---------- Worker UI (fail-closed) ----------
+    function testWorker(){
+      // No worker here; fail-closed
+      elStateText.textContent = "Status: Worker saknas (UI-only) – ingen åtgärd";
+      elStatePill.className = "pill warn";
+      renderDebug();
+    }
+    function genBlocks(){
+      // No worker here; fail-closed
+      elStateText.textContent = "Status: Generering kräver worker – ingen åtgärd";
+      elStatePill.className = "pill warn";
+      renderDebug();
+    }
+
+    // ---------- Logout ----------
+    function logout(){
+      try{
+        if(HR && typeof HR.logout === "function"){
+          HR.logout(); // expected to clear sessionStorage auth (AO-001)
+        }else{
+          // minimal fail-closed fallback: clear session only
+          sessionStorage.clear();
+        }
+      }catch(e){
+        sessionStorage.clear();
+      }
+      location.href = "../index.html";
+    }
+
+    // ---------- Init ----------
+    function init(){
+      // Auth
+      const authRes = requireAuthAdmin();
+      if(!authRes.ok){
+        setLocked(true, authRes.reason || "Auth fail-closed.");
+        elWhoText.textContent = "INLOGGNING KRÄVS";
+      }else{
+        const a = authRes.auth || {};
+        const role = a.role || a.userRole || "—";
+        const empNo = a.empNo || a.userId || "—";
+        elWhoText.textContent = "empNo: " + empNo + " • role: " + role;
+      }
+
+      // Load trainings
+      const raw = loadTrainingsRaw();
+      STATE.trainingsMissing = !!raw.missing;
+      STATE.trainingsCorrupt = !!raw.corrupt;
+      STATE.trainingsOk = (!raw.corrupt);
+
+      if(raw.corrupt){
+        setLocked(true, "Korrupt utbildningsdata (AO-057_TRAININGS_V1).");
+      }
+
+      STATE.wrapper = raw.wrapper || { trainings: raw.list || [] };
+      STATE.all = (raw.list || []).map(normalizeTraining);
+
+      // Ensure wrapper references STATE.all
+      STATE.wrapper.trainings = STATE.all;
+
+      computeVisible();
+      renderList();
+      renderBlocks();
+      renderPreview(null);
+      renderDebug();
+
+      // List controls
+      elQ.addEventListener("input", ()=>{
+        computeVisible(); renderList();
+      });
+      elFStatus.addEventListener("change", ()=>{
+        computeVisible(); renderList();
+      });
+      btnShowAll.addEventListener("click", ()=>{
+        elQ.value = "";
+        elFStatus.value = "";
+        computeVisible();
+        renderList();
+      });
+
+      btnNew.addEventListener("click", createNewTraining);
+
+      // Editor changes
+      bindEditorChange(elMod, applyEditorToEdit);
+      bindEditorChange(elArea, applyEditorToEdit);
+      bindEditorChange(elTitle, applyEditorToEdit);
+      bindEditorChange(elStatus, applyEditorToEdit);
+      bindEditorChange(elDesc, applyEditorToEdit);
+      bindEditorChange(elGoals, applyEditorToEdit);
+
+      cbOnlyProblems.addEventListener("change", ()=>{
+        renderBlocks();
+      });
+
+      // Blocks
+      btnAddInfo.addEventListener("click", ()=> addBlock("info", "Information (rubrik)", "Text…"));
+      btnAddTask.addEventListener("click", ()=> addBlock("task", "Uppgift (rubrik)", "Instruktioner…"));
+      btnAddQuiz.addEventListener("click", ()=> addBlock("quiz", "Fråga/Quiz (rubrik)", "Fråga/instruktion…"));
+      btnAddDoc.addEventListener("click", ()=> addBlock("doc", "Dokument (rubrik)", "Kravtext…"));
+
+      // Templates & progressive
+      btnTpl1.addEventListener("click", ()=> applyTemplate(1));
+      btnTpl2.addEventListener("click", ()=> applyTemplate(2));
+      btnTpl3.addEventListener("click", ()=> applyTemplate(3));
+      btnProgressive.addEventListener("click", makeProgressive);
+
+      // AI UI
+      btnTestWorker.addEventListener("click", testWorker);
+      btnGenBlocks.addEventListener("click", genBlocks);
+
+      // Save/revert
+      btnRevert.addEventListener("click", revert);
+      btnSaveDraft.addEventListener("click", saveDraft);
+      btnSavePublish.addEventListener("click", savePublish);
+
+      // Logout
+      btnLogout.addEventListener("click", logout);
+
+      // Hotkeys (light, safe)
+      document.addEventListener("keydown", (e)=>{
+        if(e.ctrlKey || e.metaKey){
+          if(e.key === "s"){
+            e.preventDefault();
+            // Save draft by default, publish requires explicit click
+            if(!btnSaveDraft.disabled) saveDraft();
           }
         }
-      }
-
-      setDirtySafe(true);
-      applyMsg.textContent = "Sparat i UI (osparat till storage tills du klickar Spara).";
-      sayOutcome("Ändrat: block sparat i UI (osparat).", "warn");
-      setTimeout(()=>{ applyMsg.textContent = "—"; }, 1200);
-      render();
-    });
-
-    return wrap;
-  }
-
-  function renderQuestionEditor(it, qi, items){
-    const box = document.createElement("div");
-    box.style.border = "1px solid rgba(0,0,0,.08)";
-    box.style.borderRadius = "12px";
-    box.style.padding = "10px";
-    box.style.background = "rgba(255,255,255,.6)";
-
-    const isR = isReflectionItem(it);
-
-    const top = document.createElement("div");
-    top.style.display = "flex";
-    top.style.justifyContent = "space-between";
-    top.style.gap = "10px";
-    top.style.flexWrap = "wrap";
-    top.style.alignItems = "center";
-
-    const tag = document.createElement("span");
-    tag.className = "pill " + (isR ? "warn" : "ok");
-    tag.textContent = isR ? "Reflektionsfråga" : "Kunskapsfråga";
-
-    const btnRemove = document.createElement("button");
-    btnRemove.className = "miniBtn danger";
-    btnRemove.type = "button";
-    btnRemove.textContent = "Ta bort";
-
-    top.appendChild(tag);
-    top.appendChild(btnRemove);
-
-    const labPrompt = document.createElement("label");
-    labPrompt.textContent = "Fråga";
-    const taPrompt = document.createElement("textarea");
-    taPrompt.maxLength = 400;
-    taPrompt.value = xssText(it.prompt || it.question || "");
-    labPrompt.appendChild(taPrompt);
-
-    const row = document.createElement("div");
-    row.style.display = "grid";
-    row.style.gridTemplateColumns = "1fr 1fr";
-    row.style.gap = "10px";
-
-    const labType = document.createElement("label");
-    labType.textContent = "Svarstyp";
-    const selType = document.createElement("select");
-    [
-      ["choice","Choice"],
-      ["text","Text"]
-    ].forEach(([v,t])=>{
-      const o = document.createElement("option");
-      o.value = v; o.textContent = t;
-      if (String(it.answerType || it.type || "choice") === v) o.selected = true;
-      selType.appendChild(o);
-    });
-    labType.appendChild(selType);
-
-    const labReflection = document.createElement("label");
-    labReflection.textContent = "Reflektion";
-    const chkR = document.createElement("input");
-    chkR.type = "checkbox";
-    chkR.checked = isR;
-    labReflection.appendChild(chkR);
-
-    row.appendChild(labType);
-    row.appendChild(labReflection);
-
-    const body = document.createElement("div");
-    body.style.display = "grid";
-    body.style.gap = "10px";
-
-    // Feedback
-    const labFb = document.createElement("label");
-    labFb.textContent = isR ? "Feedback (obligatorisk)" : "Feedback (rätt/fel)";
-    const taFb = document.createElement("textarea");
-    taFb.maxLength = 300;
-    taFb.value = xssText(isR ? (it.feedback || "") : (it.feedbackCorrect || ""));
-    labFb.appendChild(taFb);
-
-    const labFb2 = document.createElement("label");
-    labFb2.textContent = isR ? "—" : "Feedback (fel)";
-    const taFb2 = document.createElement("textarea");
-    taFb2.maxLength = 300;
-    taFb2.value = xssText(isR ? "" : (it.feedbackWrong || ""));
-    labFb2.appendChild(taFb2);
-    labFb2.style.display = isR ? "none" : "block";
-
-    // Choices
-    const labChoices = document.createElement("label");
-    labChoices.textContent = "Alternativ (en per rad)";
-    const taChoices = document.createElement("textarea");
-    taChoices.maxLength = 800;
-    const choicesArr = Array.isArray(it.choices) ? it.choices : [];
-    taChoices.value = choicesArr.join("\n");
-    labChoices.appendChild(taChoices);
-
-    const labCorrect = document.createElement("label");
-    labCorrect.textContent = "Rätt svar (index, 1..N)";
-    const inpCorrect = document.createElement("input");
-    inpCorrect.type = "number";
-    inpCorrect.min = "1";
-    inpCorrect.max = "20";
-    const cIdx = (typeof it.correctIndex === "number") ? (it.correctIndex + 1) : 1;
-    inpCorrect.value = String(cIdx);
-    labCorrect.appendChild(inpCorrect);
-
-    if (isR){
-      labChoices.style.display = "none";
-      labCorrect.style.display = "none";
-    }
-
-    const actions = document.createElement("div");
-    actions.style.display = "flex";
-    actions.style.gap = "10px";
-    actions.style.flexWrap = "wrap";
-    actions.style.alignItems = "center";
-
-    const btnApply = document.createElement("button");
-    btnApply.className = "miniBtn";
-    btnApply.type = "button";
-    btnApply.textContent = "Spara fråga";
-
-    const hint = document.createElement("span");
-    hint.className = "tiny muted2";
-    hint.textContent = "—";
-
-    actions.appendChild(btnApply);
-    actions.appendChild(hint);
-
-    body.appendChild(labFb);
-    body.appendChild(labFb2);
-    body.appendChild(labChoices);
-    body.appendChild(labCorrect);
-    body.appendChild(actions);
-
-    box.appendChild(top);
-    box.appendChild(labPrompt);
-    box.appendChild(row);
-    box.appendChild(body);
-
-    btnRemove.addEventListener("click", ()=>{
-      if (!confirm("Ta bort frågan?")) return;
-      items.splice(qi,1);
-      setDirtySafe(true);
-      sayOutcome("Ändrat: fråga borttagen (osparat).", "warn");
-      render();
-    });
-
-    function applyReflectionUI(on){
-      labFb.textContent = on ? "Feedback (obligatorisk)" : "Feedback (rätt)";
-      labFb2.style.display = on ? "none" : "block";
-      labChoices.style.display = on ? "none" : "block";
-      labCorrect.style.display = on ? "none" : "block";
-      tag.className = "pill " + (on ? "warn" : "ok");
-      tag.textContent = on ? "Reflektionsfråga" : "Kunskapsfråga";
-    }
-
-    chkR.addEventListener("change", ()=>{
-      applyReflectionUI(chkR.checked);
-    });
-
-    btnApply.addEventListener("click", ()=>{
-      it.prompt = taPrompt.value.trim();
-
-      const wantR = !!chkR.checked;
-      it.reflection = wantR;
-      it.isReflection = wantR;
-
-      if (wantR){
-        delete it.correctIndex;
-        delete it.feedbackCorrect;
-        delete it.feedbackWrong;
-
-        const fb = taFb.value.trim();
-        it.feedback = fb || "Tack — skriv gärna en kort reflektion om hur du tänker och varför.";
-        it.answerType = "text";
-      }else{
-        const type = selType.value;
-        it.answerType = type;
-
-        if (type === "choice"){
-          const lines = taChoices.value.split("\n").map(s=>s.trim()).filter(Boolean);
-          it.choices = lines.length ? lines : ["Alternativ A","Alternativ B"];
-          const ci = Math.max(1, Math.min(it.choices.length, Number(inpCorrect.value||"1")));
-          it.correctIndex = ci - 1;
-        }else{
-          it.choices = [];
-          delete it.correctIndex;
-        }
-
-        it.feedbackCorrect = taFb.value.trim() || "Bra!";
-        it.feedbackWrong = taFb2.value.trim() || "Titta igen på innehållet och försök igen.";
-        delete it.feedback;
-      }
-
-      const blocks = ensureBlocks();
-      const refl = blocks ? countReflections(blocks) : 0;
-      if (refl > 2){
-        hint.textContent = "Obs: Rek max 1–2 reflektionsfrågor per kurs (nu: " + refl + ").";
-      }else{
-        hint.textContent = "Sparad.";
-      }
-
-      setDirtySafe(true);
-      sayOutcome("Ändrat: fråga sparad (osparat).", "warn");
-      setTimeout(()=>{ hint.textContent = "—"; }, 1400);
-      render();
-    });
-
-    return box;
-  }
-
-  // ---- 9A add block ----
-  function addBlock(kind, preset){
-    const blocks = ensureBlocks();
-    if (!blocks) return;
-
-    const k = String(kind || "info");
-    const b = {
-      id: uid(),
-      kind: k,
-      title: preset && preset.title ? preset.title : "",
-      text: preset && preset.text ? preset.text : ""
-    };
-
-    // Keep compatible with existing model
-    if (k === "question" || k === "both"){
-      const usesItems = blocks.some(x=>x && Array.isArray(x.items));
-      const usesQuestions = blocks.some(x=>x && Array.isArray(x.questions));
-      if (usesItems) b.items = [];
-      else if (usesQuestions) b.questions = [];
-    }
-
-    blocks.push(b);
-    setDirtySafe(true);
-    sayOutcome("Ändrat: nytt block skapat (osparat).", "warn");
-    render();
-  }
-
-  // ---- 9B templates ----
-  function confirmTemplateIfBlocksExist(blocks){
-    if (!blocks || !blocks.length) return {mode:"append"};
-    const msg =
-      "Det finns redan " + blocks.length + " block i kursen.\n\n" +
-      "OK = Ersätt (rensa och skapa mallen)\n" +
-      "Avbryt = Avbryt helt\n\n" +
-      "Tips: Om du vill lägga till utan att rensa, skapa manuellt istället.";
-    const ok = confirm(msg);
-    return ok ? {mode:"replace"} : {mode:"cancel"};
-  }
-
-  function applyTemplate(name){
-    const blocks = ensureBlocks();
-    if (!blocks) return;
-
-    const choice = confirmTemplateIfBlocksExist(blocks);
-    if (choice.mode === "cancel") return;
-    if (choice.mode === "replace") blocks.splice(0, blocks.length);
-
-    if (name === "theoryTaskQuiz"){
-      addBlock("info", { title:"Teori – Översikt", text:"Skriv teori i korta stycken. Använd tydliga exempel…"});
-      addBlock("task", { title:"Uppgift – Praktisk tillämpning", text:"Beskriv uppgiften steg för steg. Vad ska göras? Vad är klart när…"});
-      addBlock("question", { title:"Quiz – Kunskapsfrågor", text:"Lägg in 2–5 frågor. Blanda choice och text vid behov."});
-    }
-
-    if (name === "scenario"){
-      addBlock("info", { title:"Scenario (Case) – Bakgrund", text:"Beskriv situationen: plats, roll, vad som händer…"});
-      addBlock("task", { title:"Uppgift – Vad gör du nu?", text:"Skriv uppgiften. Be användaren välja/utföra åtgärder…"});
-      addBlock("question", { title:"Reflektion/Check", text:"Lägg in 1–2 kontrollfrågor och ev. en reflektionsfråga."});
-    }
-
-    if (name === "docCtrl"){
-      addBlock("document", { title:"Dokument – Kravtext / Policy", text:"Skriv kravet/policyn. Dela upp i punkter och undvik onödigt långa stycken…"});
-      addBlock("question", { title:"Kontrollfrågor – Förståelse", text:"Skapa 2–5 frågor som säkerställer att kraven förstås och kan tillämpas."});
-    }
-
-    setDirtySafe(true);
-    sayOutcome("Mall skapad (osparat).", "warn");
-    render();
-  }
-
-  // ---- 9C progressive ----
-  function stripStepPrefix(t){
-    const s = String(t||"").trim();
-    return s.replace(/^Steg\s+\d+\s+[–-]\s+/i, "");
-  }
-  function makeProgressive(){
-    const blocks = ensureBlocks();
-    if (!blocks || !blocks.length) return;
-
-    for (let i=0;i<blocks.length;i++){
-      const b = blocks[i];
-      if (!b || typeof b !== "object") continue;
-      const base = stripStepPrefix(b.title || "");
-      b.title = "Steg " + (i+1) + " – " + (base.trim() ? base.trim() : kindLabel(b.kind));
-    }
-    setDirtySafe(true);
-    sayOutcome("Ändrat: kursen är nu progressiv (osparat).", "warn");
-    render();
-  }
-
-  // ---- 9F AI mode: add Scenario option (if AI select exists) ----
-  function patchAiModeIfPresent(){
-    if (!el.aiMode) return;
-    const exists = Array.from(el.aiMode.options).some(o => o.value === "scenario");
-    if (!exists){
-      const opt = document.createElement("option");
-      opt.value = "scenario";
-      opt.textContent = "Scenario (Case)";
-      el.aiMode.appendChild(opt);
-    }
-
-    if (el.aiStatus){
-      const t = el.aiStatus.textContent || "—";
-      if (t === "—"){
-        el.aiStatus.textContent = "AI: Välj läge och antal block. Vid worker-fel visas tydligt fel här.";
-      }
-    }
-
-    const attach = (btn, label) => {
-      if (!btn) return;
-      btn.addEventListener("click", ()=>{
-        if (el.aiStatus){
-          el.aiStatus.textContent = label + "… Om det fastnar: kontrollera endpoint och CORS, eller testa igen.";
-        }
-      }, {capture:true});
-    };
-    attach(el.btnAiTest, "Testar worker");
-    attach(el.btnAiGenerate, "Skapar med AI");
-  }
-
-  // ---- BLOCK 10: save/revert/publish hooks (fail-closed) ----
-  function canPublish(edit){
-    if (!edit) return false;
-    const blocks = ensureBlocks();
-    return !!(blocks && blocks.length > 0);
-  }
-
-  function callIfFn(fn, args){
-    try{
-      if (typeof fn === "function") return fn.apply(null, args || []);
-    }catch(_){}
-    return undefined;
-  }
-
-  function doRevert(){
-    const edit = getEdit();
-    if (!edit){
-      sayOutcome("Fail-closed: Ingen vald utbildning att ångra.", "err");
-      return;
-    }
-    const ok = confirm("Ångra osparat?\n\nDetta återställer osparade ändringar för vald utbildning. Detta kan inte ångras.");
-    if (!ok) return;
-
-    // Om din app redan har revert-funktioner, anropa dem.
-    // (Vi gissar inte datamodell; fail-closed annars.)
-    const did =
-      callIfFn(window.revertUnsaved, []) ??
-      callIfFn(window.onRevertUnsaved, []) ??
-      callIfFn(window.revertEdit, []) ??
-      callIfFn(window.__revertEdit, []);
-
-    if (did === undefined){
-      // Om ingen handler finns, gör inget (säkerhetsprincip).
-      sayOutcome("Ångra: ingen revert-handler hittades i appen. (Ingen förändring gjord.)", "err");
-      return;
-    }
-
-    setDirtySafe(false);
-    sayOutcome("Ångra: osparade ändringar återställda.", "ok");
-    render();
-  }
-
-  function doSaveDraft(){
-    const edit = getEdit();
-    if (!edit){
-      sayOutcome("Fail-closed: Ingen vald utbildning att spara.", "err");
-      return;
-    }
-
-    // Sätt status om fältet finns (UI-logik). Vi skapar inte nya keys/strukturer.
-    if ("status" in edit) edit.status = "draft";
-
-    // Anropa befintliga save-funktioner om de finns.
-    const did =
-      callIfFn(window.saveTraining, [{ mode:"draft" }]) ??
-      callIfFn(window.saveCurrentTraining, [{ mode:"draft" }]) ??
-      callIfFn(window.onSave, ["draft"]) ??
-      callIfFn(window.__save, ["draft"]);
-
-    if (did === undefined){
-      sayOutcome("Spara utkast: ingen save-handler hittades i appen. (UI uppdaterat, men ingen storage-skrivning gjord.)", "err");
-      setDirtySafe(true);
-      updateDebug();
-      return;
-    }
-
-    setDirtySafe(false);
-    sayOutcome("Sparat som utkast.", "ok");
-    updateDebug();
-  }
-
-  function doSavePublish(){
-    const edit = getEdit();
-    if (!edit){
-      sayOutcome("Fail-closed: Ingen vald utbildning att publicera.", "err");
-      return;
-    }
-
-    if (!canPublish(edit)){
-      sayOutcome("Publicering stoppad (fail-closed): Publicerad kräver minst 1 block.", "err");
-      return;
-    }
-
-    if ("status" in edit) edit.status = "published";
-
-    const did =
-      callIfFn(window.saveTraining, [{ mode:"publish" }]) ??
-      callIfFn(window.saveCurrentTraining, [{ mode:"publish" }]) ??
-      callIfFn(window.onSave, ["publish"]) ??
-      callIfFn(window.__save, ["publish"]);
-
-    if (did === undefined){
-      sayOutcome("Publicera: ingen save-handler hittades i appen. (UI uppdaterat, men ingen storage-skrivning gjord.)", "err");
-      setDirtySafe(true);
-      updateDebug();
-      return;
-    }
-
-    setDirtySafe(false);
-    sayOutcome("Sparat & publicerat.", "ok");
-    updateDebug();
-  }
-
-  // ---- Wiring ----
-  function wire(){
-    if (el.btnShowAllBlocks){
-      el.btnShowAllBlocks.dataset.showall = "0";
-      el.btnShowAllBlocks.addEventListener("click", ()=>{
-        const on = (el.btnShowAllBlocks.dataset.showall === "1");
-        el.btnShowAllBlocks.dataset.showall = on ? "0" : "1";
-        el.btnShowAllBlocks.textContent = on ? "Visa alla" : "Göm igen";
-        render();
       });
+
+      syncButtons();
     }
 
-    if (el.blockSearch){
-      el.blockSearch.addEventListener("input", ()=>{
-        render();
-      });
-    }
-
-    if (el.btnAddBlock){
-      el.btnAddBlock.addEventListener("click", ()=>{
-        const kind = el.addKind ? el.addKind.value : "info";
-        addBlock(kind, { title: kindLabel(kind) + " – titel", text: "" });
-      });
-    }
-
-    if (el.btnTplTheoryTaskQuiz) el.btnTplTheoryTaskQuiz.addEventListener("click", ()=>applyTemplate("theoryTaskQuiz"));
-    if (el.btnTplScenario) el.btnTplScenario.addEventListener("click", ()=>applyTemplate("scenario"));
-    if (el.btnTplDocCtrl) el.btnTplDocCtrl.addEventListener("click", ()=>applyTemplate("docCtrl"));
-    if (el.btnMakeProgressive) el.btnMakeProgressive.addEventListener("click", makeProgressive);
-<!-- =========================================
-   BLOCK 10/10 – Spara, Ångra, Publicera, Debug
-   ========================================= -->
-
-<div class="footerRow" aria-label="Spara och publicera">
-  <div class="left" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-    <button class="miniBtn danger" id="btnRevert" type="button"
-      title="Återställer osparade ändringar för vald utbildning">
-      Ångra osparat
-    </button>
-    <span class="tiny muted2" id="revertHint">
-      Ångra osparat återställer ändringar som inte sparats. Detta kan inte ångras.
-    </span>
-  </div>
-
-  <div class="left" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-    <button class="btn secondary" id="btnSaveDraft" type="button" title="Sparar som utkast">
-      Spara som utkast
-    </button>
-    <button class="btn" id="btnSavePublish" type="button" title="Sparar och publicerar (fail-closed)">
-      Spara & publicera
-    </button>
-  </div>
-</div>
-
-<div class="tiny" id="saveOutcome" role="status" aria-live="polite" style="margin-top:10px;">
-  —
-</div>
-
-<div class="tiny" id="postSaveText" style="margin-top:8px;">
-  Denna utbildning kan nu redigeras vidare i block-redigeraren.
-</div>
-
-<details id="debugDetails" style="margin-top:10px;">
-  <summary>Visa sparad data (debug)</summary>
-  <div class="tiny">
-    Visar exakt objekt som skickas vidare (det som skrivs till storage) för felsök.
-  </div>
-  <pre id="debugPre">{}</pre>
-</details>
-
-
-<!-- ============================================================
-Ändringslogg (AO-TRAININGS-AI-DOCMODE-01) ≤ 8 rader
-- UI: Tar bort “Laddad senaste utbildning” vid normal sidöppning (visas bara efter att du skapar/sparar)
-- UI: Blocklistan är gömd tills du söker eller klickar “Visa alla” (hindrar enorm lång sida)
-- UI: Skapa/Redigera känns smalare + tydligare: fält under varandra + översikt bredvid
-- POLICY: Inga nya storage-keys, inga kopplingsändringar, XSS-safe rendering oförändrad
-Testnoteringar (klicksteg):
-1) Öppna sidan → ingen “Laddad senaste…”-ruta ska visas
-2) Ändra rubrik → klicka Spara → OK-ruta visas + blocklistan är lugn (gömd)
-3) Gå till “5) Block” → skriv i “Sök block” → lista visas bara med matchande block
-4) Klicka “Visa alla” → hela listan visas → klicka “Göm igen” → listan göms
-Risk/edge cases:
-- Vid sök visas block i ursprunglig ordning; flytta/ta bort fungerar fortfarande (index säkras)
-- Om två block har identisk referens (ovanligt) kan arr.indexOf bli första träffen; data-modellen här är normalt unik per blockId
-QA-check:
-P0: Fail-closed/auth oförändrat • inga nya keys • inga kopplingsändringar
-P1: Regression: spara/AI/add block renderar korrekt • publish-regel baseras på total block-count
-P2: UI: små skärmar staplar preview under fälten
-============================================================ -->
+    init();
+  })();
+  </script>
 </body>
 </html>
