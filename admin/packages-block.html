@@ -6,11 +6,17 @@ AO-BLOCK-PIPELINE-01 (MASTER) | BLOCK 2/5 | FIL-ID: admin/packages-block.html
 Projekt: HR-System
 Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
 
-NYTT i denna patch (EXPORT-STEGET):
-- Import/Export-steg: “Hämta från Utbildningar (AO-057_TRAININGS_V1)” → exportera som block till block-banken (AO-0XX_BLOCKS_V1)
-- Fail-closed: export blockas om trainings-data är korrupt; SYSTEM_ADMIN = read-only
-- Back-compat: stöder flera shapes i trainings (array/wrapper, olika fältnamn för block/items/content/rawText osv.)
-- Ingen ny storage-key: Läser AO-057_TRAININGS_V1, skriver endast AO-0XX_BLOCKS_V1
+MÅL (UPGRADE vNext):
+- “Super-redigeringssida” för BLOCK: fokus på Frågor + Svar (facit) + Dokument.
+- Måste passa ihop med Onboard-planer (admin/onboard-plans.html): Onboard använder frågor/svar + dokument.
+- Tasks finns kvar för back-compat men markeras som “ej i nästa steg” (UI only).
+
+NYTT i denna patch (EDITOR-QUALITY):
+- Ny 3-panel-layout på desktop: Blocklista | Itemlista | Item-editor (snabbt att jobba).
+- Item-sök + filter (Dokument/Frågor/Uppgifter) – inget nytt storage.
+- Duplicera item, duplicera block, skapa nytt draft-block (ingen ny datamodell).
+- Starkare fail-closed: DOM-guards, storage-guards, beforeunload-varning, säkrare validering.
+- Bättre typografi (matchar senaste stil: “lugnt, premium, läsbart”).
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -35,36 +41,86 @@ POLICY (LÅST):
   <script src="../UI/UI-03-APP.js"></script>
 
   <style>
-    .muted2{ color: var(--muted); font-size:.92rem; line-height:1.35; }
+    /* =========================================
+       TYPO / BASE (premium, lugnt, läsbart)
+       ========================================= */
+    :root{
+      --ink-strong:#0b1220;
+      --ink:#111827;
+      --muted2:#6b7280;
+      --bg-soft: rgba(250,250,250,.72);
+      --glass: rgba(255,255,255,.92);
+      --focus: rgba(59,130,246,.35);
+      --ok-bg: rgba(167,243,208,.18);
+      --warn-bg: rgba(254,243,199,.65);
+      --bad-bg: rgba(254,242,242,.90);
+    }
+
+    html, body{
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .muted2{ color: var(--muted); font-size:.92rem; line-height:1.45; }
     .pill{
-      display:inline-flex; align-items:center; gap:6px; padding:4px 10px;
+      display:inline-flex; align-items:center; gap:6px; padding:5px 10px;
       border:1px solid var(--line); border-radius:999px; background:#fff;
       font-size:.88rem; color: var(--muted); white-space:nowrap;
     }
-    .pill.ok{ background: rgba(167,243,208,.18); border-color: rgba(16,185,129,.28); color:#065f46; }
-    .pill.warn{ background: rgba(254,243,199,.65); border-color: rgba(245,158,11,.30); color:#7c2d12; }
-    .pill.bad{ background: rgba(254,242,242,.90); border-color: rgba(239,68,68,.30); color:#7f1d1d; }
+    .pill.ok{ background: var(--ok-bg); border-color: rgba(16,185,129,.28); color:#065f46; }
+    .pill.warn{ background: var(--warn-bg); border-color: rgba(245,158,11,.30); color:#7c2d12; }
+    .pill.bad{ background: var(--bad-bg); border-color: rgba(239,68,68,.30); color:#7f1d1d; }
 
-    .grid2{
+    .tiny{ font-size:.88rem; color: var(--muted); line-height:1.35; }
+    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; font-size:.92rem; color: var(--muted); }
+
+    /* =========================================
+       LAYOUT
+       - Desktop: 3 paneler (Block | Items | Editor)
+       ========================================= */
+    .grid3{
       display:grid;
-      grid-template-columns: 380px 1fr;
+      grid-template-columns: 360px 360px 1fr;
       gap: 14px;
       align-items:start;
     }
+    @media (max-width: 1280px){
+      .grid3{ grid-template-columns: 360px 1fr; }
+      .colItems{ display:none; } /* På mindre skärm: items + editor kör i editorpanelen */
+    }
     @media (max-width: 1100px){
-      .grid2{ grid-template-columns: 1fr; }
+      .grid3{ grid-template-columns: 1fr; }
+      .colItems{ display:block; }
     }
 
     .sideCard{ position: sticky; top: 10px; }
     @media (max-width: 1100px){ .sideCard{ position: static; } }
 
+    .panel{
+      border:1px solid var(--line);
+      border-radius: var(--r14);
+      background:#fff;
+      padding: 12px;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .panelSticky{
+      position: sticky;
+      top: 10px;
+    }
+    @media (max-width: 1100px){ .panelSticky{ position: static; } }
+
+    /* =========================================
+       LIST ROWS (no lift)
+       ========================================= */
     .rows{
       padding:10px;
       display:flex;
       flex-direction:column;
       gap:8px;
     }
-    .rowItem{
+    .rowItem, .itemRow, .exportRow{
       border:1px solid var(--line);
       border-radius: 14px;
       padding:10px;
@@ -74,21 +130,30 @@ POLICY (LÅST):
       transition: box-shadow .15s ease, filter .15s ease, outline-color .15s ease;
     }
     /* SPEC: ingen lift */
-    .rowItem:hover{
+    .rowItem:hover, .itemRow:hover, .exportRow:hover{
       box-shadow: 0 10px 26px rgba(17,17,17,.10);
       filter: brightness(1.01);
     }
-    .rowItem.active{ outline: 2px solid rgba(59,130,246,.35); }
+    .rowItem.active, .itemRow.active, .exportRow.active{ outline: 2px solid var(--focus); }
 
-    .rowTop{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
-    .rowTitle{ font-weight: 950; line-height: 1.2; }
-    .tiny{ font-size:.88rem; color: var(--muted); line-height:1.25; }
+    .rowTop, .itemTop{
+      display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap;
+    }
+    .rowTitle, .itemTitle{
+      font-weight: 950;
+      line-height: 1.2;
+      color: var(--ink);
+    }
+
     .tag{
       display:inline-flex; align-items:center; gap:6px; padding:2px 8px;
       border:1px solid var(--line); border-radius:999px; background: rgba(250,250,250,.92);
       font-size:.85rem; color: var(--muted); white-space: nowrap;
     }
 
+    /* =========================================
+       MSG
+       ========================================= */
     .msg{
       margin-top:10px;
       padding:10px 12px;
@@ -102,31 +167,7 @@ POLICY (LÅST):
     .msg.warn{ border-color: rgba(245,158,11,.30); background: rgba(254,243,199,.35); color:#7c2d12; display:block; }
 
     input[type="text"], textarea, select, input[type="number"]{ width:100%; margin-top:6px; }
-    textarea{ min-height: 92px; resize: vertical; }
-
-    .panel{
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      background:#fff;
-      padding: 12px;
-      box-shadow: var(--shadow-soft);
-      position: sticky;
-      top: 10px;
-    }
-    @media (max-width: 1100px){ .panel{ position: static; } }
-
-    .panel h2{ margin:0; font-size: 1.02rem; font-weight: 950; }
-    .panel h3{ margin:12px 0 6px; font-size: .98rem; font-weight: 950; }
-
-    .row2{
-      display:grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 10px;
-      align-items:end;
-    }
-    @media (max-width: 1100px){ .row2{ grid-template-columns: 1fr; } }
-
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; font-size:.92rem; color: var(--muted); }
+    textarea{ min-height: 104px; resize: vertical; }
 
     .miniBtn{
       border: 1px solid var(--line);
@@ -147,7 +188,6 @@ POLICY (LÅST):
     }
     .miniBtn:hover{ background:#fafafa; }
     .miniBtn:disabled{ opacity:.55; cursor:not-allowed; }
-
     .miniBtn.danger{ border-color: rgba(239,68,68,.35); }
     .miniBtn.danger:hover{ background: rgba(254,242,242,.8); }
 
@@ -172,36 +212,22 @@ POLICY (LÅST):
     .lockbox ul{ margin:8px 0 0; padding-left:18px; }
     .lockbox li{ margin:4px 0; }
 
-    .itemRow{
-      border:1px solid var(--line);
-      border-radius: 14px;
-      padding:10px;
-      background:#fff;
-      cursor:pointer;
-      box-shadow: var(--shadow-soft);
-      transition: box-shadow .15s ease, filter .15s ease;
-    }
-    .itemRow:hover{
-      box-shadow: 0 10px 26px rgba(17,17,17,.08);
-      filter: brightness(1.01);
-    }
-    .itemRow.active{ outline: 2px solid rgba(59,130,246,.35); }
-    .itemTop{ display:flex; gap:10px; align-items:flex-start; justify-content:space-between; flex-wrap:wrap; }
-    .itemTitle{ font-weight: 950; line-height:1.2; display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .itemMeta{ margin-top:6px; }
-    .itemMeta2{ margin-top:6px; font-size:.86rem; color: var(--muted); }
-
+    /* =========================================
+       QA pills
+       ========================================= */
     .qaLine{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:6px; }
     .qaPill{ font-size:.82rem; padding:2px 8px; border-radius:999px; border:1px solid var(--line); background:#fff; color:var(--muted); }
     .qaPill.ok{ background: rgba(167,243,208,.16); border-color: rgba(16,185,129,.26); color:#065f46; }
     .qaPill.bad{ background: rgba(254,242,242,.85); border-color: rgba(239,68,68,.30); color:#7f1d1d; }
 
-    /* Item detail summary (All info) */
+    /* =========================================
+       DETAIL CARD
+       ========================================= */
     .detailCard{
       margin-top:10px;
       border:1px solid var(--line);
       border-radius: var(--r14);
-      background:#fff;
+      background: var(--glass);
       padding:10px;
     }
     .detailGrid{
@@ -211,10 +237,12 @@ POLICY (LÅST):
     }
     @media (max-width: 800px){ .detailGrid{ grid-template-columns: 1fr; } }
     .detailLabel{ font-size:.82rem; color: var(--muted); font-weight: 900; margin-bottom:4px; }
-    .detailValue{ font-size:.92rem; color:#111; line-height:1.25; white-space:pre-wrap; }
+    .detailValue{ font-size:.92rem; color:#111; line-height:1.35; white-space:pre-wrap; }
     .detailValue.mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono","Courier New", monospace; }
 
-    /* EXPORT panel */
+    /* =========================================
+       EXPORT panel
+       ========================================= */
     .exportBox{
       margin-top:10px;
       border:1px dashed var(--line);
@@ -240,27 +268,6 @@ POLICY (LÅST):
       max-height: 220px;
       overflow:auto;
     }
-    .exportRow{
-      border:1px solid var(--line);
-      border-radius: 12px;
-      background:#fff;
-      padding:8px;
-      margin:6px 0;
-      display:flex;
-      gap:10px;
-      align-items:flex-start;
-      justify-content:space-between;
-      cursor:pointer;
-      box-shadow: var(--shadow-soft);
-      transition: box-shadow .15s ease, filter .15s ease;
-    }
-    .exportRow:hover{
-      box-shadow: 0 10px 26px rgba(17,17,17,.08);
-      filter: brightness(1.01);
-    }
-    .exportRow.active{
-      outline: 2px solid rgba(59,130,246,.30);
-    }
     .exportRow .left{ min-width:0; }
     .exportRow .t{ font-weight:950; line-height:1.2; }
     .exportRow .s{ font-size:.86rem; color: var(--muted); white-space:pre-wrap; margin-top:4px; }
@@ -273,13 +280,10 @@ POLICY (LÅST):
       background: rgba(250,250,250,.6);
       color: var(--muted);
       font-size:.9rem;
-      line-height:1.35;
+      line-height:1.45;
     }
 
-    .debugWrap{
-      margin-top:12px;
-      display:none;
-    }
+    .debugWrap{ margin-top:12px; display:none; }
     .debugBtnRow{
       margin-top:12px;
       display:flex;
@@ -287,6 +291,58 @@ POLICY (LÅST):
       flex-wrap:wrap;
       align-items:center;
       justify-content:flex-start;
+    }
+
+    /* =========================================
+       ITEM FILTER BAR
+       ========================================= */
+    .filterBar{
+      margin-top:10px;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:flex-end;
+    }
+    .filterBar > div{ flex:1; min-width: 160px; }
+
+    .hintBadge{
+      display:inline-flex;
+      gap:8px;
+      align-items:center;
+      padding:6px 10px;
+      border:1px solid var(--line);
+      border-radius: 999px;
+      background: var(--bg-soft);
+      color: var(--muted);
+      font-size:.88rem;
+      line-height:1.2;
+      white-space:nowrap;
+    }
+
+    /* small helper in editor */
+    .editorSplit{
+      display:grid;
+      grid-template-columns: 360px 1fr;
+      gap: 14px;
+      align-items:start;
+    }
+    @media (max-width: 1280px){ .editorSplit{ grid-template-columns: 1fr; } }
+
+    .kpiRow{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      justify-content:space-between;
+      margin-top:10px;
+    }
+
+    .ghostCard{
+      border:1px dashed var(--line);
+      border-radius: var(--r14);
+      background: rgba(250,250,250,.65);
+      padding:10px;
+      color: var(--muted);
     }
   </style>
 </head>
@@ -322,12 +378,23 @@ POLICY (LÅST):
       <span class="pill" id="whoPill" style="display:none;">Inloggad: —</span>
       <span class="pill" id="modePill" style="display:none;">Läge: —</span>
       <button class="miniBtn" id="btnToggleInfo" type="button">Visa info</button>
+
+      <span class="hintBadge" id="compatHint" style="display:none;">
+        Onboard använder: Dokument + Frågor
+      </span>
     </div>
 
     <div class="actionBar" aria-label="Åtgärder">
+      <button class="btn secondary" id="btnNewBlock" type="button" disabled>Nytt block</button>
+      <button class="btn secondary" id="btnDupBlock" type="button" disabled>Duplicera block</button>
       <button class="btn secondary" id="btnEdit" type="button" disabled>Redigera</button>
+
       <button class="btn" id="btnSave" type="button" disabled>Spara</button>
       <button class="btn secondary" id="btnPublish" type="button" disabled>Publicera</button>
+
+      <button class="btn secondary" id="btnDeleteBlock" type="button" disabled style="border-color: rgba(239,68,68,.25);">
+        Ta bort (utkast)
+      </button>
     </div>
 
     <div id="lockBox" class="lockbox" style="display:none;"></div>
@@ -335,11 +402,11 @@ POLICY (LÅST):
 
   <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
 
-  <!-- ONE grid2 only -->
-  <div class="grid2" style="margin-top:12px;">
+  <!-- NEW grid3 -->
+  <div class="grid3" style="margin-top:12px;">
 
     <!-- /* =========================================
-       BLOCK 5/17 – Left column: Blocklista + Export-box + filter + listcontainer
+       BLOCK 5/17 – Column 1: Blocklista + Export-box + filter + listcontainer
        ========================================= */ -->
     <section class="card sideCard" aria-label="Blocklista">
 
@@ -439,276 +506,354 @@ POLICY (LÅST):
     </section>
 
     <!-- /* =========================================
-       BLOCK 6/17 – Right column: Editor-panel + Item-list + Item-editor + Detail/Debug UI
+       BLOCK 6/17 – Column 2: Itemlista (snabb-UI)
+       ========================================= */ -->
+    <section class="card sideCard colItems" aria-label="Itemlista">
+      <div style="padding:10px; border-bottom:1px solid var(--line); background: rgba(250,250,250,.92);">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
+          <div>
+            <div style="font-weight:950;">Items</div>
+            <div class="tiny" id="itemsSummary2">—</div>
+          </div>
+          <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+            <button class="miniBtn" id="btnItemDup2" type="button" disabled>Duplicera</button>
+            <button class="miniBtn danger" id="btnItemDelete2" type="button" disabled>Ta bort</button>
+          </div>
+        </div>
+
+        <div class="filterBar" aria-label="Item-filter">
+          <div>
+            <label class="tiny" style="margin:0; font-weight:900;">
+              Sök item
+              <input id="qItems" type="text" placeholder="Sök i item-text…" autocomplete="off" />
+            </label>
+          </div>
+          <div style="max-width: 200px;">
+            <label class="tiny" style="margin:0; font-weight:900;">
+              Typ
+              <select id="filterItemType">
+                <option value="all">Alla</option>
+                <option value="document">Dokument</option>
+                <option value="question">Frågor</option>
+                <option value="task">Uppgifter</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
+
+      <div class="rows" id="itemListFast" style="padding:10px;">
+        <div class="muted2">Välj ett block först.</div>
+      </div>
+
+      <div style="padding:0 10px 10px;">
+        <div class="ghostCard">
+          <div style="font-weight:950; color: var(--ink);">Tips</div>
+          <div class="tiny" style="margin-top:6px;">
+            Onboard-planer använder idag främst <strong>Dokument</strong> + <strong>Frågor (med facit)</strong>.
+            Uppgifter finns kvar för back-compat men kan ignoreras i nästa steg.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- /* =========================================
+       BLOCK 6/17 – Column 3: Editor-panel + Item-editor + Debug UI
        ========================================= */ -->
     <section class="card" aria-label="Editor">
-      <div class="panel" id="editorPanel" aria-label="Blockpanel">
+      <div class="panel panelSticky" id="editorPanel" aria-label="Blockpanel">
         <div class="row space-between wrap" style="align-items:center;">
-          <h2>Editor</h2>
+          <h2 style="margin:0; font-size: 1.04rem; font-weight: 950;">Editor</h2>
           <span class="tag" id="blockTag">—</span>
         </div>
 
         <div class="tiny" id="panelHint" aria-live="polite" style="margin-top:6px;">Välj ett block i listan.</div>
 
         <div class="tiny muted2" id="editorEmptyHint" style="margin-top:8px;">
-          Tips: Välj ett block i vänsterlistan för att se och redigera innehållet här.
+          Tips: Välj ett block i vänsterlistan. Sedan väljer du item i itemlistan (mitten) och redigerar till höger.
         </div>
 
         <div id="editorWrap" style="margin-top:10px; display:none;">
-          <div class="row2">
-            <label>
-              Modul
-              <input id="moduleInp" type="text" maxlength="60" autocomplete="off" />
-            </label>
-            <label>
-              Område
-              <input id="areaInp" type="text" maxlength="60" autocomplete="off" />
-            </label>
-          </div>
-
-          <div class="row2" style="margin-top:10px;">
-            <label>
-              Steg
-              <input id="stepInp" type="text" maxlength="60" autocomplete="off" />
-            </label>
-            <label>
-              Status
-              <input id="statusInp" type="text" disabled />
-            </label>
-          </div>
-
-          <div class="tiny" id="statusHint" aria-live="polite" style="margin-top:6px;">
-            Status: <span class="tag" id="statusTag">—</span>
-          </div>
-
-          <label style="margin-top:10px;">
-            Rubrik (post-it)
-            <input id="titleInp" type="text" maxlength="80" autocomplete="off" />
-          </label>
-
-          <div style="margin-top:12px; border-top:1px dashed var(--line); padding-top:12px;">
-            <div class="row space-between wrap" style="align-items:center;">
-              <div>
-                <h3 style="margin:0;">Items</h3>
-                <div class="tiny" id="itemsSummary" aria-live="polite">—</div>
+          <div class="editorSplit">
+            <!-- LEFT in editor: block fields + add item -->
+            <div>
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; align-items:end;">
+                <label>
+                  Modul
+                  <input id="moduleInp" type="text" maxlength="60" autocomplete="off" />
+                </label>
+                <label>
+                  Område
+                  <input id="areaInp" type="text" maxlength="60" autocomplete="off" />
+                </label>
               </div>
-              <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-                <button class="miniBtn" id="btnItemUp" type="button" disabled title="Flytta upp">↑</button>
-                <button class="miniBtn" id="btnItemDown" type="button" disabled title="Flytta ner">↓</button>
-                <button class="miniBtn danger" id="btnItemDelete" type="button" disabled title="Ta bort item">Ta bort</button>
+
+              <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; align-items:end; margin-top:10px;">
+                <label>
+                  Steg
+                  <input id="stepInp" type="text" maxlength="60" autocomplete="off" />
+                </label>
+                <label>
+                  Status
+                  <input id="statusInp" type="text" disabled />
+                </label>
               </div>
-            </div>
 
-            <div class="rows" id="itemRows" style="margin-top:10px; padding:0;">
-              <div class="muted2">Välj ett block i vänsterlistan för att se items.</div>
-            </div>
+              <div class="tiny" id="statusHint" aria-live="polite" style="margin-top:6px;">
+                Status: <span class="tag" id="statusTag">—</span>
+              </div>
 
-            <div style="margin-top:12px; border:1px solid var(--line); border-radius: var(--r14); background:#fff; padding:10px;">
-              <label style="margin:0; font-weight:900;">
-                Lägg till item
-                <select id="addItemKind" aria-label="Välj item-typ att lägga till">
-                  <option value="document">Dokument</option>
-                  <option value="question_text">Fråga (text)</option>
-                  <option value="question_choice">Fråga (val)</option>
-                  <option value="task_checkbox">Uppgift (checkbox)</option>
-                  <option value="task_scale">Uppgift (skala)</option>
-                </select>
+              <label style="margin-top:10px;">
+                Rubrik (post-it)
+                <input id="titleInp" type="text" maxlength="80" autocomplete="off" />
               </label>
-              <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
-                <button class="miniBtn" id="btnAddItem" type="button" disabled>+ Lägg till</button>
-                <div class="tiny">Spara när du är klar.</div>
+
+              <div class="kpiRow">
+                <span class="pill" id="itemsPill">Items: —</span>
+                <span class="pill" id="qaPillBlock">QA: —</span>
               </div>
-            </div>
 
-            <!-- Item editor -->
-            <div id="itemEditor" style="margin-top:12px; display:none; border-top:1px dashed var(--line); padding-top:12px;">
-              <h3 style="margin-top:0;">Item-editor</h3>
-
-              <!-- ALL INFO (sammanfattning) -->
-              <div class="detailCard" aria-label="Detaljer för valt item">
-                <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
-                  <div style="font-weight:950;">Detaljer</div>
-                  <span class="qaPill" id="detailFacitPill" style="display:none;">Facit: —</span>
-                </div>
-
-                <div class="detailGrid" style="margin-top:10px;">
+              <div style="margin-top:12px; border-top:1px dashed var(--line); padding-top:12px;">
+                <div class="row space-between wrap" style="align-items:center;">
                   <div>
-                    <div class="detailLabel">Typ</div>
-                    <div class="detailValue" id="detailType">—</div>
-                  </div>
-                  <div>
-                    <div class="detailLabel">Index</div>
-                    <div class="detailValue" id="detailIndex">—</div>
-                  </div>
-                  <div>
-                    <div class="detailLabel">ID</div>
-                    <div class="detailValue mono" id="detailId">—</div>
-                  </div>
-                  <div>
-                    <div class="detailLabel">Krav</div>
-                    <div class="detailValue" id="detailReq">—</div>
-                  </div>
-                  <div>
-                    <div class="detailLabel">Svarstyp</div>
-                    <div class="detailValue" id="detailAnswerType">—</div>
-                  </div>
-                  <div>
-                    <div class="detailLabel">Meta</div>
-                    <div class="detailValue" id="detailMeta">—</div>
+                    <div style="font-weight:950;">Lägg till item</div>
+                    <div class="tiny">För Onboard: välj Dokument eller Fråga.</div>
                   </div>
                 </div>
 
                 <div style="margin-top:10px;">
-                  <div class="detailLabel">Text (full)</div>
-                  <div class="detailValue" id="detailText">—</div>
-                </div>
+                  <label style="margin:0; font-weight:900;">
+                    Typ
+                    <select id="addItemKind" aria-label="Välj item-typ att lägga till">
+                      <option value="document">Dokument</option>
+                      <option value="question_text">Fråga (text)</option>
+                      <option value="question_choice">Fråga (val)</option>
+                      <option value="task_checkbox">Uppgift (checkbox)</option>
+                      <option value="task_scale">Uppgift (skala)</option>
+                    </select>
+                  </label>
 
-                <div style="margin-top:10px; display:none;" id="detailOptionsWrap">
-                  <div class="detailLabel">Alternativ (val-fråga)</div>
-                  <div class="detailValue" id="detailOptions">—</div>
-                </div>
+                  <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
+                    <button class="miniBtn" id="btnAddItem" type="button" disabled>+ Lägg till</button>
 
-                <div style="margin-top:10px; display:none;" id="detailScaleWrap">
-                  <div class="detailLabel">Skala</div>
-                  <div class="detailValue" id="detailScale">—</div>
-                </div>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                      <button class="miniBtn" id="btnItemUp" type="button" disabled title="Flytta upp">↑</button>
+                      <button class="miniBtn" id="btnItemDown" type="button" disabled title="Flytta ner">↓</button>
+                      <button class="miniBtn" id="btnItemDup" type="button" disabled title="Duplicera item">Duplicera</button>
+                      <button class="miniBtn danger" id="btnItemDelete" type="button" disabled title="Ta bort item">Ta bort</button>
+                    </div>
+                  </div>
 
-                <div style="margin-top:10px; display:none;" id="detailFacitWrap">
-                  <div class="detailLabel">Facit</div>
-                  <div class="detailValue" id="detailFacit">—</div>
-                </div>
-
-                <div class="tiny" style="margin-top:10px;">
-                  Tips: Du kan alltid rätta facit här och spara. Publicering stoppas om facit saknas.
+                  <div class="softNote" style="margin-top:10px;">
+                    <strong>Publicering kräver:</strong> rubrik + minst 1 item + alla frågor har facit (och val-frågor har 2+ alternativ).
+                  </div>
                 </div>
               </div>
+            </div>
 
-              <label style="margin-top:12px;">
-                Typ
-                <input id="itemKindInp" type="text" disabled />
-              </label>
+            <!-- RIGHT in editor: item editor -->
+            <div>
+              <!-- Item editor -->
+              <div id="itemEditor" style="display:none;">
+                <div class="row space-between wrap" style="align-items:center;">
+                  <h3 style="margin:0; font-size: 1.0rem; font-weight: 950;">Item-editor</h3>
+                  <span class="tag" id="itemTag">—</span>
+                </div>
 
-              <label style="margin-top:10px;">
-                Text
-                <textarea id="itemTextInp" maxlength="2000" aria-label="Item-text"></textarea>
-              </label>
+                <!-- ALL INFO (sammanfattning) -->
+                <div class="detailCard" aria-label="Detaljer för valt item">
+                  <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
+                    <div style="font-weight:950;">Detaljer</div>
+                    <span class="qaPill" id="detailFacitPill" style="display:none;">Facit: —</span>
+                  </div>
 
-              <!-- Question -->
-              <div id="qWrap" style="margin-top:12px; display:none;">
-                <label>
-                  Svarstyp
-                  <select id="qAnswerSel" aria-label="Svarstyp för fråga">
-                    <option value="text">Text</option>
-                    <option value="choice">Val</option>
-                  </select>
+                  <div class="detailGrid" style="margin-top:10px;">
+                    <div>
+                      <div class="detailLabel">Typ</div>
+                      <div class="detailValue" id="detailType">—</div>
+                    </div>
+                    <div>
+                      <div class="detailLabel">Index</div>
+                      <div class="detailValue" id="detailIndex">—</div>
+                    </div>
+                    <div>
+                      <div class="detailLabel">ID</div>
+                      <div class="detailValue mono" id="detailId">—</div>
+                    </div>
+                    <div>
+                      <div class="detailLabel">Krav</div>
+                      <div class="detailValue" id="detailReq">—</div>
+                    </div>
+                    <div>
+                      <div class="detailLabel">Svarstyp</div>
+                      <div class="detailValue" id="detailAnswerType">—</div>
+                    </div>
+                    <div>
+                      <div class="detailLabel">Meta</div>
+                      <div class="detailValue" id="detailMeta">—</div>
+                    </div>
+                  </div>
+
+                  <div style="margin-top:10px;">
+                    <div class="detailLabel">Text (full)</div>
+                    <div class="detailValue" id="detailText">—</div>
+                  </div>
+
+                  <div style="margin-top:10px; display:none;" id="detailOptionsWrap">
+                    <div class="detailLabel">Alternativ (val-fråga)</div>
+                    <div class="detailValue" id="detailOptions">—</div>
+                  </div>
+
+                  <div style="margin-top:10px; display:none;" id="detailScaleWrap">
+                    <div class="detailLabel">Skala</div>
+                    <div class="detailValue" id="detailScale">—</div>
+                  </div>
+
+                  <div style="margin-top:10px; display:none;" id="detailFacitWrap">
+                    <div class="detailLabel">Facit</div>
+                    <div class="detailValue" id="detailFacit">—</div>
+                  </div>
+
+                  <div class="tiny" style="margin-top:10px;">
+                    Tips: Facit styr kvaliteten i nästa steg (Onboard). Publicering stoppas om facit saknas.
+                  </div>
+                </div>
+
+                <label style="margin-top:12px;">
+                  Typ
+                  <input id="itemKindInp" type="text" disabled />
                 </label>
 
                 <label style="margin-top:10px;">
-                  Alternativ (en per rad, max 10)
-                  <textarea id="qOptionsInp" maxlength="500" placeholder="Skriv ett alternativ per rad…" aria-label="Alternativ för val-fråga"></textarea>
+                  Text
+                  <textarea id="itemTextInp" maxlength="2000" aria-label="Item-text"></textarea>
                 </label>
 
-                <div id="qFacitChoiceWrap" style="margin-top:10px; display:none;">
+                <!-- Question -->
+                <div id="qWrap" style="margin-top:12px; display:none;">
                   <label>
-                    Facit (måste väljas)
-                    <select id="qFacitChoiceSel" aria-label="Välj facit för val-fråga"></select>
+                    Svarstyp
+                    <select id="qAnswerSel" aria-label="Svarstyp för fråga">
+                      <option value="text">Text</option>
+                      <option value="choice">Val</option>
+                    </select>
+                  </label>
+
+                  <label style="margin-top:10px;">
+                    Alternativ (en per rad, max 10)
+                    <textarea id="qOptionsInp" maxlength="500" placeholder="Skriv ett alternativ per rad…" aria-label="Alternativ för val-fråga"></textarea>
+                  </label>
+
+                  <div id="qFacitChoiceWrap" style="margin-top:10px; display:none;">
+                    <label>
+                      Facit (måste väljas)
+                      <select id="qFacitChoiceSel" aria-label="Välj facit för val-fråga"></select>
+                    </label>
+                  </div>
+
+                  <div id="qFacitTextWrap" style="margin-top:10px; display:none;">
+                    <label>
+                      Facit (fri text)
+                      <textarea id="qFacitTextInp" maxlength="500" placeholder="Skriv facit/korrekt svar…" aria-label="Facit för text-fråga"></textarea>
+                    </label>
+                  </div>
+
+                  <div class="qaLine">
+                    <span class="qaPill" id="qFacitPill">Facit: —</span>
+                    <span class="tiny" id="qHint">Val kräver minst 2 alternativ.</span>
+                  </div>
+
+                  <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
+                    <input id="qReqInp" type="checkbox" />
+                    <span>Kräver svar</span>
                   </label>
                 </div>
 
-                <div id="qFacitTextWrap" style="margin-top:10px; display:none;">
-                  <label>
-                    Facit (fri text)
-                    <textarea id="qFacitTextInp" maxlength="500" placeholder="Skriv facit/korrekt svar…" aria-label="Facit för text-fråga"></textarea>
+                <!-- Task -->
+                <div id="tWrap" style="margin-top:12px; display:none;">
+                  <div class="softNote">
+                    <strong>Obs:</strong> Uppgifter finns kvar för kompatibilitet, men Onboard kan ignorera dem i nästa steg.
+                  </div>
+
+                  <label style="margin-top:10px;">
+                    Svarstyp
+                    <select id="tAnswerSel" aria-label="Svarstyp för uppgift">
+                      <option value="checkbox">Checkbox</option>
+                      <option value="scale">Skala</option>
+                    </select>
+                  </label>
+
+                  <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; align-items:end; margin-top:10px;">
+                    <label>
+                      Min (1–10)
+                      <input id="tMinInp" type="number" min="1" max="10" step="1" inputmode="numeric" />
+                    </label>
+                    <label>
+                      Max (1–10)
+                      <input id="tMaxInp" type="number" min="1" max="10" step="1" inputmode="numeric" />
+                    </label>
+                  </div>
+
+                  <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; align-items:end; margin-top:10px;">
+                    <label>
+                      Label min (valfritt)
+                      <input id="tMinLabelInp" type="text" maxlength="40" autocomplete="off" />
+                    </label>
+                    <label>
+                      Label max (valfritt)
+                      <input id="tMaxLabelInp" type="text" maxlength="40" autocomplete="off" />
+                    </label>
+                  </div>
+
+                  <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
+                    <input id="tReqInp" type="checkbox" />
+                    <span>Kräver klar (done)</span>
+                  </label>
+
+                  <div class="tiny" id="tHint" style="margin-top:6px;">Skala kräver min/max och text.</div>
+                </div>
+
+                <!-- Document -->
+                <div id="dWrap" style="margin-top:12px; display:none;">
+                  <label style="margin:0; display:flex; gap:10px; align-items:center;">
+                    <input id="dSignInp" type="checkbox" />
+                    <span>Kräver signering</span>
                   </label>
                 </div>
 
-                <div class="qaLine">
-                  <span class="qaPill" id="qFacitPill">Facit: —</span>
-                  <span class="tiny" id="qHint">Val kräver minst 2 alternativ.</span>
+                <!-- Debug (gömd som standard) -->
+                <div class="debugBtnRow">
+                  <button class="miniBtn" id="btnToggleDebug" type="button" aria-expanded="false">Visa felsökning</button>
+                  <span class="tiny">För avancerad kontroll (valfritt).</span>
                 </div>
 
-                <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
-                  <input id="qReqInp" type="checkbox" />
-                  <span>Kräver svar</span>
-                </label>
+                <div class="debugWrap" id="debugWrap">
+                  <div style="margin-top:12px;">
+                    <div class="tiny" style="font-weight:900; color: var(--muted);">Felsökning: Item (normaliserad)</div>
+                    <pre id="debugPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
+                  </div>
+
+                  <div style="margin-top:10px;">
+                    <div class="tiny" style="font-weight:900; color: var(--muted);">Felsökning: Block (raw från storage)</div>
+                    <pre id="debugBlockPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
+                  </div>
+                </div>
               </div>
 
-              <!-- Task -->
-              <div id="tWrap" style="margin-top:12px; display:none;">
-                <label>
-                  Svarstyp
-                  <select id="tAnswerSel" aria-label="Svarstyp för uppgift">
-                    <option value="checkbox">Checkbox</option>
-                    <option value="scale">Skala</option>
-                  </select>
-                </label>
-
-                <div class="row2" style="margin-top:10px;">
-                  <label>
-                    Min (1–10)
-                    <input id="tMinInp" type="number" min="1" max="10" step="1" inputmode="numeric" />
-                  </label>
-                  <label>
-                    Max (1–10)
-                    <input id="tMaxInp" type="number" min="1" max="10" step="1" inputmode="numeric" />
-                  </label>
-                </div>
-
-                <div class="row2" style="margin-top:10px;">
-                  <label>
-                    Label min (valfritt)
-                    <input id="tMinLabelInp" type="text" maxlength="40" autocomplete="off" />
-                  </label>
-                  <label>
-                    Label max (valfritt)
-                    <input id="tMaxLabelInp" type="text" maxlength="40" autocomplete="off" />
-                  </label>
-                </div>
-
-                <label style="margin-top:10px; display:flex; gap:10px; align-items:center;">
-                  <input id="tReqInp" type="checkbox" />
-                  <span>Kräver klar (done)</span>
-                </label>
-
-                <div class="tiny" id="tHint" style="margin-top:6px;">Skala kräver min/max och text.</div>
-              </div>
-
-              <!-- Document -->
-              <div id="dWrap" style="margin-top:12px; display:none;">
-                <label style="margin:0; display:flex; gap:10px; align-items:center;">
-                  <input id="dSignInp" type="checkbox" />
-                  <span>Kräver signering</span>
-                </label>
-              </div>
-
-              <!-- Debug (gömd som standard) -->
-              <div class="debugBtnRow">
-                <button class="miniBtn" id="btnToggleDebug" type="button" aria-expanded="false">Visa felsökning</button>
-                <span class="tiny">För avancerad kontroll (valfritt).</span>
-              </div>
-
-              <div class="debugWrap" id="debugWrap">
-                <div style="margin-top:12px;">
-                  <div class="tiny" style="font-weight:900; color: var(--muted);">Felsökning: Item (normaliserad)</div>
-                  <pre id="debugPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
-                </div>
-
-                <div style="margin-top:10px;">
-                  <div class="tiny" style="font-weight:900; color: var(--muted);">Felsökning: Block (raw från storage)</div>
-                  <pre id="debugBlockPre" class="mono" style="white-space:pre-wrap; background: rgba(17,17,17,.04); border:1px solid var(--line); border-radius: var(--r14); padding:10px; overflow:auto;">{}</pre>
-                </div>
+              <div id="itemEditorEmpty" class="ghostCard" style="margin-top:10px;">
+                Välj ett item i itemlistan för att redigera.
               </div>
             </div>
           </div>
-        </div>
 
-        <div class="tiny" style="margin-top:12px;">
-          <strong>Fail-closed:</strong> Om block-banken är korrupt låses redigering/publicering.
+          <div class="tiny" style="margin-top:12px;">
+            <strong>Fail-closed:</strong> Om block-banken är korrupt låses redigering/publicering.
+          </div>
         </div>
       </div>
     </section>
 
-  </div><!-- /grid2 -->
+  </div><!-- /grid3 -->
 </main>
 
 <!-- /* =========================================
@@ -724,107 +869,141 @@ POLICY (LÅST):
 
   const $ = (s) => document.querySelector(s);
 
-  const elMsg = $("#msgBox");
-  const elWho = $("#whoPill");
-  const elMode = $("#modePill");
-  const elState = $("#statePill");
-  const elSel = $("#selPill");
-  const lockBox = $("#lockBox");
+  function must(el, name){
+    if(!el){
+      // fail-closed: visa tydligt, och stoppa init utan crash
+      const msg = document.createElement("div");
+      msg.className = "msg err";
+      msg.textContent = "Fail-closed: Saknar DOM-element: " + (name || "okänd");
+      document.body.prepend(msg);
+      throw new Error("Missing DOM: " + (name || "unknown"));
+    }
+    return el;
+  }
 
-  const qBlocks = $("#qBlocks");
-  const filterStatus = $("#filterStatus");
-  const countBlocks = $("#countBlocks");
-  const blockList = $("#blockList");
+  // Top
+  const elMsg = must($("#msgBox"), "msgBox");
+  const elWho = must($("#whoPill"), "whoPill");
+  const elMode = must($("#modePill"), "modePill");
+  const elState = must($("#statePill"), "statePill");
+  const elSel = must($("#selPill"), "selPill");
+  const lockBox = must($("#lockBox"), "lockBox");
+  const compatHint = must($("#compatHint"), "compatHint");
 
-  const btnEdit = $("#btnEdit");
-  const btnSave = $("#btnSave");
-  const btnPublish = $("#btnPublish");
+  // Actions
+  const btnNewBlock = must($("#btnNewBlock"), "btnNewBlock");
+  const btnDupBlock = must($("#btnDupBlock"), "btnDupBlock");
+  const btnDeleteBlock = must($("#btnDeleteBlock"), "btnDeleteBlock");
+  const btnEdit = must($("#btnEdit"), "btnEdit");
+  const btnSave = must($("#btnSave"), "btnSave");
+  const btnPublish = must($("#btnPublish"), "btnPublish");
 
-  const editorWrap = $("#editorWrap");
-  const editorEmptyHint = $("#editorEmptyHint");
-  const panelHint = $("#panelHint");
-  const blockTag = $("#blockTag");
-  const statusTag = $("#statusTag");
+  // Blocks list
+  const qBlocks = must($("#qBlocks"), "qBlocks");
+  const filterStatus = must($("#filterStatus"), "filterStatus");
+  const countBlocks = must($("#countBlocks"), "countBlocks");
+  const blockList = must($("#blockList"), "blockList");
 
-  const moduleInp = $("#moduleInp");
-  const areaInp = $("#areaInp");
-  const stepInp = $("#stepInp");
-  const titleInp = $("#titleInp");
-  const statusInp = $("#statusInp");
+  // Items fast list
+  const itemsSummary2 = must($("#itemsSummary2"), "itemsSummary2");
+  const itemListFast = must($("#itemListFast"), "itemListFast");
+  const qItems = must($("#qItems"), "qItems");
+  const filterItemType = must($("#filterItemType"), "filterItemType");
+  const btnItemDup2 = must($("#btnItemDup2"), "btnItemDup2");
+  const btnItemDelete2 = must($("#btnItemDelete2"), "btnItemDelete2");
 
-  const itemsSummary = $("#itemsSummary");
-  const itemRows = $("#itemRows");
-  const btnItemUp = $("#btnItemUp");
-  const btnItemDown = $("#btnItemDown");
-  const btnItemDelete = $("#btnItemDelete");
+  // Editor panel
+  const editorWrap = must($("#editorWrap"), "editorWrap");
+  const editorEmptyHint = must($("#editorEmptyHint"), "editorEmptyHint");
+  const panelHint = must($("#panelHint"), "panelHint");
+  const blockTag = must($("#blockTag"), "blockTag");
+  const statusTag = must($("#statusTag"), "statusTag");
 
-  const addItemKind = $("#addItemKind");
-  const btnAddItem = $("#btnAddItem");
+  const moduleInp = must($("#moduleInp"), "moduleInp");
+  const areaInp = must($("#areaInp"), "areaInp");
+  const stepInp = must($("#stepInp"), "stepInp");
+  const titleInp = must($("#titleInp"), "titleInp");
+  const statusInp = must($("#statusInp"), "statusInp");
 
-  const itemEditor = $("#itemEditor");
-  const itemKindInp = $("#itemKindInp");
-  const itemTextInp = $("#itemTextInp");
+  const itemsPill = must($("#itemsPill"), "itemsPill");
+  const qaPillBlock = must($("#qaPillBlock"), "qaPillBlock");
 
-  const qWrap = $("#qWrap");
-  const qAnswerSel = $("#qAnswerSel");
-  const qOptionsInp = $("#qOptionsInp");
-  const qReqInp = $("#qReqInp");
-  const qHint = $("#qHint");
-  const qFacitChoiceWrap = $("#qFacitChoiceWrap");
-  const qFacitChoiceSel = $("#qFacitChoiceSel");
-  const qFacitTextWrap = $("#qFacitTextWrap");
-  const qFacitTextInp = $("#qFacitTextInp");
-  const qFacitPill = $("#qFacitPill");
+  const btnItemUp = must($("#btnItemUp"), "btnItemUp");
+  const btnItemDown = must($("#btnItemDown"), "btnItemDown");
+  const btnItemDup = must($("#btnItemDup"), "btnItemDup");
+  const btnItemDelete = must($("#btnItemDelete"), "btnItemDelete");
 
-  const tWrap = $("#tWrap");
-  const tAnswerSel = $("#tAnswerSel");
-  const tMinInp = $("#tMinInp");
-  const tMaxInp = $("#tMaxInp");
-  const tMinLabelInp = $("#tMinLabelInp");
-  const tMaxLabelInp = $("#tMaxLabelInp");
-  const tReqInp = $("#tReqInp");
-  const tHint = $("#tHint");
+  const addItemKind = must($("#addItemKind"), "addItemKind");
+  const btnAddItem = must($("#btnAddItem"), "btnAddItem");
 
-  const dWrap = $("#dWrap");
-  const dSignInp = $("#dSignInp");
+  // Item editor
+  const itemEditor = must($("#itemEditor"), "itemEditor");
+  const itemEditorEmpty = must($("#itemEditorEmpty"), "itemEditorEmpty");
+  const itemTag = must($("#itemTag"), "itemTag");
 
-  // All info (detail panel)
-  const detailType = $("#detailType");
-  const detailIndex = $("#detailIndex");
-  const detailId = $("#detailId");
-  const detailReq = $("#detailReq");
-  const detailAnswerType = $("#detailAnswerType");
-  const detailMeta = $("#detailMeta");
-  const detailText = $("#detailText");
-  const detailOptionsWrap = $("#detailOptionsWrap");
-  const detailOptions = $("#detailOptions");
-  const detailScaleWrap = $("#detailScaleWrap");
-  const detailScale = $("#detailScale");
-  const detailFacitWrap = $("#detailFacitWrap");
-  const detailFacit = $("#detailFacit");
-  const detailFacitPill = $("#detailFacitPill");
+  const itemKindInp = must($("#itemKindInp"), "itemKindInp");
+  const itemTextInp = must($("#itemTextInp"), "itemTextInp");
 
-  // Debug (toggle)
-  const btnToggleDebug = $("#btnToggleDebug");
-  const debugWrap = $("#debugWrap");
-  const debugPre = $("#debugPre");
-  const debugBlockPre = $("#debugBlockPre");
+  const qWrap = must($("#qWrap"), "qWrap");
+  const qAnswerSel = must($("#qAnswerSel"), "qAnswerSel");
+  const qOptionsInp = must($("#qOptionsInp"), "qOptionsInp");
+  const qReqInp = must($("#qReqInp"), "qReqInp");
+  const qHint = must($("#qHint"), "qHint");
+  const qFacitChoiceWrap = must($("#qFacitChoiceWrap"), "qFacitChoiceWrap");
+  const qFacitChoiceSel = must($("#qFacitChoiceSel"), "qFacitChoiceSel");
+  const qFacitTextWrap = must($("#qFacitTextWrap"), "qFacitTextWrap");
+  const qFacitTextInp = must($("#qFacitTextInp"), "qFacitTextInp");
+  const qFacitPill = must($("#qFacitPill"), "qFacitPill");
+
+  const tWrap = must($("#tWrap"), "tWrap");
+  const tAnswerSel = must($("#tAnswerSel"), "tAnswerSel");
+  const tMinInp = must($("#tMinInp"), "tMinInp");
+  const tMaxInp = must($("#tMaxInp"), "tMaxInp");
+  const tMinLabelInp = must($("#tMinLabelInp"), "tMinLabelInp");
+  const tMaxLabelInp = must($("#tMaxLabelInp"), "tMaxLabelInp");
+  const tReqInp = must($("#tReqInp"), "tReqInp");
+  const tHint = must($("#tHint"), "tHint");
+
+  const dWrap = must($("#dWrap"), "dWrap");
+  const dSignInp = must($("#dSignInp"), "dSignInp");
+
+  // Detail
+  const detailType = must($("#detailType"), "detailType");
+  const detailIndex = must($("#detailIndex"), "detailIndex");
+  const detailId = must($("#detailId"), "detailId");
+  const detailReq = must($("#detailReq"), "detailReq");
+  const detailAnswerType = must($("#detailAnswerType"), "detailAnswerType");
+  const detailMeta = must($("#detailMeta"), "detailMeta");
+  const detailText = must($("#detailText"), "detailText");
+  const detailOptionsWrap = must($("#detailOptionsWrap"), "detailOptionsWrap");
+  const detailOptions = must($("#detailOptions"), "detailOptions");
+  const detailScaleWrap = must($("#detailScaleWrap"), "detailScaleWrap");
+  const detailScale = must($("#detailScale"), "detailScale");
+  const detailFacitWrap = must($("#detailFacitWrap"), "detailFacitWrap");
+  const detailFacit = must($("#detailFacit"), "detailFacit");
+  const detailFacitPill = must($("#detailFacitPill"), "detailFacitPill");
+
+  // Debug toggle
+  const btnToggleDebug = must($("#btnToggleDebug"), "btnToggleDebug");
+  const debugWrap = must($("#debugWrap"), "debugWrap");
+  const debugPre = must($("#debugPre"), "debugPre");
+  const debugBlockPre = must($("#debugBlockPre"), "debugBlockPre");
 
   // Top info toggle
-  const btnToggleInfo = $("#btnToggleInfo");
+  const btnToggleInfo = must($("#btnToggleInfo"), "btnToggleInfo");
 
-  // Export UI (new)
-  const btnToggleExport = $("#btnToggleExport");
-  const exportBody = $("#exportBody");
-  const qTrainModule = $("#qTrainModule");
-  const qTrainArea = $("#qTrainArea");
-  const qTrainFree = $("#qTrainFree");
-  const dlTrainModules = $("#dlTrainModules");
-  const dlTrainAreas = $("#dlTrainAreas");
-  const trainPreview = $("#trainPreview");
-  const btnExportTraining = $("#btnExportTraining");
-  const btnReloadTrainings = $("#btnReloadTrainings");
-  const trainExportHint = $("#trainExportHint");
+  // Export UI
+  const btnToggleExport = must($("#btnToggleExport"), "btnToggleExport");
+  const exportBody = must($("#exportBody"), "exportBody");
+  const qTrainModule = must($("#qTrainModule"), "qTrainModule");
+  const qTrainArea = must($("#qTrainArea"), "qTrainArea");
+  const qTrainFree = must($("#qTrainFree"), "qTrainFree");
+  const dlTrainModules = must($("#dlTrainModules"), "dlTrainModules");
+  const dlTrainAreas = must($("#dlTrainAreas"), "dlTrainAreas");
+  const trainPreview = must($("#trainPreview"), "trainPreview");
+  const btnExportTraining = must($("#btnExportTraining"), "btnExportTraining");
+  const btnReloadTrainings = must($("#btnReloadTrainings"), "btnReloadTrainings");
+  const trainExportHint = must($("#trainExportHint"), "trainExportHint");
 
   const isText = (v) => (typeof v === "string");
   const clampInt = (n, lo, hi, def) => {
@@ -852,7 +1031,7 @@ POLICY (LÅST):
     try{ localStorage.removeItem(SESSION_KEY); }catch{}
     redirectLogin();
   }
-  $("#navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
+  must($("#navLogout"), "navLogout").addEventListener("click", (e) => { e.preventDefault(); doLogout(); });
 
   function showLockBox(lines){
     if(!lines || !lines.length){
@@ -901,6 +1080,9 @@ POLICY (LÅST):
   elWho.textContent = `Inloggad: ${empNo ? ("Anst.nr " + empNo) : "—"} • Roll ${role || "—"}`;
   elMode.textContent = isSystemAdmin ? "Läge: Steward (read-only)" : "Läge: Editor";
   elMode.className = "pill " + (isSystemAdmin ? "warn" : "ok");
+
+  // compatibility hint (always true in this version)
+  compatHint.style.display = "inline-flex";
 
   // Top info toggle
   let infoOpen = false;
@@ -1184,7 +1366,6 @@ POLICY (LÅST):
         continue;
       }
     }
-
     return out;
   }
 
@@ -1265,7 +1446,6 @@ POLICY (LÅST):
 
   function normalizeBlock(raw){
     const b = (raw && typeof raw === "object") ? raw : {};
-
     let itemsRaw = Array.isArray(b.items) ? b.items : null;
 
     if(!itemsRaw){
@@ -1291,1365 +1471,4 @@ POLICY (LÅST):
           taskId: t?.taskId ?? t?.id,
           text: t?.text ?? t?.task ?? t?.prompt ?? "",
           answerType: (t?.answerType === "scale" || t?.mode === "scale") ? "scale" : "checkbox",
-          scale: t?.scale ?? t?.range ?? null,
-          requiresDone: (t?.requiresDone !== false && t?.required !== false)
-        }));
-      }
-
-      if(Array.isArray(b.content)){
-        b.content.forEach(x => legacy.push(x));
-      }
-
-      if(legacy.length) itemsRaw = legacy;
-    }
-
-    if(!itemsRaw){
-      const txt = (b.rawText || b.itemsText || b.linesText || b.bodyText || b.blockText || "");
-      if(isText(txt) && String(txt).trim()){
-        const parsed = parseLegacyLinesToItems(txt);
-        if(parsed.length) itemsRaw = parsed;
-      }
-    }
-
-    const items = Array.isArray(itemsRaw) ? itemsRaw.map(normalizeItem).slice(0, 200) : [];
-
-    return {
-      blockId: String(b.blockId || b.id || genId("blk")),
-      title: String(b.title || b.name || "").slice(0, 80),
-      module: String(b.module || b.mod || "").slice(0, 60),
-      area: String(b.area || b.domain || "").slice(0, 60),
-      step: String(b.step || b.stage || "").slice(0, 60),
-      status: normStatus(b.status || "draft"),
-      createdAt: Number.isFinite(Number(b.createdAt)) ? Number(b.createdAt) : Date.now(),
-      updatedAt: Number.isFinite(Number(b.updatedAt)) ? Number(b.updatedAt) : Date.now(),
-      createdBy: String(b.createdBy || ""),
-      verifiedAt: (b.verifiedAt === null || b.verifiedAt === undefined) ? null : (Number.isFinite(Number(b.verifiedAt)) ? Number(b.verifiedAt) : null),
-      verifiedBy: String(b.verifiedBy || ""),
-      items
-    };
-  }
-
-  function validateForPublish(block){
-    const reasons = [];
-    const title = String(block?.title || "").trim();
-    if(!title) reasons.push("Rubrik saknas.");
-
-    const items = Array.isArray(block?.items) ? block.items : [];
-    if(items.length < 1) reasons.push("Minst 1 item krävs.");
-
-    items.forEach((it0, i) => {
-      const it = normalizeItem(it0);
-      const k = String(it?.kind || "");
-      const tx = String(it?.text || "").trim();
-      if(!tx) reasons.push(`Item #${i+1}: Text saknas.`);
-
-      if(k === "question"){
-        const at = String(it?.answerType || "text");
-        if(at === "choice"){
-          const opts0 = Array.isArray(it?.options) ? it.options : [];
-          const uniq = [];
-          opts0.forEach(o => { const s = String(o||"").trim(); if(s && !uniq.includes(s)) uniq.push(s); });
-          if(uniq.length < 2) reasons.push(`Item #${i+1}: Val-fråga kräver minst 2 alternativ.`);
-        }
-
-        const key = normalizeFacitText(it.answerKey);
-        if(!key){
-          reasons.push(`Item #${i+1}: Fråga saknar facit.`);
-        }else if(at === "choice"){
-          const opts = Array.isArray(it.options) ? it.options.map(x => String(x||"").trim()) : [];
-          if(!opts.includes(key)){
-            reasons.push(`Item #${i+1}: Facit måste matcha ett av alternativen.`);
-          }
-        }
-      }
-
-      if(k === "task"){
-        const at = String(it?.answerType || "checkbox");
-        if(at === "scale"){
-          const mn = Number(it?.scale?.min);
-          const mx = Number(it?.scale?.max);
-          if(!Number.isFinite(mn) || !Number.isFinite(mx)) reasons.push(`Item #${i+1}: Skala saknar min/max.`);
-          if(Number.isFinite(mn) && Number.isFinite(mx) && mx < mn) reasons.push(`Item #${i+1}: Skala max < min.`);
-        }
-      }
-    });
-
-    return { ok: reasons.length === 0, reasons };
-  }
-
-  /* =========================================
-     BLOCK 11/17 – Trainings export: read/normalize/preview/export (read path)
-     ========================================= */
-  function loadTrainingsState(){
-    const raw = safeGetLocalRaw(TRAININGS_KEY);
-    if(raw === null) return { ok:true, missing:true, corrupt:false, trainings:[] };
-
-    let parsed;
-    try{ parsed = JSON.parse(raw); }
-    catch{ return { ok:false, missing:false, corrupt:true, trainings:[] }; }
-
-    if(parsed && typeof parsed === "object" && !Array.isArray(parsed)){
-      if(Array.isArray(parsed.trainings)) parsed = parsed.trainings;
-      else if(Array.isArray(parsed.items)) parsed = parsed.items;
-      else if(Array.isArray(parsed.list)) parsed = parsed.list;
-    }
-
-    if(!Array.isArray(parsed)) return { ok:false, missing:false, corrupt:true, trainings:[] };
-    return { ok:true, missing:false, corrupt:false, trainings: parsed };
-  }
-
-  function trainingTitle(t){
-    const x = String(t?.title || t?.name || t?.trainingTitle || t?.label || "").trim();
-    return x || "(utan titel)";
-  }
-
-  function trainingMeta(t){
-    const mod = String(t?.module || t?.mod || t?.moduleName || "").trim();
-    const area = String(t?.area || t?.domain || t?.topic || "").trim();
-    const step = String(t?.step || t?.stage || t?.phase || "").trim();
-    return { module: mod.slice(0,60), area: area.slice(0,60), step: step.slice(0,60) };
-  }
-
-  function extractTrainingBlocks(t){
-    if(!t || typeof t !== "object") return [];
-
-    const direct = [];
-    const candidates = [
-      t.blocks,
-      t.blockBank,
-      t.blockbank,
-      t.packageBlocks,
-      t.content?.blocks,
-      t.content?.items,
-      t.items,
-      t.content
-    ];
-
-    for(const c of candidates){
-      if(Array.isArray(c)) { c.forEach(x => direct.push(x)); break; }
-    }
-
-    if(direct.length === 0){
-      const txt = t.rawText || t.itemsText || t.linesText || t.bodyText || t.blockText || t.text || "";
-      if(isText(txt) && String(txt).trim()){
-        return [{ title: trainingTitle(t), module: trainingMeta(t).module, area: trainingMeta(t).area, step: trainingMeta(t).step, rawText: String(txt) }];
-      }
-    }
-
-    const looksLikeItem = (x) => {
-      if(!x || typeof x !== "object") return false;
-      const k = String(x.kind || x.type || "").toLowerCase();
-      if(k === "document" || k === "question" || k === "task") return true;
-      if(x.questionId || x.taskId || x.answerType || x.options || x.choices) return true;
-      return false;
-    };
-
-    if(direct.length && direct.every(looksLikeItem)){
-      return [{
-        title: trainingTitle(t),
-        module: trainingMeta(t).module,
-        area: trainingMeta(t).area,
-        step: trainingMeta(t).step,
-        items: direct
-      }];
-    }
-
-    return direct.slice(0, 200);
-  }
-
-  function normalizeTrainingToExportBlock(t, empNo){
-    const meta = trainingMeta(t);
-    const blocks = extractTrainingBlocks(t);
-
-    let mergedItems = [];
-    for(const b of blocks){
-      const nb = normalizeBlock(b);
-      const its = Array.isArray(nb.items) ? nb.items : [];
-      if(its.length) mergedItems = mergedItems.concat(its);
-    }
-    mergedItems = mergedItems.slice(0, 200);
-
-    if(mergedItems.length === 0){
-      const fallbackTxt =
-        String(t?.rawText || t?.text || t?.bodyText || "").trim() ||
-        "Inga hittade items i utbildningen (export skapade endast skal).";
-      mergedItems = [{ kind:"document", text: fallbackTxt.slice(0, 2000), requiresSign: true }].map(normalizeItem);
-    }
-
-    const createdAt = Number.isFinite(Number(t?.createdAt)) ? Number(t.createdAt) : Date.now();
-    const now = Date.now();
-
-    return normalizeBlock({
-      blockId: genId("blk"),
-      title: normText(trainingTitle(t), 80),
-      module: meta.module,
-      area: meta.area,
-      step: meta.step,
-      status: "draft",
-      createdAt: createdAt || now,
-      updatedAt: now,
-      createdBy: String(empNo || ""),
-      verifiedAt: null,
-      verifiedBy: "",
-      items: mergedItems
-    });
-  }
-
-  function countTrainingItems(t){
-    const blocks = extractTrainingBlocks(t);
-    let itemsCount = 0;
-    blocks.forEach(b => {
-      const nb = normalizeBlock(b);
-      itemsCount += (Array.isArray(nb.items) ? nb.items.length : 0);
-    });
-    return { blocksCount: blocks.length, itemsCount };
-  }
-
-  function uniqSorted(arr){
-    const out = [];
-    (arr || []).forEach(x => {
-      const s = String(x || "").trim();
-      if(!s) return;
-      if(!out.includes(s)) out.push(s);
-    });
-    out.sort((a,b) => a.localeCompare(b, "sv", { sensitivity:"base" }));
-    return out;
-  }
-
-  /* =========================================
-     BLOCK 12/17 – STATE + lock/dirty + pills
-     ========================================= */
-  const STATE = {
-    locked: false,
-    lockReasons: [],
-    all: [],
-    visible: [],
-    selectedId: "",
-    edit: null,
-    rawSelected: null,
-    selectedItemIndex: -1,
-    dirty: false,
-
-    trainingsOk: true,
-    trainingsCorrupt: false,
-    trainingsMissing: false,
-    trainings: [],
-    selectedTrainingIndex: -1,
-    trainingVisibleIndexes: []
-  };
-
-  function setDirty(on){
-    STATE.dirty = !!on;
-    elState.textContent = STATE.dirty ? "Status: Osparade ändringar" : "Status: OK";
-    elState.className = "pill " + (STATE.dirty ? "warn" : "ok");
-
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-    btnSave.disabled = !(canWrite && STATE.dirty && STATE.edit);
-    updatePublishButton();
-
-    // Edit is a "focus" helper here
-    btnEdit.disabled = !STATE.edit;
-  }
-
-  function setSelectionPill(){
-    const b = STATE.edit;
-    if(!b){
-      elSel.textContent = "Val: —";
-      elSel.className = "pill";
-      return;
-    }
-    const nItems = Array.isArray(b.items) ? b.items.length : 0;
-    const st = normStatus(b.status || "draft");
-    elSel.textContent = `Val: ${b.title || "—"} • ${nItems} items • ${blockStatusLabel(st)}`;
-    elSel.className = "pill " + (st === "published" ? "ok" : (nItems ? "ok" : "warn"));
-  }
-
-  function updatePublishButton(){
-    const b = STATE.edit;
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-    if(!b || !canWrite){
-      btnPublish.disabled = true;
-      btnPublish.textContent = "Publicera";
-      btnPublish.title = isSystemAdmin ? "Steward-läge (read-only)." : "Välj ett block först.";
-      return;
-    }
-    if(STATE.dirty){
-      btnPublish.disabled = true;
-      btnPublish.textContent = "Publicera";
-      btnPublish.title = "Spara först (osparade ändringar).";
-      return;
-    }
-
-    const st = normStatus(b.status || "draft");
-    btnPublish.textContent = (st === "published") ? "Publicera uppdatering" : "Publicera";
-
-    const chk = validateForPublish(b);
-    if(!chk.ok){
-      btnPublish.disabled = true;
-      btnPublish.title = "Kan inte publicera: " + chk.reasons.join(" ");
-      return;
-    }
-    btnPublish.disabled = false;
-    btnPublish.title = (st === "published")
-      ? "Publicera uppdatering: uppdaterar verifiering."
-      : "Publicera: status=published + verifiering.";
-  }
-
-  function setModePill(){
-    if(STATE.locked){
-      elMode.textContent = "Läge: Låst (för säkerhet)";
-      elMode.className = "pill bad";
-      return;
-    }
-    if(isSystemAdmin){
-      elMode.textContent = "Läge: Steward (read-only)";
-      elMode.className = "pill warn";
-      return;
-    }
-    elMode.textContent = "Läge: Editor";
-    elMode.className = "pill ok";
-  }
-
-  function applyLockFromState(){
-    STATE.locked = (STATE.lockReasons.length > 0);
-    showLockBox(STATE.lockReasons);
-    setModePill();
-    setDirty(STATE.dirty);
-  }
-
-  /* =========================================
-     BLOCK 13/17 – Block list render + selection (RESTORED CORE)
-     ========================================= */
-  function computeVisible(){
-    const q = String(qBlocks?.value || "").trim().toLowerCase();
-    const f = String(filterStatus?.value || "all");
-
-    const all = Array.isArray(STATE.all) ? STATE.all : [];
-    const out = [];
-
-    for(const b0 of all){
-      const b = normalizeBlock(b0);
-      const st = normStatus(b.status);
-      if(f !== "all" && st !== f) continue;
-
-      if(q){
-        const hay = [
-          b.title || "",
-          b.module || "",
-          b.area || "",
-          b.step || "",
-          b.blockId || ""
-        ].join(" ").toLowerCase();
-        if(!hay.includes(q)) continue;
-      }
-
-      out.push(b);
-    }
-
-    out.sort((a,b) => Number(b.updatedAt||0) - Number(a.updatedAt||0));
-    STATE.visible = out;
-  }
-
-  function renderBlockList(){
-    computeVisible();
-    clear(blockList);
-
-    const nAll = Array.isArray(STATE.all) ? STATE.all.length : 0;
-    const nVis = Array.isArray(STATE.visible) ? STATE.visible.length : 0;
-    countBlocks.textContent = `${nVis} / ${nAll}`;
-
-    if(nVis === 0){
-      const d = document.createElement("div");
-      d.className = "muted2";
-      d.textContent = nAll ? "Inga träffar (justera sök/filter)." : "Inga block ännu.";
-      blockList.appendChild(d);
-      return;
-    }
-
-    STATE.visible.slice(0, 400).forEach(b => {
-      const row = document.createElement("div");
-      row.className = "rowItem" + (String(b.blockId) === String(STATE.selectedId) ? " active" : "");
-      row.setAttribute("role","button");
-      row.setAttribute("tabindex","0");
-
-      const top = document.createElement("div");
-      top.className = "rowTop";
-
-      const left = document.createElement("div");
-      const title = document.createElement("div");
-      title.className = "rowTitle";
-      title.textContent = b.title || "(utan rubrik)";
-
-      const meta = document.createElement("div");
-      meta.className = "tiny";
-      const st = normStatus(b.status);
-      const nItems = Array.isArray(b.items) ? b.items.length : 0;
-      meta.textContent = `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"} • ${nItems} item(s)`;
-
-      left.appendChild(title);
-      left.appendChild(meta);
-
-      const right = document.createElement("div");
-      const pill = document.createElement("span");
-      pill.className = "pill " + (st === "published" ? "ok" : "warn");
-      pill.textContent = blockStatusLabel(st);
-      right.appendChild(pill);
-
-      top.appendChild(left);
-      top.appendChild(right);
-
-      row.appendChild(top);
-
-      function choose(){
-        selectBlock(b.blockId);
-      }
-      row.addEventListener("click", choose);
-      row.addEventListener("keydown", (e) => {
-        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
-      });
-
-      blockList.appendChild(row);
-    });
-  }
-
-  function hideEditor(){
-    editorWrap.style.display = "none";
-    editorEmptyHint.style.display = "block";
-    panelHint.textContent = "Välj ett block i listan.";
-    blockTag.textContent = "—";
-    statusTag.textContent = "—";
-    statusInp.value = "";
-    STATE.selectedItemIndex = -1;
-    hideItemEditor();
-
-    btnSave.disabled = true;
-    btnPublish.disabled = true;
-    btnEdit.disabled = !STATE.edit;
-    btnItemUp.disabled = true;
-    btnItemDown.disabled = true;
-    btnItemDelete.disabled = true;
-    btnAddItem.disabled = true;
-  }
-
-  function showEditor(){
-    const b = STATE.edit;
-    if(!b){ hideEditor(); return; }
-
-    editorWrap.style.display = "block";
-    editorEmptyHint.style.display = "none";
-    panelHint.textContent = "Redigera block och items. Spara när du är klar.";
-
-    blockTag.textContent = b.blockId ? ("ID: " + b.blockId) : "—";
-    moduleInp.value = String(b.module || "");
-    areaInp.value = String(b.area || "");
-    stepInp.value = String(b.step || "");
-    titleInp.value = String(b.title || "");
-    statusInp.value = blockStatusLabel(b.status);
-
-    statusTag.textContent = blockStatusLabel(b.status);
-    statusTag.className = "tag";
-
-    setSelectionPill();
-
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-
-    moduleInp.disabled = !canWrite;
-    areaInp.disabled = !canWrite;
-    stepInp.disabled = !canWrite;
-    titleInp.disabled = !canWrite;
-
-    btnAddItem.disabled = !canWrite;
-    btnEdit.disabled = false;
-
-    renderItems();
-    updatePublishButton();
-    setDirty(STATE.dirty);
-  }
-
-  function selectBlock(blockId){
-    const id = String(blockId || "");
-    if(!id) return;
-
-    if(STATE.dirty){
-      const ok = confirm("Du har osparade ändringar. Byta block och kasta ändringar?");
-      if(!ok) return;
-    }
-
-    // refresh from storage (fail-closed)
-    const st = loadBlocksState();
-    if(st.corrupt){
-      STATE.lockReasons = [`Låst för säkerhet: ${BLOCKS_KEY} är korrupt.`];
-      STATE.all = [];
-      STATE.visible = [];
-      STATE.selectedId = "";
-      STATE.edit = null;
-      STATE.rawSelected = null;
-      STATE.dirty = false;
-      applyLockFromState();
-      renderBlockList();
-      hideEditor();
-      setMsg("err", `Låst för säkerhet: ${BLOCKS_KEY} är korrupt.`);
-      return;
-    }
-
-    STATE.all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
-
-    const raw = (Array.isArray(st.blocks) ? st.blocks : []).find(x => String(x?.blockId || x?.id || "") === id);
-    const found = STATE.all.find(x => String(x.blockId) === id);
-
-    if(!found){
-      setMsg("warn", "Block hittades inte (kan ha raderats).");
-      STATE.selectedId = "";
-      STATE.edit = null;
-      STATE.rawSelected = null;
-      STATE.dirty = false;
-      renderBlockList();
-      hideEditor();
-      return;
-    }
-
-    STATE.selectedId = id;
-    STATE.edit = normalizeBlock(found);
-    STATE.rawSelected = raw || found;
-    STATE.selectedItemIndex = -1;
-    STATE.dirty = false;
-
-    setMsg("", "");
-    renderBlockList();
-    showEditor();
-    setDirty(false);
-  }
-
-  // btnEdit: simple focus helper (no new modes)
-  btnEdit.addEventListener("click", () => {
-    if(!STATE.edit) return;
-    try{ titleInp.focus(); }catch{}
-  });
-
-  /* =========================================
-     BLOCK 14/17 – Item editor logic (inkl. All info panel)
-     ========================================= */
-  function hideItemEditor(){
-    itemEditor.style.display = "none";
-    qWrap.style.display = "none";
-    tWrap.style.display = "none";
-    dWrap.style.display = "none";
-    itemKindInp.value = "";
-    itemTextInp.value = "";
-    qOptionsInp.value = "";
-    qFacitChoiceSel.innerHTML = "";
-    qFacitTextInp.value = "";
-    qFacitPill.textContent = "Facit: —";
-    qFacitPill.className = "qaPill";
-    debugPre.textContent = "{}";
-
-    detailType.textContent = "—";
-    detailIndex.textContent = "—";
-    detailId.textContent = "—";
-    detailReq.textContent = "—";
-    detailAnswerType.textContent = "—";
-    detailMeta.textContent = "—";
-    detailText.textContent = "—";
-    detailOptionsWrap.style.display = "none";
-    detailScaleWrap.style.display = "none";
-    detailFacitWrap.style.display = "none";
-    setDetailFacitPillFor(null);
-  }
-
-  function rebuildFacitChoiceOptions(opts, selected){
-    qFacitChoiceSel.innerHTML = "";
-    const o0 = document.createElement("option");
-    o0.value = "";
-    o0.textContent = "— Välj facit —";
-    qFacitChoiceSel.appendChild(o0);
-
-    (opts || []).forEach(o => {
-      const op = document.createElement("option");
-      op.value = o;
-      op.textContent = o;
-      qFacitChoiceSel.appendChild(op);
-    });
-
-    qFacitChoiceSel.value = selected || "";
-  }
-
-  function setFacitPillFor(it){
-    if(!it || it.kind !== "question"){
-      qFacitPill.textContent = "Facit: —";
-      qFacitPill.className = "qaPill";
-      return;
-    }
-    const ok = facitOkForQuestion(it);
-    qFacitPill.textContent = ok ? "Facit: OK" : "Facit: Saknas";
-    qFacitPill.className = "qaPill " + (ok ? "ok" : "bad");
-  }
-
-  function renderItems(){
-    const b = STATE.edit;
-    clear(itemRows);
-
-    if(!b){
-      const d = document.createElement("div");
-      d.className = "muted2";
-      d.textContent = "Välj ett block först.";
-      itemRows.appendChild(d);
-      itemsSummary.textContent = "—";
-      return;
-    }
-
-    const items = Array.isArray(b.items) ? b.items : [];
-    itemsSummary.textContent = `${items.length} item(s)`;
-
-    if(items.length === 0){
-      const d = document.createElement("div");
-      d.className = "muted2";
-      d.textContent = "Inga items ännu.";
-      itemRows.appendChild(d);
-      hideItemEditor();
-      return;
-    }
-
-    items.forEach((it0, idx) => {
-      const it = normalizeItem(it0);
-      items[idx] = it;
-
-      const row = document.createElement("div");
-      row.className = "itemRow" + (idx === STATE.selectedItemIndex ? " active" : "");
-      row.setAttribute("role","button");
-      row.setAttribute("tabindex","0");
-
-      const top = document.createElement("div");
-      top.className = "itemTop";
-
-      const left = document.createElement("div");
-
-      const title = document.createElement("div");
-      title.className = "itemTitle";
-      title.textContent = `${idx+1}) ${itemKindLabel(it)}`;
-
-      const meta = document.createElement("div");
-      meta.className = "itemMeta2";
-      const tx = String(it.text || "").trim();
-      meta.textContent = tx ? tx.slice(0, 120) + (tx.length > 120 ? "…" : "") : "(utan text)";
-
-      left.appendChild(title);
-      left.appendChild(meta);
-
-      const right = document.createElement("div");
-      if(it.kind === "question"){
-        const ok = facitOkForQuestion(it);
-        const p = document.createElement("span");
-        p.className = "qaPill " + (ok ? "ok" : "bad");
-        p.textContent = ok ? "Facit OK" : "Facit saknas";
-        right.appendChild(p);
-      }
-
-      top.appendChild(left);
-      top.appendChild(right);
-      row.appendChild(top);
-
-      function choose(){
-        STATE.selectedItemIndex = idx;
-        showItemEditor(idx);
-        renderItems();
-      }
-      row.addEventListener("click", choose);
-      row.addEventListener("keydown", (e) => {
-        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
-      });
-
-      itemRows.appendChild(row);
-    });
-
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-    const hasSel = (STATE.selectedItemIndex >= 0 && STATE.selectedItemIndex < items.length);
-
-    btnItemUp.disabled = !(canWrite && hasSel && STATE.selectedItemIndex > 0);
-    btnItemDown.disabled = !(canWrite && hasSel && STATE.selectedItemIndex < items.length - 1);
-    btnItemDelete.disabled = !(canWrite && hasSel);
-    btnAddItem.disabled = !canWrite;
-  }
-
-  function showItemEditor(index){
-    const b = STATE.edit;
-    if(!b){ hideItemEditor(); return; }
-    const items = Array.isArray(b.items) ? b.items : [];
-    if(index < 0 || index >= items.length){ hideItemEditor(); return; }
-
-    const it = normalizeItem(items[index]);
-    items[index] = it;
-
-    itemEditor.style.display = "block";
-    itemKindInp.value = itemKindLabel(it);
-
-    renderAllInfo(it, index);
-
-    const isDoc = (it.kind === "document");
-    itemTextInp.maxLength = isDoc ? 2000 : 240;
-    itemTextInp.value = String(it.text || "");
-
-    qWrap.style.display = (it.kind === "question") ? "block" : "none";
-    tWrap.style.display = (it.kind === "task") ? "block" : "none";
-    dWrap.style.display = (it.kind === "document") ? "block" : "none";
-
-    if(it.kind === "question"){
-      qAnswerSel.value = (it.answerType === "choice") ? "choice" : "text";
-      qOptionsInp.disabled = (qAnswerSel.value !== "choice");
-      qOptionsInp.value = (Array.isArray(it.options) ? it.options : []).join("\n");
-      qReqInp.checked = (it.requiresAnswer !== false);
-
-      const key = normalizeFacitText(it.answerKey);
-
-      if(qAnswerSel.value === "choice"){
-        qHint.textContent = "Val kräver minst 2 alternativ. Facit måste matcha ett alternativ.";
-        qFacitChoiceWrap.style.display = "block";
-        qFacitTextWrap.style.display = "none";
-        const opts = (Array.isArray(it.options) ? it.options : []).map(x => String(x||"").trim()).filter(Boolean);
-        rebuildFacitChoiceOptions(opts, key);
-        qFacitTextInp.value = "";
-      }else{
-        qHint.textContent = "Text-fråga: skriv facit som fri text.";
-        qFacitChoiceWrap.style.display = "none";
-        qFacitTextWrap.style.display = "block";
-        qFacitTextInp.value = key;
-        rebuildFacitChoiceOptions([], "");
-      }
-
-      setFacitPillFor(it);
-    }
-
-    if(it.kind === "task"){
-      tAnswerSel.value = (it.answerType === "scale") ? "scale" : "checkbox";
-      const scale = it.scale || { min:1, max:5, minLabel:"", maxLabel:"" };
-      tMinInp.value = String(clampInt(scale.min, 1, 10, 1));
-      tMaxInp.value = String(clampInt(scale.max, 1, 10, 5));
-      tMinLabelInp.value = String(scale.minLabel || "");
-      tMaxLabelInp.value = String(scale.maxLabel || "");
-      tReqInp.checked = (it.requiresDone !== false);
-      tHint.textContent = (tAnswerSel.value === "scale") ? "Skala aktiv." : "Checkbox aktiv (skala ignoreras).";
-    }
-
-    if(it.kind === "document"){
-      dSignInp.checked = (it.requiresSign !== false);
-    }
-
-    if(debugOpen){
-      try{ debugPre.textContent = JSON.stringify(it, null, 2); }catch{ debugPre.textContent = "{}"; }
-      try{ debugBlockPre.textContent = JSON.stringify(STATE.rawSelected ?? {}, null, 2); }catch{ debugBlockPre.textContent = "{}"; }
-    }else{
-      debugPre.textContent = "{}";
-    }
-
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-
-    itemTextInp.disabled = !canWrite;
-
-    qAnswerSel.disabled = !canWrite;
-    qOptionsInp.disabled = !canWrite || (qAnswerSel.value !== "choice");
-    qReqInp.disabled = !canWrite;
-    qFacitChoiceSel.disabled = !canWrite || (qAnswerSel.value !== "choice");
-    qFacitTextInp.disabled = !canWrite || (qAnswerSel.value !== "text");
-
-    tAnswerSel.disabled = !canWrite;
-    tMinInp.disabled = !canWrite || (tAnswerSel.value !== "scale");
-    tMaxInp.disabled = !canWrite || (tAnswerSel.value !== "scale");
-    tMinLabelInp.disabled = !canWrite || (tAnswerSel.value !== "scale");
-    tMaxLabelInp.disabled = !canWrite || (tAnswerSel.value !== "scale");
-    tReqInp.disabled = !canWrite;
-
-    dSignInp.disabled = !canWrite;
-  }
-
-  function applyEditorToBlock(){
-    const b = STATE.edit;
-    if(!b) return;
-
-    b.module = normText(moduleInp.value, 60);
-    b.area   = normText(areaInp.value, 60);
-    b.step   = normText(stepInp.value, 60);
-    b.title  = normText(titleInp.value, 80);
-
-    statusInp.value = blockStatusLabel(b.status);
-    statusTag.textContent = blockStatusLabel(b.status);
-    setSelectionPill();
-  }
-
-  function applyItemEditorToState(){
-    const b = STATE.edit;
-    if(!b) return;
-    const items = Array.isArray(b.items) ? b.items : [];
-    const i = STATE.selectedItemIndex;
-    if(i < 0 || i >= items.length) return;
-
-    let it = normalizeItem(items[i]);
-
-    it.text = String(itemTextInp.value || "").slice(0, it.kind === "document" ? 2000 : 240);
-
-    if(it.kind === "question"){
-      it.answerType = (qAnswerSel.value === "choice") ? "choice" : "text";
-      it.requiresAnswer = !!qReqInp.checked;
-
-      if(it.answerType === "choice"){
-        const lines = String(qOptionsInp.value || "").split("\n").map(s => s.trim()).filter(Boolean).slice(0, 20);
-        const uniq = [];
-        lines.forEach(x => { const s = x.slice(0,60); if(s && !uniq.includes(s)) uniq.push(s); });
-        it.options = uniq.slice(0,10);
-
-        it.answerKey = normalizeFacitText(qFacitChoiceSel.value || "");
-        if(it.answerKey && !it.options.includes(it.answerKey)){
-          it.answerKey = "";
-        }
-      }else{
-        it.options = [];
-        it.answerKey = normalizeFacitText(qFacitTextInp.value || "");
-      }
-    }
-
-    if(it.kind === "task"){
-      it.answerType = (tAnswerSel.value === "scale") ? "scale" : "checkbox";
-      it.requiresDone = !!tReqInp.checked;
-
-      if(it.answerType === "scale"){
-        const mn = clampInt(tMinInp.value, 1, 10, 1);
-        const mx0 = clampInt(tMaxInp.value, 1, 10, 5);
-        const mx = (mx0 < mn) ? mn : mx0;
-        it.scale = {
-          min: mn,
-          max: mx,
-          minLabel: String(tMinLabelInp.value || "").slice(0,40),
-          maxLabel: String(tMaxLabelInp.value || "").slice(0,40)
-        };
-      }else{
-        it.scale = null;
-      }
-    }
-
-    if(it.kind === "document"){
-      it.requiresSign = !!dSignInp.checked;
-    }
-
-    items[i] = normalizeItem(it);
-
-    setFacitPillFor(items[i]);
-    if(debugOpen){
-      try{ debugPre.textContent = JSON.stringify(items[i], null, 2); }catch{ debugPre.textContent = "{}"; }
-    }
-    renderAllInfo(items[i], i);
-  }
-
-  function markDirty(){ setDirty(true); }
-
-  function onBlockFieldChange(){
-    applyEditorToBlock();
-    markDirty();
-    renderBlockList();
-  }
-  moduleInp.addEventListener("input", onBlockFieldChange);
-  areaInp.addEventListener("input", onBlockFieldChange);
-  stepInp.addEventListener("input", onBlockFieldChange);
-  titleInp.addEventListener("input", onBlockFieldChange);
-
-  itemTextInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); renderItems(); updatePublishButton(); });
-
-  qAnswerSel.addEventListener("change", () => {
-    applyItemEditorToState();
-    qOptionsInp.disabled = (STATE.locked || isSystemAdmin) ? true : (qAnswerSel.value !== "choice");
-    showItemEditor(STATE.selectedItemIndex);
-    markDirty();
-    renderItems();
-    updatePublishButton();
-  });
-  qOptionsInp.addEventListener("input", () => {
-    applyItemEditorToState();
-    showItemEditor(STATE.selectedItemIndex);
-    markDirty();
-    renderItems();
-    updatePublishButton();
-  });
-  qReqInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); updatePublishButton(); });
-
-  qFacitChoiceSel.addEventListener("change", () => {
-    applyItemEditorToState();
-    markDirty();
-    renderItems();
-    updatePublishButton();
-  });
-  qFacitTextInp.addEventListener("input", () => {
-    applyItemEditorToState();
-    markDirty();
-    renderItems();
-    updatePublishButton();
-  });
-
-  tAnswerSel.addEventListener("change", () => {
-    applyItemEditorToState();
-    showItemEditor(STATE.selectedItemIndex);
-    markDirty();
-    renderItems();
-    updatePublishButton();
-  });
-  tMinInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); updatePublishButton(); });
-  tMaxInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); updatePublishButton(); });
-  tMinLabelInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); });
-  tMaxLabelInp.addEventListener("input", () => { applyItemEditorToState(); markDirty(); });
-  tReqInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); });
-
-  dSignInp.addEventListener("change", () => { applyItemEditorToState(); markDirty(); });
-
-  btnItemUp.addEventListener("click", () => {
-    const b = STATE.edit; if(!b) return;
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-    if(!canWrite) return;
-
-    const items = b.items || [];
-    const i = STATE.selectedItemIndex;
-    if(i <= 0) return;
-    const tmp = items[i-1]; items[i-1] = items[i]; items[i] = tmp;
-    STATE.selectedItemIndex = i - 1;
-    markDirty();
-    renderItems();
-    showItemEditor(STATE.selectedItemIndex);
-  });
-
-  btnItemDown.addEventListener("click", () => {
-    const b = STATE.edit; if(!b) return;
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-    if(!canWrite) return;
-
-    const items = b.items || [];
-    const i = STATE.selectedItemIndex;
-    if(i < 0 || i >= items.length - 1) return;
-    const tmp = items[i+1]; items[i+1] = items[i]; items[i] = tmp;
-    STATE.selectedItemIndex = i + 1;
-    markDirty();
-    renderItems();
-    showItemEditor(STATE.selectedItemIndex);
-  });
-
-  btnItemDelete.addEventListener("click", () => {
-    const b = STATE.edit; if(!b) return;
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-    if(!canWrite) return;
-
-    const items = b.items || [];
-    const i = STATE.selectedItemIndex;
-    if(i < 0 || i >= items.length) return;
-    if(!confirm("Ta bort item?")) return;
-
-    items.splice(i, 1);
-    STATE.selectedItemIndex = Math.min(i, items.length - 1);
-    markDirty();
-    renderItems();
-    if(STATE.selectedItemIndex >= 0) showItemEditor(STATE.selectedItemIndex);
-    else itemEditor.style.display = "none";
-  });
-
-  btnAddItem.addEventListener("click", () => {
-    const b = STATE.edit; if(!b) return;
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-    if(!canWrite) return;
-
-    b.items = Array.isArray(b.items) ? b.items : [];
-    const v = String(addItemKind.value || "document");
-
-    let it;
-    if(v === "document"){
-      it = { kind:"document", text:"", requiresSign:true };
-    }else if(v === "question_text"){
-      it = { kind:"question", questionId: genId("q"), text:"", answerType:"text", options:[], requiresAnswer:true, answerKey:"" };
-    }else if(v === "question_choice"){
-      it = { kind:"question", questionId: genId("q"), text:"", answerType:"choice", options:["Alternativ 1","Alternativ 2"], requiresAnswer:true, answerKey:"Alternativ 1" };
-    }else if(v === "task_checkbox"){
-      it = { kind:"task", taskId: genId("t"), text:"", answerType:"checkbox", scale:null, requiresDone:true };
-    }else if(v === "task_scale"){
-      it = { kind:"task", taskId: genId("t"), text:"", answerType:"scale", scale:{ min:1, max:5, minLabel:"", maxLabel:"" }, requiresDone:true };
-    }else{
-      it = { kind:"document", text:"", requiresSign:true };
-    }
-
-    b.items.push(normalizeItem(it));
-    STATE.selectedItemIndex = b.items.length - 1;
-    markDirty();
-    renderItems();
-    showItemEditor(STATE.selectedItemIndex);
-    try{ itemTextInp.focus(); }catch{}
-  });
-
-  /* =========================================
-     BLOCK 15/17 – Save/Publish (sync tillbaka till storage)
-     ========================================= */
-  function syncEditBackToAll(){
-    const edit = STATE.edit;
-    if(!edit) return { ok:false, err:"Ingen vald block." };
-
-    const st = loadBlocksState();
-    if(st.corrupt) return { ok:false, err:`Låst för säkerhet: ${BLOCKS_KEY} är korrupt.` };
-
-    const all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
-    const idx = all.findIndex(x => String(x.blockId) === String(edit.blockId));
-    if(idx < 0) return { ok:false, err:"Låst för säkerhet: block finns inte i bank." };
-
-    all[idx] = normalizeBlock(edit);
-    const res = saveBlocks(all);
-    if(!res.ok) return { ok:false, err: res.err || "Kunde inte spara." };
-
-    STATE.all = all;
-    return { ok:true };
-  }
-
-  function saveEdits(){
-    if(STATE.locked){ setMsg("err","Låst (för säkerhet)."); return; }
-    if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte spara."); return; }
-    if(!STATE.edit) return;
-
-    applyEditorToBlock();
-    applyItemEditorToState();
-
-    STATE.edit.updatedAt = Date.now();
-
-    const res = syncEditBackToAll();
-    if(!res.ok){ setMsg("err", res.err); return; }
-
-    setDirty(false);
-    renderBlockList();
-    showEditor();
-    setMsg("ok","Sparat.");
-  }
-
-  function publishBlock(){
-    if(STATE.locked){ setMsg("err","Låst (för säkerhet)."); return; }
-    if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte publicera."); return; }
-    if(!STATE.edit){ setMsg("err","Välj ett block först."); return; }
-    if(STATE.dirty){ setMsg("warn","Spara först (osparade ändringar)."); return; }
-
-    applyEditorToBlock();
-    applyItemEditorToState();
-
-    const chk = validateForPublish(STATE.edit);
-    if(!chk.ok){
-      setMsg("err","Kan inte publicera: " + chk.reasons.join(" "));
-      return;
-    }
-
-    const now = Date.now();
-    STATE.edit.status = "published";
-    STATE.edit.verifiedAt = now;
-    STATE.edit.verifiedBy = String(empNo || "");
-    STATE.edit.updatedAt = now;
-
-    const res = syncEditBackToAll();
-    if(!res.ok){ setMsg("err", res.err); return; }
-
-    setDirty(false);
-    renderBlockList();
-    showEditor();
-    setMsg("ok","Publicerad.");
-  }
-
-  btnSave.addEventListener("click", () => { setMsg("", ""); if(!STATE.dirty) return; saveEdits(); });
-  btnPublish.addEventListener("click", () => { setMsg("", ""); publishBlock(); });
-
-  /* =========================================
-     BLOCK 16/17 – Export-step runtime
-     ========================================= */
-  function setExportUiState(){
-    const canWrite = (!STATE.locked && !isSystemAdmin);
-    const hasTrainings = Array.isArray(STATE.trainings) && STATE.trainings.length > 0;
-    const selOk = (STATE.selectedTrainingIndex >= 0 && STATE.selectedTrainingIndex < (STATE.trainings?.length || 0));
-
-    btnExportTraining.disabled = !(canWrite && hasTrainings && selOk && !STATE.trainingsCorrupt);
-    btnExportTraining.title = isSystemAdmin
-      ? "Steward-läge (read-only)."
-      : (STATE.trainingsCorrupt ? "Trainings-data är korrupt (låst för säkerhet)." : "Exportera vald utbildning till block-banken.");
-
-    trainExportHint.textContent = STATE.trainingsCorrupt
-      ? "Låst för säkerhet: utbildningsdata verkar vara trasig. Åtgärda/rensa innan export."
-      : (STATE.trainingsMissing
-          ? "Inga utbildningar hittades ännu."
-          : (selOk
-              ? "Vald utbildning: klicka på Exportera."
-              : "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)."));
-  }
-
-  function fillDatalists(){
-    const mods = uniqSorted((STATE.trainings || []).map(t => trainingMeta(t).module));
-    const areasAll = uniqSorted((STATE.trainings || []).map(t => trainingMeta(t).area));
-
-    // SAFE: dlTrainModules exists but may be unused
-    if(dlTrainModules){
-      dlTrainModules.innerHTML = "";
-      mods.slice(0, 500).forEach(m => {
-        const o = document.createElement("option");
-        o.value = m;
-        dlTrainModules.appendChild(o);
-      });
-    }
-
-    // Fill module select (preferred)
-    if(qTrainModule && String(qTrainModule.tagName||"").toLowerCase() === "select"){
-      const prev = String(qTrainModule.value || "");
-      qTrainModule.innerHTML = "";
-      const o0 = document.createElement("option");
-      o0.value = "";
-      o0.textContent = "Alla moduler";
-      qTrainModule.appendChild(o0);
-      mods.forEach(m => {
-        const o = document.createElement("option");
-        o.value = m;
-        o.textContent = m;
-        qTrainModule.appendChild(o);
-      });
-      qTrainModule.value = (prev && mods.includes(prev)) ? prev : "";
-    }
-
-    const qMod = String(qTrainModule.value || "").trim().toLowerCase();
-    let areas = areasAll;
-    if(qMod){
-      const filtered = (STATE.trainings || []).filter(t => trainingMeta(t).module.toLowerCase() === qMod);
-      areas = uniqSorted(filtered.map(t => trainingMeta(t).area));
-    }
-
-    if(dlTrainAreas){
-      dlTrainAreas.innerHTML = "";
-      areas.slice(0, 500).forEach(a => {
-        const o = document.createElement("option");
-        o.value = a;
-        dlTrainAreas.appendChild(o);
-      });
-    }
-  }
-
-  function computeVisibleTrainings(){
-    const qMod = String(qTrainModule.value || "").trim().toLowerCase();
-    const qArea = String(qTrainArea.value || "").trim().toLowerCase();
-    const qFree = String(qTrainFree.value || "").trim().toLowerCase();
-
-    const idxs = [];
-    (STATE.trainings || []).forEach((t, idx) => {
-      const meta = trainingMeta(t);
-      const title = trainingTitle(t);
-
-      if(qMod && String(meta.module || "").toLowerCase() !== qMod) return;
-      if(qArea && !String(meta.area || "").toLowerCase().includes(qArea)) return;
-      if(qFree && !String(title || "").toLowerCase().includes(qFree)) return;
-
-      idxs.push(idx);
-    });
-
-    idxs.sort((a,b) => {
-      const ta = STATE.trainings[a];
-      const tb = STATE.trainings[b];
-      const ua = Number(ta?.updatedAt || ta?.createdAt || 0);
-      const ub = Number(tb?.updatedAt || tb?.createdAt || 0);
-      return ub - ua;
-    });
-
-    STATE.trainingVisibleIndexes = idxs;
-  }
-
-  function renderTrainingHits(){
-    clear(trainPreview);
-
-    if(STATE.trainingsCorrupt){
-      const d = document.createElement("div");
-      d.className = "muted2";
-      d.textContent = `Låst för säkerhet: ${TRAININGS_KEY} verkar vara trasig.`;
-      trainPreview.appendChild(d);
-      setExportUiState();
-      return;
-    }
-
-    if(!STATE.trainings || STATE.trainings.length === 0){
-      const d = document.createElement("div");
-      d.className = "muted2";
-      d.textContent = "Inga utbildningar hittades.";
-      trainPreview.appendChild(d);
-      setExportUiState();
-      return;
-    }
-
-    computeVisibleTrainings();
-    const hits = STATE.trainingVisibleIndexes.slice(0, 80);
-
-    if(hits.length === 0){
-      const d = document.createElement("div");
-      d.className = "muted2";
-      d.textContent = "Inga träffar. Prova annan modul/område eller sök fritt.";
-      trainPreview.appendChild(d);
-      setExportUiState();
-      return;
-    }
-
-    const head = document.createElement("div");
-    head.className = "tiny";
-    head.textContent = `Träffar: ${STATE.trainingVisibleIndexes.length} st (visar ${hits.length}). Klicka för att välja.`;
-    trainPreview.appendChild(head);
-
-    hits.forEach((idx) => {
-      const t = STATE.trainings[idx];
-      const meta = trainingMeta(t);
-      const title = trainingTitle(t);
-      const cnt = countTrainingItems(t);
-      const isActive = (idx === STATE.selectedTrainingIndex);
-
-      const row = document.createElement("div");
-      row.className = "exportRow" + (isActive ? " active" : "");
-      row.setAttribute("role","button");
-      row.setAttribute("tabindex","0");
-
-      const left = document.createElement("div");
-      left.className = "left";
-
-      const tt = document.createElement("div");
-      tt.className = "t";
-      tt.textContent = title;
-
-      const sub = document.createElement("div");
-      sub.className = "s";
-      sub.textContent = [
-        meta.module ? ("Modul: " + meta.module) : "Modul: —",
-        meta.area ? ("Område: " + meta.area) : "Område: —",
-        meta.step ? ("Steg: " + meta.step) : "Steg: —",
-        `Hittat: ${cnt.itemsCount} item(s)`
-      ].join("\n");
-
-      left.appendChild(tt);
-      left.appendChild(sub);
-
-      const right = document.createElement("div");
-      const p = document.createElement("span");
-      p.className = "pill " + (cnt.itemsCount ? "ok" : "warn");
-      p.textContent = cnt.itemsCount ? (isActive ? "Vald" : "Redo") : "Tomt";
-      right.appendChild(p);
-
-      row.appendChild(left);
-      row.appendChild(right);
-
-      function choose(){
-        STATE.selectedTrainingIndex = idx;
-        renderTrainingHits();
-        setExportUiState();
-      }
-      row.addEventListener("click", choose);
-      row.addEventListener("keydown", (e) => {
-        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
-      });
-
-      trainPreview.appendChild(row);
-    });
-
-    setExportUiState();
-  }
-
-  function reloadTrainings(){
-    const st = loadTrainingsState();
-    STATE.trainingsOk = !!st.ok;
-    STATE.trainingsCorrupt = !!st.corrupt;
-    STATE.trainingsMissing = !!st.missing;
-    STATE.trainings = Array.isArray(st.trainings) ? st.trainings : [];
-
-    if(STATE.trainings.length === 0){
-      STATE.selectedTrainingIndex = -1;
-    }else{
-      if(STATE.selectedTrainingIndex < 0 || STATE.selectedTrainingIndex >= STATE.trainings.length){
-        STATE.selectedTrainingIndex = -1;
-      }
-    }
-
-    fillDatalists();
-    renderTrainingHits();
-    setExportUiState();
-  }
-
-  function exportSelectedTraining(){
-    if(STATE.locked){ setMsg("err","Låst (för säkerhet)."); return; }
-    if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte exportera."); return; }
-    if(STATE.trainingsCorrupt){ setMsg("err", `Låst för säkerhet: ${TRAININGS_KEY} är trasig.`); return; }
-
-    const idx = STATE.selectedTrainingIndex;
-    if(idx < 0 || idx >= (STATE.trainings?.length || 0)){
-      setMsg("warn","Välj en utbildning först (klicka i listan).");
-      return;
-    }
-
-    const stBlocks = loadBlocksState();
-    if(stBlocks.corrupt){
-      setMsg("err", `Låst för säkerhet: ${BLOCKS_KEY} är trasig.`);
-      return;
-    }
-
-    const t = STATE.trainings[idx];
-    const newBlock = normalizeTrainingToExportBlock(t, empNo);
-
-    const all = (Array.isArray(stBlocks.blocks) ? stBlocks.blocks : []).map(normalizeBlock);
-    const dup = all.find(b =>
-      normText(b.title,80) === normText(newBlock.title,80) &&
-      normText(b.module,60) === normText(newBlock.module,60) &&
-      normText(b.area,60) === normText(newBlock.area,60) &&
-      normText(b.step,60) === normText(newBlock.step,60) &&
-      normStatus(b.status) === "draft"
-    );
-
-    if(dup){
-      const ok = confirm("Det finns redan ett utkast i block-banken med samma titel/modul/område/steg. Skapa ändå ett nytt block?");
-      if(!ok) return;
-    }
-
-    all.push(newBlock);
-
-    const res = saveBlocks(all);
-    if(!res || !res.ok){
-      setMsg("err", res?.err || "Kunde inte spara exporten.");
-      return;
-    }
-
-    STATE.all = all;
-
-    // Make sure it becomes visible
-    if(filterStatus && filterStatus.value !== "all") filterStatus.value = "all";
-    if(qBlocks && qBlocks.value.trim()) qBlocks.value = "";
-
-    renderBlockList();
-
-    try{ selectBlock(newBlock.blockId); }catch{}
-    setMsg("ok", "Export klar: nytt block (utkast) skapat.");
-  }
-
-  /* =========================================
-     BLOCK 17/17 – Bootstrap + events
-     ========================================= */
-  qBlocks.addEventListener("input", () => { renderBlockList(); });
-  filterStatus.addEventListener("change", () => { renderBlockList(); });
-
-  qTrainModule.addEventListener("change", () => { fillDatalists(); renderTrainingHits(); });
-  qTrainArea.addEventListener("input", () => { renderTrainingHits(); });
-  qTrainFree.addEventListener("input", () => { renderTrainingHits(); });
-
-  btnReloadTrainings.addEventListener("click", () => { setMsg("", ""); reloadTrainings(); });
-  btnExportTraining.addEventListener("click", () => { setMsg("", ""); exportSelectedTraining(); });
-
-  (function init(){
-    STATE.lockReasons = [];
-
-    const st = loadBlocksState();
-    if(st.corrupt){
-      STATE.lockReasons.push(`Låst för säkerhet: ${BLOCKS_KEY} är korrupt.`);
-      STATE.all = [];
-    }else{
-      STATE.all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
-    }
-
-    applyLockFromState();
-    setMsg("", "");
-
-    hideEditor();
-    renderBlockList();
-    reloadTrainings();
-    setDirty(false);
-    updatePublishButton();
-  })();
-
-})();
-</script>
-</body>
-</html>
+          scale: t?.scale ??
