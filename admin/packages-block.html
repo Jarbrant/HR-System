@@ -1522,19 +1522,25 @@ function applyLockFromState(){
 })();
 </script>
 
-     
-
-
  /* ============================================================
    AO-14 — BLOCK 14/17 (Item editor)
    Mini-mallar • Live-preview • Duplicera item
    ============================================================ */
+/* ============================================================
+   AO-14 — BLOCK 14/17 (Item editor)
+   Mini-mallar • Live-preview • Duplicera item
+   KOMPATIBEL MED AO-12 (STATE)
+   ============================================================ */
 
+/* ------------------------------
+   HIDE EDITOR
+--------------------------------*/
 function hideItemEditor(){
   itemEditor.style.display = "none";
   qWrap.style.display = "none";
   tWrap.style.display = "none";
   dWrap.style.display = "none";
+
   itemKindInp.value = "";
   itemTextInp.value = "";
   qOptionsInp.value = "";
@@ -1560,9 +1566,8 @@ function hideItemEditor(){
 }
 
 /* ------------------------------
-   AO-14: MINI-MALLAR
+   MINI-MALLAR
 --------------------------------*/
-
 function createItemFromTemplate(kind){
   if(kind === "standard-question"){
     return {
@@ -1597,57 +1602,46 @@ function createItemFromTemplate(kind){
 }
 
 /* ------------------------------
-   AO-14: DUPLICERA ITEM
+   DUPLICERA ITEM (ID-BASERAT)
 --------------------------------*/
-
 function duplicateSelectedItem(){
   const b = STATE.edit;
   if(!b) return;
-  const canWrite = (!STATE.locked && !isSystemAdmin);
-  if(!canWrite) return;
+  if(STATE.locked || isSystemAdmin) return;
 
   const items = Array.isArray(b.items) ? b.items : [];
-  const i = STATE.selectedItemIndex;
-  if(i < 0 || i >= items.length) return;
+  const src = items.find(it => getItemIdSafe(it) === STATE.selectedItem);
+  if(!src) return;
 
-  const src = normalizeItem(items[i]);
   const copy = JSON.parse(JSON.stringify(src));
-
-  // ny ID men samma typ
   if(copy.kind === "question") copy.questionId = genId("q");
   if(copy.kind === "task") copy.taskId = genId("t");
 
-  items.splice(i + 1, 0, normalizeItem(copy));
-  STATE.selectedItemIndex = i + 1;
+  const idx = items.indexOf(src);
+  items.splice(idx + 1, 0, normalizeItem(copy));
 
-  setDirty(true);
+  selectItem(copy, idx + 1);
+  markItemDirty(copy);
   renderItems();
-  showItemEditor(STATE.selectedItemIndex);
+  showItemEditor(copy);
 }
 
 /* ------------------------------
-   AO-14: LIVE PREVIEW
-   (exakt som medarbetare)
+   LIVE PREVIEW
 --------------------------------*/
-
 function updateLivePreview(it, index){
-  // återanvänd samma detalj-rendering som används i view-läge
   renderAllInfo(it, index);
 }
 
 /* ------------------------------
-   ITEM-LISTA
+   ITEM LIST (STATE-DRIVEN)
 --------------------------------*/
-
 function renderItems(){
   const b = STATE.edit;
   clear(itemRows);
 
   if(!b){
-    const d = document.createElement("div");
-    d.className = "muted2";
-    d.textContent = "Välj ett block först.";
-    itemRows.appendChild(d);
+    itemRows.innerHTML = `<div class="muted2">Välj ett block först.</div>`;
     itemsSummary.textContent = "—";
     return;
   }
@@ -1656,58 +1650,53 @@ function renderItems(){
   itemsSummary.textContent = `${items.length} item(s)`;
 
   if(items.length === 0){
-    const d = document.createElement("div");
-    d.className = "muted2";
-    d.textContent = "Inga items ännu.";
-    itemRows.appendChild(d);
+    itemRows.innerHTML = `<div class="muted2">Inga items ännu.</div>`;
     hideItemEditor();
     return;
   }
 
-  items.forEach((it0, idx) => {
+  items.forEach((it0, idx)=>{
     const it = normalizeItem(it0);
     items[idx] = it;
 
     const row = document.createElement("div");
-    row.className = "itemRow" + (idx === STATE.selectedItemIndex ? " active" : "");
+    row.className =
+      "itemRow" +
+      (getItemIdSafe(it) === STATE.selectedItem ? " active" : "");
+
+    row.tabIndex = 0;
     row.setAttribute("role","button");
-    row.setAttribute("tabindex","0");
 
-    const top = document.createElement("div");
-    top.className = "itemTop";
-
-    const left = document.createElement("div");
-
-    const title = document.createElement("div");
-    title.className = "itemTitle";
-    title.textContent = `${idx+1}) ${itemKindLabel(it)}`;
-
-    const meta = document.createElement("div");
-    meta.className = "itemMeta2";
-    const tx = String(it.text || "").trim();
-    meta.textContent = tx ? tx.slice(0, 120) + (tx.length > 120 ? "…" : "") : "(utan text)";
-
-    left.appendChild(title);
-    left.appendChild(meta);
-
-    top.appendChild(left);
-    row.appendChild(top);
+    row.innerHTML = `
+      <div class="itemTop">
+        <div>
+          <div class="itemTitle">${idx+1}) ${itemKindLabel(it)}</div>
+          <div class="itemMeta2">
+            ${(it.text||"").trim().slice(0,120) || "(utan text)"}
+          </div>
+        </div>
+      </div>
+    `;
 
     function choose(){
-      STATE.selectedItemIndex = idx;
-      showItemEditor(idx);
+      selectItem(it, idx);
+      showItemEditor(it);
       renderItems();
     }
+
     row.addEventListener("click", choose);
-    row.addEventListener("keydown", (e) => {
-      if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
+    row.addEventListener("keydown", e=>{
+      if(e.key==="Enter"||e.key===" "){
+        e.preventDefault();
+        choose();
+      }
     });
 
     itemRows.appendChild(row);
   });
 
   const canWrite = (!STATE.locked && !isSystemAdmin);
-  const hasSel = (STATE.selectedItemIndex >= 0 && STATE.selectedItemIndex < items.length);
+  const hasSel = !!STATE.selectedItem;
 
   btnItemDuplicate.disabled = !(canWrite && hasSel);
   btnItemDelete.disabled = !(canWrite && hasSel);
@@ -1715,113 +1704,129 @@ function renderItems(){
 }
 
 /* ------------------------------
-   ITEM-EDITOR
+   ITEM EDITOR (ID-BASERAD)
 --------------------------------*/
-
-function showItemEditor(index){
-  const b = STATE.edit;
-  if(!b){ hideItemEditor(); return; }
-  const items = Array.isArray(b.items) ? b.items : [];
-  if(index < 0 || index >= items.length){ hideItemEditor(); return; }
-
-  const it = normalizeItem(items[index]);
-  items[index] = it;
+function showItemEditor(it){
+  if(!it){ hideItemEditor(); return; }
 
   itemEditor.style.display = "block";
   itemKindInp.value = itemKindLabel(it);
   itemTextInp.value = String(it.text || "");
 
-  renderAllInfo(it, index);
-  updateLivePreview(it, index);
+  renderAllInfo(it);
+  updateLivePreview(it);
 
-  const canWrite = (!STATE.locked && !isSystemAdmin);
-  itemTextInp.disabled = !canWrite;
+  itemTextInp.disabled = (STATE.locked || isSystemAdmin);
 }
 
 /* ------------------------------
-   EVENT HOOKS
+   EVENTS
 --------------------------------*/
+itemTextInp.addEventListener("input", ()=>{
+  const it = STATE.edit?.items?.find(x=>getItemIdSafe(x)===STATE.selectedItem);
+  if(!it) return;
 
-itemTextInp.addEventListener("input", () => {
   applyItemEditorToState();
-  updateLivePreview(STATE.edit.items[STATE.selectedItemIndex], STATE.selectedItemIndex);
-  setDirty(true);
+  markItemDirty(it);
+  updateLivePreview(it);
   renderItems();
   updatePublishButton();
 });
 
 btnItemDuplicate.addEventListener("click", duplicateSelectedItem);
 
-btnTemplateStandard.addEventListener("click", () => {
+btnTemplateStandard.addEventListener("click", ()=>{
   const b = STATE.edit; if(!b) return;
-  b.items.push(normalizeItem(createItemFromTemplate("standard-question")));
-  STATE.selectedItemIndex = b.items.length - 1;
-  setDirty(true);
+  const it = normalizeItem(createItemFromTemplate("standard-question"));
+  b.items.push(it);
+  selectItem(it, b.items.length-1);
+  markItemDirty(it);
   renderItems();
-  showItemEditor(STATE.selectedItemIndex);
+  showItemEditor(it);
 });
 
-btnTemplateYesNo.addEventListener("click", () => {
+btnTemplateYesNo.addEventListener("click", ()=>{
   const b = STATE.edit; if(!b) return;
-  b.items.push(normalizeItem(createItemFromTemplate("yes-no")));
-  STATE.selectedItemIndex = b.items.length - 1;
-  setDirty(true);
+  const it = normalizeItem(createItemFromTemplate("yes-no"));
+  b.items.push(it);
+  selectItem(it, b.items.length-1);
+  markItemDirty(it);
   renderItems();
-  showItemEditor(STATE.selectedItemIndex);
+  showItemEditor(it);
 });
 
-btnTemplateInfo.addEventListener("click", () => {
+btnTemplateInfo.addEventListener("click", ()=>{
   const b = STATE.edit; if(!b) return;
-  b.items.push(normalizeItem(createItemFromTemplate("info")));
-  STATE.selectedItemIndex = b.items.length - 1;
-  setDirty(true);
+  const it = normalizeItem(createItemFromTemplate("info"));
+  b.items.push(it);
+  selectItem(it, b.items.length-1);
+  markItemDirty(it);
   renderItems();
-  showItemEditor(STATE.selectedItemIndex);
+  showItemEditor(it);
 });
 
-  /* =========================================
-     BLOCK 15/17 – Save/Publish (sync tillbaka till storage)
-     ========================================= */
- function syncEditBackToAll(){
+/* ============================================================
+   AO-15 — BLOCK 15/17
+   Save / Publish + sammanfattning + verifiering
+   KOMPATIBEL MED AO-12 (STATE)
+   ============================================================ */
+
+function syncEditBackToAll(){
   const edit = STATE.edit;
   if(!edit) return { ok:false, err:"Ingen vald block." };
 
   const st = loadBlocksState();
-  if(st.corrupt) return { ok:false, err:`Låst för säkerhet: ${BLOCKS_KEY} är korrupt.` };
+  if(st.corrupt){
+    return { ok:false, err:`Låst för säkerhet: ${BLOCKS_KEY} är korrupt.` };
+  }
 
   const all = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
   const idx = all.findIndex(x => String(x.blockId) === String(edit.blockId));
-  if(idx < 0) return { ok:false, err:"Låst för säkerhet: block finns inte i bank." };
+  if(idx < 0){
+    return { ok:false, err:"Låst för säkerhet: block finns inte i bank." };
+  }
 
   all[idx] = normalizeBlock(edit);
+
   const res = saveBlocks(all);
-  if(!res.ok) return { ok:false, err: res.err || "Kunde inte spara." };
+  if(!res.ok){
+    return { ok:false, err: res.err || "Kunde inte spara." };
+  }
 
   STATE.all = all;
   return { ok:true };
 }
 
 /* --------------------------------
-   AO-15: sammanfattning efter publish
+   Sammanfattning efter publish
 ----------------------------------*/
-
 function computePublishSummary(block){
   const items = Array.isArray(block?.items) ? block.items : [];
   let q = 0, d = 0;
-  items.forEach(it => {
+
+  items.forEach(it=>{
     if(it.kind === "question") q++;
     else if(it.kind === "document") d++;
   });
 
   const parts = [];
   if(q) parts.push(`${q} ${q === 1 ? "fråga" : "frågor"}`);
-  if(d) parts.push(`${d} ${d === 1 ? "dokument" : "dokument"}`);
+  if(d) parts.push(`${d} dokument`);
   return parts.join(", ") || "Inga items";
 }
 
+/* --------------------------------
+   SAVE
+----------------------------------*/
 function saveEdits(){
-  if(STATE.locked){ setMsg("err","Låst (för säkerhet)."); return; }
-  if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte spara."); return; }
+  if(STATE.locked){
+    setMsg("err","Låst (för säkerhet).");
+    return;
+  }
+  if(isSystemAdmin){
+    setMsg("warn","Steward-läge (read-only): kan inte spara.");
+    return;
+  }
   if(!STATE.edit) return;
 
   applyEditorToBlock();
@@ -1830,19 +1835,37 @@ function saveEdits(){
   STATE.edit.updatedAt = Date.now();
 
   const res = syncEditBackToAll();
-  if(!res.ok){ setMsg("err", res.err); return; }
+  if(!res.ok){
+    setMsg("err", res.err);
+    return;
+  }
 
-  setDirty(false);
+  resetDirtyForBlock();
   renderBlockList();
   showEditor();
   setMsg("ok","Sparat.");
 }
 
+/* --------------------------------
+   PUBLISH
+----------------------------------*/
 function publishBlock(){
-  if(STATE.locked){ setMsg("err","Låst (för säkerhet)."); return; }
-  if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte publicera."); return; }
-  if(!STATE.edit){ setMsg("err","Välj ett block först."); return; }
-  if(STATE.dirty){ setMsg("warn","Spara först (osparade ändringar)."); return; }
+  if(STATE.locked){
+    setMsg("err","Låst (för säkerhet).");
+    return;
+  }
+  if(isSystemAdmin){
+    setMsg("warn","Steward-läge (read-only): kan inte publicera.");
+    return;
+  }
+  if(!STATE.edit){
+    setMsg("err","Välj ett block först.");
+    return;
+  }
+  if(STATE.dirtyBlock){
+    setMsg("warn","Spara först (osparade ändringar).");
+    return;
+  }
 
   applyEditorToBlock();
   applyItemEditorToState();
@@ -1860,14 +1883,16 @@ function publishBlock(){
   STATE.edit.updatedAt = now;
 
   const res = syncEditBackToAll();
-  if(!res.ok){ setMsg("err", res.err); return; }
+  if(!res.ok){
+    setMsg("err", res.err);
+    return;
+  }
 
-  // AO-15: visa sammanfattning + verifiering direkt
   const summary = computePublishSummary(STATE.edit);
   const who = STATE.edit.verifiedBy || "—";
   const when = new Date(STATE.edit.verifiedAt).toLocaleString("sv-SE");
 
-  setDirty(false);
+  resetDirtyForBlock();
   renderBlockList();
   showEditor();
 
@@ -1877,13 +1902,16 @@ function publishBlock(){
   );
 }
 
-btnSave.addEventListener("click", () => {
+/* --------------------------------
+   EVENTS
+----------------------------------*/
+btnSave.addEventListener("click", ()=>{
   setMsg("", "");
-  if(!STATE.dirty) return;
+  if(!STATE.dirtyBlock) return;
   saveEdits();
 });
 
-btnPublish.addEventListener("click", () => {
+btnPublish.addEventListener("click", ()=>{
   setMsg("", "");
   publishBlock();
 });
@@ -2135,6 +2163,7 @@ function exportSelectedTraining(){
 /* ============================================================
    AO-17 — BLOCK 17/17
    Bootstrap + events (safe init + empty state)
+   Kompatibel med AO-12 (STATE)
    ============================================================ */
 
 function renderEmptySystemHint(){
@@ -2162,7 +2191,8 @@ function safeInitBlocks(){
   const st = loadBlocksState();
 
   if(st.corrupt){
-    STATE.locked = true;
+    STATE.lockReasons = [`Låst för säkerhet: ${BLOCKS_KEY} är trasig.`];
+    applyLockFromState(); // sätter STATE.locked + UI
     STATE.all = [];
     STATE.visible = [];
     renderEmptySystemHint();
@@ -2179,15 +2209,17 @@ function safeInitBlocks(){
 
   renderBlockList();
 
-  // Auto-select first visible block (safe)
+  // Auto-select first visible block (safe) — OBS: selectBlock vill ha block-objekt
   try{
-    const first = STATE.visible?.[0];
-    if(first?.blockId){
-      selectBlock(first.blockId);
+    const first = Array.isArray(STATE.visible) ? STATE.visible[0] : null;
+    if(first && typeof first === "object"){
+      selectBlock(first);
     }else{
+      selectBlock(null);
       hideEditor();
     }
   }catch{
+    selectBlock(null);
     hideEditor();
   }
 }
@@ -2202,6 +2234,8 @@ function safeInitTrainings(){
 
   if(STATE.trainingsCorrupt){
     setMsg("warn", `Utbildningar låsta: ${TRAININGS_KEY} är trasig.`);
+    // export UI ska ändå reflektera att export är blockerad
+    setExportUiState();
     return;
   }
 
@@ -2213,11 +2247,17 @@ function safeInitTrainings(){
 function bootstrapApp(){
   setMsg("", "");
 
-  // Reset transient state
-  STATE.selectedId = "";
-  STATE.selectedItemIndex = -1;
+  // Reset transient state (AO-12)
+  STATE.selectedBlock = "";
+  STATE.selectedItem = null;
+  STATE.selectedItemType = "";
   STATE.edit = null;
-  STATE.dirty = false;
+
+  resetDirtyForBlock();
+
+  // Om tidigare lockReasons fanns, nollställ (fail-closed hanteras i safeInitBlocks)
+  STATE.lockReasons = [];
+  applyLockFromState();
 
   // Safe init order
   safeInitBlocks();
@@ -2227,7 +2267,7 @@ function bootstrapApp(){
   updatePublishButton();
 }
 
-document.addEventListener("DOMContentLoaded", () => {
+document.addEventListener("DOMContentLoaded", ()=>{
   try{
     bootstrapApp();
   }catch(e){
@@ -2236,5 +2276,6 @@ document.addEventListener("DOMContentLoaded", () => {
     renderEmptySystemHint();
   }
 });
+
 
  
