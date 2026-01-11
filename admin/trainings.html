@@ -1025,9 +1025,9 @@ POLICY (LÅST):
           })();
         </script>
 
-     <!-- =========================
+ <!-- =========================
      BLOCK 10/10 – Footer & Debug (PATCH)
-     PATCH: Lägg tillbaka AI-knappar i footern
+     PATCH: Koppla om AI-knappar så de alltid hittar rätt funktion
 ========================== -->
 <div class="footerRow" aria-label="Spara och publicera">
   <div class="left" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
@@ -1035,7 +1035,7 @@ POLICY (LÅST):
       Ångra osparat
     </button>
 
-    <!-- PATCH: AI-knappar tillbaka i footern -->
+    <!-- AI-knappar i footern -->
     <button class="miniBtn" id="btnTestAI" type="button" title="Testar kopplingen till AI">
       Testa AI
     </button>
@@ -1065,14 +1065,16 @@ POLICY (LÅST):
 
 <script>
   /* ============================================================
-     AO-TRN-B10-AI-BUTTONS-01 — BLOCK 10 PATCH
-     - Lägger tillbaka AI-knappar i footer
-     - Binder EN gång, utan att störa övriga knappar
-     - Fail-safe: om funktioner saknas -> skriv tydlig hint
+     AO-TRN-B10-AI-REWIRE-01 — BLOCK 10 PATCH (REWIRE)
+     Mål: Knapparna ska alltid hitta rätt koppling, även om funktionen
+     laddas senare i filen.
+     - Ingen redesign
+     - Ingen ny lagring
+     - Fail-safe text i hint
   ============================================================ */
   (function(){
     try{
-      // refresh hook (behåll)
+      // behåll refresh hook
       window.HRTrainingsRefreshUI = function(){
         try{ if (typeof window.renderBlocks === "function") window.renderBlocks(); }catch(_){}
         try{ if (window.STATE && window.STATE.edit && typeof window.renderPreview === "function") window.renderPreview(window.STATE.edit); }catch(_){}
@@ -1086,52 +1088,81 @@ POLICY (LÅST):
       const btnGen  = document.getElementById("btnGenAI");
 
       function say(msg){
-        try{
-          if (!hint) return;
-          hint.textContent = msg;
-        }catch(_){}
+        try{ if (hint) hint.textContent = msg; }catch(_){}
       }
 
-      // undvik dubbelbindning
-      if (btnTest && btnTest.__hrBoundAI) return;
-      if (btnGen && btnGen.__hrBoundAI) return;
-      if (btnTest) btnTest.__hrBoundAI = true;
-      if (btnGen) btnGen.__hrBoundAI = true;
+      // hård stopp mot dubbelbindning
+      if (btnTest && btnTest.__hrBoundAIRewire) return;
+      if (btnGen && btnGen.__hrBoundAIRewire) return;
+      if (btnTest) btnTest.__hrBoundAIRewire = true;
+      if (btnGen) btnGen.__hrBoundAIRewire = true;
+
+      // hjälp: försök hitta funktion nu, annars vänta lite och försök igen
+      function callWhenReady(fnName, busyText, failText){
+        try{
+          const fn = window[fnName];
+          if (typeof fn === "function"){
+            say(busyText);
+            fn();
+            return;
+          }
+        }catch(_){}
+
+        // om funktionen inte finns exakt nu: försök igen en kort stund
+        say(busyText);
+
+        let tries = 0;
+        const maxTries = 8;     // ~2s
+        const delay = 250;
+
+        const t = setInterval(function(){
+          tries++;
+          try{
+            const fn = window[fnName];
+            if (typeof fn === "function"){
+              clearInterval(t);
+              fn();
+              return;
+            }
+          }catch(_){}
+
+          if (tries >= maxTries){
+            clearInterval(t);
+            say(failText);
+          }
+        }, delay);
+      }
 
       if (btnTest){
         btnTest.addEventListener("click", function(){
-          try{
-            if (typeof window.HRTrainingsTestWorker === "function"){
-              say("Testar AI…");
-              window.HRTrainingsTestWorker();
-              return;
-            }
-            say("Kan inte testa AI just nu.");
-          }catch(_){
-            say("Kan inte testa AI just nu.");
-          }
+          callWhenReady(
+            "HRTrainingsTestWorker",
+            "Testar AI…",
+            "Kan inte testa AI just nu."
+          );
         });
       }
 
       if (btnGen){
         btnGen.addEventListener("click", function(){
+          // mjuk varning om ingen utbildning är vald
           try{
-            if (typeof window.HRTrainingsGenerateAI === "function"){
-              say("Genererar block…");
-              window.HRTrainingsGenerateAI();
+            if (!window.STATE || !window.STATE.edit){
+              say("Välj en utbildning först.");
               return;
             }
-            say("Kan inte generera block just nu.");
-          }catch(_){
-            say("Kan inte generera block just nu.");
-          }
+          }catch(_){}
+
+          callWhenReady(
+            "HRTrainingsGenerateAI",
+            "Genererar block…",
+            "Kan inte generera block just nu."
+          );
         });
       }
     }catch(_){}
   })();
 </script>
-
-
     <!-- =========================
          BLOCK 11/11 — CORE ENGINE (JS) [NYTT BLOCK]
          AO-TRN-B11-CORE-ENGINE-01 (PROD)
