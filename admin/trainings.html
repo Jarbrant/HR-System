@@ -1,12 +1,13 @@
 <!-- ============================================================
-AO-TRAININGS-PATCH-01 (PROD AUTOPATCH v2.2.1) | FIL-ID: admin/trainings.html
+AO-TRAININGS-PATCH-01 (PROD AUTOPATCH v2.2.2) | FIL-ID: admin/trainings.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN – Skapa/Redigera utbildningar (återanvändbart innehåll) + AI-stöd
 
-PATCH (v2.2.1):
-- BLOCK 5: Återinför “Moduler”-förslag (15–25 st) som fast lista i sidan (inte storage)
-- BLOCK 5: Sök kräver ≥ 3 tecken, men "Visa alla" visar allt direkt
-- BLOCK 5: "Visa alla" ligger på samma rad som Modul (label-raden)
+PATCH (v2.2.2) – DESIGN/FLOW-FIX (utan funktionsborttag):
+- Fixar dubbla html/head/doctypes (orsakar konstig layout)
+- Lägger BLOCK 5–10 i högerkolumn (så de inte hamnar “utanför” layouten)
+- Lägger “Skapa ny”-koden i rätt script-del
+- Synkar dubbel “Visa bara problem” utan att bryta befintlig logik
 
 POLICY (LÅST):
 - UI-only • Fail-closed • localStorage-first (data), sessionStorage först (auth) • fallback localStorage
@@ -20,1078 +21,1048 @@ POLICY (LÅST):
 <!doctype html>
 <html lang="sv">
 <head>
-<!-- =========================
-     BLOCK 1/10 – HTML-Huvud & Grundläggande Metadata (PATCH)
-     ÄNDRING: Sätter worker-url på <body>
-========================== -->
-<!doctype html>
-<html lang="sv">
-<head>
+  <!-- =========================
+       BLOCK 1/10 – HTML-Huvud & Grundläggande Metadata (PATCH)
+       ÄNDRING: Sätter worker-url på <body>
+  ========================== -->
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HR-System – Admin • Utbildningar</title>
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <!-- =========================
+       AO-TRN-B02 — BLOCK 2/10 – CSS-stilar (sid-specifika) (PATCH v2)
+       Syfte: Smalare sida + centrerad text + UI-stöd för nya blockfeatures
+       PATCH: Fixar vit text i vita knappar (sätter explicit textfärg på "ljusa" knappar)
+       POLICY: Ingen lift/resize på hover (endast skugga). UI-only. Inga keys.
+  ========================== -->
+  <style>
+    :root{
+      --bg:#f6f7fb;
+      --card:#ffffff;
+      --ink:#111827;
+      --muted:#6b7280;
+      --line:#e5e7eb;
+      --shadow:0 6px 18px rgba(17,24,39,.08);
+      --shadow2:0 10px 26px rgba(17,24,39,.10);
+      --radius:16px;
+
+      --ok:#16a34a;
+      --warn:#d97706;
+      --bad:#dc2626;
+
+      --chip:#eef2ff;
+      --chipInk:#3730a3;
+
+      /* ============================================================
+         BLOCK 2/10 – Visuell semantik (LÅST)
+      ============================================================ */
+      --blockDocument:#9ca3af;
+      --blockTask:#22c55e;
+      --blockQuestion:#0ea5e9;
+      --blockBothA: var(--blockTask);
+      --blockBothB: var(--blockQuestion);
+
+      /* Legacy tokens (behålls) */
+      --blockInfo:#0ea5e9;
+      --blockQuiz:#f59e0b;
+      --blockDoc:#a855f7;
+      --blockPersona:#f43f5e;
+
+      /* Focus / edit */
+      --focusRing: rgba(11,95,255,.22);
+      --focusRing2: rgba(11,95,255,.10);
+    }
+
+    body{ background:var(--bg); color:var(--ink); }
+
+    /* ============================================================
+       Layout: gör sidan mindre bred + mer “editor-fokus”
+    ============================================================ */
+    .wrap{
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 16px 12px 36px;
+    }
+
+    .muted2{ color:var(--muted); font-size:13px; line-height:1.35; }
+    .tiny{ font-size:12px; }
+
+    /* Centrera informations-text (inte list-knappar) */
+    .muted2,
+    .inlineHelp,
+    .previewBox,
+    .editorSection > .muted2,
+    .editorSection > .tiny{
+      text-align:center;
+      margin-left:auto;
+      margin-right:auto;
+      max-width:720px;
+    }
+
+    /* ============================================================
+       Bas UI atoms
+    ============================================================ */
+    .pill{
+      display:inline-flex; align-items:center; gap:8px;
+      padding:6px 10px; border-radius:999px;
+      background:#fff; border:1px solid var(--line);
+      box-shadow:0 2px 10px rgba(17,24,39,.06);
+      font-size:12px;
+    }
+    .pillDot{ width:10px; height:10px; border-radius:999px; background:#9ca3af; display:inline-block; }
+    .pill.ok .pillDot{ background:var(--ok); }
+    .pill.warn .pillDot{ background:var(--warn); }
+    .pill.bad .pillDot{ background:var(--bad); }
+
+    .topbar{
+      display:flex; gap:10px; justify-content:space-between; align-items:center;
+      padding:14px 16px; border:1px solid var(--line); background:#fff;
+      border-radius:var(--radius); box-shadow:var(--shadow);
+    }
+    .topbar .left{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .topbar .right{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+
+    .navRow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .navRow a{
+      text-decoration:none; color:var(--ink);
+      background:#fff; border:1px solid var(--line);
+      padding:8px 10px; border-radius:999px;
+      box-shadow:0 2px 10px rgba(17,24,39,.06);
+      font-size:13px;
+    }
+    .navRow a:hover{ box-shadow:var(--shadow2); }
+
+    .logoutBtn{
+      background: #fee2e2;
+      border:1px solid #fecaca;
+      color:#7f1d1d;
+      padding:8px 12px;
+      border-radius:999px;
+      cursor:pointer;
+      font-weight:600;
+    }
+    .logoutBtn:hover{ box-shadow:var(--shadow2); }
+
+    /* ============================================================
+       Grid
+    ============================================================ */
+    .grid{
+      display:grid;
+      grid-template-columns: 420px 1fr;
+      gap:14px;
+      margin-top:14px;
+    }
+    @media (max-width: 980px){
+      .grid{ grid-template-columns: 1fr; }
+    }
+
+    .sideCard, .editorCard{
+      background:var(--card);
+      border:1px solid var(--line);
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:14px;
+    }
+    .sideCard h2, .editorCard h2{ margin:0 0 6px; font-size:16px; text-align:left; }
+    .sideCard h3, .editorCard h3{ margin:12px 0 6px; font-size:14px; text-align:left; }
+
+    /* ============================================================
+       Inputs
+    ============================================================ */
+    .label{ font-size:12px; color:var(--muted); margin:6px 0 4px; text-align:center; }
+    .input, .textarea, .select,
+    input, select, textarea{
+      width:100%;
+      border:1px solid var(--line);
+      border-radius:12px;
+      padding:10px 12px;
+      background:#fff;
+      outline:none;
+      font-size:14px;
+
+      max-width:720px;
+      margin-left:auto;
+      margin-right:auto;
+      display:block;
+      color: var(--ink);
+    }
+    .textarea{ min-height:96px; resize:vertical; }
+
+    /* Search/filter row */
+    .searchRow{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; }
+    .searchRow .wAuto{ width:auto; min-width:140px; max-width:none; margin:0; }
+    .searchRow .grow{ flex:1; min-width:220px; max-width:none; margin:0; }
+    .searchRow input, .searchRow select, .searchRow textarea{ max-width:none; margin:0; }
+    .searchRow button{
+      border:1px solid var(--line);
+      background:#fff;
+      padding:10px 12px;
+      border-radius:12px;
+      cursor:pointer;
+      font-weight:600;
+      color: var(--ink);
+    }
+    .searchRow button:hover{ box-shadow:var(--shadow2); }
+
+    .row2{
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap:10px;
+    }
+    @media (max-width: 820px){
+      .row2{ grid-template-columns: 1fr; }
+    }
+
+    .previewBox{
+      border:1px dashed var(--line);
+      border-radius:14px;
+      padding:12px;
+      background:#fafafa;
+    }
+
+    /* ============================================================
+       Buttons
+    ============================================================ */
+    .blocksBar{
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top:10px;
+    }
+
+    button,
+    .btn,
+    .miniBtn,
+    .templateBar .tplBtn{
+      color: var(--ink);
+    }
+
+    .btn{
+      border:1px solid var(--line);
+      background:#fff;
+      padding:10px 12px;
+      border-radius:12px;
+      cursor:pointer;
+      font-weight:800;
+    }
+    .btn:hover{ box-shadow:var(--shadow2); }
+
+    .btn.primary{
+      background:#111827;
+      color:#fff;
+      border-color:#111827;
+    }
+    .btn.secondary{
+      background:#f3f4f6;
+      border-color:#e5e7eb;
+      color:#111827;
+    }
+    .btn.disabled, .btn:disabled{ opacity:.55; cursor:not-allowed; box-shadow:none !important; }
+
+    .miniBtn{
+      border:1px solid var(--line);
+      background:#fff;
+      padding:8px 10px;
+      border-radius:12px;
+      cursor:pointer;
+      font-weight:700;
+      font-size:12px;
+    }
+    .miniBtn:hover{ box-shadow:var(--shadow2); }
+    .miniBtn.danger{
+      background:#fff1f2;
+      border-color:#fecdd3;
+      color:#9f1239;
+    }
+
+    /* ============================================================
+       Toggle row / hint
+    ============================================================ */
+    .toggleRow{
+      display:flex; gap:10px; align-items:center; flex-wrap:wrap;
+      margin-top:10px;
+      padding:10px;
+      border:1px solid var(--line);
+      border-radius:14px;
+      background:#fff;
+    }
+    .toggleRow label{ display:flex; gap:8px; align-items:center; cursor:pointer; }
+
+    .hintBar{
+      margin-top:10px;
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:10px 12px;
+      background:#fff;
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      justify-content:space-between;
+      flex-wrap:wrap;
+    }
+
+    /* ============================================================
+       List UI
+    ============================================================ */
+    .list{
+      margin-top:10px;
+      border-top:1px solid var(--line);
+      padding-top:10px;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+
+    .trainRow{
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:10px 10px;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      box-shadow:0 2px 10px rgba(17,24,39,.05);
+      background:#fff;
+    }
+    .trainRow:hover{ box-shadow:var(--shadow2); }
+    .trainRow .meta{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; }
+    .chip{
+      display:inline-flex; align-items:center;
+      padding:5px 9px;
+      border-radius:999px;
+      background:var(--chip);
+      color:var(--chipInk);
+      font-size:12px;
+      border:1px solid rgba(55,48,163,.15);
+    }
+    .trainRow .title{ font-weight:800; }
+    .trainRow .right{ display:flex; gap:8px; align-items:center; }
+
+    /* ============================================================
+       templateBar
+    ============================================================ */
+    .templateBar{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-top:8px;
+      padding:8px;
+      border:1px dashed var(--line);
+      border-radius:14px;
+      background:#fafafa;
+    }
+    .templateBar .tplBtn{
+      border:1px solid var(--line);
+      background:#fff;
+      padding:8px 10px;
+      border-radius:999px;
+      font-size:12px;
+      font-weight:700;
+      cursor:pointer;
+      white-space:nowrap;
+      color: var(--ink);
+    }
+    .templateBar .tplBtn:hover{ box-shadow:var(--shadow2); }
+
+    .metaRow{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top:6px;
+    }
+
+    .chip.time{ background:#ecfeff; color:#155e75; border-color:#cffafe; }
+    .chip.difficulty.easy{ background:#ecfdf5; color:#065f46; border-color:#bbf7d0; }
+    .chip.difficulty.medium{ background:#fffbeb; color:#92400e; border-color:#fde68a; }
+    .chip.difficulty.hard{ background:#fff1f2; color:#9f1239; border-color:#fecdd3; }
+
+    .chip.personality{ background:#fdf2f8; color:#831843; border-color:#fbcfe8; }
+    .chip.scenario{ background:#f5f3ff; color:#4c1d95; border-color:#ddd6fe; }
+    .chip.type{ background:#eef2ff; color:#3730a3; }
+
+    .progress{
+      display:flex;
+      gap:6px;
+      align-items:center;
+      margin-top:8px;
+      flex-wrap:wrap;
+    }
+    .progress .step{
+      width:10px;
+      height:10px;
+      border-radius:999px;
+      background:#e5e7eb;
+    }
+    .progress .step.done{ background:var(--ok); }
+    .progress .step.current{
+      background:#111827;
+      box-shadow:0 0 0 4px rgba(17,24,39,.12);
+    }
+    .progressLabel{
+      font-size:12px;
+      color:var(--muted);
+      margin-left:6px;
+    }
+
+    .inlineHelp{
+      margin-top:6px;
+      font-size:12px;
+      color:var(--muted);
+      background:#fafafa;
+      border-left:4px solid var(--line);
+      padding:6px 10px;
+      border-radius:8px;
+    }
+
+    .blocksList{
+      margin-top:10px;
+      display:flex;
+      flex-direction:column;
+      gap:10px;
+    }
+    .blockCard{
+      border:1px solid var(--line);
+      border-radius:14px;
+      padding:10px;
+      background:#fff;
+      box-shadow:0 2px 10px rgba(17,24,39,.05);
+      position:relative;
+    }
+    .blockHead{
+      display:flex; gap:10px; justify-content:space-between; align-items:flex-start; flex-wrap:wrap;
+    }
+    .blockLeft{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+
+    .blockTypeDot{
+      width:12px; height:12px; border-radius:999px;
+      background:#9ca3af;
+      flex: 0 0 auto;
+    }
+
+    .blockType.task .blockTypeDot{ background:var(--blockTask); }
+    .blockType.document .blockTypeDot{ background:var(--blockDocument); }
+    .blockType.doc .blockTypeDot{ background:var(--blockDocument); }
+    .blockType.question .blockTypeDot{ background:var(--blockQuestion); }
+    .blockType.info .blockTypeDot{ background:var(--blockQuestion); }
+    .blockType.both .blockTypeDot{
+      background: linear-gradient(90deg, var(--blockBothA) 0 50%, var(--blockBothB) 50% 100%);
+    }
+    .blockType.quiz .blockTypeDot{ background:var(--blockQuiz); }
+    .blockType.persona .blockTypeDot{ background:var(--blockPersona); }
+
+    .blockCard[data-kind="task"]{
+      box-shadow: inset 4px 0 0 var(--blockTask), 0 2px 10px rgba(17,24,39,.05);
+    }
+    .blockCard[data-kind="document"]{
+      box-shadow: inset 4px 0 0 var(--blockDocument), 0 2px 10px rgba(17,24,39,.05);
+    }
+    .blockCard[data-kind="question"]{
+      box-shadow: inset 4px 0 0 var(--blockQuestion), 0 2px 10px rgba(17,24,39,.05);
+    }
+    .blockCard[data-kind="both"]{
+      box-shadow:
+        inset 4px 0 0 var(--blockTask),
+        inset 8px 0 0 var(--blockQuestion),
+        0 2px 10px rgba(17,24,39,.05);
+    }
+
+    .blockTitle{ font-weight:900; }
+    .blockSub{ font-size:12px; color:var(--muted); margin-top:3px; }
+    .blockActions{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+
+    .inlineRow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+    .inlineRow .grow{ flex:1; min-width:220px; }
+    .inlineRow .wSmall{ width:160px; }
+
+    .dangerText{ color:var(--bad); }
+    .warnText{ color:var(--warn); }
+
+    .footerRow{
+      position:sticky;
+      bottom:10px;
+      margin-top:14px;
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      padding:12px;
+      border-radius:16px;
+      border:1px solid var(--line);
+      background:rgba(255,255,255,.92);
+      backdrop-filter: blur(8px);
+      box-shadow: var(--shadow2);
+    }
+
+    .debugBox{
+      margin-top:14px;
+      border:1px solid var(--line);
+      border-radius:14px;
+      background:#fff;
+      box-shadow: var(--shadow);
+      overflow:hidden;
+    }
+    .debugBox summary{
+      cursor:pointer;
+      padding:12px 14px;
+      font-weight:900;
+    }
+    pre{
+      margin:0;
+      padding:12px 14px;
+      white-space:pre-wrap;
+      word-break:break-word;
+      border-top:1px solid var(--line);
+      background:#fafafa;
+      text-align:left;
+    }
+
+    a:focus-visible,
+    button:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible{
+      outline: 3px solid var(--focusRing);
+      outline-offset: 2px;
+      box-shadow: 0 0 0 6px var(--focusRing2);
+    }
+
+    .blockCard.isEditing{
+      outline: 3px solid var(--focusRing);
+      outline-offset: 2px;
+      background: rgba(238,242,255,.55);
+    }
+
+    .labelRowInline{
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      gap:8px;
+      flex-wrap:wrap;
+      margin:6px 0 4px;
+    }
+    .labelRowInline .label{
+      margin:0;
+    }
+    .miniInlineBtn{
+      border:1px solid var(--line);
+      background:#fff;
+      padding:6px 10px;
+      border-radius:999px;
+      cursor:pointer;
+      font-weight:800;
+      font-size:12px;
+      color:var(--ink);
+    }
+    .miniInlineBtn:hover{ box-shadow:var(--shadow2); }
+  </style>
 </head>
 
 <body data-worker-url="https://hrsystem.andersmenyit.workers.dev">
+  <div class="wrap">
 
-<!-- =========================
-     AO-TRN-B02 — BLOCK 2/10 – CSS-stilar (sid-specifika) (PATCH v2)
-     Syfte: Smalare sida + centrerad text + UI-stöd för nya blockfeatures
-     PATCH: Fixar vit text i vita knappar (sätter explicit textfärg på "ljusa" knappar)
-     POLICY: Ingen lift/resize på hover (endast skugga). UI-only. Inga keys.
-========================== -->
-<style>
-  :root{
-    --bg:#f6f7fb;
-    --card:#ffffff;
-    --ink:#111827;
-    --muted:#6b7280;
-    --line:#e5e7eb;
-    --shadow:0 6px 18px rgba(17,24,39,.08);
-    --shadow2:0 10px 26px rgba(17,24,39,.10);
-    --radius:16px;
+    <!-- =========================
+       BLOCK 3/10 – Sida Header
+       PATCH: trygg kontext + statusrad (AI-läge + Worker)
+    ========================== -->
+    <header class="topbar" aria-label="Adminnavigation">
+      <div class="left">
+        <div class="navRow" aria-label="Navigation">
+          <a href="./home.html" title="Admin start">Hem</a>
+          <a href="./trainings.html" title="Utbildningar (denna sida)" aria-current="page">Utbildningar</a>
+          <a href="./packages-block.html" title="Paket (blockbibliotek)">Paket</a>
+          <a href="../system/assignments.html" title="Access & assignments">Access</a>
+          <a href="../system/org.html" title="Organisation">Org</a>
+        </div>
 
-    --ok:#16a34a;
-    --warn:#d97706;
-    --bad:#dc2626;
+        <span class="pill" id="contextPill" aria-label="Du redigerar">
+          <span class="pillDot" aria-hidden="true"></span>
+          <span id="contextText">Redigerar: Utbildningar</span>
+        </span>
 
-    --chip:#eef2ff;
-    --chipInk:#3730a3;
+        <span class="pill ok" id="statePill" aria-label="Status">
+          <span class="pillDot" aria-hidden="true"></span>
+          <span id="stateText">Status: OK</span>
+        </span>
 
-    /* ============================================================
-       BLOCK 2/10 – Visuell semantik (LÅST)
-    ============================================================ */
-    --blockDocument:#9ca3af;
-    --blockTask:#22c55e;
-    --blockQuestion:#0ea5e9;
-    --blockBothA: var(--blockTask);
-    --blockBothB: var(--blockQuestion);
+        <span class="pill" id="aiModePill" aria-label="AI-läge" title="Valt AI-läge">
+          <span class="pillDot" aria-hidden="true"></span>
+          <span id="aiModeText">AI: —</span>
+        </span>
 
-    /* Legacy tokens (behålls) */
-    --blockInfo:#0ea5e9;
-    --blockQuiz:#f59e0b;
-    --blockDoc:#a855f7;
-    --blockPersona:#f43f5e;
+        <span class="pill" id="workerPill" aria-label="Worker-status" title="Senaste worker-test">
+          <span class="pillDot" aria-hidden="true"></span>
+          <span id="workerText">Worker: —</span>
+        </span>
 
-    /* Focus / edit */
-    --focusRing: rgba(11,95,255,.22);
-    --focusRing2: rgba(11,95,255,.10);
-  }
-
-  body{ background:var(--bg); color:var(--ink); }
-
-  /* ============================================================
-     Layout: gör sidan mindre bred + mer “editor-fokus”
-  ============================================================ */
-  .wrap{
-    max-width: 960px;            /* ✅ smalare */
-    margin: 0 auto;
-    padding: 16px 12px 36px;     /* ✅ tightare */
-  }
-
-  .muted2{ color:var(--muted); font-size:13px; line-height:1.35; }
-  .tiny{ font-size:12px; }
-
-  /* Centrera informations-text (inte list-knappar) */
-  .muted2,
-  .inlineHelp,
-  .previewBox,
-  .editorSection > .muted2,
-  .editorSection > .tiny{
-    text-align:center;
-    margin-left:auto;
-    margin-right:auto;
-    max-width:720px; /* optisk textkolumn */
-  }
-
-  /* ============================================================
-     Bas UI atoms
-  ============================================================ */
-  .pill{
-    display:inline-flex; align-items:center; gap:8px;
-    padding:6px 10px; border-radius:999px;
-    background:#fff; border:1px solid var(--line);
-    box-shadow:0 2px 10px rgba(17,24,39,.06);
-    font-size:12px;
-  }
-  .pillDot{ width:10px; height:10px; border-radius:999px; background:#9ca3af; display:inline-block; }
-  .pill.ok .pillDot{ background:var(--ok); }
-  .pill.warn .pillDot{ background:var(--warn); }
-  .pill.bad .pillDot{ background:var(--bad); }
-
-  .topbar{
-    display:flex; gap:10px; justify-content:space-between; align-items:center;
-    padding:14px 16px; border:1px solid var(--line); background:#fff;
-    border-radius:var(--radius); box-shadow:var(--shadow);
-  }
-  .topbar .left{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-  .topbar .right{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
-
-  .navRow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
-  .navRow a{
-    text-decoration:none; color:var(--ink);
-    background:#fff; border:1px solid var(--line);
-    padding:8px 10px; border-radius:999px;
-    box-shadow:0 2px 10px rgba(17,24,39,.06);
-    font-size:13px;
-  }
-  .navRow a:hover{ box-shadow:var(--shadow2); } /* hover = skugga only */
-
-  .logoutBtn{
-    background: #fee2e2;
-    border:1px solid #fecaca;
-    color:#7f1d1d;
-    padding:8px 12px;
-    border-radius:999px;
-    cursor:pointer;
-    font-weight:600;
-  }
-  .logoutBtn:hover{ box-shadow:var(--shadow2); } /* hover = skugga only */
-
-  /* ============================================================
-     Grid
-  ============================================================ */
-  .grid{
-    display:grid;
-    grid-template-columns: 420px 1fr;
-    gap:14px;
-    margin-top:14px;
-  }
-  @media (max-width: 980px){
-    .grid{ grid-template-columns: 1fr; }
-  }
-
-  .sideCard, .editorCard{
-    background:var(--card);
-    border:1px solid var(--line);
-    border-radius:var(--radius);
-    box-shadow:var(--shadow);
-    padding:14px;
-  }
-  .sideCard h2, .editorCard h2{ margin:0 0 6px; font-size:16px; text-align:left; }
-  .sideCard h3, .editorCard h3{ margin:12px 0 6px; font-size:14px; text-align:left; }
-
-  /* ============================================================
-     Inputs: centrera fält visuellt (maxbredd), men behåll 100% inom sin container
-  ============================================================ */
-  .label{ font-size:12px; color:var(--muted); margin:6px 0 4px; text-align:center; }
-  .input, .textarea, .select,
-  input, select, textarea{
-    width:100%;
-    border:1px solid var(--line);
-    border-radius:12px;
-    padding:10px 12px;
-    background:#fff;
-    outline:none;
-    font-size:14px;
-
-    max-width:720px;              /* ✅ centrera fältkolumn */
-    margin-left:auto;
-    margin-right:auto;
-    display:block;
-    color: var(--ink);            /* ✅ fail-safe: text alltid läsbar */
-  }
-  .textarea{ min-height:96px; resize:vertical; }
-
-  /* Search/filter row */
-  .searchRow{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:10px; }
-  .searchRow .wAuto{ width:auto; min-width:140px; max-width:none; margin:0; }
-  .searchRow .grow{ flex:1; min-width:220px; max-width:none; margin:0; }
-  .searchRow input, .searchRow select, .searchRow textarea{ max-width:none; margin:0; } /* search ska fylla raden */
-  .searchRow button{
-    border:1px solid var(--line);
-    background:#fff;
-    padding:10px 12px;
-    border-radius:12px;
-    cursor:pointer;
-    font-weight:600;
-    color: var(--ink);            /* ✅ PATCH: vit text -> svart */
-  }
-  .searchRow button:hover{ box-shadow:var(--shadow2); } /* hover = skugga only */
-
-  .row2{
-    display:grid;
-    grid-template-columns: 1fr 1fr;
-    gap:10px;
-  }
-  @media (max-width: 820px){
-    .row2{ grid-template-columns: 1fr; }
-  }
-
-  .previewBox{
-    border:1px dashed var(--line);
-    border-radius:14px;
-    padding:12px;
-    background:#fafafa;
-  }
-
-  /* ============================================================
-     Buttons
-  ============================================================ */
-  .blocksBar{
-    display:flex;
-    gap:10px;
-    flex-wrap:wrap;
-    align-items:center;
-    margin-top:10px;
-  }
-
-  /* ✅ PATCH: Sätt explicit textfärg på alla "ljusa" knappar så de aldrig blir vita */
-  button,
-  .btn,
-  .miniBtn,
-  .templateBar .tplBtn{
-    color: var(--ink);
-  }
-
-  .btn{
-    border:1px solid var(--line);
-    background:#fff;
-    padding:10px 12px;
-    border-radius:12px;
-    cursor:pointer;
-    font-weight:800;
-  }
-  .btn:hover{ box-shadow:var(--shadow2); } /* hover = skugga only */
-
-  .btn.primary{
-    background:#111827;
-    color:#fff;                  /* ✅ behåll vit text på mörk knapp */
-    border-color:#111827;
-  }
-  .btn.secondary{
-    background:#f3f4f6;
-    border-color:#e5e7eb;
-    color:#111827;               /* ✅ explicit */
-  }
-  .btn.disabled, .btn:disabled{ opacity:.55; cursor:not-allowed; box-shadow:none !important; }
-
-  .miniBtn{
-    border:1px solid var(--line);
-    background:#fff;
-    padding:8px 10px;
-    border-radius:12px;
-    cursor:pointer;
-    font-weight:700;
-    font-size:12px;
-  }
-  .miniBtn:hover{ box-shadow:var(--shadow2); } /* hover = skugga only */
-  .miniBtn.danger{
-    background:#fff1f2;
-    border-color:#fecdd3;
-    color:#9f1239;
-  }
-
-  /* ============================================================
-     Toggle row / hint
-  ============================================================ */
-  .toggleRow{
-    display:flex; gap:10px; align-items:center; flex-wrap:wrap;
-    margin-top:10px;
-    padding:10px;
-    border:1px solid var(--line);
-    border-radius:14px;
-    background:#fff;
-  }
-  .toggleRow label{ display:flex; gap:8px; align-items:center; cursor:pointer; }
-
-  .hintBar{
-    margin-top:10px;
-    border:1px solid var(--line);
-    border-radius:14px;
-    padding:10px 12px;
-    background:#fff;
-    display:flex;
-    gap:10px;
-    align-items:flex-start;
-    justify-content:space-between;
-    flex-wrap:wrap;
-  }
-
-  /* ============================================================
-     List UI
-  ============================================================ */
-  .list{
-    margin-top:10px;
-    border-top:1px solid var(--line);
-    padding-top:10px;
-    display:flex;
-    flex-direction:column;
-    gap:10px;
-  }
-
-  .trainRow{
-    border:1px solid var(--line);
-    border-radius:14px;
-    padding:10px 10px;
-    display:flex;
-    gap:10px;
-    justify-content:space-between;
-    align-items:flex-start;
-    box-shadow:0 2px 10px rgba(17,24,39,.05);
-    background:#fff;
-  }
-  .trainRow:hover{ box-shadow:var(--shadow2); } /* hover = skugga only */
-  .trainRow .meta{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; }
-  .chip{
-    display:inline-flex; align-items:center;
-    padding:5px 9px;
-    border-radius:999px;
-    background:var(--chip);
-    color:var(--chipInk);
-    font-size:12px;
-    border:1px solid rgba(55,48,163,.15);
-  }
-  .trainRow .title{ font-weight:800; }
-  .trainRow .right{ display:flex; gap:8px; align-items:center; }
-
-  /* ============================================================
-     BLOCK 2/10 – templateBar (mallknappar)  ✅
-  ============================================================ */
-  .templateBar{
-    display:flex;
-    gap:8px;
-    flex-wrap:wrap;
-    margin-top:8px;
-    padding:8px;
-    border:1px dashed var(--line);
-    border-radius:14px;
-    background:#fafafa;
-  }
-  .templateBar .tplBtn{
-    border:1px solid var(--line);
-    background:#fff;
-    padding:8px 10px;
-    border-radius:999px;
-    font-size:12px;
-    font-weight:700;
-    cursor:pointer;
-    white-space:nowrap;
-    color: var(--ink);           /* ✅ explicit */
-  }
-  .templateBar .tplBtn:hover{ box-shadow:var(--shadow2); } /* hover = skugga only */
-
-  /* ============================================================
-     BLOCK 2/10 – metaRow (tid + svårighet + typ) ✅
-  ============================================================ */
-  .metaRow{
-    display:flex;
-    gap:8px;
-    flex-wrap:wrap;
-    align-items:center;
-    margin-top:6px;
-  }
-
-  /* ============================================================
-     BLOCK 2/10 – Chips / Badges ✅
-  ============================================================ */
-  .chip.time{ background:#ecfeff; color:#155e75; border-color:#cffafe; }
-  .chip.difficulty.easy{ background:#ecfdf5; color:#065f46; border-color:#bbf7d0; }
-  .chip.difficulty.medium{ background:#fffbeb; color:#92400e; border-color:#fde68a; }
-  .chip.difficulty.hard{ background:#fff1f2; color:#9f1239; border-color:#fecdd3; }
-
-  .chip.personality{ background:#fdf2f8; color:#831843; border-color:#fbcfe8; }
-  .chip.scenario{ background:#f5f3ff; color:#4c1d95; border-color:#ddd6fe; }
-  .chip.type{ background:#eef2ff; color:#3730a3; }
-
-  /* ============================================================
-     BLOCK 2/10 – Progress-indikator (Steg 1..N) ✅
-  ============================================================ */
-  .progress{
-    display:flex;
-    gap:6px;
-    align-items:center;
-    margin-top:8px;
-    flex-wrap:wrap;
-  }
-  .progress .step{
-    width:10px;
-    height:10px;
-    border-radius:999px;
-    background:#e5e7eb;
-  }
-  .progress .step.done{ background:var(--ok); }
-  .progress .step.current{
-    background:#111827;
-    box-shadow:0 0 0 4px rgba(17,24,39,.12);
-  }
-  .progressLabel{
-    font-size:12px;
-    color:var(--muted);
-    margin-left:6px;
-  }
-
-  /* ============================================================
-     BLOCK 2/10 – inlineHelp ✅
-  ============================================================ */
-  .inlineHelp{
-    margin-top:6px;
-    font-size:12px;
-    color:var(--muted);
-    background:#fafafa;
-    border-left:4px solid var(--line);
-    padding:6px 10px;
-    border-radius:8px;
-  }
-
-  /* ============================================================
-     Blocks list UI
-  ============================================================ */
-  .blocksList{
-    margin-top:10px;
-    display:flex;
-    flex-direction:column;
-    gap:10px;
-  }
-  .blockCard{
-    border:1px solid var(--line);
-    border-radius:14px;
-    padding:10px;
-    background:#fff;
-    box-shadow:0 2px 10px rgba(17,24,39,.05);
-    position:relative;
-  }
-  .blockHead{
-    display:flex; gap:10px; justify-content:space-between; align-items:flex-start; flex-wrap:wrap;
-  }
-  .blockLeft{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-
-  .blockTypeDot{
-    width:12px; height:12px; border-radius:999px;
-    background:#9ca3af;
-    flex: 0 0 auto;
-  }
-
-  /* Typfärger (dot) */
-  .blockType.task .blockTypeDot{ background:var(--blockTask); }
-  .blockType.document .blockTypeDot{ background:var(--blockDocument); }
-  .blockType.doc .blockTypeDot{ background:var(--blockDocument); } /* legacy */
-  .blockType.question .blockTypeDot{ background:var(--blockQuestion); }
-  .blockType.info .blockTypeDot{ background:var(--blockQuestion); } /* legacy info->question */
-  .blockType.both .blockTypeDot{
-    background: linear-gradient(90deg, var(--blockBothA) 0 50%, var(--blockBothB) 50% 100%);
-  }
-  .blockType.quiz .blockTypeDot{ background:var(--blockQuiz); }
-  .blockType.persona .blockTypeDot{ background:var(--blockPersona); }
-
-  /* Accent på kortet (valfritt via data-kind) */
-  .blockCard[data-kind="task"]{
-    box-shadow: inset 4px 0 0 var(--blockTask), 0 2px 10px rgba(17,24,39,.05);
-  }
-  .blockCard[data-kind="document"]{
-    box-shadow: inset 4px 0 0 var(--blockDocument), 0 2px 10px rgba(17,24,39,.05);
-  }
-  .blockCard[data-kind="question"]{
-    box-shadow: inset 4px 0 0 var(--blockQuestion), 0 2px 10px rgba(17,24,39,.05);
-  }
-  .blockCard[data-kind="both"]{
-    box-shadow:
-      inset 4px 0 0 var(--blockTask),
-      inset 8px 0 0 var(--blockQuestion),
-      0 2px 10px rgba(17,24,39,.05);
-  }
-
-  .blockTitle{ font-weight:900; }
-  .blockSub{ font-size:12px; color:var(--muted); margin-top:3px; }
-  .blockActions{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-
-  .inlineRow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:8px; }
-  .inlineRow .grow{ flex:1; min-width:220px; }
-  .inlineRow .wSmall{ width:160px; }
-
-  .dangerText{ color:var(--bad); }
-  .warnText{ color:var(--warn); }
-
-  /* ============================================================
-     Footer / Debug
-  ============================================================ */
-  .footerRow{
-    position:sticky;
-    bottom:10px;
-    margin-top:14px;
-    display:flex;
-    gap:10px;
-    justify-content:space-between;
-    align-items:flex-start;
-    flex-wrap:wrap;
-    padding:12px;
-    border-radius:16px;
-    border:1px solid var(--line);
-    background:rgba(255,255,255,.92);
-    backdrop-filter: blur(8px);
-    box-shadow: var(--shadow2);
-  }
-
-  .debugBox{
-    margin-top:14px;
-    border:1px solid var(--line);
-    border-radius:14px;
-    background:#fff;
-    box-shadow: var(--shadow);
-    overflow:hidden;
-  }
-  .debugBox summary{
-    cursor:pointer;
-    padding:12px 14px;
-    font-weight:900;
-  }
-  pre{
-    margin:0;
-    padding:12px 14px;
-    white-space:pre-wrap;
-    word-break:break-word;
-    border-top:1px solid var(--line);
-    background:#fafafa;
-    text-align:left; /* debug ska vara lätt att läsa */
-  }
-
-  /* ============================================================
-     Keyboard-first focus states ✅
-  ============================================================ */
-  a:focus-visible,
-  button:focus-visible,
-  input:focus-visible,
-  select:focus-visible,
-  textarea:focus-visible{
-    outline: 3px solid var(--focusRing);
-    outline-offset: 2px;
-    box-shadow: 0 0 0 6px var(--focusRing2);
-  }
-
-  .blockCard.isEditing{
-    outline: 3px solid var(--focusRing);
-    outline-offset: 2px;
-    background: rgba(238,242,255,.55);
-  }
-
-  /* ✅ BLOCK 5: små inline-knappar i label-raden */
-  .labelRowInline{
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    gap:8px;
-    flex-wrap:wrap;
-    margin:6px 0 4px;
-  }
-  .labelRowInline .label{
-    margin:0;
-  }
-  .miniInlineBtn{
-    border:1px solid var(--line);
-    background:#fff;
-    padding:6px 10px;
-    border-radius:999px;
-    cursor:pointer;
-    font-weight:800;
-    font-size:12px;
-    color:var(--ink);
-  }
-  .miniInlineBtn:hover{ box-shadow:var(--shadow2); }
-</style>
-
-  <!-- =========================
-     BLOCK 3/10 – Sida Header
-     PATCH: trygg kontext + statusrad (AI-läge + Worker)
-========================== -->
-<header class="topbar" aria-label="Adminnavigation">
-  <div class="left">
-    <div class="navRow" aria-label="Navigation">
-      <a href="./home.html" title="Admin start">Hem</a>
-      <a href="./trainings.html" title="Utbildningar (denna sida)" aria-current="page">Utbildningar</a>
-      <a href="./packages-block.html" title="Paket (blockbibliotek)">Paket</a>
-      <a href="../system/assignments.html" title="Access & assignments">Access</a>
-      <a href="../system/org.html" title="Organisation">Org</a>
-    </div>
-
-    <!-- Trygg kontext: vad du redigerar -->
-    <span class="pill" id="contextPill" aria-label="Du redigerar">
-      <span class="pillDot" aria-hidden="true"></span>
-      <span id="contextText">Redigerar: Utbildningar</span>
-    </span>
-
-    <span class="pill ok" id="statePill" aria-label="Status">
-      <span class="pillDot" aria-hidden="true"></span>
-      <span id="stateText">Status: OK</span>
-    </span>
-
-    <!-- NY: AI + Worker status (info-only, fylls av JS) -->
-    <span class="pill" id="aiModePill" aria-label="AI-läge" title="Valt AI-läge">
-      <span class="pillDot" aria-hidden="true"></span>
-      <span id="aiModeText">AI: —</span>
-    </span>
-
-    <span class="pill" id="workerPill" aria-label="Worker-status" title="Senaste worker-test">
-      <span class="pillDot" aria-hidden="true"></span>
-      <span id="workerText">Worker: —</span>
-    </span>
-
-    <!-- Auth-status -->
-    <span class="pill" id="whoPill" aria-label="Inloggad användare" title="Inloggad användare • empNo • roll • scope">
-      <span class="pillDot" aria-hidden="true"></span>
-      <span id="whoText">—</span>
-    </span>
-  </div>
-
-  <div class="right">
-    <button class="logoutBtn" id="btnLogout" type="button" title="Logga ut (röd) – rensar session">
-      Logga ut
-    </button>
-  </div>
-</header>
-<!-- =========================
-     BLOCK 4/10 – Sida Huvud (Main)
-     PATCH: borttagen Redigera-ruta helt
-========================== -->
-<main class="grid" aria-label="Utbildningar">
-  <!-- LEFT: list -->
-  <section class="sideCard" aria-label="Utbildningslista">
-    <h2>Utbildningar</h2>
-    <div class="muted2">
-      Sök och välj utbildning.
-    </div>
-
-    <div class="searchRow" aria-label="Sök och filter">
-      <input
-        id="q"
-        class="grow"
-        type="search"
-        placeholder="Sök titel…"
-        autocomplete="off"
-      />
-      <select id="fStatus" class="wAuto" title="Status">
-        <option value="">Alla</option>
-        <option value="draft">Utkast</option>
-        <option value="published">Publicerad</option>
-      </select>
-      <button id="btnShowAll" type="button">Visa alla</button>
-      <button id="btnClear" type="button">Rensa</button>
-    </div>
-
-    <div class="toggleRow">
-      <label>
-        <input id="onlyProblems" type="checkbox" />
-        <span>Visa bara problem</span>
-      </label>
-    </div>
-
-    <div class="hintBar">
-      <div class="muted2">
-        Publicering kräver minst 1 block.
+        <span class="pill" id="whoPill" aria-label="Inloggad användare" title="Inloggad användare • empNo • roll • scope">
+          <span class="pillDot" aria-hidden="true"></span>
+          <span id="whoText">—</span>
+        </span>
       </div>
-      <button id="btnNew" class="btn" type="button">
-        Skapa ny
-      </button>
-    </div>
 
-    <div class="list" id="list"></div>
-  </section>
-</main>
-
-/* ============================================================
-   PATCH – Återkoppla “Skapa ny”
-   Använder befintlig logik (ingen ny funktion)
-============================================================ */
-(function(){
-  const btn = document.getElementById("btnNew");
-  if (!btn) return;
-
-  btn.addEventListener("click", function(){
-    try{
-      // standardväg i sidan
-      if (typeof window.HRTrainingsNew === "function") {
-        window.HRTrainingsNew();
-        return;
-      }
-      // fallback: simulera samma som tidigare UI-flöde
-      if (window.STATE && Array.isArray(STATE.trainings)) {
-        const t = {
-          id: "tr_" + Date.now(),
-          title: "",
-          status: "draft",
-          blocks: []
-        };
-        STATE.trainings.unshift(t);
-        STATE.edit = t;
-        if (typeof window.setDirty === "function") window.setDirty(true);
-        if (typeof window.HRTrainingsRefreshUI === "function") window.HRTrainingsRefreshUI();
-      }
-    }catch(_){}
-  });
-})();
-</script>
-
-<!-- =========================
-     BLOCK 5/10 – Modul/Område Väljare
-     PATCH:
-     - 25 fasta moduler definierade här
-     - Visas direkt
-     - Sök + Visa alla fungerar
-========================== -->
-<section class="editorSection" aria-labelledby="h-mod-area">
-  <div class="labelRowInline" style="justify-content:space-between; gap:10px;">
-    <h3 id="h-mod-area" style="margin:0;">Modul & område</h3>
-    <div style="display:flex; gap:8px; flex-wrap:wrap;">
-      <button class="miniInlineBtn" id="btnModAll" type="button">Visa alla</button>
-      <button class="miniInlineBtn" id="btnModClear" type="button">Rensa</button>
-    </div>
-  </div>
-
-  <div class="row2">
-    <div>
-      <label class="label" for="mod">Kategori</label>
-      <input
-        class="input"
-        id="mod"
-        placeholder="Sök kategori…"
-        autocomplete="off"
-        list="modList"
-      />
-      <datalist id="modList"></datalist>
-    </div>
-
-    <div>
-      <label class="label" for="area">Område</label>
-      <input
-        class="input"
-        id="area"
-        placeholder="t.ex. Ergonomi"
-        autocomplete="off"
-      />
-    </div>
-  </div>
-</section>
-
-<script>
-(function(){
-  if (window.__HR_MOD_BOUND__) return;
-  window.__HR_MOD_BOUND__ = true;
-
-  const MODULES = [
-    "Utvecklingssamtal",
-    "Utbildningsmotor",
-    "Kompetenskartläggning",
-    "Personlig Utvecklingsplan",
-    "Roll & Förväntningar",
-    "Feedback & Reflektion",
-    "Kunskapsvalidering",
-    "Onboarding",
-    "Arbetsmiljö & Välmående",
-    "Chefens Verktyg",
-    "Individens Mål & Drivkrafter",
-    "Teamutveckling",
-    "Certifiering & Behörighet",
-    "Uppföljning & Progress",
-    "HR-Insikter",
-    "Mikrolärande",
-    "Scenariospel",
-    "Personlig Styrkeprofil",
-    "Utmaningar & Missions",
-    "Synlig Progress & Milstolpar",
-    "Storybaserat Lärande",
-    "Team-utmaningar",
-    "Feedback-snacks",
-    "Reflektionskort",
-    "Belöning genom Förståelse"
-  ];
-
-  const input = document.getElementById("mod");
-  const list = document.getElementById("modList");
-  const btnAll = document.getElementById("btnModAll");
-  const btnClear = document.getElementById("btnModClear");
-
-  function render(items){
-    list.innerHTML = "";
-    items.forEach(v=>{
-      const o = document.createElement("option");
-      o.value = v;
-      list.appendChild(o);
-    });
-  }
-
-  function filter(q){
-    const t = q.toLowerCase();
-    render(MODULES.filter(v => v.toLowerCase().includes(t)));
-  }
-
-  input.addEventListener("input", ()=>{
-    const v = input.value.trim();
-    if (!v) render(MODULES);
-    else filter(v);
-  });
-
-  btnAll.addEventListener("click", ()=> render(MODULES));
-  btnClear.addEventListener("click", ()=>{
-    input.value = "";
-    render(MODULES);
-  });
-
-  // init
-  render(MODULES);
-})();
-</script>
-
-<!-- =========================
-     BLOCK 6/10 – Grundinfo
-     PATCH: Titel + Status på samma rad, rensat språk
-========================== -->
-<section class="editorSection" aria-labelledby="h-basic">
-  <div class="labelRowInline" style="justify-content:space-between; gap:10px;">
-    <h3 id="h-basic" style="margin:0;">Grundinfo</h3>
-    <div style="display:flex; gap:8px; flex-wrap:wrap;">
-      <label class="label" for="status">Status</label>
-      <select id="status" class="wAuto" aria-label="Status">
-        <option value="draft">Utkast</option>
-        <option value="published">Publicerad</option>
-      </select>
-    </div>
-  </div>
-
-  <div class="row2" aria-label="Titel och beskrivning">
-    <div>
-      <label class="label" for="title">Titel</label>
-      <input
-        class="input"
-        id="title"
-        placeholder="Skriv en tydlig titel"
-        autocomplete="off"
-        data-watch-dirty="true"
-      />
-    </div>
-
-    <div>
-      <label class="label" for="desc">Beskrivning</label>
-      <textarea
-        class="input"
-        id="desc"
-        rows="3"
-        placeholder="Kort beskrivning"
-        data-watch-dirty="true"
-      ></textarea>
-    </div>
-  </div>
-</section>
-
-<!-- =========================
-     BLOCK 7/10 – Mål
-     PATCH: Nivå på samma rad som rubrik, rensad text
-========================== -->
-<section class="editorSection" aria-labelledby="h-goals">
-  <div class="labelRowInline" style="justify-content:space-between; gap:10px;">
-    <h3 id="h-goals" style="margin:0;">Mål</h3>
-    <div style="display:flex; gap:8px; align-items:center;">
-      <label class="label" for="goalsLevel">Nivå</label>
-      <select class="select" id="goalsLevel">
-        <option value="intro">Intro</option>
-        <option value="normal" selected>Normal</option>
-        <option value="advanced">Avancerad</option>
-      </select>
-    </div>
-  </div>
-
-  <textarea
-    class="textarea"
-    id="goals"
-    placeholder="- Förstå grunderna…&#10;- Kunna tillämpa…"
-    style="margin-top:8px;"
-  ></textarea>
-</section>
-
-<!-- =========================
-     BLOCK 8/10 – AI-Skapande av Block
-     PATCH: Alla val först, ”Generera block” som sista steg
-========================== -->
-
-<section class="editorSection" aria-labelledby="h-ai">
-  <h3 id="h-ai">AI</h3>
-  <div class="muted2">
-    Fyll i valen nedan. När allt är klart genererar du block i ett steg.
-  </div>
-
-  <!-- STEG 1: Val -->
-  <div class="row2" style="margin-top:10px;">
-    <div>
-      <label class="label" for="aiMode">Typ</label>
-      <select class="select" id="aiMode">
-        <option value="training">Utbildning</option>
-        <option value="document">Dokument</option>
-        <option value="scenario">Scenario</option>
-      </select>
-    </div>
-
-    <div>
-      <label class="label" for="aiCount">Antal block</label>
-      <select class="select" id="aiCount">
-        <option>1</option><option>2</option><option>3</option><option>4</option>
-        <option>5</option><option>6</option><option>7</option><option>8</option>
-        <option>9</option><option>10</option><option>11</option><option>12</option>
-      </select>
-    </div>
-  </div>
-
-  <!-- STEG 2: Fördjupning -->
-  <div class="toggleRow" style="margin-top:10px;">
-    <div>
-      <label class="label" for="aiDifficulty">Svårighet</label>
-      <select class="select" id="aiDifficulty">
-        <option value="auto" selected>Auto</option>
-        <option value="1">1</option>
-        <option value="2">2</option>
-        <option value="3">3</option>
-        <option value="4">4</option>
-        <option value="5">5</option>
-      </select>
-    </div>
-
-    <div>
-      <label class="label">
-        <input type="checkbox" id="aiIncludePersonality" />
-        Blanda in reflektionsfrågor
-      </label>
-      <div class="inlineRow" style="margin-top:6px;">
-        <select class="select wSmall" id="aiPersonalityCount" disabled>
-          <option value="1">1 fråga</option>
-          <option value="2">2 frågor</option>
-        </select>
+      <div class="right">
+        <button class="logoutBtn" id="btnLogout" type="button" title="Logga ut (röd) – rensar session">
+          Logga ut
+        </button>
       </div>
-    </div>
+    </header>
 
-    <div>
-      <label class="label">
-        <input type="checkbox" id="aiFeedbackEnabled" />
-        Feedback på svar
-      </label>
-    </div>
+    <!-- =========================
+       BLOCK 4/10 – Sida Huvud (Main)
+       PATCH: BLOCK 5–10 ligger nu i högerkolumnen (så layouten håller)
+    ========================== -->
+    <main class="grid" aria-label="Utbildningar">
+      <!-- LEFT: list -->
+      <section class="sideCard" aria-label="Utbildningslista">
+        <h2>Utbildningar</h2>
+        <div class="muted2">
+          Sök och välj utbildning.
+        </div>
+
+        <div class="searchRow" aria-label="Sök och filter">
+          <input
+            id="q"
+            class="grow"
+            type="search"
+            placeholder="Sök titel…"
+            autocomplete="off"
+          />
+          <select id="fStatus" class="wAuto" title="Status">
+            <option value="">Alla</option>
+            <option value="draft">Utkast</option>
+            <option value="published">Publicerad</option>
+          </select>
+          <button id="btnShowAll" type="button">Visa alla</button>
+          <button id="btnClear" type="button">Rensa</button>
+        </div>
+
+        <div class="toggleRow">
+          <label>
+            <input id="onlyProblems" type="checkbox" />
+            <span>Visa bara problem</span>
+          </label>
+        </div>
+
+        <div class="hintBar">
+          <div class="muted2">
+            Publicering kräver minst 1 block.
+          </div>
+          <button id="btnNew" class="btn" type="button">
+            Skapa ny
+          </button>
+        </div>
+
+        <div class="list" id="list"></div>
+      </section>
+
+      <!-- RIGHT: editor -->
+      <section class="editorCard" aria-label="Redigera utbildning">
+        <!-- =========================
+             BLOCK 5/10 – Modul/Område Väljare
+        ========================== -->
+        <section class="editorSection" aria-labelledby="h-mod-area">
+          <div class="labelRowInline" style="justify-content:space-between; gap:10px;">
+            <h3 id="h-mod-area" style="margin:0;">Modul & område</h3>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button class="miniInlineBtn" id="btnModAll" type="button">Visa alla</button>
+              <button class="miniInlineBtn" id="btnModClear" type="button">Rensa</button>
+            </div>
+          </div>
+
+          <div class="row2">
+            <div>
+              <label class="label" for="mod">Kategori</label>
+              <input
+                class="input"
+                id="mod"
+                placeholder="Sök kategori…"
+                autocomplete="off"
+                list="modList"
+              />
+              <datalist id="modList"></datalist>
+            </div>
+
+            <div>
+              <label class="label" for="area">Område</label>
+              <input
+                class="input"
+                id="area"
+                placeholder="t.ex. Ergonomi"
+                autocomplete="off"
+              />
+            </div>
+          </div>
+        </section>
+
+        <script>
+          (function(){
+            if (window.__HR_MOD_BOUND__) return;
+            window.__HR_MOD_BOUND__ = true;
+
+            const MODULES = [
+              "Utvecklingssamtal",
+              "Utbildningsmotor",
+              "Kompetenskartläggning",
+              "Personlig Utvecklingsplan",
+              "Roll & Förväntningar",
+              "Feedback & Reflektion",
+              "Kunskapsvalidering",
+              "Onboarding",
+              "Arbetsmiljö & Välmående",
+              "Chefens Verktyg",
+              "Individens Mål & Drivkrafter",
+              "Teamutveckling",
+              "Certifiering & Behörighet",
+              "Uppföljning & Progress",
+              "HR-Insikter",
+              "Mikrolärande",
+              "Scenariospel",
+              "Personlig Styrkeprofil",
+              "Utmaningar & Missions",
+              "Synlig Progress & Milstolpar",
+              "Storybaserat Lärande",
+              "Team-utmaningar",
+              "Feedback-snacks",
+              "Reflektionskort",
+              "Belöning genom Förståelse"
+            ];
+
+            const input = document.getElementById("mod");
+            const list = document.getElementById("modList");
+            const btnAll = document.getElementById("btnModAll");
+            const btnClear = document.getElementById("btnModClear");
+
+            function render(items){
+              list.innerHTML = "";
+              items.forEach(v=>{
+                const o = document.createElement("option");
+                o.value = v;
+                list.appendChild(o);
+              });
+            }
+
+            function filter(q){
+              const t = (q || "").toLowerCase();
+              render(MODULES.filter(v => v.toLowerCase().includes(t)));
+            }
+
+            if (input) {
+              input.addEventListener("input", ()=>{
+                const v = input.value.trim();
+                if (!v) render(MODULES);
+                else filter(v);
+              });
+            }
+
+            if (btnAll) btnAll.addEventListener("click", ()=> render(MODULES));
+            if (btnClear) btnClear.addEventListener("click", ()=>{
+              if (input) input.value = "";
+              render(MODULES);
+            });
+
+            render(MODULES);
+          })();
+        </script>
+
+        <!-- =========================
+             BLOCK 6/10 – Grundinfo
+        ========================== -->
+        <section class="editorSection" aria-labelledby="h-basic">
+          <div class="labelRowInline" style="justify-content:space-between; gap:10px;">
+            <h3 id="h-basic" style="margin:0;">Grundinfo</h3>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <label class="label" for="status">Status</label>
+              <select id="status" class="wAuto" aria-label="Status">
+                <option value="draft">Utkast</option>
+                <option value="published">Publicerad</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="row2" aria-label="Titel och beskrivning">
+            <div>
+              <label class="label" for="title">Titel</label>
+              <input
+                class="input"
+                id="title"
+                placeholder="Skriv en tydlig titel"
+                autocomplete="off"
+                data-watch-dirty="true"
+              />
+            </div>
+
+            <div>
+              <label class="label" for="desc">Beskrivning</label>
+              <textarea
+                class="input"
+                id="desc"
+                rows="3"
+                placeholder="Kort beskrivning"
+                data-watch-dirty="true"
+              ></textarea>
+            </div>
+          </div>
+        </section>
+
+        <!-- =========================
+             BLOCK 7/10 – Mål
+        ========================== -->
+        <section class="editorSection" aria-labelledby="h-goals">
+          <div class="labelRowInline" style="justify-content:space-between; gap:10px;">
+            <h3 id="h-goals" style="margin:0;">Mål</h3>
+            <div style="display:flex; gap:8px; align-items:center;">
+              <label class="label" for="goalsLevel">Nivå</label>
+              <select class="select" id="goalsLevel">
+                <option value="intro">Intro</option>
+                <option value="normal" selected>Normal</option>
+                <option value="advanced">Avancerad</option>
+              </select>
+            </div>
+          </div>
+
+          <textarea
+            class="textarea"
+            id="goals"
+            placeholder="- Förstå grunderna…&#10;- Kunna tillämpa…"
+            style="margin-top:8px;"
+          ></textarea>
+        </section>
+
+        <!-- =========================
+             BLOCK 8/10 – AI
+        ========================== -->
+        <section class="editorSection" aria-labelledby="h-ai">
+          <h3 id="h-ai">AI</h3>
+          <div class="muted2">
+            Fyll i valen nedan. När allt är klart genererar du block i ett steg.
+          </div>
+
+          <div class="row2" style="margin-top:10px;">
+            <div>
+              <label class="label" for="aiMode">Typ</label>
+              <select class="select" id="aiMode">
+                <option value="training">Utbildning</option>
+                <option value="document">Dokument</option>
+                <option value="scenario">Scenario</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="label" for="aiCount">Antal block</label>
+              <select class="select" id="aiCount">
+                <option>1</option><option>2</option><option>3</option><option>4</option>
+                <option>5</option><option>6</option><option>7</option><option>8</option>
+                <option>9</option><option>10</option><option>11</option><option>12</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="toggleRow" style="margin-top:10px;">
+            <div>
+              <label class="label" for="aiDifficulty">Svårighet</label>
+              <select class="select" id="aiDifficulty">
+                <option value="auto" selected>Auto</option>
+                <option value="1">1</option>
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="5">5</option>
+              </select>
+            </div>
+
+            <div>
+              <label class="label">
+                <input type="checkbox" id="aiIncludePersonality" />
+                Blanda in reflektionsfrågor
+              </label>
+              <div class="inlineRow" style="margin-top:6px;">
+                <select class="select wSmall" id="aiPersonalityCount" disabled>
+                  <option value="1">1 fråga</option>
+                  <option value="2">2 frågor</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label class="label">
+                <input type="checkbox" id="aiFeedbackEnabled" />
+                Feedback på svar
+              </label>
+            </div>
+          </div>
+
+          <div class="blocksBar" style="margin-top:12px;">
+            <button class="btn secondary" id="btnTestWorker" type="button">
+              Testa AI
+            </button>
+            <button class="btn" id="btnGenBlocks" type="button">
+              Generera block
+            </button>
+            <span class="muted2 tiny" id="aiHint"></span>
+          </div>
+        </section>
+
+        <script>
+          (function(){
+            if (window.__HR_TRN_AI_BOUND__ === true) return;
+            window.__HR_TRN_AI_BOUND__ = true;
+
+            const elPers = document.getElementById("aiIncludePersonality");
+            const elPersCount = document.getElementById("aiPersonalityCount");
+
+            function syncPersUI(){
+              if (!elPers || !elPersCount) return;
+              elPersCount.disabled = !elPers.checked;
+            }
+            if (elPers) elPers.addEventListener("change", syncPersUI);
+            syncPersUI();
+          })();
+        </script>
+
+        <!-- =========================
+             BLOCK 9/10 – Blockhantering
+        ========================== -->
+        <section class="editorSection" aria-label="Blockhantering">
+          <h3>Block</h3>
+          <div class="muted2">
+            Lägg till block manuellt, använd mallar eller låt AI skapa block. Problem-vy visar bara block som saknar rubrik.
+          </div>
+
+          <div class="templateBar" style="margin-top:10px;">
+            <div class="inlineRow" style="gap:10px; flex-wrap:wrap;">
+              <button class="miniBtn" id="addInfo" type="button" title="Lägg till informationsblock">+ Information</button>
+              <button class="miniBtn" id="addTask" type="button" title="Lägg till uppgiftsblock">+ Uppgift</button>
+              <button class="miniBtn" id="addQuiz" type="button" title="Lägg till frågeblock">+ Fråga/Quiz</button>
+              <button class="miniBtn" id="addDoc" type="button" title="Lägg till dokumentblock">+ Dokument</button>
+            </div>
+
+            <div class="inlineRow" style="gap:10px; flex-wrap:wrap; margin-top:10px;">
+              <button class="btn secondary" id="btnTpl1" type="button" title="Teori + Uppgift + Quiz">Mall: Teori → Uppgift → Quiz</button>
+              <button class="btn secondary" id="btnTpl2" type="button" title="Scenario/Case">Mall: Scenario (Case)</button>
+              <button class="btn secondary" id="btnTpl3" type="button" title="Dokument + Kontrollfrågor">Mall: Dokument + Kontroll</button>
+              <button class="btn" id="btnProgressive" type="button" title="Numrerar blocken som steg">Gör till steg</button>
+            </div>
+
+            <!-- Synkad problem-toggle (behåller funktionen utan att bråka) -->
+            <div class="inlineRow" style="margin-top:10px; align-items:center; gap:10px;">
+              <label class="label" style="display:flex; align-items:center; gap:8px; margin:0;">
+                <input type="checkbox" id="onlyProblems_2" />
+                Visa bara problem
+              </label>
+              <span class="muted2 tiny" id="problemsHint">Välj en utbildning för att aktivera problemvy.</span>
+            </div>
+          </div>
+
+          <div style="margin-top:12px;">
+            <div id="blocksList" aria-label="Blocklista"></div>
+          </div>
+        </section>
+
+        <script>
+          (function(){
+            try{
+              const a = document.getElementById("onlyProblems");
+              const b = document.getElementById("onlyProblems_2");
+              if (!a || !b) return;
+
+              // start: håll samma läge
+              b.checked = a.checked;
+
+              // synka båda vägar
+              a.addEventListener("change", ()=>{ b.checked = a.checked; });
+              b.addEventListener("change", ()=>{
+                a.checked = b.checked;
+                // trigga samma som om användaren klickat originalet
+                a.dispatchEvent(new Event("change", { bubbles:true }));
+              });
+            }catch(_){}
+          })();
+        </script>
+
+        <!-- =========================
+             BLOCK 10/10 – Footer & Debug
+        ========================== -->
+        <div class="footerRow" aria-label="Spara och publicera">
+          <div class="left" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+            <button class="miniBtn danger" id="btnRevert" type="button" title="Återställer osparade ändringar för vald utbildning">
+              Ångra osparat
+            </button>
+            <span class="tiny muted2" id="revertHint">
+              Ångra osparat återställer ändringar som inte sparats. Detta kan inte ångras (förrän du gör om ändringarna).
+            </span>
+          </div>
+
+          <div class="left" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+            <button class="btn secondary" id="btnSaveDraft" type="button" title="Sparar som utkast">
+              Spara som utkast
+            </button>
+            <button class="btn primary" id="btnSavePublish" type="button" title="Sparar och publicerar (fail-closed)">
+              Spara & publicera
+            </button>
+          </div>
+        </div>
+
+        <details class="debugBox" id="debugBox">
+          <summary>Debug (sparad data)</summary>
+          <pre id="debugPre">—</pre>
+        </details>
+
+        <script>
+          /* ============================================================
+          AO-TRN-B10-PROD-FIX-01 — BLOCK 10 fix (bind inte om AI-knappar)
+          - Låter BLOCK 8 styra "Testa worker" + "Generera block"
+          - Exponerar en refresh-funktion som BLOCK 8 kan anropa efter att block lagts till
+          ============================================================ */
+          (function(){
+            try{
+              window.HRTrainingsRefreshUI = function(){
+                try{ if (typeof window.renderBlocks === "function") window.renderBlocks(); }catch(_){}
+                try{ if (window.STATE && window.STATE.edit && typeof window.renderPreview === "function") window.renderPreview(window.STATE.edit); }catch(_){}
+                try{ if (typeof window.renderList === "function") window.renderList(); }catch(_){}
+                try{ if (typeof window.renderDebug === "function") window.renderDebug(); }catch(_){}
+                try{ if (typeof window.syncButtons === "function") window.syncButtons(); }catch(_){}
+              };
+            }catch(_){}
+          })();
+        </script>
+
+      </section>
+    </main>
+
+    <!-- PATCH – Återkoppla “Skapa ny” -->
+    <script>
+      (function(){
+        const btn = document.getElementById("btnNew");
+        if (!btn) return;
+
+        btn.addEventListener("click", function(){
+          try{
+            if (typeof window.HRTrainingsNew === "function") {
+              window.HRTrainingsNew();
+              return;
+            }
+            if (window.STATE && Array.isArray(STATE.trainings)) {
+              const t = {
+                id: "tr_" + Date.now(),
+                title: "",
+                status: "draft",
+                blocks: []
+              };
+              STATE.trainings.unshift(t);
+              STATE.edit = t;
+              if (typeof window.setDirty === "function") window.setDirty(true);
+              if (typeof window.HRTrainingsRefreshUI === "function") window.HRTrainingsRefreshUI();
+            }
+          }catch(_){}
+        });
+      })();
+    </script>
+
+    <!-- OBS: Resten av din befintliga logik kan ligga kvar som tidigare längre ner i filen -->
   </div>
-
-  <!-- STEG 3: Skapa -->
-  <div class="blocksBar" style="margin-top:12px;">
-    <button class="btn secondary" id="btnTestWorker" type="button">
-      Testa AI
-    </button>
-    <button class="btn" id="btnGenBlocks" type="button">
-      Generera block
-    </button>
-    <span class="muted2 tiny" id="aiHint"></span>
-  </div>
-</section>
-
-<script>
-(function(){
-  if (window.__HR_TRN_AI_BOUND__ === true) return;
-  window.__HR_TRN_AI_BOUND__ = true;
-
-  const elPers = document.getElementById("aiIncludePersonality");
-  const elPersCount = document.getElementById("aiPersonalityCount");
-
-  function syncPersUI(){
-    if (!elPers || !elPersCount) return;
-    elPersCount.disabled = !elPers.checked;
-  }
-  if (elPers) elPers.addEventListener("change", syncPersUI);
-  syncPersUI();
-})();
-</script>
-
-
-<!-- =========================
-     BLOCK 9/10 – Blockhantering (PROD FIX)
-========================== -->
-
-<h3>Block</h3>
-<div class="muted2">
-  Lägg till block manuellt, använd mallar eller låt AI skapa block. Problem-vy visar bara block som saknar rubrik.
-</div>
-
-<div class="templateBar" style="margin-top:10px;">
-  <div class="inlineRow" style="gap:10px; flex-wrap:wrap;">
-    <button class="miniBtn" id="addInfo" type="button" title="Lägg till informationsblock">+ Information</button>
-    <button class="miniBtn" id="addTask" type="button" title="Lägg till uppgiftsblock">+ Uppgift</button>
-    <button class="miniBtn" id="addQuiz" type="button" title="Lägg till frågeblock">+ Fråga/Quiz</button>
-    <button class="miniBtn" id="addDoc" type="button" title="Lägg till dokumentblock">+ Dokument</button>
-  </div>
-
-  <div class="inlineRow" style="gap:10px; flex-wrap:wrap; margin-top:10px;">
-    <button class="btn secondary" id="btnTpl1" type="button" title="Teori + Uppgift + Quiz">Mall: Teori → Uppgift → Quiz</button>
-    <button class="btn secondary" id="btnTpl2" type="button" title="Scenario/Case">Mall: Scenario (Case)</button>
-    <button class="btn secondary" id="btnTpl3" type="button" title="Dokument + Kontrollfrågor">Mall: Dokument + Kontroll</button>
-    <button class="btn" id="btnProgressive" type="button" title="Numrerar blocken som steg">Gör till steg</button>
-  </div>
-
-  <div class="inlineRow" style="margin-top:10px; align-items:center; gap:10px;">
-    <label class="label" style="display:flex; align-items:center; gap:8px; margin:0;">
-      <input type="checkbox" id="onlyProblems" />
-      Visa bara problem
-    </label>
-    <span class="muted2 tiny" id="problemsHint">Välj en utbildning för att aktivera problemvy.</span>
-  </div>
-</div>
-
-<div style="margin-top:12px;">
-  <div id="blocksList" aria-label="Blocklista"></div>
-</div>
-
-
-<!-- =========================
-     BLOCK 10/10 – Footer & Debug (PROD FIX)
-========================== -->
-
-<div class="footerRow" aria-label="Spara och publicera">
-  <div class="left" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-    <button class="miniBtn danger" id="btnRevert" type="button" title="Återställer osparade ändringar för vald utbildning">
-      Ångra osparat
-    </button>
-    <span class="tiny muted2" id="revertHint">
-      Ångra osparat återställer ändringar som inte sparats. Detta kan inte ångras (förrän du gör om ändringarna).
-    </span>
-  </div>
-
-  <div class="left" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-    <button class="btn secondary" id="btnSaveDraft" type="button" title="Sparar som utkast">
-      Spara som utkast
-    </button>
-    <button class="btn primary" id="btnSavePublish" type="button" title="Sparar och publicerar (fail-closed)">
-      Spara & publicera
-    </button>
-  </div>
-</div>
-
-<details class="debugBox" id="debugBox">
-  <summary>Debug (sparad data)</summary>
-  <pre id="debugPre">—</pre>
-</details>
-
-<script>
-/* ============================================================
-AO-TRN-B10-PROD-FIX-01 — BLOCK 10 fix (bind inte om AI-knappar)
-- Låter BLOCK 8 styra "Testa worker" + "Generera block"
-- Exponerar en refresh-funktion som BLOCK 8 kan anropa efter att block lagts till
-============================================================ */
-(function(){
-  try{
-    // Den här funktionen sätts om flera gånger utan problem (senaste vinner)
-    window.HRTrainingsRefreshUI = function(){
-      try{
-        if (typeof window.renderBlocks === "function") window.renderBlocks();
-      }catch(_){}
-
-      try{
-        if (window.STATE && window.STATE.edit && typeof window.renderPreview === "function") window.renderPreview(window.STATE.edit);
-      }catch(_){}
-
-      try{
-        if (typeof window.renderList === "function") window.renderList();
-      }catch(_){}
-
-      try{
-        if (typeof window.renderDebug === "function") window.renderDebug();
-      }catch(_){}
-
-      try{
-        if (typeof window.syncButtons === "function") window.syncButtons();
-      }catch(_){}
-    };
-  }catch(_){}
-})();
-</script>
-
+</body>
+</html>
