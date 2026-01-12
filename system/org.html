@@ -1,48 +1,32 @@
 <!-- ============================================================
-AO-SYS-ASSIGNMENTS-MULTI-ENHET-01 (PATCH v1.3) | FIL-ID: system/assignments.html
+AO-SYS-ORG-BUILDER-01 (PROD) | FIL-ID: system/org.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
-Syfte: SYSTEM_ADMIN – Koppla empNo -> (roleId + scopeIds[]) enligt org-trädet (ENHET-only)
+Syfte: SYSTEM_ADMIN – Org Builder (ROOT + Bolag + ENHET) för hela systemet
 Nivå: UI-only (GitHub Pages)
 
 POLICY (LÅST):
 - SYSTEM_ADMIN-only (ren systemförvaltning)
-- Endast SYSTEM_ADMIN får skapa/tilldela ADMIN
-- ADMIN kan ha flera ENHETER (scopeIds[])
 - Ingen backend
-- Ingen känslig persondata (endast empNo)
+- Ingen känslig persondata (endast empNo i auth)
 - Inga nya storage-keys
-- Fail-closed: saknad org / korrupt data => blockera sparande
-- XSS-escape på allt från storage
-- Hel-filsleverans
+- Fail-closed: saknad core/auth => redirect till skeleton
+- XSS-escape på allt från storage (textContent, ingen osäker innerHTML)
+- Org används av Assignments (ENHET-only scope)
 
-Keys (LÅST, endast dessa):
-- Läs (session): AO-001_LOGIN_V1 (via HRApp.mustGetSession/requireAuth)
-- Läs/Skriv: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) — assignments map
-- Läs: AO-020_ORG_V1 (localStorage) — org-träd
+Keys (LÅST):
+- Läs (session): AO-001_LOGIN_V1 (via HRApp.requireAuth)
+- Läs/Skriv: AO-020_ORG_V1 (localStorage) — org-träd (array)
 
-Datamodell (RW, bakåtkompatibel vid läs):
-{
-  "3001": {
-    "roleId":"ADMIN|SYSTEM_ADMIN",
-    "scopeIds":["<enhetId1>","<enhetId2>"],
-    "scopeId":"<enhetId1>", // legacy-stöd, hålls synkad vid save
-    "updatedAt": 1730000000000
-  }
-}
+Org-ID (LÅST):
+- ROOT_ID = "org_root_v1"  (måste finnas för Assignments)
 
-Regler (LÅST):
-- roleId på denna sida: ADMIN eller SYSTEM_ADMIN (fail-closed)
-- ADMIN: scopeIds[] krävs, får bara innehålla org-noder med type="Enhet" (ej ROOT, ej Bolag)
-- SYSTEM_ADMIN: ska ha tom scope (rekommenderat), scopeIds tas bort/ignoreras
-- Delete är tillåtet (tar bort assignment-rad), alltid bekräftelse
-- Import/Export: finns ej i denna AO (undviker risk)
+Datamodell (enkel, tolerant):
+[
+  { id:"org_root_v1", name:"Root", type:"Root", parentId:null },
+  { id:"org_xxx", name:"Bolag A", type:"Bolag", parentId:"org_root_v1" },
+  { id:"org_yyy", name:"Enhet 1", type:"Enhet", parentId:"org_xxx" }
+]
 
-PATCH v1.3 – Stabilitet/UX:
-- P0: Sluta rebuild:a multi-select på varje render (bevarar val)
-- P0: wireScopeFilterUI binds endast en gång (inga dubbla listeners)
-- P0: Manual->Selection sker endast via knapp (inte varje render)
-- P1: Health auto-expand endast första gången per sidladd
-- P1: Support-trigger synlig även i blocker-only
 ============================================================ -->
 
 <!doctype html>
@@ -50,356 +34,239 @@ PATCH v1.3 – Stabilitet/UX:
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – System • Assignments</title>
+  <title>HR-System – System • Org Builder</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
-<style>
-  :root{
-    --wrap-max: 1100px;
-    --wrap-pad: 16px;
+  <style>
+    :root{
+      --wrap-max: 1100px;
+      --wrap-pad: 16px;
 
-    --tile-shadow-1: 0 1px 0 rgba(0,0,0,.03);
-    --tile-shadow-2: 0 10px 24px rgba(0,0,0,.06);
-    --tile-shadow-2-hover: 0 10px 24px rgba(0,0,0,.08);
+      --tile-shadow-1: 0 1px 0 rgba(0,0,0,.03);
+      --tile-shadow-2: 0 10px 24px rgba(0,0,0,.06);
+      --tile-shadow-2-hover: 0 10px 24px rgba(0,0,0,.08);
 
-    --line: rgba(0,0,0,.08);
-    --r12: 12px;
-    --r14: 14px;
-    --muted: rgba(17,17,17,.68);
+      --line: rgba(0,0,0,.08);
+      --muted: rgba(17,17,17,.68);
 
-    /* primär accent = blå (statusfärger separat) */
-    --accent: rgba(59,130,246,.80);
-    --accent-soft: rgba(11,95,255,.18);
-    --accent-ink: rgba(11,95,255,.92);
+      --accent: rgba(59,130,246,.80);
+      --accent-soft: rgba(11,95,255,.18);
 
-    /* Statusfärger (endast OK/Varning) */
-    --ok-bg: rgba(209,250,229,.90);
-    --warn-bg: rgba(254,226,226,.90);
-    --danger-border: rgba(220,38,38,.25);
-    --danger-ink: #7f1d1d;
-  }
+      --ok-bg: rgba(209,250,229,.90);
+      --warn-bg: rgba(254,226,226,.90);
+      --danger-border: rgba(220,38,38,.25);
+      --danger-ink: #7f1d1d;
+    }
 
-  .wrap{ max-width: var(--wrap-max); margin: 0 auto; padding: var(--wrap-pad); }
+    .wrap{ max-width: var(--wrap-max); margin: 0 auto; padding: var(--wrap-pad); }
 
-  header.top{ border-bottom: 1px solid var(--line); background: #fff; }
-  .topInner{
-    display:flex; align-items:center; justify-content:space-between; gap: 12px;
-    max-width: var(--wrap-max); margin: 0 auto; padding: 12px var(--wrap-pad);
-  }
-  .topLeft{ display:flex; align-items:center; gap: 10px; flex-wrap:wrap; min-width: 0; }
-  .brandLine{ display:flex; align-items:baseline; gap: 8px; flex-wrap:wrap; }
-  .brandLine strong{ font-weight: 900; }
-  .brandLine .muted{ color: var(--muted); }
-  .topNav{ display:flex; gap: 8px; flex-wrap:wrap; align-items:center; }
-  .topRight{ display:flex; gap: 8px; align-items:center; flex-wrap:wrap; }
+    header.top{ border-bottom: 1px solid var(--line); background: #fff; }
+    .topInner{
+      display:flex; align-items:center; justify-content:space-between; gap: 12px;
+      max-width: var(--wrap-max); margin: 0 auto; padding: 12px var(--wrap-pad);
+    }
+    .topLeft{ display:flex; align-items:center; gap: 10px; flex-wrap:wrap; min-width: 0; }
+    .brandLine{ display:flex; align-items:baseline; gap: 8px; flex-wrap:wrap; }
+    .brandLine strong{ font-weight: 900; }
+    .brandLine .muted{ color: var(--muted); }
+    .topNav{ display:flex; gap: 8px; flex-wrap:wrap; align-items:center; }
+    .topRight{ display:flex; gap: 8px; align-items:center; flex-wrap:wrap; }
 
-  .topBtn{
-    display:inline-flex; align-items:center; justify-content:center; gap: 8px;
-    padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,.12);
-    text-decoration:none; color: #111; background: #fff;
-    box-shadow: 0 1px 0 rgba(0,0,0,.02);
-    white-space: nowrap; outline: none;
-  }
-  .topBtn:focus{ outline: 3px solid var(--accent-soft); outline-offset: 2px; }
-  .topBtn:hover{ border-color: rgba(0,0,0,.18); box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); }
+    .topBtn{
+      display:inline-flex; align-items:center; justify-content:center; gap: 8px;
+      padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,.12);
+      text-decoration:none; color: #111; background: #fff;
+      box-shadow: 0 1px 0 rgba(0,0,0,.02);
+      white-space: nowrap; outline: none;
+    }
+    .topBtn:focus{ outline: 3px solid var(--accent-soft); outline-offset: 2px; }
+    .topBtn:hover{ border-color: rgba(0,0,0,.18); box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); }
 
-  .topBtn.my{ background: rgba(17,17,17,.04); border-color: rgba(0,0,0,.14); color: #111; }
-  .topBtn.logout{ background: rgba(220,38,38,.08); border-color: rgba(220,38,38,.25); color: var(--danger-ink); }
-  .topBtn.logout:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); border-color: rgba(220,38,38,.35); }
+    .topBtn.my{ background: rgba(17,17,17,.04); border-color: rgba(0,0,0,.14); color: #111; }
+    .topBtn.logout{ background: rgba(220,38,38,.08); border-color: rgba(220,38,38,.25); color: var(--danger-ink); }
+    .topBtn.logout:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); border-color: rgba(220,38,38,.35); }
 
-  /* aktiv sida tydligare (Assignments) */
-  .topBtn[aria-current="page"]{
-    border-color: rgba(11,95,255,.30);
-    box-shadow: var(--tile-shadow-1), 0 10px 24px rgba(59,130,246,.10);
-    background: rgba(59,130,246,.06);
-    font-weight: 800;
-  }
+    .topBtn[aria-current="page"]{
+      border-color: rgba(11,95,255,.30);
+      box-shadow: var(--tile-shadow-1), 0 10px 24px rgba(59,130,246,.10);
+      background: rgba(59,130,246,.06);
+      font-weight: 800;
+    }
 
-  main.container{ max-width: var(--wrap-max); margin: 0 auto; padding: var(--wrap-pad); }
+    main.container{ max-width: var(--wrap-max); margin: 0 auto; padding: var(--wrap-pad); }
 
-  /* layout = 1 kolumn default. 2 kolumner endast när listan visas. */
-  .layout{ display:grid; grid-template-columns: 1fr; gap: 12px; align-items:start; }
-  .layout.hasList{ grid-template-columns: 1fr 1fr; }
-  @media (max-width: 920px){ .layout.hasList{ grid-template-columns: 1fr; } }
+    .layout{ display:grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items:start; }
+    @media (max-width: 980px){ .layout{ grid-template-columns: 1fr; } }
 
-  .row2{ display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  @media (max-width: 620px){ .row2{ grid-template-columns: 1fr; } }
+    .tile{
+      position: relative;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background:#fff;
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2);
+      overflow:hidden;
+    }
+    .tile::before{
+      content:""; position:absolute; top:0; left:0; right:0; height:6px;
+      background: var(--accent);
+    }
+    .tile:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); border-color: rgba(0,0,0,.14); }
 
-  .tile{
-    position: relative;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background:#fff;
-    box-shadow: var(--tile-shadow-1), var(--tile-shadow-2);
-    overflow:hidden;
-  }
-  .tile::before{
-    content:""; position:absolute; top:0; left:0; right:0; height:6px;
-    background: var(--accent);
-  }
-  .tile:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); border-color: rgba(0,0,0,.14); }
+    .panel{ padding: 12px; }
+    .panel-title{ font-weight: 900; margin: 2px 0 10px; }
 
-  .panel{ padding: 12px; }
-  .panel.create::before{ background: var(--accent); }
-  .panel.list::before{ background: var(--accent); } /* ingen grön accent på list */
+    .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    .rowBetween{ display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
+    .row2{ display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    @media (max-width: 620px){ .row2{ grid-template-columns: 1fr; } }
 
-  .panel.create{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2), 0 12px 24px rgba(59,130,246,.14); }
-  .panel.create:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover), 0 12px 24px rgba(59,130,246,.24); }
+    .kpis{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0 2px; }
+    .kpi{
+      display:flex; gap:8px; align-items:center; padding: 6px 10px;
+      border: 1px solid var(--line); border-radius: 999px; background:#fff; font-size:.95rem;
+    }
 
-  .panel.list{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2), 0 12px 24px rgba(59,130,246,.08); }
-  .panel.list:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover), 0 12px 24px rgba(59,130,246,.14); }
+    .pill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(0,0,0,.08);
+      background:#fff;
+      color:#111;
+      font-size:.86rem;
+      white-space:nowrap;
+      line-height: 1.2;
+      min-height: 28px;
+    }
+    .okpill{ background: var(--ok-bg); }
+    .warnpill{ background: var(--warn-bg); }
 
-  .panel-title{ font-weight: 900; margin: 2px 0 10px; }
+    .mutedText{ color: var(--muted); font-size:.92rem; }
+    .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
+    code{ font-size:.95em; }
 
-  .kpis{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0 2px; }
-  .kpi{
-    display:flex; gap:8px; align-items:center; padding: 6px 10px;
-    border: 1px solid var(--line); border-radius: 999px; background:#fff; font-size:.95rem;
-  }
+    label{ display:block; font-size: 12px; opacity: .86; }
+    input, select, textarea{
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,.12);
+      background:#fff;
+      outline: none;
+      margin-top:6px;
+      font: inherit;
+    }
+    input:focus, select:focus, textarea:focus{
+      outline: 3px solid var(--accent-soft);
+      outline-offset: 2px;
+    }
 
-  .health{
-    margin-top:10px; border:1px dashed var(--line); border-radius: 12px;
-    padding: 10px 12px; background:#fff;
-  }
-  .health .title{ font-weight: 900; margin:0 0 4px; }
-  .health .row{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; justify-content:space-between; }
+    .miniBtn{
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,.12);
+      background:#fff;
+      cursor:pointer;
+      display:inline-flex;
+      gap:8px;
+      align-items:center;
+      justify-content:center;
+      text-decoration:none;
+      color:#111;
+    }
+    .miniBtn:hover{ border-color: rgba(0,0,0,.18); box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); }
+    .miniBtn:focus{ outline: 3px solid var(--accent-soft); outline-offset: 2px; }
 
-  .item{
-    border:1px solid var(--line);
-    border-radius: 12px;
-    padding: 12px;
-    background:#fff;
-    box-shadow: var(--tile-shadow-1), var(--tile-shadow-2);
-    display:flex;
-    gap:10px;
-    justify-content:space-between;
-    align-items:flex-start;
-    flex-wrap:wrap;
-    margin-top:10px;
-    position: relative;
-    overflow:hidden;
-  }
-  .item::before{
-    content:"";
-    position:absolute; top:0; left:0; right:0; height:6px;
-    background: rgba(148,163,184,.75);
-  }
-  .item:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); border-color: rgba(0,0,0,.14); }
+    .miniBtn.delete{ background:#fff; border-color: rgba(0,0,0,.12); color:#111; }
+    .miniBtn.delete:hover{
+      background: rgba(254,226,226,.65);
+      border-color: rgba(220,38,38,.35);
+      color: var(--danger-ink);
+    }
 
-  .item.danger{ border-color: var(--danger-border); background: rgba(254,226,226,.25); }
-  .item.danger::before{ background: rgba(220,38,38,.75); }
+    .blocker{
+      border: 1px solid var(--danger-border);
+      background: rgba(254,226,226,.45);
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin: 10px 0 0;
+    }
+    .blocker strong{ font-weight: 900; }
 
-  .item-title{ font-weight: 900; margin:0; color:#111; }
+    .item{
+      border:1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px;
+      background:#fff;
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2);
+      display:flex;
+      gap:10px;
+      justify-content:space-between;
+      align-items:flex-start;
+      flex-wrap:wrap;
+      margin-top:10px;
+      position: relative;
+      overflow:hidden;
+    }
+    .item::before{
+      content:"";
+      position:absolute; top:0; left:0; right:0; height:6px;
+      background: rgba(148,163,184,.75);
+    }
+    .item:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); border-color: rgba(0,0,0,.14); }
 
-  .meta{
-    color: var(--muted);
-    font-size:.9rem;
-    display:flex;
-    gap:10px;
-    flex-wrap:wrap;
-    margin-top:6px;
-  }
+    .item.danger{ border-color: var(--danger-border); background: rgba(254,226,226,.25); }
+    .item.danger::before{ background: rgba(220,38,38,.75); }
 
-  .empty{
-    padding:18px;
-    border:1px dashed var(--line);
-    border-radius: 12px;
-    color: var(--muted);
-    background:#fff;
-    text-align:center;
-    margin-top:10px;
-  }
+    .item-title{ font-weight: 900; margin:0; color:#111; }
+    .meta{
+      color: var(--muted);
+      font-size:.9rem;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      margin-top:6px;
+    }
 
-  .pill{
-    display:inline-flex;
-    align-items:center;
-    gap:6px;
-    padding: 4px 8px;
-    border-radius: 999px;
-    border: 1px solid rgba(0,0,0,.08);
-    background:#fff;
-    color:#111;
-    font-size:.86rem;
-    white-space:nowrap;
+    .empty{
+      padding:18px;
+      border:1px dashed var(--line);
+      border-radius: 12px;
+      color: var(--muted);
+      background:#fff;
+      text-align:center;
+      margin-top:10px;
+    }
 
-    line-height: 1.2;
-    min-height: 28px;
-  }
-  .warnpill{ background: var(--warn-bg); }
-  .okpill{ background: var(--ok-bg); }
-
-  .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
-  code{ font-size:.95em; }
-
-  .blocker{
-    border: 1px solid var(--danger-border);
-    background: rgba(254,226,226,.45);
-    border-radius: 12px;
-    padding: 10px 12px;
-    margin: 10px 0;
-  }
-  .blocker strong{ font-weight: 900; }
-
-  .hint{
-    margin-top:8px;
-    padding:10px 12px;
-    border:1px dashed var(--line);
-    border-radius: 12px;
-    background:#fff;
-    color: var(--muted);
-    font-size:.92rem;
-  }
-  .hint strong{ color:#111; }
-
-  label{ display:block; font-size: 12px; opacity: .86; }
-  input, select, textarea{
-    width: 100%;
-    padding: 10px 12px;
-    border-radius: 10px;
-    border: 1px solid rgba(0,0,0,.12);
-    background:#fff;
-    outline: none;
-    margin-top:6px;
-    font: inherit;
-  }
-  input:focus, select:focus, textarea:focus{
-    outline: 3px solid var(--accent-soft);
-    outline-offset: 2px;
-  }
-
-  /* Multi-select layout */
-  .multiTools{
-    display:flex;
-    gap:8px;
-    flex-wrap:wrap;
-    align-items:center;
-    margin-top:8px;
-  }
-  .miniBtn{
-    padding: 8px 10px;
-    border-radius: 10px;
-    border: 1px solid rgba(0,0,0,.12);
-    background:#fff;
-    cursor:pointer;
-  }
-  .miniBtn:hover{
-    border-color: rgba(0,0,0,.18);
-    box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover);
-  }
-
-  /* delete sekundär – blir röd först vid hover/confirm */
-  .miniBtn.delete{ background:#fff; border-color: rgba(0,0,0,.12); color:#111; }
-  .miniBtn.delete:hover{
-    background: rgba(254,226,226,.65);
-    border-color: rgba(220,38,38,.35);
-    color: var(--danger-ink);
-  }
-
-  .mutedText{ color: var(--muted); font-size:.92rem; }
-
-  .sectionHeader{
-    display:flex;
-    flex-direction:column;
-    gap:4px;
-    margin: 2px 0 10px;
-  }
-  .sectionHeader .title{
-    font-weight: 900;
-    margin: 0;
-    color:#111;
-  }
-  .sectionHeader .desc{
-    margin: 0;
-    color: var(--muted);
-    font-size:.92rem;
-  }
-  .stepBadge{
-    display:inline-flex;
-    align-items:center;
-    gap:6px;
-    padding: 4px 8px;
-    border-radius: 999px;
-    border: 1px solid rgba(11,95,255,.22);
-    background: rgba(59,130,246,.08);
-    color: rgba(17,17,17,.78);
-    font-size: .86rem;
-    white-space: nowrap;
-    line-height: 1.2;
-    min-height: 28px;
-  }
-
-  .systemBadge{
-    display:inline-flex;
-    align-items:center;
-    gap:6px;
-    padding: 4px 8px;
-    border-radius: 999px;
-    border: 1px solid rgba(0,0,0,.10);
-    background: rgba(0,0,0,.04);
-    color: rgba(17,17,17,.72);
-    font-size: .86rem;
-    white-space: nowrap;
-    line-height: 1.2;
-    min-height: 28px;
-  }
-
-  .editingHighlight{
-    outline: 2px solid rgba(11,95,255,.16);
-    outline-offset: 2px;
-    box-shadow: 0 0 0 6px rgba(11,95,255,.06);
-    border-radius: 12px;
-  }
-
-  .statusStabilizer{
-    min-height: 32px;
-    display:flex;
-    align-items:center;
-    gap:8px;
-    flex-wrap:wrap;
-  }
-
-  .healthCollapsed .healthBody{ display:none; }
-  .healthHeaderRow{
-    display:flex;
-    align-items:center;
-    justify-content:space-between;
-    gap:10px;
-    flex-wrap:wrap;
-  }
-
-  .chipRow{
-    display:flex;
-    gap:6px;
-    flex-wrap:wrap;
-    margin-top:8px;
-  }
-  .chip{
-    display:inline-flex;
-    align-items:center;
-    gap:6px;
-    padding: 4px 8px;
-    border-radius: 999px;
-    border: 1px solid rgba(0,0,0,.10);
-    background:#fff;
-    font-size:.86rem;
-    color:#111;
-  }
-  .chip.more{ background: rgba(0,0,0,.04); color: rgba(17,17,17,.72); }
-
-  .miniLink{
-    display:inline-flex;
-    gap:6px;
-    align-items:center;
-    font-size:.9rem;
-    color: rgba(11,95,255,.88);
-    text-decoration:none;
-    border-bottom: 1px dotted rgba(11,95,255,.35);
-  }
-  .miniLink:hover{ border-bottom-style: solid; }
-
-  .hidden{ display:none !important; }
-</style>
+    .linkTile{
+      display:block;
+      text-decoration:none;
+      color:#111;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background:#fff;
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2);
+      overflow:hidden;
+      position: relative;
+      margin-top:10px;
+    }
+    .linkTile::before{
+      content:"";
+      position:absolute; top:0; left:0; right:0; height:6px;
+      background: rgba(59,130,246,.75);
+    }
+    .linkTile:hover{
+      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover);
+      border-color: rgba(0,0,0,.14);
+    }
+    .linkTileInner{ padding: 12px; }
+    .linkTitle{ margin: 0; font-weight: 900; }
+    .linkDesc{ margin: 6px 0 0; color: var(--muted); font-size:.92rem; }
+    .linkUrl{ margin: 10px 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.86rem; color: rgba(17,17,17,.70); }
+  </style>
 </head>
 
 <body>
@@ -409,17 +276,14 @@ PATCH v1.3 – Stabilitet/UX:
     <div class="topLeft">
       <div class="brandLine">
         <strong>HR-System</strong>
-        <span class="muted">• System • Assignments</span>
-
-        <span class="systemBadge" aria-label="Systemkontext">
-          Systemförvaltning • Påverkar behörigheter
-        </span>
+        <span class="muted">• System • Org Builder</span>
+        <span class="pill okpill" id="pillReadOnly" style="display:none;">UI-only</span>
       </div>
 
       <nav class="topNav" aria-label="Systemmeny">
         <a class="topBtn" href="./dashboard.html">Systemstart</a>
-        <a class="topBtn" href="./org.html">Org</a>
-        <a class="topBtn" href="./assignments.html" aria-current="page">Assignments</a>
+        <a class="topBtn" href="./org.html" aria-current="page">Org</a>
+        <a class="topBtn" href="./assignments.html">Assignments</a>
       </nav>
     </div>
 
@@ -431,369 +295,164 @@ PATCH v1.3 – Stabilitet/UX:
 </header>
 
 <main class="container">
-  <h1 class="tight">Assignments</h1>
+  <h1 class="tight">Org Builder</h1>
   <p class="muted">
-    Koppla <strong>anst.nr (empNo)</strong> till <strong>roll</strong> och <strong>enheter</strong> (ENHET-noder). SYSTEM_ADMIN-only.
+    Bygg org-trädet som används av Assignments. För scope i Assignments gäller endast <strong>ENHET</strong>.
   </p>
 
-  <section class="card" id="pageCard">
-    <div class="row space-between wrap" style="margin-bottom:10px;">
-      <div class="muted">
-        Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
-      </div>
-
-      <div class="row wrap" style="gap:8px;" id="topActions">
-        <a class="btn secondary" href="./org.html" id="btnOpenOrg">Öppna Org Builder</a>
-
-        <button id="btnShowHealth" type="button" class="btn secondary" aria-controls="healthBox" aria-expanded="false">
-          Visa datahälsa
-        </button>
-
-        <button id="btnToggleList" type="button" class="btn secondary" aria-controls="listPanel" aria-expanded="false" style="display:none;">
-          Visa lista
-        </button>
-      </div>
-    </div>
-
-    <div class="muted" id="statusBox" style="display:none; margin: 0 0 10px;">
-      <span id="statusText">—</span>
-      <div class="mutedText" id="statusConsequence" style="margin-top:4px; display:none;"></div>
-    </div>
-
-    <div id="blockerBox" class="blocker" style="display:none;">
-      <div><strong>Systemet är inte konfigurerat.</strong> Du måste skapa Org först.</div>
-
-      <div class="muted" id="blockerText" style="margin-top:4px;">
-        Org saknas eller root saknas. —
-      </div>
-
-      <div class="row wrap" style="gap:8px; margin-top:10px;">
-        <a class="btn" href="./org.html">Gå till Org Builder</a>
-        <a class="btn secondary" href="./dashboard.html">Gå till Systemstart</a>
-      </div>
-    </div>
-
-    <div id="healthBox" class="health healthCollapsed" style="display:none;">
-      <div class="healthHeaderRow">
-        <div>
-          <div class="title" style="margin:0;">Datahälsa</div>
-          <div class="mutedText" id="healthText" style="margin-top:4px;">—</div>
+  <section class="tile" aria-label="Status">
+    <div class="panel">
+      <div class="rowBetween">
+        <div class="mutedText">
+          Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
         </div>
-
-        <div class="row" style="gap:8px;">
-          <button id="btnClearInvalid" type="button" class="secondary" style="display:none;">
-            Rensa ogiltiga enheter
-          </button>
-          <button id="btnHideHealth" type="button" class="secondary">
-            Dölj
-          </button>
+        <div class="row">
+          <button class="miniBtn" id="btnRefresh" type="button">Uppdatera</button>
+          <a class="miniBtn" href="./assignments.html">Öppna Assignments</a>
         </div>
       </div>
 
-      <div class="healthBody">
-        <div class="mutedText" id="healthSummary" style="margin-top:8px;"></div>
-        <ul id="healthList" class="muted" style="margin:8px 0 0; padding-left:18px;"></ul>
+      <div class="kpis" aria-label="Nyckeltal">
+        <div class="kpi">Org-noder: <strong id="kpiNodes">0</strong></div>
+        <div class="kpi">Bolag: <strong id="kpiBolag">0</strong></div>
+        <div class="kpi">ENHETER: <strong id="kpiEnheter">0</strong></div>
+      </div>
+
+      <div class="row" style="margin-top:10px;">
+        <span class="pill" id="pillRoot">Root: —</span>
+        <span class="pill" id="pillShape">Datakoll: —</span>
+      </div>
+
+      <div id="blocker" class="blocker" style="display:none;">
+        <div><strong>Åtgärd krävs:</strong> <span id="blockerText">—</span></div>
+        <div class="row" style="margin-top:10px;">
+          <button class="miniBtn" id="btnCreateRoot" type="button">Skapa Root</button>
+          <button class="miniBtn delete" id="btnResetOrg" type="button">Rensa Org (danger)</button>
+        </div>
+      </div>
+
+      <div class="smallnote">
+        Lagring (RW): <code>AO-020_ORG_V1</code>. Root-id är låst till <code>org_root_v1</code>.
+      </div>
+    </div>
+  </section>
+
+  <div class="layout" style="margin-top:12px;">
+    <!-- LEFT: CREATE / EDIT -->
+    <section class="tile" aria-label="Skapa / Redigera">
+      <div class="panel">
+        <div class="panel-title">Skapa / Redigera nod</div>
+
+        <div class="row2">
+          <label>
+            Namn
+            <input id="nodeName" type="text" placeholder="t.ex. Aurora Kitchen Group" autocomplete="off" />
+            <div class="mutedText" style="margin-top:6px;">Krav: minst 2 tecken.</div>
+          </label>
+
+          <label>
+            Typ
+            <select id="nodeType">
+              <option value="Bolag" selected>Bolag</option>
+              <option value="Enhet">Enhet</option>
+            </select>
+            <div class="mutedText" style="margin-top:6px;">
+              Scope i Assignments = endast <strong>Enhet</strong>.
+            </div>
+          </label>
+        </div>
+
+        <div class="row2" style="margin-top:10px;">
+          <label>
+            Förälder (parent)
+            <select id="parentId"></select>
+            <div class="mutedText" style="margin-top:6px;">Tips: skapa Bolag under Root, skapa Enheter under Bolag.</div>
+          </label>
+
+          <label>
+            Nod-ID (auto)
+            <input id="nodeId" type="text" disabled value="—" />
+            <div class="mutedText" style="margin-top:6px;">ID skapas automatiskt (org_...).</div>
+          </label>
+        </div>
+
+        <div class="row" style="margin-top:10px;">
+          <button class="miniBtn" id="btnSave" type="button">Spara nod</button>
+          <button class="miniBtn" id="btnNew" type="button">Ny</button>
+          <button class="miniBtn delete" id="btnDelete" type="button" style="display:none;">Ta bort</button>
+        </div>
+
+        <p id="msg" class="message" aria-live="polite"></p>
 
         <div class="smallnote">
-          “Rensa ogiltiga enheter” tar bort enhets-ID som inte längre finns (eller inte är ENHET) från ADMIN:s scopeIds.
-          Om inga enheter återstår blir raden “Saknar enhet” (fail-closed) tills du väljer enheter igen.
+          Regler: Root skapas separat. Du kan inte skapa assignments utan Root + minst 1 Enhet.
         </div>
+
+        <a class="linkTile" href="./dashboard.html" aria-label="Gå till Systemstart">
+          <div class="linkTileInner">
+            <p class="linkTitle">Systemstart</p>
+            <p class="linkDesc">Överblick för Org + Assignments.</p>
+            <div class="linkUrl">/system/dashboard.html</div>
+          </div>
+        </a>
+
+        <a class="linkTile" href="./assignments.html" aria-label="Gå till Assignments">
+          <div class="linkTileInner">
+            <p class="linkTitle">Assignments</p>
+            <p class="linkDesc">Koppla empNo → (roll + ENHET-scope).</p>
+            <div class="linkUrl">/system/assignments.html</div>
+          </div>
+        </a>
       </div>
-    </div>
+    </section>
 
-    <div class="layout" id="layoutRoot">
-
-      <section class="tile panel create" aria-label="Skapa assignment" id="formPanel">
-        <div class="panel-title">Skapa / Redigera assignment</div>
-
-        <div class="kpis" aria-label="Sammanfattning">
-          <div class="kpi">Rader: <strong id="kpiRows">0</strong></div>
-          <div class="kpi">Ogiltiga enheter: <strong id="kpiInvalid">0</strong></div>
-          <div class="kpi">Saknar enhet: <strong id="kpiMissing">0</strong></div>
-        </div>
-
-        <div style="margin-top:10px;">
-
-          <div class="sectionHeader">
-            <div class="row wrap" style="gap:8px; align-items:center;">
-              <span class="stepBadge">Steg 1</span>
-              <p class="title" style="margin:0;">empNo</p>
-            </div>
-            <p class="desc">Ange anställningsnummer (1–12 siffror).</p>
-          </div>
-
-          <label>
-            empNo (anst.nr)
-            <input id="empNo" type="text" inputmode="numeric" placeholder="t.ex. 3001" />
-            <div class="row wrap" style="gap:8px; margin-top:6px; align-items:center;">
-              <div class="mutedText">Krav: <strong>1–12 siffror</strong>.</div>
-              <a href="#" class="miniLink" id="lnkChangeEmpNo" style="display:none;">Ändra</a>
-            </div>
-          </label>
-
-          <hr style="border:none; border-top:1px solid var(--line); margin:12px 0;" />
-
-          <div class="sectionHeader">
-            <div class="row wrap" style="gap:8px; align-items:center;">
-              <span class="stepBadge">Steg 2</span>
-              <p class="title" style="margin:0;">Roll</p>
-              <span class="systemBadge" id="roleBadge" style="display:none;">Avancerat</span>
-            </div>
-            <p class="desc">Välj ADMIN eller SYSTEM_ADMIN (SYSTEM_ADMIN används sällan).</p>
-          </div>
-
-          <label>
-            Roll (SYSTEM_ADMIN skapar ADMIN)
-            <select id="roleId">
-              <option value="ADMIN" selected>ADMIN</option>
-              <option value="SYSTEM_ADMIN">SYSTEM_ADMIN</option>
-            </select>
-            <div class="mutedText" id="sysAdminNote" style="margin-top:6px; display:none;">
-              SYSTEM_ADMIN används sällan – scope ignoreras (rekommenderat tomt)
-            </div>
-          </label>
-
-          <hr style="border:none; border-top:1px solid var(--line); margin:12px 0;" />
-
-          <div class="sectionHeader">
-            <div class="row wrap" style="gap:8px; align-items:center;">
-              <span class="stepBadge">Steg 3</span>
-              <p class="title" style="margin:0;">Enheter</p>
-              <span class="systemBadge" id="orgBadge" style="display:none;">Org: OK</span>
-            </div>
-            <p class="desc">För ADMIN: välj minst 1 ENHET. Root/Bolag kan inte användas.</p>
-          </div>
-
-          <div class="row wrap" style="gap:8px; align-items:flex-end;">
-            <label style="flex:1; min-width:240px;">
-              <span class="mutedText">Sök ENHET (namn/ID)</span>
-              <input id="scopeFilter" type="text" placeholder="Sök i listan…" autocomplete="off" />
-            </label>
-            <span class="systemBadge" aria-label="Antal synliga enheter">
-              Visar: <strong id="scopeFilterCount">0</strong>
-            </span>
-          </div>
-
-          <label style="margin-top:10px;">
-            Enheter (ENHET) – välj en eller flera (krävs för ADMIN)
-            <select id="scopeIds" multiple size="10" aria-label="Välj enheter"></select>
-
-            <div class="row wrap" style="gap:8px; margin-top:8px; align-items:center;">
-              <span class="mutedText">Valda enheter: <strong id="selectedCountNum">0</strong></span>
-            </div>
-
-            <div class="chipRow" id="selectedChips" aria-label="Valda enheter (chips)" style="display:none;"></div>
-
-            <div class="mutedText" style="margin-top:6px;">
-              Tips: håll <strong>Ctrl</strong> (Windows) / <strong>Cmd</strong> (Mac) för att välja flera i listan.
-            </div>
-
-            <div class="multiTools" aria-label="Verktyg för enhetsval">
-              <button id="btnSelectAll" type="button" class="miniBtn">Välj alla</button>
-              <button id="btnClearSel" type="button" class="miniBtn delete">Rensa val</button>
-            </div>
-          </label>
-
-          <div style="margin-top:10px;">
-            <label style="display:flex; gap:8px; align-items:center; margin:0;">
-              <input id="togManual" type="checkbox" style="width:auto; margin:0;" />
-              <span class="mutedText"><strong>Avancerat:</strong> klistra in enhets-ID</span>
-            </label>
-
-            <div id="manualWrap" style="display:none; margin-top:8px;">
-              <label>
-                Klistra in enhets-ID – en per rad
-                <textarea id="scopeManual" rows="6" placeholder="org_...&#10;org_..."></textarea>
-
-                <div class="mutedText" style="margin-top:6px;">
-                  <strong>Varning:</strong> Ogiltiga ID stoppar sparande (fail-closed).
-                </div>
-
-                <div class="multiTools" aria-label="Verktyg för klistra in" style="margin-top:8px;">
-                  <button id="btnMarkInList" type="button" class="miniBtn">Markera i listan</button>
-                  <span class="systemBadge" id="manualFeedback" style="display:none;"></span>
-                </div>
-              </label>
-            </div>
-          </div>
-
-          <hr style="border:none; border-top:1px solid var(--line); margin:12px 0;" />
-
-          <div class="row2">
-            <label>
-              Status
-              <input id="status" type="text" disabled value="—" />
-            </label>
-
-            <div class="hint" aria-label="Snabbguide">
-              <strong>Snabbguide:</strong><br/>
-              1) Ange empNo<br/>
-              2) Välj roll (ADMIN eller SYSTEM_ADMIN)<br/>
-              3) För <strong>ADMIN</strong>: välj <strong>en eller flera ENHETER</strong><br/>
-              4) Spara → kontrollera alltid <strong>Status</strong> / <strong>Datahälsa</strong> för återkoppling
-            </div>
-          </div>
-
-          <div class="statusStabilizer" id="savePreviewRow" style="margin-top:10px; display:none;">
-            <span class="systemBadge" id="savePreview"></span>
-          </div>
-
-          <div class="row-actions" style="margin-top:10px;">
-            <button id="btnSave" type="button" disabled>Spara</button>
-            <button id="btnNew" type="button" class="secondary">Ny</button>
-          </div>
-
-          <p id="msg" class="message" aria-live="polite"></p>
-
-          <div class="smallnote">
-            Regler: <strong>ADMIN kräver minst 1 ENHET</strong>. SYSTEM_ADMIN ska ha tom enhet.
-            <br/>Lagring: <code>AO-020_ROLE_ASSIGNMENTS_V2</code> (RW) + <code>AO-020_ORG_V1</code> (R).
-          </div>
-
-        </div>
-      </section>
-
-      <section class="tile panel list" aria-label="Lista assignments" id="listPanel" style="display:none;">
-        <div class="row space-between wrap" style="gap:10px; align-items:center;">
+    <!-- RIGHT: TREE / SEARCH -->
+    <section class="tile" aria-label="Org-träd">
+      <div class="panel">
+        <div class="rowBetween">
           <div>
-            <div class="panel-title" style="margin:0;">Assignments</div>
-            <div class="mutedText" id="listHeaderStats" style="margin-top:4px;">
-              Totalt: — • Problem: — • Saknar enhet: —
-            </div>
+            <div class="panel-title" style="margin:0;">Org-träd</div>
+            <div class="mutedText" id="treeHint" style="margin-top:4px;">Klicka “Redigera” för att ändra namn/typ/parent.</div>
           </div>
-
-          <div class="row wrap" style="gap:8px;">
-            <button type="button" class="btn secondary" id="btnHideList">Dölj lista</button>
+          <div class="row">
+            <button class="miniBtn" id="btnQuickEnhet" type="button">+ Enhet</button>
+            <button class="miniBtn" id="btnQuickBolag" type="button">+ Bolag</button>
           </div>
         </div>
 
         <div class="row2" style="margin:12px 0 10px;">
           <label>
-            Sök (empNo / roll / enhet)
-            <input id="search" type="text" placeholder="t.ex. 3001 eller ADMIN" />
+            Sök (namn / ID)
+            <input id="search" type="text" placeholder="t.ex. Enhet eller org_" autocomplete="off" />
           </label>
-
           <label>
             Filter
             <select id="filter">
               <option value="all" selected>Alla</option>
-              <option value="invalid">Ogiltiga enheter</option>
-              <option value="missing">Saknar enhet</option>
-              <option value="admin">ADMIN</option>
-              <option value="system_admin">SYSTEM_ADMIN</option>
+              <option value="enhet">Endast ENHET</option>
+              <option value="bolag">Endast Bolag</option>
+              <option value="problems">Visa problem</option>
             </select>
           </label>
         </div>
 
-        <div class="kpis" aria-label="Legend" style="margin: 0 0 8px;">
-          <span class="systemBadge">Hover på rad = preview</span>
-          <span class="pill warnpill">Saknar enhet (krävs)</span>
-          <span class="pill warnpill">Ogiltiga: org_x, org_y +N</span>
+        <div class="row" style="margin-top:8px;">
+          <span class="pill okpill" id="pillOk" style="display:none;">OK</span>
+          <span class="pill warnpill" id="pillWarn" style="display:none;">Varning</span>
         </div>
 
-        <div id="list" aria-label="Lista"></div>
+        <div id="tree"></div>
 
-        <div id="listEmpty" class="empty" style="display:none;">
-          Inga träffar för din sökning/filter.
+        <div id="treeEmpty" class="empty" style="display:none;">
+          Ingen data att visa.
         </div>
 
         <div class="smallnote">
-          Om du inte kan spara: skapa Org först, välj sedan ENHET(er) (root/bolag kan inte användas).
-        </div>
-      </section>
-
-    </div><!-- /layoutRoot -->
-
-    <div class="row wrap" style="gap:8px; margin-top:12px; justify-content:flex-end;" id="supportTriggerRow">
-      <button
-        id="btnSupport"
-        type="button"
-        class="btn secondary"
-        aria-controls="supportPanel"
-        aria-expanded="false"
-      >
-        Behöver du hjälp?
-      </button>
-    </div>
-
-    <section
-      id="supportPanel"
-      class="tile"
-      role="region"
-      aria-label="Support för Assignments"
-      style="display:none; margin-top:10px;"
-      tabindex="-1"
-    >
-      <div class="panel" style="padding:12px;">
-        <div class="row space-between wrap" style="gap:10px; align-items:center;">
-          <div>
-            <div class="panel-title" style="margin:0;">Support för Assignments</div>
-            <div class="mutedText" style="margin-top:4px;">
-              Kompakt FAQ. Ingen lagring, ingen AI, UI-only.
-            </div>
-          </div>
-
-          <div class="row wrap" style="gap:8px;">
-            <button id="btnCopyAnonStatus" type="button" class="btn secondary">
-              Kopiera status (anonym)
-            </button>
-            <button id="btnCloseSupport" type="button" class="btn secondary">
-              Stäng
-            </button>
-          </div>
-        </div>
-
-        <div class="tile" style="box-shadow:none; border:1px solid var(--line); margin-top:12px;">
-          <div class="panel" style="padding:12px;">
-            <div class="panel-title" style="margin:0 0 8px;">FAQ (vanligast)</div>
-
-            <details class="health" style="margin:0 0 10px;">
-              <summary class="title" style="cursor:pointer;">1) Jag kan inte spara</summary>
-              <div class="mutedText" style="margin-top:8px;">
-                Kontrollera: Org finns (root + ENHET), empNo är 1–12 siffror, roll är ADMIN/SYSTEM_ADMIN.
-                För ADMIN krävs minst 1 ENHET. Ogiltiga enhets-ID stoppar sparande (fail-closed).
-              </div>
-            </details>
-
-            <details class="health" style="margin:0 0 10px;">
-              <summary class="title" style="cursor:pointer;">2) Org saknas / “Systemet är inte konfigurerat”</summary>
-              <div class="mutedText" style="margin-top:8px;">
-                Gå till <strong>Org Builder</strong> och skapa root + minst en ENHET. Kom tillbaka hit och uppdatera sidan.
-              </div>
-            </details>
-
-            <details class="health" style="margin:0 0 10px;">
-              <summary class="title" style="cursor:pointer;">3) Vad menas med ENHET?</summary>
-              <div class="mutedText" style="margin-top:8px;">
-                ENHET är den enda nodtyp som får användas som scope för ADMIN. Root och Bolag kan inte väljas.
-              </div>
-            </details>
-
-            <details class="health" style="margin:0 0 10px;">
-              <summary class="title" style="cursor:pointer;">4) Ogiltiga enheter (varning)</summary>
-              <div class="mutedText" style="margin-top:8px;">
-                Det betyder att en eller flera scopeIds inte längre finns i org-trädet eller inte är typen ENHET.
-                Använd <strong>“Rensa ogiltiga enheter”</strong> i Datahälsa för att ta bort dem.
-              </div>
-            </details>
-
-            <details class="health" style="margin:0;">
-              <summary class="title" style="cursor:pointer;">5) SYSTEM_ADMIN har scope</summary>
-              <div class="mutedText" style="margin-top:8px;">
-                SYSTEM_ADMIN ska normalt ha tom scope. Datahälsa visar varning om scope är satt.
-                “Rensa ogiltiga enheter” rensar även scope för SYSTEM_ADMIN-rader.
-              </div>
-            </details>
-          </div>
-        </div>
-
-        <div class="mutedText" style="margin-top:10px;">
-          Tips: Tryck <strong>Esc</strong> för att stänga panelen.
+          Tips: Om du flyttar en nod (parent) — kontrollera att inga noder får “saknad parent”.
         </div>
       </div>
     </section>
-
-  </section>
+  </div>
 </main>
 
 <script src="../UI/UI-04-CONFIG.js"></script>
@@ -804,33 +463,14 @@ PATCH v1.3 – Stabilitet/UX:
   "use strict";
 
   const ORG_KEY = "AO-020_ORG_V1";
-  const ASSIGN_KEY = "AO-020_ROLE_ASSIGNMENTS_V2";
   const ROOT_ID = "org_root_v1";
 
-  const $ = (s) => document.querySelector(s);
-
-  // UI-only state (ingen lagring)
-  const UI_STATE = {
-    showList: false,
-    showHealth: false,
-
-    // PATCH v1.3 (P0/P1): wire-once + org-cache + health-auto-once
-    scopeFilterWired: false,
-    healthAutoExpandedOnce: false,
-    lastOrgRaw: null,
-    cachedOrgById: new Map(),
-    cachedOrgOk: false,
-
-    // wireScopeFilterUI exposes an apply() callback
-    scopeFilterApplyFn: null
-  };
-
+  const HRApp = window.HRApp;
   function safeReplace(url){
     try{ window.location.replace(url); }catch{ window.location.href = url; }
   }
 
-  // ---- Core guard (tidigt) ----
-  const HRApp = window.HRApp;
+  // --- Auth guard (fail-closed) ---
   if(!HRApp || typeof HRApp.requireAuth !== "function"){
     safeReplace("../UI/UI-01-SKELETON.html?err=core");
     return;
@@ -848,24 +488,11 @@ PATCH v1.3 – Stabilitet/UX:
     return;
   }
 
-  const who = $("#whoName");
-  const wr  = $("#whoRole");
-  if(who){
-    const emp = String(auth.empNo || "").trim();
-    who.textContent = emp ? ("#" + emp) : "SYSTEM_ADMIN";
-  }
-  if(wr) wr.textContent = "SYSTEM_ADMIN";
-
-  const navLogout = $("#navLogout");
-  if(navLogout){
-    navLogout.addEventListener("click", (e) => {
-      e.preventDefault();
-      try{ HRApp.logout(); }catch{ safeReplace("../UI/UI-01-SKELETON.html?err=logout"); }
-    });
-  }
+  // --- DOM helpers ---
+  const $ = (id) => document.getElementById(id);
 
   function setMsg(kind, text){
-    const m = $("#msg");
+    const m = $("msg");
     if(!m) return;
     m.className = "message" + (kind ? (" " + kind) : "");
     m.textContent = text || "";
@@ -886,68 +513,247 @@ PATCH v1.3 – Stabilitet/UX:
     localStorage.setItem(key, JSON.stringify(value));
   }
 
-  // -------------------------
-  // ORG read-only
-  // -------------------------
+  function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
+  function trimStr(v){ return safeStr(v).trim(); }
+
+  // --- UI state (UI-only) ---
+  let editingId = ""; // node.id
+
+  // --- normalize org nodes (tolerant) ---
   function normalizeOrgNodes(raw){
     const arr = Array.isArray(raw) ? raw : [];
     const nodes = [];
-
     for(const it of arr){
-      const id = String(it?.id || it?.scopeId || "").trim();
-      const name = String(it?.name || it?.label || it?.title || "").trim();
-      const type = String(it?.type || it?.kind || "").trim();
+      const id = trimStr(it?.id || it?.scopeId);
+      const name = trimStr(it?.name || it?.label || it?.title);
+      const type = trimStr(it?.type || it?.kind);
       const parentId = (it?.parentId === null || it?.parentId === undefined)
         ? null
-        : String(it?.parentId || it?.parent || "").trim();
+        : trimStr(it?.parentId || it?.parent);
 
       if(!id || !name) continue;
-      nodes.push({ id, name, type, parentId });
+      nodes.push({ id, name, type, parentId: parentId || null });
     }
-
     return nodes;
   }
 
-  function buildOrgIndex(nodes){
+  function buildIndex(nodes){
     const byId = new Map();
     for(const n of nodes){
       if(!byId.has(n.id)) byId.set(n.id, n);
     }
     const children = new Map();
-    nodes.forEach(n => children.set(n.id, []));
-    nodes.forEach(n => {
+    for(const n of nodes) children.set(n.id, []);
+    for(const n of nodes){
       const pid = n.parentId;
       if(pid && children.has(pid)) children.get(pid).push(n.id);
-    });
+    }
     return { byId, children };
   }
 
-  function isEnhetNode(node){
-    const t = String(node?.type || "").trim().toLowerCase();
-    return t === "enhet";
+  function normalizeType(t){
+    const s = trimStr(t);
+    if(!s) return "";
+    const low = s.toLowerCase();
+    if(low === "root") return "Root";
+    if(low === "bolag") return "Bolag";
+    if(low === "enhet") return "Enhet";
+    return s; // tolerant
   }
 
-  function isAllowedScopeNode(node){
-    if(!node) return false;
-    if(String(node.id || "").trim() === String(ROOT_ID || "").trim()) return false;
-    return isEnhetNode(node);
+  function isValidName(name){
+    const n = trimStr(name);
+    return n.length >= 2;
   }
 
-  function flattenOrgEnheter(nodes){
-    const idx = buildOrgIndex(nodes);
-    const out = [];
+  function makeId(){
+    // UI-only id generator (stabil nog för localStorage)
+    const rand = Math.random().toString(36).slice(2, 8);
+    const time = Date.now().toString(36).slice(-4);
+    return "org_" + rand + time;
+  }
+
+  // --- health / validation (fail-closed decisions only for critical actions) ---
+  function computeHealth(nodes){
+    const idx = buildIndex(nodes);
+    const hasRoot = idx.byId.has(ROOT_ID);
+
+    let problems = 0;
+    const issues = [];
+
+    // duplicates (by normalize in byId we lose duplicates; detect by counting)
     const seen = new Set();
+    const dups = new Set();
+    for(const n of nodes){
+      if(seen.has(n.id)) dups.add(n.id);
+      seen.add(n.id);
+    }
+    if(dups.size){
+      problems++;
+      issues.push(`Dubblett-ID: ${Array.from(dups).slice(0,2).join(", ")}${dups.size>2 ? " +"+(dups.size-2) : ""}`);
+    }
+
+    if(!hasRoot){
+      problems++;
+      issues.push("Root saknas (org_root_v1).");
+    }else{
+      const root = idx.byId.get(ROOT_ID);
+      if(root && normalizeType(root.type) !== "Root"){
+        problems++;
+        issues.push("Root har fel typ (bör vara Root).");
+      }
+      if(root && root.parentId !== null){
+        problems++;
+        issues.push("Root ska ha parentId=null.");
+      }
+    }
+
+    // missing parent (excluding null and root)
+    let missingParentCount = 0;
+    for(const n of nodes){
+      if(n.id === ROOT_ID) continue;
+      if(n.parentId === null) { missingParentCount++; continue; }
+      if(!idx.byId.has(n.parentId)) missingParentCount++;
+    }
+    if(missingParentCount){
+      problems++;
+      issues.push(`Saknad/ogiltig parentId: ${missingParentCount} nod(er).`);
+    }
+
+    // simple cycle detection (best effort)
+    function hasCycle(){
+      const visiting = new Set();
+      const visited = new Set();
+
+      function dfs(id){
+        if(visiting.has(id)) return true;
+        if(visited.has(id)) return false;
+        visiting.add(id);
+
+        const kids = idx.children.get(id) || [];
+        for(const k of kids){
+          if(dfs(k)) return true;
+        }
+
+        visiting.delete(id);
+        visited.add(id);
+        return false;
+      }
+
+      // start from root if exists, else from each node
+      if(idx.byId.has(ROOT_ID)){
+        return dfs(ROOT_ID);
+      }
+      for(const n of nodes){
+        if(dfs(n.id)) return true;
+      }
+      return false;
+    }
+
+    if(nodes.length && hasCycle()){
+      problems++;
+      issues.push("Cykel upptäckt (parent-loop).");
+    }
+
+    // counts
+    const bolag = nodes.filter(n => normalizeType(n.type) === "Bolag").length;
+    const enhet = nodes.filter(n => normalizeType(n.type) === "Enhet").length;
+
+    return { problems, issues, hasRoot, bolag, enhet, total: nodes.length };
+  }
+
+  function loadOrg(){
+    const raw = safeParseLocal(ORG_KEY, []);
+    return normalizeOrgNodes(raw);
+  }
+
+  function saveOrg(nodes){
+    // skriv tolerant format (id/name/type/parentId)
+    const out = nodes.map(n => ({
+      id: trimStr(n.id),
+      name: trimStr(n.name),
+      type: normalizeType(n.type),
+      parentId: (n.parentId === null || n.parentId === undefined) ? null : trimStr(n.parentId)
+    }));
+    saveLocal(ORG_KEY, out);
+  }
+
+  // --- form helpers ---
+  function resetForm(){
+    editingId = "";
+    $("nodeName").value = "";
+    $("nodeType").value = "Bolag";
+    $("nodeId").value = "—";
+    $("btnDelete").style.display = "none";
+    setMsg("", "");
+
+    // parent select will be set by renderParents()
+    syncEditingUI();
+  }
+
+  function syncEditingUI(){
+    const btnNew = $("btnNew");
+    const btnDel = $("btnDelete");
+    const nid = $("nodeId");
+
+    if(btnNew) btnNew.textContent = editingId ? "Avsluta redigering" : "Ny";
+    if(btnDel) btnDel.style.display = (editingId && editingId !== ROOT_ID) ? "inline-flex" : "none";
+    if(nid) nid.value = editingId ? editingId : makeId(); // preview id even before save
+  }
+
+  function setEditing(node){
+    if(!node) return;
+    editingId = node.id;
+
+    $("nodeName").value = node.name;
+    const t = normalizeType(node.type);
+    $("nodeType").value = (t === "Enhet") ? "Enhet" : (t === "Bolag" ? "Bolag" : "Bolag");
+
+    // parent select will be updated by renderParents, then set value
+    renderParents();
+    const pid = (node.parentId === null || node.parentId === undefined) ? "" : String(node.parentId);
+    $("parentId").value = pid;
+
+    $("nodeId").value = editingId;
+    setMsg("", "");
+    syncEditingUI();
+  }
+
+  // --- render parents select ---
+  function renderParents(){
+    const sel = $("parentId");
+    if(!sel) return;
+
+    while(sel.firstChild) sel.removeChild(sel.firstChild);
+
+    const nodes = loadOrg();
+    const idx = buildIndex(nodes);
+
+    // If no root, parent select is still shown but disabled
+    const optEmpty = document.createElement("option");
+    optEmpty.value = "";
+    optEmpty.textContent = "(parent saknas) — skapa Root först";
+    sel.appendChild(optEmpty);
+
+    if(!idx.byId.has(ROOT_ID)){
+      sel.disabled = true;
+      return;
+    }
+
+    sel.disabled = false;
+
+    // Build a stable display list (tree order)
+    const order = [];
+    const visited = new Set();
 
     function walk(id, depth){
-      if(seen.has(id)) return;
-      seen.add(id);
+      if(visited.has(id)) return;
+      visited.add(id);
 
       const n = idx.byId.get(id);
       if(!n) return;
 
-      if(isAllowedScopeNode(n)){
-        out.push({ id:n.id, name:n.name, type:n.type, depth });
-      }
+      order.push({ id:n.id, name:n.name, type:normalizeType(n.type), depth });
 
       const kids = (idx.children.get(id) || []).slice().sort((a,b) => {
         const na = idx.byId.get(a)?.name || "";
@@ -957,767 +763,203 @@ PATCH v1.3 – Stabilitet/UX:
       for(const k of kids) walk(k, depth+1);
     }
 
-    walk(ROOT_ID, 1);
-    return out;
-  }
-
-  // PATCH v1.3: read org raw string for cheap change detection (ingen ny storage key, endast läsa samma key)
-  function readOrgRaw(){
-    try{
-      const raw = localStorage.getItem(ORG_KEY);
-      return (raw === null || raw === undefined) ? "" : String(raw);
-    }catch{
-      return "";
-    }
-  }
-
-  function loadOrg(){
-    const raw = safeParseLocal(ORG_KEY, []);
-    const nodes = normalizeOrgNodes(raw);
-    const hasRoot = nodes.some(n => n.id === ROOT_ID);
-    if(!hasRoot) return { ok:false, nodes:[], reason:"NO_ROOT" };
-    return { ok:true, nodes, reason:"" };
-  }
-
-  // PATCH v1.3 (P0): wire scope filter once + expose apply()
-  function wireScopeFilterUIOnce(){
-    if(UI_STATE.scopeFilterWired) return;
-    const elFilter = document.getElementById("scopeFilter");
-    const elSelect = document.getElementById("scopeIds");
-    if(!elFilter || !elSelect) return;
-
-    function apply(){
-      const q = String(elFilter.value || "").trim().toLowerCase();
-      const opts = Array.from(elSelect.options || []);
-      let visibleCount = 0;
-
-      for(const o of opts){
-        const hay = (String(o.text || "") + " " + String(o.value || "")).toLowerCase();
-        const ok = !q || hay.includes(q);
-        o.hidden = !ok;
-        if(ok) visibleCount++;
-      }
-
-      const el = document.getElementById("scopeFilterCount");
-      if(el) el.textContent = String(visibleCount);
-    }
-
-    elFilter.addEventListener("input", apply);
-
-    UI_STATE.scopeFilterWired = true;
-    UI_STATE.scopeFilterApplyFn = apply;
-
-    // initial apply
-    apply();
-  }
-
-  function applyScopeFilterNow(){
-    if(typeof UI_STATE.scopeFilterApplyFn === "function"){
-      UI_STATE.scopeFilterApplyFn();
-    }
-  }
-
-  // -------------------------
-  // ASSIGNMENTS read/write
-  // -------------------------
-  function normalizeRole(role){
-    const r = String(role || "").trim();
-    return (r === "ADMIN" || r === "SYSTEM_ADMIN") ? r : "";
-  }
-
-  function normalizeEmpNo(empNo){
-    const s = String(empNo ?? "").trim();
-    if(!/^\d{1,12}$/.test(s)) return "";
-    return s;
-  }
-
-  function asStringArray(v){
-    if(Array.isArray(v)){
-      return v.map(x => String(x || "").trim()).filter(Boolean);
-    }
-    return [];
-  }
-
-  function dedupeStrings(arr){
-    const out = [];
-    const seen = new Set();
-    for(const s of arr){
-      const v = String(s || "").trim();
-      if(!v) continue;
-      if(seen.has(v)) continue;
-      seen.add(v);
-      out.push(v);
-    }
-    return out;
-  }
-
-  function loadAssignments(){
-    const raw = safeParseLocal(ASSIGN_KEY, {});
-    if(raw && typeof raw === "object" && !Array.isArray(raw)){
-      return raw;
-    }
-    return {};
-  }
-
-  function saveAssignments(map){
-    saveLocal(ASSIGN_KEY, map);
-  }
-
-  // -------------------------
-  // Validation helpers
-  // -------------------------
-  function isValidEnhetId(orgById, id){
-    const sid = String(id || "").trim();
-    if(!sid) return false;
-    if(sid === ROOT_ID) return false;
-    const n = orgById.get(sid);
-    if(!n) return false;
-    return isEnhetNode(n);
-  }
-
-  function getRowScopes(row){
-    const list = dedupeStrings(asStringArray(row?.scopeIds));
-    if(list.length) return list;
-    const legacy = String(row?.scopeId || "").trim();
-    return legacy ? [legacy] : [];
-  }
-
-  function computeHealth(assignMap, orgById){
-    let invalid = 0;
-    let missing = 0;
-
-    const byType = {
-      system_admin_scope_not_empty: { count: 0, examples: [] },
-      admin_missing_scope: { count: 0, examples: [] },
-      admin_invalid_scope: { count: 0, examples: [] }
-    };
-
-    function addType(typeKey, exampleId){
-      const bucket = byType[typeKey];
-      if(!bucket) return;
-      bucket.count++;
-      if(exampleId && bucket.examples.length < 2) bucket.examples.push(String(exampleId));
-    }
-
-    for(const empNo of Object.keys(assignMap || {})){
-      const row = assignMap[empNo];
-      const roleId = normalizeRole(row?.roleId);
-      if(!roleId) continue;
-
-      if(roleId === "SYSTEM_ADMIN"){
-        const scopes = getRowScopes(row);
-        if(scopes.length){
-          invalid++;
-          for(const sid of scopes){
-            addType("system_admin_scope_not_empty", sid);
-            if(byType.system_admin_scope_not_empty.examples.length >= 2) break;
-          }
-        }
-        continue;
-      }
-
-      const scopes = getRowScopes(row);
-
-      if(scopes.length === 0){
-        missing++;
-        addType("admin_missing_scope", empNo);
-        continue;
-      }
-
-      let hasInvalid = false;
-      for(const sid of scopes){
-        if(!isValidEnhetId(orgById, sid)){
-          hasInvalid = true;
-          addType("admin_invalid_scope", sid);
-        }
-      }
-      if(hasInvalid) invalid++;
-    }
-
-    return { invalid, missing, byType };
-  }
-
-  // -------------------------
-  // Blocker-only mode (UI-only)
-  // -------------------------
-  function setBlockerOnlyMode(on){
-    const layout = document.getElementById("layoutRoot");
-    const health = document.getElementById("healthBox");
-    const topActions = document.getElementById("topActions");
-    const statusBox = document.getElementById("statusBox");
-
-    // PATCH v1.3: Support-trigger ska vara synlig även i blocker-only (för FAQ + kopiera status)
-    if(on){
-      if(layout) layout.classList.add("hidden");
-      if(health) health.style.display = "none";
-      if(topActions) topActions.classList.add("hidden");
-      if(statusBox) statusBox.style.display = "none";
-    }else{
-      if(layout) layout.classList.remove("hidden");
-      if(topActions) topActions.classList.remove("hidden");
-    }
-  }
-
-  function showHealthBox(text, showClear){
-    const box = $("#healthBox");
-    $("#healthText").textContent = text || "—";
-    box.style.display = "block";
-    $("#btnClearInvalid").style.display = showClear ? "inline-block" : "none";
-  }
-
-  const btnHideHealth = $("#btnHideHealth");
-  if(btnHideHealth){
-    btnHideHealth.addEventListener("click", () => {
-      UI_STATE.showHealth = false;
-      const btn = document.getElementById("btnShowHealth");
-      if(btn) btn.setAttribute("aria-expanded", "false");
-      renderAll();
-    });
-  }
-
-  function showBlocker(text){
-    const b = $("#blockerBox");
-    const prefix = "Org saknas eller root saknas.";
-    const t = String(text || "—");
-    $("#blockerText").textContent = t.startsWith(prefix) ? t : (prefix + " " + t);
-    b.style.display = "block";
-  }
-  function hideBlocker(){ $("#blockerBox").style.display = "none"; }
-
-  // -------------------------
-  // UI state
-  // -------------------------
-  let editingEmpNo = "";
-  let orgOkState = false;
-
-  function setSaveEnabled(enabled){
-    $("#btnSave").disabled = !enabled;
-    $("#btnNew").disabled = false;
-  }
-
-  function setStatus(text){
-    const s = $("#status");
-    if(s) s.value = text || "";
-  }
-
-  function clearMultiSelect(sel){
-    for(const opt of sel.options){
-      opt.selected = false;
-    }
-  }
-
-  function getSelectedValues(sel){
-    const out = [];
-    for(const opt of sel.options){
-      if(opt.selected) out.push(String(opt.value || "").trim());
-    }
-    return dedupeStrings(out);
-  }
-
-  function setSelectedValues(sel, ids){
-    const set = new Set(dedupeStrings(ids));
-    for(const opt of sel.options){
-      const v = String(opt.value || "").trim();
-      opt.selected = set.has(v);
-    }
-  }
-
-  function updateSelectedUI(orgById){
-    const role = normalizeRole($("#roleId").value);
-    const numEl = document.getElementById("selectedCountNum");
-    const chipsWrap = document.getElementById("selectedChips");
-
-    if(!numEl || !chipsWrap) return;
-
-    if(role !== "ADMIN" || !orgOkState){
-      numEl.textContent = "0";
-      chipsWrap.style.display = "none";
-      while(chipsWrap.firstChild) chipsWrap.removeChild(chipsWrap.firstChild);
-      return;
-    }
-
-    const sel = document.getElementById("scopeIds");
-    const selected = sel ? getSelectedValues(sel) : [];
-
-    numEl.textContent = String(selected.length);
-
-    while(chipsWrap.firstChild) chipsWrap.removeChild(chipsWrap.firstChild);
-
-    if(selected.length === 0){
-      chipsWrap.style.display = "none";
-      return;
-    }
-
-    const shown = selected.slice(0, 5);
-    const rest = selected.length - shown.length;
-
-    for(const id of shown){
-      const chip = document.createElement("span");
-      chip.className = "chip";
-      const n = orgById ? orgById.get(id) : null;
-      chip.textContent = n ? n.name : id;
-      chipsWrap.appendChild(chip);
-    }
-
-    if(rest > 0){
-      const more = document.createElement("span");
-      more.className = "chip more";
-      more.textContent = "+" + rest;
-      chipsWrap.appendChild(more);
-    }
-
-    chipsWrap.style.display = "flex";
-  }
-
-  function computeFormValidity(orgById){
-    if(!orgOkState) return { ok:false, status:"Skapa Org först", preview:"" };
-
-    const roleId = normalizeRole($("#roleId").value);
-    const empNo = normalizeEmpNo($("#empNo").value);
-
-    if(!empNo) return { ok:false, status:"empNo måste vara 1–12 siffror", preview:"" };
-    if(!roleId) return { ok:false, status:"Välj roll", preview:"" };
-
-    if(roleId === "SYSTEM_ADMIN"){
-      return { ok:true, status:"Redo att spara", preview:"Kommer spara: SYSTEM_ADMIN • scope ignoreras" };
-    }
-
-    const selected = getSelectedValues(document.getElementById("scopeIds"));
-    let merged = selected;
-
-    const manualOn = !!document.getElementById("togManual")?.checked;
-    if(manualOn){
-      const manualLines = String(document.getElementById("scopeManual")?.value || "")
-        .split(/\r?\n/)
-        .map(s => String(s || "").trim())
-        .filter(Boolean);
-      merged = dedupeStrings(selected.concat(manualLines));
-    }
-
-    if(merged.length === 0) return { ok:false, status:"Välj minst 1 ENHET", preview:"" };
-
-    const invalid = merged.filter(id => !isValidEnhetId(orgById, id));
-    if(invalid.length) return { ok:false, status:"Ogiltiga enhets-ID stoppar sparande", preview:"" };
-
-    return { ok:true, status:"Redo att spara", preview:`Kommer spara: ADMIN • ${merged.length} ENHETER` };
-  }
-
-  function syncEditingUI(){
-    const btnNew = $("#btnNew");
-    const isEditing = !!editingEmpNo;
-
-    if(btnNew){
-      btnNew.textContent = isEditing ? "Avsluta redigering" : "Ny";
-    }
-
-    const lnk = document.getElementById("lnkChangeEmpNo");
-    if(lnk){
-      lnk.style.display = isEditing ? "inline-flex" : "none";
-    }
-  }
-
-  function resetForm(){
-    editingEmpNo = "";
-    $("#empNo").value = "";
-    $("#roleId").value = "ADMIN";
-
-    const togg = document.getElementById("togManual");
-    if(togg) togg.checked = false;
-
-    const mw = document.getElementById("manualWrap");
-    if(mw) mw.style.display = "none";
-
-    const manual = $("#scopeManual");
-    if(manual) manual.value = "";
-
-    $("#empNo").disabled = false;
-
-    const sel = $("#scopeIds");
-    if(sel) clearMultiSelect(sel);
-
-    const fb = document.getElementById("manualFeedback");
-    if(fb){ fb.textContent = ""; fb.style.display = "none"; }
-
-    setMsg("", "");
-    syncScopeEnabled();
-    syncEditingUI();
-  }
-
-  function setEditing(empNo, row, orgById){
-    editingEmpNo = empNo;
-
-    $("#empNo").value = empNo;
-    $("#empNo").disabled = true;
-
-    const role = normalizeRole(row?.roleId) || "ADMIN";
-    $("#roleId").value = (role === "SYSTEM_ADMIN") ? "SYSTEM_ADMIN" : "ADMIN";
-
-    const scopes = getRowScopes(row);
-
-    const sel = $("#scopeIds");
-    if(orgById && sel){
-      const valid = scopes.filter(id => isValidEnhetId(orgById, id));
-      setSelectedValues(sel, valid);
-      applyScopeFilterNow();
-    }
-
-    const togg = document.getElementById("togManual");
-    const mw = document.getElementById("manualWrap");
-    if(togg && mw){
-      togg.checked = false;
-      mw.style.display = "none";
-    }
-    $("#scopeManual").value = scopes.join("\n");
-
-    setMsg("", "");
-    syncScopeEnabled();
-    syncEditingUI();
-  }
-
-  function syncScopeEnabled(){
-    const role = normalizeRole($("#roleId").value);
-    const sel = $("#scopeIds");
-    const manual = $("#scopeManual");
-    const togg = document.getElementById("togManual");
-
-    const orgBadge = document.getElementById("orgBadge");
-    if(orgBadge) orgBadge.style.display = orgOkState ? "inline-flex" : "none";
-
-    if(!orgOkState){
-      if(sel) sel.disabled = true;
-      if(togg) togg.disabled = true;
-      if(manual) manual.disabled = true;
-      return;
-    }
-
-    if(togg) togg.disabled = false;
-
-    if(role === "SYSTEM_ADMIN"){
-      if(sel){
-        sel.disabled = true;
-        clearMultiSelect(sel);
-      }
-      if(togg) togg.checked = false;
-      const mw = document.getElementById("manualWrap");
-      if(mw) mw.style.display = "none";
-      if(manual){
-        manual.disabled = true;
-        manual.value = "";
-      }
-      return;
-    }
-
-    if(sel) sel.disabled = false;
-
-    const manualOn = !!document.getElementById("togManual")?.checked;
-    if(manual){
-      manual.disabled = !manualOn;
-    }
-  }
-
-  const togManual = document.getElementById("togManual");
-  if(togManual){
-    togManual.addEventListener("change", () => {
-      const mw = document.getElementById("manualWrap");
-      const manual = document.getElementById("scopeManual");
-      const on = !!togManual.checked;
-
-      if(mw) mw.style.display = on ? "block" : "none";
-      if(manual) manual.disabled = !on;
-
-      const fb = document.getElementById("manualFeedback");
-      if(fb){ fb.textContent = ""; fb.style.display = "none"; }
-
-      renderAll();
-    });
-  }
-
-  function syncRoleNote(){
-    const role = normalizeRole($("#roleId").value);
-    const note = document.getElementById("sysAdminNote");
-    const badge = document.getElementById("roleBadge");
-    if(role === "SYSTEM_ADMIN"){
-      if(note) note.style.display = "block";
-      if(badge) badge.style.display = "inline-flex";
-    }else{
-      if(note) note.style.display = "none";
-      if(badge) badge.style.display = "none";
-    }
-  }
-
-  $("#roleId").addEventListener("change", () => {
-    syncScopeEnabled();
-    syncRoleNote();
-    renderAll();
-  });
-
-  const lnkChange = document.getElementById("lnkChangeEmpNo");
-  if(lnkChange){
-    lnkChange.addEventListener("click", (e) => {
-      e.preventDefault();
-      resetForm();
-      const emp = document.getElementById("empNo");
-      if(emp) emp.focus({ preventScroll:true });
-      renderAll();
-    });
-  }
-
-  // -------------------------
-  // Render scope multi-select (ENHET-only)
-  // PATCH v1.3: endast rebuild när org ändrats
-  // -------------------------
-  function renderScopeMultiSelect(orgNodes){
-    const sel = $("#scopeIds");
-    if(!sel) return;
-
-    // preserve current selection before rebuild (P0)
-    const prevSelected = getSelectedValues(sel);
-
+    walk(ROOT_ID, 0);
+
+    // parent options: allow selecting root and any other node EXCEPT the node itself (avoid trivial cycles)
+    // (Extra cycle prevention is handled in save validation.)
+    // Replace placeholder option
     while(sel.firstChild) sel.removeChild(sel.firstChild);
 
-    const enheter = flattenOrgEnheter(orgNodes);
+    for(const r of order){
+      // if editing, do not allow selecting itself as parent
+      if(editingId && r.id === editingId) continue;
 
-    if(enheter.length === 0){
-      const opt = document.createElement("option");
-      opt.value = "";
-      opt.textContent = "— Inga ENHETER finns i org ännu —";
-      opt.disabled = true;
-      opt.selected = false;
-      sel.appendChild(opt);
-      return;
-    }
-
-    for(const r of enheter){
       const opt = document.createElement("option");
       opt.value = r.id;
-      const indent = "—".repeat(Math.min(Math.max(r.depth - 1, 0), 10));
-      opt.textContent = `${indent} ${r.name} (${r.id})`;
+      const indent = "—".repeat(Math.min(Math.max(r.depth, 0), 10));
+      opt.textContent = `${indent} ${r.name} [${r.type}] (${r.id})`;
       sel.appendChild(opt);
     }
 
-    // restore previous selection if still present
-    if(prevSelected.length){
-      setSelectedValues(sel, prevSelected);
-    }
-
-    // apply filter after rebuild
-    applyScopeFilterNow();
-  }
-
-  function applyManualToSelection(orgById){
-    const role = normalizeRole($("#roleId").value);
-    const manualOn = !!document.getElementById("togManual")?.checked;
-    if(role !== "ADMIN" || !manualOn) return;
-
-    const raw = String($("#scopeManual").value || "");
-    const lines = raw.split(/\r?\n/).map(s => String(s || "").trim()).filter(Boolean);
-    const ids = dedupeStrings(lines);
-
-    const valid = ids.filter(id => isValidEnhetId(orgById, id));
-    setSelectedValues($("#scopeIds"), valid);
-    applyScopeFilterNow();
-
-    const fb = document.getElementById("manualFeedback");
-    if(fb){
-      const invalidCount = ids.length - valid.length;
-      const okCount = valid.length;
-      if(okCount === 0 && invalidCount === 0){
-        fb.style.display = "none";
-      }else{
-        const parts = [];
-        if(okCount) parts.push(`✅ ${okCount} giltiga markerade`);
-        if(invalidCount) parts.push(`⚠️ ${invalidCount} ogiltiga`);
-        fb.textContent = parts.join(" • ");
-        fb.style.display = "inline-flex";
-      }
+    // If not editing, default parent = root
+    if(!editingId){
+      sel.value = ROOT_ID;
+    }else{
+      // keep current if possible
+      const cur = loadOrg().find(x => x.id === editingId);
+      sel.value = (cur && cur.parentId) ? cur.parentId : ROOT_ID;
     }
   }
 
-  // Manual input -> bara UI, renderAll tar beslut
-  const scopeManual = document.getElementById("scopeManual");
-  if(scopeManual){
-    scopeManual.addEventListener("input", () => {
-      renderAll();
-    });
-  }
-
-  const selScope = document.getElementById("scopeIds");
-  if(selScope){
-    selScope.addEventListener("change", () => {
-      renderAll();
-    });
-  }
-
-  $("#btnSelectAll").addEventListener("click", () => {
-    const role = normalizeRole($("#roleId").value);
-    if(role !== "ADMIN") return;
-    const sel = $("#scopeIds");
-    for(const opt of sel.options){
-      if(!opt.disabled && !opt.hidden) opt.selected = true;
-    }
-    renderAll();
-  });
-
-  $("#btnClearSel").addEventListener("click", () => {
-    const role = normalizeRole($("#roleId").value);
-    if(role !== "ADMIN") return;
-    clearMultiSelect($("#scopeIds"));
-    renderAll();
-  });
-
-  // Manual markera knapp (ENDa stället som gör manual->selection, P0)
-  const btnMark = document.getElementById("btnMarkInList");
-  if(btnMark){
-    btnMark.addEventListener("click", () => {
-      if(!UI_STATE.cachedOrgOk){
-        setMsg("err", "Fail-closed: Org saknas. Skapa org i Org Builder först.");
-        return;
-      }
-      applyManualToSelection(UI_STATE.cachedOrgById);
-      renderAll();
-    });
-  }
-
-  // -------------------------
-  // Render list (DOM + textContent)
-  // -------------------------
-  function renderKpis(assignMap, health){
-    const total = Object.keys(assignMap).length;
-    $("#kpiRows").textContent = String(total);
-    $("#kpiInvalid").textContent = String(health.invalid);
-    $("#kpiMissing").textContent = String(health.missing);
-  }
-
-  function makePill(text, className){
+  // --- render tree list ---
+  function makePill(text, cls){
     const s = document.createElement("span");
-    s.className = "pill" + (className ? (" " + className) : "");
+    s.className = "pill" + (cls ? (" " + cls) : "");
     s.textContent = text;
     return s;
   }
 
-  function prettyEnhetNames(orgById, ids, max){
-    const out = [];
-    const lim = Number.isFinite(max) ? max : 4;
-    for(const id of ids){
-      const n = orgById.get(id);
-      out.push(n ? n.name : id);
-      if(out.length >= lim) break;
+  function renderTree(){
+    const nodes = loadOrg();
+    const health = computeHealth(nodes);
+
+    $("kpiNodes").textContent = String(health.total);
+    $("kpiBolag").textContent = String(health.bolag);
+    $("kpiEnheter").textContent = String(health.enhet);
+
+    // pills
+    const pillRoot = $("pillRoot");
+    const pillShape = $("pillShape");
+
+    if(health.hasRoot){
+      pillRoot.textContent = "Root: OK";
+      pillRoot.className = "pill okpill";
+    }else{
+      pillRoot.textContent = "Root: SAKNAS";
+      pillRoot.className = "pill warnpill";
     }
-    return out;
-  }
 
-  function formatInvalidIds(ids){
-    const arr = dedupeStrings(asStringArray(ids));
-    if(arr.length === 0) return "";
-    const shown = arr.slice(0, 2);
-    const rest = arr.length - shown.length;
-    return rest > 0 ? `${shown.join(", ")} +${rest}` : shown.join(", ");
-  }
+    if(health.problems === 0){
+      pillShape.textContent = "Datakoll: OK";
+      pillShape.className = "pill okpill";
+      $("pillOk").style.display = "inline-flex";
+      $("pillWarn").style.display = "none";
+    }else{
+      pillShape.textContent = `Datakoll: Varning (${health.problems})`;
+      pillShape.className = "pill warnpill";
+      $("pillOk").style.display = "none";
+      $("pillWarn").style.display = "inline-flex";
+    }
 
-  function renderList(assignMap, orgById){
-    const list = $("#list");
-    while(list.firstChild) list.removeChild(list.firstChild);
+    // blocker
+    const blocker = $("blocker");
+    const btnCreateRoot = $("btnCreateRoot");
+    const btnResetOrg = $("btnResetOrg");
 
-    const q = String($("#search").value || "").trim().toLowerCase();
-    const filter = $("#filter").value;
+    if(!health.hasRoot){
+      blocker.style.display = "block";
+      $("blockerText").textContent = "Root saknas. Skapa Root för att kunna använda Assignments.";
+      if(btnCreateRoot) btnCreateRoot.style.display = "inline-flex";
+      if(btnResetOrg) btnResetOrg.style.display = "inline-flex";
+    }else if(health.enhet === 0){
+      blocker.style.display = "block";
+      $("blockerText").textContent = "Org finns men saknar ENHET. Lägg till minst en ENHET för att kunna spara assignments.";
+      if(btnCreateRoot) btnCreateRoot.style.display = "none";
+      if(btnResetOrg) btnResetOrg.style.display = "inline-flex";
+    }else{
+      blocker.style.display = "none";
+    }
 
+    // tree render (filter/search)
+    const tree = $("tree");
+    while(tree.firstChild) tree.removeChild(tree.firstChild);
+
+    const q = trimStr($("search").value).toLowerCase();
+    const filter = $("filter").value;
+
+    if(nodes.length === 0){
+      $("treeEmpty").style.display = "block";
+      return;
+    }
+    $("treeEmpty").style.display = "none";
+
+    const idx = buildIndex(nodes);
+
+    // build tree order from root; include orphans separately
     const rows = [];
-    for(const empNo of Object.keys(assignMap).sort((a,b) => a.localeCompare(b, "sv"))){
-      const row = assignMap[empNo];
-      const roleId = normalizeRole(row?.roleId);
-      if(!roleId) continue;
+    const visited = new Set();
 
-      const scopes = getRowScopes(row);
-      const updatedAt = Number(row?.updatedAt) || null;
+    function includeNode(n, depth, flags){
+      rows.push({ n, depth, flags });
+    }
 
-      let invalidScope = false;
-      let missingScope = false;
-      let invalidIds = [];
-
-      if(roleId === "SYSTEM_ADMIN"){
-        invalidIds = scopes.slice();
-        invalidScope = scopes.length > 0;
-        missingScope = false;
-      }else{
-        missingScope = scopes.length === 0;
-        if(!missingScope){
-          for(const sid of scopes){
-            if(!isValidEnhetId(orgById, sid)){
-              invalidScope = true;
-              invalidIds.push(sid);
-            }
-          }
-        }
+    function nodeHasProblem(n){
+      // problems: missing parent, wrong root shape, duplicate handled elsewhere
+      if(n.id === ROOT_ID){
+        if(normalizeType(n.type) !== "Root") return true;
+        if(n.parentId !== null) return true;
+        return false;
       }
+      if(n.parentId === null) return true;
+      if(!idx.byId.has(n.parentId)) return true;
+      return false;
+    }
 
-      if(filter === "invalid" && !invalidScope) continue;
-      if(filter === "missing" && !missingScope) continue;
-      if(filter === "admin" && roleId !== "ADMIN") continue;
-      if(filter === "system_admin" && roleId !== "SYSTEM_ADMIN") continue;
+    function walk(id, depth){
+      if(visited.has(id)) return;
+      visited.add(id);
+
+      const n = idx.byId.get(id);
+      if(!n) return;
+
+      const isProblem = nodeHasProblem(n);
+      includeNode(n, depth, { problem:isProblem });
+
+      const kids = (idx.children.get(id) || []).slice().sort((a,b) => {
+        const na = idx.byId.get(a)?.name || "";
+        const nb = idx.byId.get(b)?.name || "";
+        return na.localeCompare(nb, "sv");
+      });
+      for(const k of kids) walk(k, depth+1);
+    }
+
+    if(idx.byId.has(ROOT_ID)){
+      walk(ROOT_ID, 0);
+    }
+
+    // orphans not visited
+    for(const n of nodes){
+      if(!visited.has(n.id)){
+        includeNode(n, 0, { problem:true, orphan:true });
+      }
+    }
+
+    function matchesRow(r){
+      const t = normalizeType(r.n.type);
+      if(filter === "enhet" && t !== "Enhet") return false;
+      if(filter === "bolag" && t !== "Bolag") return false;
+      if(filter === "problems" && !r.flags.problem) return false;
 
       if(q){
-        const blob = `${empNo} ${roleId} ${scopes.join(" ")}`.toLowerCase();
-        if(!blob.includes(q)) continue;
+        const blob = `${r.n.name} ${r.n.id}`.toLowerCase();
+        if(!blob.includes(q)) return false;
       }
-
-      rows.push({ empNo, roleId, scopes, invalidScope, missingScope, invalidIds, updatedAt });
+      return true;
     }
 
-    const emptyEl = document.getElementById("listEmpty");
-    if(emptyEl) emptyEl.style.display = (rows.length === 0) ? "block" : "none";
-    if(rows.length === 0) return;
+    const shown = rows.filter(matchesRow);
 
-    for(const r of rows){
-      const isEditing = (editingEmpNo && r.empNo === editingEmpNo);
+    if(shown.length === 0){
+      $("treeEmpty").style.display = "block";
+      return;
+    }
+    $("treeEmpty").style.display = "none";
+
+    for(const r of shown){
+      const n = r.n;
+      const t = normalizeType(n.type);
 
       const item = document.createElement("div");
-      item.className = "item" + (r.invalidScope ? " danger" : "") + (isEditing ? " editingHighlight" : "");
-
-      const updTxt = r.updatedAt ? new Date(r.updatedAt).toLocaleString("sv-SE") : "—";
-      item.title = `Roll: ${r.roleId} • Enheter: ${r.scopes.length} • Senast uppdaterad: ${updTxt}`;
+      item.className = "item" + (r.flags.problem ? " danger" : "");
 
       const left = document.createElement("div");
+      left.style.minWidth = "0";
 
       const title = document.createElement("p");
       title.className = "item-title";
-      title.textContent = "#" + r.empNo;
+      const indent = "—".repeat(Math.min(Math.max(r.depth, 0), 12));
+      title.textContent = `${indent} ${n.name}`;
       left.appendChild(title);
 
       const meta = document.createElement("div");
       meta.className = "meta";
+      meta.appendChild(makePill(`Typ: ${t}`, t === "Enhet" ? "okpill" : ""));
+      meta.appendChild(makePill(`ID: ${n.id}`));
+      meta.appendChild(makePill(`Parent: ${n.parentId === null ? "null" : n.parentId}`));
 
-      meta.appendChild(makePill("Role: " + r.roleId, r.roleId === "SYSTEM_ADMIN" ? "okpill" : ""));
-
-      if(r.roleId === "SYSTEM_ADMIN"){
-        meta.appendChild(makePill("System", "okpill"));
-        if(r.invalidScope){
-          const idsTxt = formatInvalidIds(r.invalidIds);
-          meta.appendChild(makePill(`Ogiltiga: ${idsTxt || "scope satt"}`, "warnpill"));
-        }else{
-          meta.appendChild(makePill("Scope: — (rekommenderat)", "okpill"));
-        }
-      }else{
-        if(r.missingScope){
-          meta.appendChild(makePill("Saknar enhet (krävs)", "warnpill"));
-        }else{
-          const names = prettyEnhetNames(orgById, r.scopes, 4);
-          const suffix = (r.scopes.length > 4) ? ` +${r.scopes.length - 4}` : "";
-          meta.appendChild(makePill(`Enheter: ${r.scopes.length}`, r.invalidScope ? "warnpill" : "okpill"));
-          meta.appendChild(makePill(`Ex: ${names.join(", ")}${suffix}`, r.invalidScope ? "warnpill" : ""));
-
-          if(r.invalidScope){
-            const idsTxt = formatInvalidIds(r.invalidIds);
-            meta.appendChild(makePill(`Ogiltiga: ${idsTxt || "—"}`, "warnpill"));
-          }
-        }
-      }
-
-      if(isEditing) meta.appendChild(makePill(`Redigerar #${r.empNo}`, "okpill"));
-
-      if(r.updatedAt){
-        const d = new Date(r.updatedAt);
-        meta.appendChild(makePill("Uppdat: " + d.toLocaleString("sv-SE")));
-      }
+      if(n.id === ROOT_ID) meta.appendChild(makePill("ROOT (låst)", "okpill"));
+      if(r.flags.orphan) meta.appendChild(makePill("Orphan", "warnpill"));
+      if(r.flags.problem) meta.appendChild(makePill("Problem", "warnpill"));
 
       left.appendChild(meta);
 
@@ -1730,27 +972,22 @@ PATCH v1.3 – Stabilitet/UX:
       btnEdit.className = "miniBtn";
       btnEdit.textContent = "Redigera";
       btnEdit.addEventListener("click", () => {
-        const row = assignMap[r.empNo];
-        if(!row) return;
-        setEditing(r.empNo, row, orgById);
-        renderAll();
+        const fresh = loadOrg();
+        const node = fresh.find(x => x.id === n.id);
+        if(!node) return;
+        setEditing(node);
+        setMsg("", "");
       });
 
       const btnDel = document.createElement("button");
       btnDel.type = "button";
       btnDel.className = "miniBtn delete";
       btnDel.textContent = "Ta bort";
+      btnDel.disabled = (n.id === ROOT_ID);
+      btnDel.title = (n.id === ROOT_ID) ? "Root kan inte tas bort här" : "";
       btnDel.addEventListener("click", () => {
-        if(!confirm(`Ta bort assignment för empNo #${r.empNo}?`)) return;
-
-        const next = loadAssignments();
-        delete next[r.empNo];
-        saveAssignments(next);
-
-        if(editingEmpNo === r.empNo) resetForm();
-
-        setMsg("ok", "Borttaget.");
-        renderAll();
+        if(n.id === ROOT_ID) return;
+        deleteNode(n.id);
       });
 
       right.appendChild(btnEdit);
@@ -1758,514 +995,239 @@ PATCH v1.3 – Stabilitet/UX:
 
       item.appendChild(left);
       item.appendChild(right);
-      list.appendChild(item);
+      tree.appendChild(item);
     }
+
+    // parents select needs refresh because tree changed/loaded
+    renderParents();
+    syncEditingUI();
   }
 
-  // -------------------------
-  // Clear invalid scopes (ADMIN: scopeIds)
-  // -------------------------
-  const btnClearInvalid = $("#btnClearInvalid");
-  if(btnClearInvalid){
-    btnClearInvalid.addEventListener("click", () => {
-      const org = loadOrg();
-      if(!org.ok){
-        setMsg("err", "Fail-closed: Org saknas. Skapa org i Org Builder först.");
-        return;
-      }
-      const orgById = buildOrgIndex(org.nodes).byId;
+  function wouldCreateCycle(nodes, movingId, newParentId){
+    if(!movingId || !newParentId) return false;
+    if(movingId === newParentId) return true;
 
-      const map = loadAssignments();
-      let changed = 0;
+    const idx = buildIndex(nodes);
 
-      for(const empNo of Object.keys(map)){
-        const row = map[empNo];
-        const roleId = normalizeRole(row?.roleId);
-        if(!roleId) continue;
-
-        if(roleId === "SYSTEM_ADMIN"){
-          const curScopes = getRowScopes(row);
-          if(curScopes.length){
-            map[empNo] = { roleId:"SYSTEM_ADMIN", scopeId:"", updatedAt: Date.now() };
-            changed++;
-          }
-          continue;
-        }
-
-        const scopes = getRowScopes(row);
-        const keep = scopes.filter(id => isValidEnhetId(orgById, id));
-        const nextScopes = dedupeStrings(keep);
-
-        const same =
-          nextScopes.length === scopes.length &&
-          nextScopes.every((v,i) => v === scopes[i]);
-
-        if(!same){
-          map[empNo] = {
-            roleId: "ADMIN",
-            scopeIds: nextScopes,
-            scopeId: nextScopes[0] || "",
-            updatedAt: Date.now()
-          };
-          changed++;
-        }
-      }
-
-      saveAssignments(map);
-      setMsg("ok", changed ? `Rensat/justerat ${changed} rad(er).` : "Inget att rensa.");
-      renderAll();
-    });
+    // walk up from newParentId and see if we reach movingId
+    let cur = newParentId;
+    const guard = new Set();
+    while(cur){
+      if(guard.has(cur)) return true; // loop already
+      guard.add(cur);
+      if(cur === movingId) return true;
+      const n = idx.byId.get(cur);
+      if(!n) return false;
+      cur = n.parentId;
+    }
+    return false;
   }
 
-  // -------------------------
-  // Save handler
-  // -------------------------
-  $("#btnSave").addEventListener("click", () => {
+  function createRoot(){
+    const nodes = loadOrg();
+    const idx = buildIndex(nodes);
+    if(idx.byId.has(ROOT_ID)){
+      setMsg("err", "Root finns redan.");
+      return;
+    }
+    const root = { id: ROOT_ID, name: "Root", type: "Root", parentId: null };
+    nodes.unshift(root);
+    saveOrg(nodes);
+    setMsg("ok", "Root skapad.");
+    resetForm();
+    renderTree();
+  }
+
+  function resetOrgDanger(){
+    if(!confirm("Rensa hela Org? Detta tar bort alla noder och kan påverka Assignments (fail-closed).")) return;
+    saveOrg([]);
+    setMsg("ok", "Org rensad.");
+    resetForm();
+    renderTree();
+  }
+
+  function deleteNode(id){
+    const nodes = loadOrg();
+    if(id === ROOT_ID){
+      setMsg("err", "Root kan inte tas bort.");
+      return;
+    }
+    const idx = buildIndex(nodes);
+
+    // Prevent delete if has children unless confirmed
+    const kids = (idx.children.get(id) || []);
+    if(kids.length){
+      const ok = confirm(`Noden har ${kids.length} barn. Ta bort noden och flytta barnen till Root?`);
+      if(!ok) return;
+
+      // move children to root (fail-safe)
+      for(const cid of kids){
+        const child = idx.byId.get(cid);
+        if(child) child.parentId = ROOT_ID;
+      }
+    }
+
+    const next = nodes.filter(n => n.id !== id);
+    saveOrg(next);
+
+    if(editingId === id) resetForm();
+    setMsg("ok", "Borttaget.");
+    renderTree();
+  }
+
+  function saveNode(){
     setMsg("", "");
 
-    const org = loadOrg();
-    if(!org.ok){
-      setMsg("err", "Fail-closed: Org saknas. Gå till Org Builder och skapa minst root + ENHET.");
-      showBlocker("Org saknas (eller root saknas). Skapa organisation först, sedan kan du skapa assignments.");
-      setSaveEnabled(false);
+    const name = trimStr($("nodeName").value);
+    const type = normalizeType($("nodeType").value);
+    const parentId = trimStr($("parentId").value);
+
+    const nodes = loadOrg();
+    const idx = buildIndex(nodes);
+
+    if(!idx.byId.has(ROOT_ID)){
+      setMsg("err", "Fail-closed: Root saknas. Skapa Root först.");
       return;
     }
 
-    const orgById = buildOrgIndex(org.nodes).byId;
-
-    const empNo = normalizeEmpNo($("#empNo").value);
-    if(!empNo){
-      setMsg("err", "empNo måste vara 1–12 siffror.");
+    if(!isValidName(name)){
+      setMsg("err", "Namn måste vara minst 2 tecken.");
       return;
     }
 
-    const roleId = normalizeRole($("#roleId").value);
-    if(!roleId){
-      setMsg("err", "Ogiltig roll.");
+    if(type !== "Bolag" && type !== "Enhet"){
+      setMsg("err", "Ogiltig typ.");
       return;
     }
 
-    if(roleId !== "ADMIN" && roleId !== "SYSTEM_ADMIN"){
-      setMsg("err", "Fail-closed: denna sida kopplar endast ADMIN (och ev SYSTEM_ADMIN).");
+    if(!parentId || !idx.byId.has(parentId)){
+      setMsg("err", "Välj giltig parent.");
       return;
     }
 
-    let scopeIds = [];
-    if(roleId === "SYSTEM_ADMIN"){
-      scopeIds = [];
-    }else{
-      const selected = getSelectedValues($("#scopeIds"));
+    // determine id
+    let id = editingId ? editingId : trimStr($("nodeId").value);
+    if(!id || id === "—") id = makeId();
+    if(id === ROOT_ID){
+      setMsg("err", "Root kan inte redigeras via denna form (endast via Root-knappen).");
+      return;
+    }
 
-      const manualOn = !!document.getElementById("togManual")?.checked;
-      let merged = selected;
+    // cycle prevention
+    const testNodes = normalizeOrgNodes(nodes.map(n => ({...n})));
+    if(wouldCreateCycle(testNodes, id, parentId)){
+      setMsg("err", "Fail-closed: Parent-val skapar cykel.");
+      return;
+    }
 
-      if(manualOn){
-        const manualLines = String($("#scopeManual").value || "")
-          .split(/\r?\n/)
-          .map(s => String(s || "").trim())
-          .filter(Boolean);
-        merged = dedupeStrings(selected.concat(manualLines));
+    // upsert
+    let found = false;
+    const next = nodes.map(n => {
+      if(n.id === id){
+        found = true;
+        return { id, name, type, parentId };
       }
+      return n;
+    });
 
-      const invalid = merged.filter(id => !isValidEnhetId(orgById, id));
-      if(invalid.length){
-        setMsg("err", "Fail-closed: en eller flera enhets-ID är ogiltiga eller inte ENHET. Rätta/ta bort dem och försök igen.");
-        return;
+    if(!found){
+      // ensure unique id
+      if(idx.byId.has(id)){
+        // collision -> generate a new id (fail-safe)
+        id = makeId();
       }
-
-      scopeIds = merged;
-      if(scopeIds.length === 0){
-        setMsg("err", "ADMIN kräver minst 1 ENHET.");
-        return;
-      }
+      next.push({ id, name, type, parentId });
     }
 
-    const map = loadAssignments();
-    const now = Date.now();
+    // Also ensure root shape remains correct if root exists
+    // (We keep it as-is; assignments requires root id)
+    saveOrg(next);
 
-    if(roleId === "SYSTEM_ADMIN"){
-      map[empNo] = { roleId:"SYSTEM_ADMIN", scopeId:"", updatedAt: now };
-    }else{
-      map[empNo] = { roleId:"ADMIN", scopeIds, scopeId: scopeIds[0] || "", updatedAt: now };
-    }
-
-    saveAssignments(map);
-
-    setMsg("ok", editingEmpNo ? "Uppdaterat." : "Skapat.");
+    setMsg("ok", found ? "Uppdaterat." : "Skapat.");
     resetForm();
-    renderAll();
-  });
-
-  $("#btnNew").addEventListener("click", () => {
-    resetForm();
-    renderAll();
-  });
-
-  $("#search").addEventListener("input", renderAll);
-  $("#filter").addEventListener("change", renderAll);
-  $("#empNo").addEventListener("input", renderAll);
-
-  // -------------------------
-  // Health toggles
-  // -------------------------
-  const btnShowHealth = document.getElementById("btnShowHealth");
-  if(btnShowHealth){
-    btnShowHealth.addEventListener("click", () => {
-      UI_STATE.showHealth = !UI_STATE.showHealth;
-      btnShowHealth.setAttribute("aria-expanded", UI_STATE.showHealth ? "true" : "false");
-      renderAll();
-    });
+    renderTree();
   }
 
-  function setHealthCollapsed(collapsed){
-    const box = document.getElementById("healthBox");
-    if(!box) return;
-    if(collapsed) box.classList.add("healthCollapsed");
-    else box.classList.remove("healthCollapsed");
-  }
-
-  // -------------------------
-  // List toggles
-  // -------------------------
-  const btnToggleList = document.getElementById("btnToggleList");
-  const btnHideList = document.getElementById("btnHideList");
-  if(btnToggleList){
-    btnToggleList.addEventListener("click", () => {
-      UI_STATE.showList = true;
-      btnToggleList.setAttribute("aria-expanded", "true");
-      renderAll();
-    });
-  }
-  if(btnHideList){
-    btnHideList.addEventListener("click", () => {
-      UI_STATE.showList = false;
-      if(btnToggleList) btnToggleList.setAttribute("aria-expanded", "false");
-      renderAll();
-    });
-  }
-
-  function syncListVisibility(totalRows, problemRows, missingRows){
-    const listPanel = document.getElementById("listPanel");
-    const layout = document.getElementById("layoutRoot");
-    const btn = document.getElementById("btnToggleList");
-
-    const canShow = totalRows > 0;
-    if(btn){
-      btn.style.display = canShow ? "inline-flex" : "none";
-      btn.textContent = UI_STATE.showList ? "Lista visas" : "Visa lista";
-      btn.disabled = UI_STATE.showList;
-    }
-
-    if(!listPanel || !layout) return;
-
-    const shouldShow = canShow && UI_STATE.showList;
-    listPanel.style.display = shouldShow ? "block" : "none";
-    layout.classList.toggle("hasList", !!shouldShow);
-
-    const hdr = document.getElementById("listHeaderStats");
-    if(hdr){
-      hdr.textContent = `Totalt: ${totalRows} • Problem: ${problemRows} • Saknar enhet: ${missingRows}`;
-    }
-  }
-
-  // -------------------------
-  // Support panel (kompakt) — aldrig auto
-  // -------------------------
-  (function supportPanelInit(){
-    const btnOpen = document.getElementById("btnSupport");
-    const panel = document.getElementById("supportPanel");
-    const btnClose = document.getElementById("btnCloseSupport");
-    const btnCopy = document.getElementById("btnCopyAnonStatus");
-
-    let lastFocusEl = null;
-
-    function openPanel(){
-      if(!panel || !btnOpen) return;
-      lastFocusEl = document.activeElement;
-      panel.style.display = "block";
-      btnOpen.setAttribute("aria-expanded", "true");
-      panel.focus({ preventScroll:true });
-    }
-
-    function closePanel(){
-      if(!panel || !btnOpen) return;
-      panel.style.display = "none";
-      btnOpen.setAttribute("aria-expanded", "false");
-      if(lastFocusEl && typeof lastFocusEl.focus === "function"){
-        lastFocusEl.focus({ preventScroll:true });
-      }else{
-        btnOpen.focus({ preventScroll:true });
-      }
-    }
-
-    function isOpen(){
-      return panel && panel.style.display !== "none";
-    }
-
-    document.addEventListener("keydown", (e) => {
-      if(e.key === "Escape" && isOpen()){
-        e.preventDefault();
-        closePanel();
-      }
-    });
-
-    if(btnOpen){
-      btnOpen.addEventListener("click", () => {
-        if(isOpen()) closePanel();
-        else openPanel();
-      });
-    }
-    if(btnClose){
-      btnClose.addEventListener("click", closePanel);
-    }
-
-    function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
-    async function copyText(txt){
-      const s = safeStr(txt);
-      if(!s) return false;
-      try{
-        if(navigator.clipboard && navigator.clipboard.writeText){
-          await navigator.clipboard.writeText(s);
-          return true;
-        }
-      }catch(_e){}
-      try{
-        const ta = document.createElement("textarea");
-        ta.value = s;
-        ta.setAttribute("readonly", "true");
-        ta.style.position = "fixed";
-        ta.style.left = "-9999px";
-        document.body.appendChild(ta);
-        ta.select();
-        const ok = document.execCommand("copy");
-        document.body.removeChild(ta);
-        return !!ok;
-      }catch(_e2){
-        return false;
-      }
-    }
-
-    function getAnonStatusLine(){
-      const orgOk = !!orgOkState;
-      const roleSel = document.getElementById("roleId");
-      const role = roleSel ? String(roleSel.value || "").trim() : "—";
-
-      const sel = document.getElementById("scopeIds");
-      let selectedCount = 0;
-      if(sel && !sel.disabled){
-        for(const opt of sel.options){
-          if(opt && opt.selected && !opt.disabled) selectedCount++;
-        }
-      }
-
-      const manualOn = !!document.getElementById("togManual")?.checked;
-      const manual = document.getElementById("scopeManual");
-      let manualLines = 0;
-      if(manualOn && manual && !manual.disabled){
-        manualLines = String(manual.value || "")
-          .split(/\r?\n/)
-          .map(s => String(s || "").trim())
-          .filter(Boolean).length;
-      }
-
-      const kpiInvalid = document.getElementById("kpiInvalid");
-      const invalidWarn = (kpiInvalid && Number(kpiInvalid.textContent) > 0) ? "JA" : "NEJ";
-
-      return [
-        `Org: ${orgOk ? "OK" : "SAKNAS"}`,
-        `Roll: ${role === "ADMIN" || role === "SYSTEM_ADMIN" ? role : "—"}`,
-        `Valda enheter: ${selectedCount}`,
-        `Manualrader: ${manualOn ? manualLines : 0}`,
-        `Invalid-varning: ${invalidWarn}`
-      ].join(" • ");
-    }
-
-    if(btnCopy){
-      btnCopy.addEventListener("click", async () => {
-        const line = getAnonStatusLine();
-        await copyText(line);
-      });
-    }
-  })();
-
-  // -------------------------
-  // Main render
-  // -------------------------
-  function renderAll(){
-    // PATCH v1.3: wire filter once (no repeat listeners)
-    wireScopeFilterUIOnce();
-
-    // org cache / change detect
-    const orgRawNow = readOrgRaw();
-    const orgChanged = (UI_STATE.lastOrgRaw !== orgRawNow);
-
-    const org = loadOrg();
-    orgOkState = !!org.ok;
-
-    let orgById = new Map();
-
-    if(org.ok){
-      hideBlocker();
-      setBlockerOnlyMode(false);
-
-      // Build index always for correctness, but cache for reuse in actions
-      orgById = buildOrgIndex(org.nodes).byId;
-
-      UI_STATE.cachedOrgById = orgById;
-      UI_STATE.cachedOrgOk = true;
-
-      // Rebuild select only if org changed OR first render (P0)
-      if(orgChanged || UI_STATE.lastOrgRaw === null){
-        renderScopeMultiSelect(org.nodes);
-      }
-
-      // update org raw marker
-      UI_STATE.lastOrgRaw = orgRawNow;
-
-      // badges
-      const orgBadge = document.getElementById("orgBadge");
-      if(orgBadge) orgBadge.style.display = "inline-flex";
-
-      // IMPORTANT (P0): do NOT auto-apply manual->selection here. Only on button.
-      // still update chips/count
-      updateSelectedUI(orgById);
-
-      // apply filter (in case options exist)
-      applyScopeFilterNow();
-
-    }else{
-      UI_STATE.cachedOrgById = new Map();
-      UI_STATE.cachedOrgOk = false;
-
-      showBlocker("Org saknas/är korrupt. Skapa org i Org Builder innan du kan spara assignments.");
-      setBlockerOnlyMode(true);
-
-      setSaveEnabled(false);
-
-      const sel = $("#scopeIds");
-      if(sel){
-        while(sel.firstChild) sel.removeChild(sel.firstChild);
-        const opt = document.createElement("option");
-        opt.value = "";
-        opt.textContent = "— Org saknas (gå till System • Org Builder) —";
-        opt.disabled = true;
-        sel.appendChild(opt);
-        sel.disabled = true;
-      }
-
-      // support trigger remains visible by design
+  function quickCreate(type){
+    const nodes = loadOrg();
+    const idx = buildIndex(nodes);
+    if(!idx.byId.has(ROOT_ID)){
+      setMsg("err", "Skapa Root först.");
       return;
     }
 
-    syncRoleNote();
-
-    const map = loadAssignments();
-    const health = computeHealth(map, orgById);
-
-    renderKpis(map, health);
-
-    // PATCH v1.3 (P1): auto-expand health only once per load, and only if invalid>0
-    if(health.invalid > 0 && !UI_STATE.healthAutoExpandedOnce){
-      UI_STATE.showHealth = true;
-      UI_STATE.healthAutoExpandedOnce = true;
-      if(btnShowHealth) btnShowHealth.setAttribute("aria-expanded", "true");
+    // pick parent: if there is any bolag under root and we create enhet -> default to first bolag, else root.
+    let parentId = ROOT_ID;
+    if(type === "Enhet"){
+      const bolag = nodes.find(n => normalizeType(n.type) === "Bolag");
+      if(bolag) parentId = bolag.id;
     }
 
-    if(UI_STATE.showHealth){
-      showHealthBox(
-        health.invalid > 0
-          ? `Varning: ${health.invalid} assignment(s) har ogiltig scope (ej ENHET / saknad nod / SYSTEM_ADMIN har scope).`
-          : "OK: Inga fel hittades i assignments.",
-        (health.invalid > 0)
-      );
-      setHealthCollapsed(false);
-    }else{
-      showHealthBox(
-        health.invalid > 0
-          ? `Varning: ${health.invalid} assignment(s) har ogiltig scope.`
-          : "Datahälsa är kollapsad.",
-        (health.invalid > 0)
-      );
-      setHealthCollapsed(true);
-    }
-
-    if(health.byType){
-      const parts = [];
-      const lines = [];
-      const order = [
-        ["system_admin_scope_not_empty", "SYSTEM_ADMIN har scope"],
-        ["admin_missing_scope", "ADMIN saknar enhet (krävs)"],
-        ["admin_invalid_scope", "ADMIN har ogiltig enhet"]
-      ];
-
-      let totalTypes = 0;
-      for(const [k, label] of order){
-        const b = health.byType[k];
-        if(b && b.count > 0){
-          totalTypes++;
-          const ex = (b.examples && b.examples.length)
-            ? ` (ex: ${b.examples.join(", ")}${b.count > b.examples.length ? " +"+(b.count - b.examples.length) : ""})`
-            : "";
-          parts.push(`${b.count}× ${label}`);
-          lines.push(`${b.count}× ${label}${ex}`);
-        }
-      }
-
-      const elSum = document.getElementById("healthSummary");
-      const elList = document.getElementById("healthList");
-      if(elSum){
-        elSum.textContent = parts.length
-          ? `${health.invalid} fel (${totalTypes} typer): ${parts.join(", ")}`
-          : "";
-      }
-      if(elList){
-        while(elList.firstChild) elList.removeChild(elList.firstChild);
-        for(const t of lines){
-          const li = document.createElement("li");
-          li.textContent = t;
-          elList.appendChild(li);
-        }
-      }
-    }
-
-    const validity = computeFormValidity(orgById);
-    setStatus(validity.status);
-
-    const previewRow = document.getElementById("savePreviewRow");
-    const preview = document.getElementById("savePreview");
-    if(previewRow && preview){
-      if(validity.ok && validity.preview){
-        preview.textContent = validity.preview;
-        previewRow.style.display = "flex";
-      }else{
-        preview.textContent = "";
-        previewRow.style.display = "none";
-      }
-    }
-
-    setSaveEnabled(!!validity.ok);
-
-    const totalRows = Object.keys(map).length;
-    const problemRows = health.invalid;
-    const missingRows = health.missing;
-    syncListVisibility(totalRows, problemRows, missingRows);
-
-    if(UI_STATE.showList && totalRows > 0){
-      renderList(map, orgById);
-    }else{
-      const list = document.getElementById("list");
-      if(list) while(list.firstChild) list.removeChild(list.firstChild);
-      const emptyEl = document.getElementById("listEmpty");
-      if(emptyEl) emptyEl.style.display = "none";
-    }
-
+    editingId = "";
+    $("nodeType").value = (type === "Enhet") ? "Enhet" : "Bolag";
+    $("nodeName").value = (type === "Enhet") ? "Ny enhet" : "Nytt bolag";
+    renderParents();
+    $("parentId").value = parentId;
     syncEditingUI();
-    updateSelectedUI(orgById);
+    $("nodeName").focus({ preventScroll:true });
   }
+
+  // --- wire auth header ---
+  $("pillReadOnly").style.display = "inline-flex";
+  const emp = trimStr(auth.empNo);
+  $("whoName").textContent = emp ? ("#" + emp) : "SYSTEM_ADMIN";
+  $("whoRole").textContent = "SYSTEM_ADMIN";
+
+  const navLogout = $("navLogout");
+  if(navLogout){
+    navLogout.addEventListener("click", (e) => {
+      e.preventDefault();
+      try{ HRApp.logout(); }catch{ safeReplace("../UI/UI-01-SKELETON.html?err=logout"); }
+    });
+  }
+
+  // --- events ---
+  $("btnRefresh").addEventListener("click", () => { setMsg("", ""); renderTree(); });
+
+  $("btnCreateRoot").addEventListener("click", createRoot);
+  $("btnResetOrg").addEventListener("click", resetOrgDanger);
+
+  $("btnSave").addEventListener("click", saveNode);
+
+  $("btnNew").addEventListener("click", () => {
+    if(editingId){
+      resetForm();
+      renderParents();
+      syncEditingUI();
+      renderTree();
+    }else{
+      resetForm();
+      renderParents();
+      syncEditingUI();
+    }
+  });
+
+  $("btnDelete").addEventListener("click", () => {
+    if(!editingId || editingId === ROOT_ID) return;
+    deleteNode(editingId);
+  });
+
+  $("search").addEventListener("input", renderTree);
+  $("filter").addEventListener("change", renderTree);
+
+  $("btnQuickEnhet").addEventListener("click", () => quickCreate("Enhet"));
+  $("btnQuickBolag").addEventListener("click", () => quickCreate("Bolag"));
+
+  // keep nodeId preview fresh when not editing
+  ["nodeName","nodeType"].forEach(id => {
+    const el = $(id);
+    if(el) el.addEventListener("input", () => { if(!editingId) syncEditingUI(); });
+  });
 
   // init
   resetForm();
-  renderAll();
+  renderParents();
+  renderTree();
 
 })();
 </script>
