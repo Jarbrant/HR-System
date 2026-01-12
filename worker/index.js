@@ -34,6 +34,23 @@ export default {
     const requireAuth = safeStr(env.REQUIRE_AUTH).trim().toLowerCase() === "true";
     const aiEnabled = safeStr(env.AI_ENABLED).trim().toLowerCase() === "true";
 
+    // ---------- ENV GUARD (fail-closed) ----------
+    // Om ALLOWED_ORIGIN saknas -> fail-closed med tydlig felkod (ingen wildcard).
+    if (!allowedOrigin) {
+      console.error("ERR", requestId, "ENV_MISSING");
+      return okJSON(
+        500,
+        {
+          ok: false,
+          requestId,
+          error: { code: "ENV_MISSING", message: "ALLOWED_ORIGIN saknas i env" }
+        },
+        {
+          "Content-Type": "application/json; charset=utf-8"
+        }
+      );
+    }
+
     // ---------- CORS (STRICT) ----------
     // RULE:
     // - OPTIONS: origin måste matcha ALLOWED_ORIGIN, annars 403 (JSON)
@@ -41,12 +58,11 @@ export default {
     // - GET /health: tillåt även utan Origin (praktiskt för curl/monitoring),
     //   men om Origin finns måste den matcha ALLOWED_ORIGIN.
     const origin = request.headers.get("Origin") || "";
-
     const corsHeaders = buildCorsHeaders(origin, allowedOrigin);
 
     // ---------- OPTIONS (Preflight) ----------
     if (request.method === "OPTIONS") {
-      if (!allowedOrigin || origin !== allowedOrigin) {
+      if (origin !== allowedOrigin) {
         return errorJSON(
           403,
           requestId,
@@ -63,7 +79,7 @@ export default {
     // ---------- ROUTES ----------
     if (request.method === "GET" && url.pathname === "/health") {
       // Health: om Origin finns måste matcha
-      if (origin && (!allowedOrigin || origin !== allowedOrigin)) {
+      if (origin && origin !== allowedOrigin) {
         return errorJSON(
           403,
           requestId,
@@ -110,7 +126,7 @@ export default {
     }
 
     // CORS strikt för AI
-    if (!allowedOrigin || origin !== allowedOrigin) {
+    if (origin !== allowedOrigin) {
       return errorJSON(
         403,
         requestId,
@@ -321,7 +337,7 @@ function okJSON(status, payload, corsHeaders) {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      ...corsHeaders
+      ...(corsHeaders || {})
     }
   });
 }
@@ -397,12 +413,8 @@ function buildDeterministicMock({ mode, count, language, context, requestId, aiE
 
     blocks.push({
       type: "info",
-      title: language === "sv"
-        ? `Block ${i + 1}`
-        : `Block ${i + 1}`,
-      text: language === "sv"
-        ? "Exempeltext (mock)."
-        : "Example text (mock).",
+      title: language === "sv" ? `Block ${i + 1}` : `Block ${i + 1}`,
+      text: language === "sv" ? "Exempeltext (mock)." : "Example text (mock).",
       meta: {
         difficulty: diff,
         mins,
@@ -423,4 +435,3 @@ function hash32(str) {
   }
   return h >>> 0;
 }
-
