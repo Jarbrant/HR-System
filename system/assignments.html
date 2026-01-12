@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-SYS-ASSIGNMENTS-MULTI-ENHET-01 (PATCH v1.3) | FIL-ID: system/assignments.html
+AO-SYS-ASSIGNMENTS-MULTI-ENHET-01 (PATCH v1.4) | FIL-ID: system/assignments.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: SYSTEM_ADMIN – Koppla empNo -> (roleId + scopeIds[]) enligt org-trädet (ENHET-only)
 Nivå: UI-only (GitHub Pages)
@@ -43,6 +43,13 @@ PATCH v1.3 – Stabilitet/UX:
 - P0: Manual->Selection sker endast via knapp (inte varje render)
 - P1: Health auto-expand endast första gången per sidladd
 - P1: Support-trigger synlig även i blocker-only
+
+PATCH v1.4 – Autopatch (stabilitet/fail-closed):
+- P0: showHealthBox null-guards (ingen hard-crash om DOM saknas)
+- P0: safe write till localStorage (quota/privacy) => fail-closed med felmeddelande
+- P0: blocker-mode återställer list-state (undvik halvlägen)
+- P1: health auto-expand även vid "missing" (ADMIN saknar enhet)
+- P1: health-text visar invalid + missing tydligare
 ============================================================ -->
 
 <!doctype html>
@@ -882,8 +889,14 @@ PATCH v1.3 – Stabilitet/UX:
     }
   }
 
+  // PATCH v1.4 (P0): safe write (quota/privacy) => fail-closed signal
   function saveLocal(key, value){
-    localStorage.setItem(key, JSON.stringify(value));
+    try{
+      localStorage.setItem(key, JSON.stringify(value));
+      return true;
+    }catch(_e){
+      return false;
+    }
   }
 
   // -------------------------
@@ -1060,7 +1073,7 @@ PATCH v1.3 – Stabilitet/UX:
   }
 
   function saveAssignments(map){
-    saveLocal(ASSIGN_KEY, map);
+    return saveLocal(ASSIGN_KEY, map);
   }
 
   // -------------------------
@@ -1158,11 +1171,14 @@ PATCH v1.3 – Stabilitet/UX:
     }
   }
 
+  // PATCH v1.4 (P0): null-guards
   function showHealthBox(text, showClear){
     const box = $("#healthBox");
-    $("#healthText").textContent = text || "—";
-    box.style.display = "block";
-    $("#btnClearInvalid").style.display = showClear ? "inline-block" : "none";
+    const elText = document.getElementById("healthText");
+    const btnClear = document.getElementById("btnClearInvalid");
+    if(elText) elText.textContent = text || "—";
+    if(box) box.style.display = "block";
+    if(btnClear) btnClear.style.display = showClear ? "inline-block" : "none";
   }
 
   const btnHideHealth = $("#btnHideHealth");
@@ -1179,10 +1195,14 @@ PATCH v1.3 – Stabilitet/UX:
     const b = $("#blockerBox");
     const prefix = "Org saknas eller root saknas.";
     const t = String(text || "—");
-    $("#blockerText").textContent = t.startsWith(prefix) ? t : (prefix + " " + t);
-    b.style.display = "block";
+    const bt = document.getElementById("blockerText");
+    if(bt) bt.textContent = t.startsWith(prefix) ? t : (prefix + " " + t);
+    if(b) b.style.display = "block";
   }
-  function hideBlocker(){ $("#blockerBox").style.display = "none"; }
+  function hideBlocker(){
+    const b = $("#blockerBox");
+    if(b) b.style.display = "none";
+  }
 
   // -------------------------
   // UI state
@@ -1191,8 +1211,10 @@ PATCH v1.3 – Stabilitet/UX:
   let orgOkState = false;
 
   function setSaveEnabled(enabled){
-    $("#btnSave").disabled = !enabled;
-    $("#btnNew").disabled = false;
+    const bSave = document.getElementById("btnSave");
+    const bNew = document.getElementById("btnNew");
+    if(bSave) bSave.disabled = !enabled;
+    if(bNew) bNew.disabled = false;
   }
 
   function setStatus(text){
@@ -1745,7 +1767,13 @@ PATCH v1.3 – Stabilitet/UX:
 
         const next = loadAssignments();
         delete next[r.empNo];
-        saveAssignments(next);
+
+        // PATCH v1.4 (P0): safe write
+        const ok = saveAssignments(next);
+        if(!ok){
+          setMsg("err", "Kunde inte spara (localStorage blockerad/full). Inget har ändrats.");
+          return;
+        }
 
         if(editingEmpNo === r.empNo) resetForm();
 
@@ -1811,7 +1839,13 @@ PATCH v1.3 – Stabilitet/UX:
         }
       }
 
-      saveAssignments(map);
+      // PATCH v1.4 (P0): safe write
+      const ok = saveAssignments(map);
+      if(!ok){
+        setMsg("err", "Kunde inte spara (localStorage blockerad/full). Inget har ändrats.");
+        return;
+      }
+
       setMsg("ok", changed ? `Rensat/justerat ${changed} rad(er).` : "Inget att rensa.");
       renderAll();
     });
@@ -1889,7 +1923,12 @@ PATCH v1.3 – Stabilitet/UX:
       map[empNo] = { roleId:"ADMIN", scopeIds, scopeId: scopeIds[0] || "", updatedAt: now };
     }
 
-    saveAssignments(map);
+    // PATCH v1.4 (P0): safe write
+    const ok = saveAssignments(map);
+    if(!ok){
+      setMsg("err", "Kunde inte spara (localStorage blockerad/full). Inget har sparats.");
+      return;
+    }
 
     setMsg("ok", editingEmpNo ? "Uppdaterat." : "Skapat.");
     resetForm();
@@ -2137,6 +2176,11 @@ PATCH v1.3 – Stabilitet/UX:
       UI_STATE.cachedOrgById = new Map();
       UI_STATE.cachedOrgOk = false;
 
+      // PATCH v1.4 (P0): reset list-state to avoid half-open UI when blocked
+      UI_STATE.showList = false;
+      const btn = document.getElementById("btnToggleList");
+      if(btn) btn.setAttribute("aria-expanded", "false");
+
       showBlocker("Org saknas/är korrupt. Skapa org i Org Builder innan du kan spara assignments.");
       setBlockerOnlyMode(true);
 
@@ -2164,25 +2208,30 @@ PATCH v1.3 – Stabilitet/UX:
 
     renderKpis(map, health);
 
-    // PATCH v1.3 (P1): auto-expand health only once per load, and only if invalid>0
-    if(health.invalid > 0 && !UI_STATE.healthAutoExpandedOnce){
+    // PATCH v1.4 (P1): auto-expand health once per load if invalid>0 OR missing>0
+    if((health.invalid > 0 || health.missing > 0) && !UI_STATE.healthAutoExpandedOnce){
       UI_STATE.showHealth = true;
       UI_STATE.healthAutoExpandedOnce = true;
       if(btnShowHealth) btnShowHealth.setAttribute("aria-expanded", "true");
     }
 
+    // PATCH v1.4 (P1): health-text tydligare (invalid + missing)
+    const hasProblems = (health.invalid > 0 || health.missing > 0);
     if(UI_STATE.showHealth){
+      const parts = [];
+      if(health.invalid > 0) parts.push(`${health.invalid} med ogiltig scope`);
+      if(health.missing > 0) parts.push(`${health.missing} som saknar enhet`);
       showHealthBox(
-        health.invalid > 0
-          ? `Varning: ${health.invalid} assignment(s) har ogiltig scope (ej ENHET / saknad nod / SYSTEM_ADMIN har scope).`
+        hasProblems
+          ? `Varning: ${parts.join(" • ")}.`
           : "OK: Inga fel hittades i assignments.",
         (health.invalid > 0)
       );
       setHealthCollapsed(false);
     }else{
       showHealthBox(
-        health.invalid > 0
-          ? `Varning: ${health.invalid} assignment(s) har ogiltig scope.`
+        hasProblems
+          ? `Varning: ${health.invalid} ogiltig scope • ${health.missing} saknar enhet.`
           : "Datahälsa är kollapsad.",
         (health.invalid > 0)
       );
@@ -2215,7 +2264,7 @@ PATCH v1.3 – Stabilitet/UX:
       const elList = document.getElementById("healthList");
       if(elSum){
         elSum.textContent = parts.length
-          ? `${health.invalid} fel (${totalTypes} typer): ${parts.join(", ")}`
+          ? `${health.invalid} ogiltig scope (${totalTypes} typer): ${parts.join(", ")}`
           : "";
       }
       if(elList){
