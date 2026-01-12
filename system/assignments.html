@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-SYS-ASSIGNMENTS-MULTI-ENHET-01 (PATCH v1.2) | FIL-ID: system/assignments.html
+AO-SYS-ASSIGNMENTS-MULTI-ENHET-01 (PATCH v1.3) | FIL-ID: system/assignments.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: SYSTEM_ADMIN – Koppla empNo -> (roleId + scopeIds[]) enligt org-trädet (ENHET-only)
 Nivå: UI-only (GitHub Pages)
@@ -24,8 +24,8 @@ Datamodell (RW, bakåtkompatibel vid läs):
 {
   "3001": {
     "roleId":"ADMIN|SYSTEM_ADMIN",
-    "scopeIds":["<enhetId1>","<enhetId2>"],   // NY (ADMIN)
-    "scopeId":"<enhetId1>",                  // legacy-stöd (för äldre moduler), hålls synkad vid save
+    "scopeIds":["<enhetId1>","<enhetId2>"],
+    "scopeId":"<enhetId1>", // legacy-stöd, hålls synkad vid save
     "updatedAt": 1730000000000
   }
 }
@@ -37,27 +37,14 @@ Regler (LÅST):
 - Delete är tillåtet (tar bort assignment-rad), alltid bekräftelse
 - Import/Export: finns ej i denna AO (undviker risk)
 
-PATCH v1.2 – MULTI-ENHET (ADMIN):
-- UI: Enhet -> Enheter (multi-select) + dedupe + validering ENHET-only
-- Bakåtkompatibilitet: läser scopeId om scopeIds saknas; vid save skriver scopeIds + scopeId=first
-- XSS: list-rendering utan innerHTML (DOM + textContent)
+PATCH v1.3 – Stabilitet/UX:
+- P0: Sluta rebuild:a multi-select på varje render (bevarar val)
+- P0: wireScopeFilterUI binds endast en gång (inga dubbla listeners)
+- P0: Manual->Selection sker endast via knapp (inte varje render)
+- P1: Health auto-expand endast första gången per sidladd
+- P1: Support-trigger synlig även i blocker-only
 ============================================================ -->
 
-<!-- ============================================================
-AO-01 → BLOCK 1/12 — Metadata & CSS (UI-bas)
-AO-02 → BLOCK 3/12 — Topbar
-AO-03 → BLOCK 4/12 — Intro / Blocker / Health / Support-trigger
-AO-04 → BLOCK 5/12 — FORM (Skapa / Redigera) (3 steg)
-AO-05 → BLOCK 6/12 — LISTA (sekundär, toggle)
-AO-06 → BLOCK 7/12 — Externa scripts (ingen flytt)
-AO-07 → BLOCK 8/12 — Bootstrap / Auth / Helpers (UI-feedback)
-AO-08 → BLOCK 13 — Supportpanel (kompakt FAQ, aldrig auto)
-============================================================ -->
-
-<!-- ============================================================
-BLOCK 1/12 — DOKUMENTSTART (HTML) + METADATA
-Syfte: Grundstruktur + head-metadata + stylesheets.
-============================================================ -->
 <!doctype html>
 <html lang="sv">
 <head>
@@ -81,7 +68,7 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
     --r14: 14px;
     --muted: rgba(17,17,17,.68);
 
-    /* AO-01: primär accent = blå (statusfärger separat) */
+    /* primär accent = blå (statusfärger separat) */
     --accent: rgba(59,130,246,.80);
     --accent-soft: rgba(11,95,255,.18);
     --accent-ink: rgba(11,95,255,.92);
@@ -121,7 +108,7 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
   .topBtn.logout{ background: rgba(220,38,38,.08); border-color: rgba(220,38,38,.25); color: var(--danger-ink); }
   .topBtn.logout:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); border-color: rgba(220,38,38,.35); }
 
-  /* AO-02: aktiv sida tydligare (Assignments) */
+  /* aktiv sida tydligare (Assignments) */
   .topBtn[aria-current="page"]{
     border-color: rgba(11,95,255,.30);
     box-shadow: var(--tile-shadow-1), 0 10px 24px rgba(59,130,246,.10);
@@ -131,7 +118,7 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
 
   main.container{ max-width: var(--wrap-max); margin: 0 auto; padding: var(--wrap-pad); }
 
-  /* AO-01: layout = 1 kolumn default. 2 kolumner endast när listan visas. */
+  /* layout = 1 kolumn default. 2 kolumner endast när listan visas. */
   .layout{ display:grid; grid-template-columns: 1fr; gap: 12px; align-items:start; }
   .layout.hasList{ grid-template-columns: 1fr 1fr; }
   @media (max-width: 920px){ .layout.hasList{ grid-template-columns: 1fr; } }
@@ -155,12 +142,11 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
 
   .panel{ padding: 12px; }
   .panel.create::before{ background: var(--accent); }
-  .panel.list::before{ background: var(--accent); } /* AO-01: ingen grön accent på list */
+  .panel.list::before{ background: var(--accent); } /* ingen grön accent på list */
 
   .panel.create{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2), 0 12px 24px rgba(59,130,246,.14); }
   .panel.create:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover), 0 12px 24px rgba(59,130,246,.24); }
 
-  /* AO-01: list-panel får neutral/blå, ej grön */
   .panel.list{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2), 0 12px 24px rgba(59,130,246,.08); }
   .panel.list:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover), 0 12px 24px rgba(59,130,246,.14); }
 
@@ -302,7 +288,7 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
     box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover);
   }
 
-  /* AO-05: delete sekundär – blir röd först vid hover/confirm */
+  /* delete sekundär – blir röd först vid hover/confirm */
   .miniBtn.delete{ background:#fff; border-color: rgba(0,0,0,.12); color:#111; }
   .miniBtn.delete:hover{
     background: rgba(254,226,226,.65);
@@ -312,7 +298,6 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
 
   .mutedText{ color: var(--muted); font-size:.92rem; }
 
-  /* AO-01: sectionHeader + stepBadge */
   .sectionHeader{
     display:flex;
     flex-direction:column;
@@ -344,7 +329,6 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
     min-height: 28px;
   }
 
-  /* Diskreta hjälparklasser */
   .systemBadge{
     display:inline-flex;
     align-items:center;
@@ -375,7 +359,6 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
     flex-wrap:wrap;
   }
 
-  /* AO-03: Health kollapsad vy */
   .healthCollapsed .healthBody{ display:none; }
   .healthHeaderRow{
     display:flex;
@@ -385,7 +368,6 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
     flex-wrap:wrap;
   }
 
-  /* Chips-rad (AO-04D) */
   .chipRow{
     display:flex;
     gap:6px;
@@ -405,7 +387,6 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
   }
   .chip.more{ background: rgba(0,0,0,.04); color: rgba(17,17,17,.72); }
 
-  /* Link look (liten, diskret) */
   .miniLink{
     display:inline-flex;
     gap:6px;
@@ -417,17 +398,12 @@ Syfte: Grundstruktur + head-metadata + stylesheets.
   }
   .miniLink:hover{ border-bottom-style: solid; }
 
-  /* AO-03: blocker-only layout helper */
   .hidden{ display:none !important; }
 </style>
 </head>
 
 <body>
 
-<!-- ============================================================
-BLOCK 3/12 — TOPBAR (HEADER) + NAV
-Syfte: Global system-navigering + logout.
-============================================================ -->
 <header class="top">
   <div class="topInner" role="banner">
     <div class="topLeft">
@@ -435,7 +411,6 @@ Syfte: Global system-navigering + logout.
         <strong>HR-System</strong>
         <span class="muted">• System • Assignments</span>
 
-        <!-- AO-02: diskret badge -->
         <span class="systemBadge" aria-label="Systemkontext">
           Systemförvaltning • Påverkar behörigheter
         </span>
@@ -455,10 +430,6 @@ Syfte: Global system-navigering + logout.
   </div>
 </header>
 
-<!-- ============================================================
-BLOCK 4/12 — MAIN (SIDINNEHÅLL) + STATUS/HELPERS
-Syfte: Intro, inloggad-rad, blocker/health panels, layout.
-============================================================ -->
 <main class="container">
   <h1 class="tight">Assignments</h1>
   <p class="muted">
@@ -471,33 +442,27 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
         Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
       </div>
 
-      <!-- AO-03: Health-toggle knappar (diskret). Support flyttas längst ner. -->
       <div class="row wrap" style="gap:8px;" id="topActions">
         <a class="btn secondary" href="./org.html" id="btnOpenOrg">Öppna Org Builder</a>
 
-        <!-- AO-03: Visa datahälsa -->
         <button id="btnShowHealth" type="button" class="btn secondary" aria-controls="healthBox" aria-expanded="false">
           Visa datahälsa
         </button>
 
-        <!-- AO-05: Visa lista (sekundär) -->
         <button id="btnToggleList" type="button" class="btn secondary" aria-controls="listPanel" aria-expanded="false" style="display:none;">
           Visa lista
         </button>
       </div>
     </div>
 
-    <!-- Status (UI-only yta) -->
     <div class="muted" id="statusBox" style="display:none; margin: 0 0 10px;">
       <span id="statusText">—</span>
       <div class="mutedText" id="statusConsequence" style="margin-top:4px; display:none;"></div>
     </div>
 
-    <!-- Blocker (fail-closed) -->
     <div id="blockerBox" class="blocker" style="display:none;">
       <div><strong>Systemet är inte konfigurerat.</strong> Du måste skapa Org först.</div>
 
-      <!-- MUST: Blocker-text börjar alltid med exakt fras -->
       <div class="muted" id="blockerText" style="margin-top:4px;">
         Org saknas eller root saknas. —
       </div>
@@ -508,7 +473,6 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
       </div>
     </div>
 
-    <!-- Health (AO-03: kollapsad default, expandera automatiskt vid invalid>0) -->
     <div id="healthBox" class="health healthCollapsed" style="display:none;">
       <div class="healthHeaderRow">
         <div>
@@ -539,10 +503,6 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
 
     <div class="layout" id="layoutRoot">
 
-      <!-- ============================================================
-      BLOCK 5/12 — UI: SKAPA/REDIGERA (FORM)
-      Syfte: Input empNo, role, multi-select scopeIds + manual paste, actions.
-      ============================================================ -->
       <section class="tile panel create" aria-label="Skapa assignment" id="formPanel">
         <div class="panel-title">Skapa / Redigera assignment</div>
 
@@ -552,10 +512,8 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
           <div class="kpi">Saknar enhet: <strong id="kpiMissing">0</strong></div>
         </div>
 
-        <!-- AO-04A: Stegstruktur (UI-only) -->
         <div style="margin-top:10px;">
 
-          <!-- AO-04B — Steg 1: empNo -->
           <div class="sectionHeader">
             <div class="row wrap" style="gap:8px; align-items:center;">
               <span class="stepBadge">Steg 1</span>
@@ -569,15 +527,12 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
             <input id="empNo" type="text" inputmode="numeric" placeholder="t.ex. 3001" />
             <div class="row wrap" style="gap:8px; margin-top:6px; align-items:center;">
               <div class="mutedText">Krav: <strong>1–12 siffror</strong>.</div>
-
-              <!-- AO-04B: read-only i edit-läge + Ändra-länk (UI-only) -->
               <a href="#" class="miniLink" id="lnkChangeEmpNo" style="display:none;">Ändra</a>
             </div>
           </label>
 
           <hr style="border:none; border-top:1px solid var(--line); margin:12px 0;" />
 
-          <!-- AO-04C — Steg 2: Roll -->
           <div class="sectionHeader">
             <div class="row wrap" style="gap:8px; align-items:center;">
               <span class="stepBadge">Steg 2</span>
@@ -593,7 +548,6 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
               <option value="ADMIN" selected>ADMIN</option>
               <option value="SYSTEM_ADMIN">SYSTEM_ADMIN</option>
             </select>
-            <!-- AO-04C: kort notis -->
             <div class="mutedText" id="sysAdminNote" style="margin-top:6px; display:none;">
               SYSTEM_ADMIN används sällan – scope ignoreras (rekommenderat tomt)
             </div>
@@ -601,19 +555,15 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
 
           <hr style="border:none; border-top:1px solid var(--line); margin:12px 0;" />
 
-          <!-- AO-04D — Steg 3: Enheter -->
           <div class="sectionHeader">
             <div class="row wrap" style="gap:8px; align-items:center;">
               <span class="stepBadge">Steg 3</span>
               <p class="title" style="margin:0;">Enheter</p>
-
-              <!-- AO-07: Org OK badge nära steg 3 -->
               <span class="systemBadge" id="orgBadge" style="display:none;">Org: OK</span>
             </div>
             <p class="desc">För ADMIN: välj minst 1 ENHET. Root/Bolag kan inte användas.</p>
           </div>
 
-          <!-- AO-04D: Sökfält ovanför multi-select (kopplas till wireScopeFilterUI) -->
           <div class="row wrap" style="gap:8px; align-items:flex-end;">
             <label style="flex:1; min-width:240px;">
               <span class="mutedText">Sök ENHET (namn/ID)</span>
@@ -629,11 +579,9 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
             <select id="scopeIds" multiple size="10" aria-label="Välj enheter"></select>
 
             <div class="row wrap" style="gap:8px; margin-top:8px; align-items:center;">
-              <!-- AO-04D: Visa alltid “Valda enheter: X” -->
               <span class="mutedText">Valda enheter: <strong id="selectedCountNum">0</strong></span>
             </div>
 
-            <!-- AO-04D: chips-rad -->
             <div class="chipRow" id="selectedChips" aria-label="Valda enheter (chips)" style="display:none;"></div>
 
             <div class="mutedText" style="margin-top:6px;">
@@ -646,7 +594,6 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
             </div>
           </label>
 
-          <!-- AO-04E: textarea bakom toggle “Avancerat” + tydlig varning -->
           <div style="margin-top:10px;">
             <label style="display:flex; gap:8px; align-items:center; margin:0;">
               <input id="togManual" type="checkbox" style="width:auto; margin:0;" />
@@ -672,7 +619,6 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
 
           <hr style="border:none; border-top:1px solid var(--line); margin:12px 0;" />
 
-          <!-- AO-04F: Status = handlingsbar mening + preview när valid -->
           <div class="row2">
             <label>
               Status
@@ -707,16 +653,10 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
         </div>
       </section>
 
-      <!-- ============================================================
-      BLOCK 6/12 — UI: LISTA (SÖK/FILTER + LIST-RENDER)
-      Syfte: Sök/filter + dynamisk DOM-lista.
-      ============================================================ -->
       <section class="tile panel list" aria-label="Lista assignments" id="listPanel" style="display:none;">
         <div class="row space-between wrap" style="gap:10px; align-items:center;">
           <div>
             <div class="panel-title" style="margin:0;">Assignments</div>
-
-            <!-- AO-05: kompakt header -->
             <div class="mutedText" id="listHeaderStats" style="margin-top:4px;">
               Totalt: — • Problem: — • Saknar enhet: —
             </div>
@@ -757,26 +697,6 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
           Inga träffar för din sökning/filter.
         </div>
 
-        <template id="rowTpl">
-          <div class="item" data-row>
-            <div style="min-width:0;">
-              <div class="row wrap" style="gap:8px; align-items:center;">
-                <div class="item-title" data-empno>—</div>
-                <span class="pill" data-role>—</span>
-                <span class="pill warnpill" data-missing style="display:none;">Saknar enhet (krävs)</span>
-                <span class="pill warnpill" data-invalid style="display:none;">Ogiltiga: —</span>
-              </div>
-              <div class="meta" data-meta></div>
-            </div>
-
-            <div class="row wrap" style="gap:8px;">
-              <!-- AO-05: Redigera = primär, Ta bort = sekundär (röd först vid hover) -->
-              <button type="button" class="miniBtn" data-edit>Redigera</button>
-              <button type="button" class="miniBtn delete" data-delete>Ta bort</button>
-            </div>
-          </div>
-        </template>
-
         <div class="smallnote">
           Om du inte kan spara: skapa Org först, välj sedan ENHET(er) (root/bolag kan inte användas).
         </div>
@@ -784,7 +704,6 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
 
     </div><!-- /layoutRoot -->
 
-    <!-- AO-03: Support-trigger längst ner -->
     <div class="row wrap" style="gap:8px; margin-top:12px; justify-content:flex-end;" id="supportTriggerRow">
       <button
         id="btnSupport"
@@ -797,10 +716,6 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
       </button>
     </div>
 
-    <!-- ============================================================
-    BLOCK 13 (NYTT) — SUPPORTPANEL (KOMPAKT FAQ)
-    AO-08: ersätt chat-lik med FAQ 3–5, behåll “Kopiera status (anonym)”, aldrig auto.
-    ============================================================ -->
     <section
       id="supportPanel"
       class="tile"
@@ -881,17 +796,9 @@ Syfte: Intro, inloggad-rad, blocker/health panels, layout.
   </section>
 </main>
 
-<!-- ============================================================
-BLOCK 7/12 — EXTERNA SCRIPT-DEPENDENCIES
-Syfte: Core config + app (HRApp).
-============================================================ -->
 <script src="../UI/UI-04-CONFIG.js"></script>
 <script src="../UI/UI-03-APP.js"></script>
 
-<!-- ============================================================
-BLOCK 8/12 — PAGE SCRIPT: BOOTSTRAP + AUTH GUARDS + BASHELPERS
-Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
-============================================================ -->
 <script>
 (function(){
   "use strict";
@@ -902,10 +809,20 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
 
   const $ = (s) => document.querySelector(s);
 
-  // AO-05/UI-only state (ingen lagring)
+  // UI-only state (ingen lagring)
   const UI_STATE = {
     showList: false,
-    showHealth: false
+    showHealth: false,
+
+    // PATCH v1.3 (P0/P1): wire-once + org-cache + health-auto-once
+    scopeFilterWired: false,
+    healthAutoExpandedOnce: false,
+    lastOrgRaw: null,
+    cachedOrgById: new Map(),
+    cachedOrgOk: false,
+
+    // wireScopeFilterUI exposes an apply() callback
+    scopeFilterApplyFn: null
   };
 
   function safeReplace(url){
@@ -1005,13 +922,11 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     return { byId, children };
   }
 
-  // MUST: endast ENHET får listas. Fail-closed: okänd/missad type => false.
   function isEnhetNode(node){
     const t = String(node?.type || "").trim().toLowerCase();
     return t === "enhet";
   }
 
-  // MUST: ROOT/BOLAG får aldrig visas (dubbelt skydd).
   function isAllowedScopeNode(node){
     if(!node) return false;
     if(String(node.id || "").trim() === String(ROOT_ID || "").trim()) return false;
@@ -1046,6 +961,16 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     return out;
   }
 
+  // PATCH v1.3: read org raw string for cheap change detection (ingen ny storage key, endast läsa samma key)
+  function readOrgRaw(){
+    try{
+      const raw = localStorage.getItem(ORG_KEY);
+      return (raw === null || raw === undefined) ? "" : String(raw);
+    }catch{
+      return "";
+    }
+  }
+
   function loadOrg(){
     const raw = safeParseLocal(ORG_KEY, []);
     const nodes = normalizeOrgNodes(raw);
@@ -1054,8 +979,9 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     return { ok:true, nodes, reason:"" };
   }
 
-  // AO-04D: UI-filter för enheter (ingen dataändring).
-  function wireScopeFilterUI(){
+  // PATCH v1.3 (P0): wire scope filter once + expose apply()
+  function wireScopeFilterUIOnce(){
+    if(UI_STATE.scopeFilterWired) return;
     const elFilter = document.getElementById("scopeFilter");
     const elSelect = document.getElementById("scopeIds");
     if(!elFilter || !elSelect) return;
@@ -1077,7 +1003,18 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     }
 
     elFilter.addEventListener("input", apply);
+
+    UI_STATE.scopeFilterWired = true;
+    UI_STATE.scopeFilterApplyFn = apply;
+
+    // initial apply
     apply();
+  }
+
+  function applyScopeFilterNow(){
+    if(typeof UI_STATE.scopeFilterApplyFn === "function"){
+      UI_STATE.scopeFilterApplyFn();
+    }
   }
 
   // -------------------------
@@ -1201,25 +1138,23 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
   }
 
   // -------------------------
-  // AO-03: Blocker-only mode (UI-only)
+  // Blocker-only mode (UI-only)
   // -------------------------
   function setBlockerOnlyMode(on){
     const layout = document.getElementById("layoutRoot");
     const health = document.getElementById("healthBox");
     const topActions = document.getElementById("topActions");
-    const supportTrig = document.getElementById("supportTriggerRow");
     const statusBox = document.getElementById("statusBox");
 
+    // PATCH v1.3: Support-trigger ska vara synlig även i blocker-only (för FAQ + kopiera status)
     if(on){
       if(layout) layout.classList.add("hidden");
       if(health) health.style.display = "none";
       if(topActions) topActions.classList.add("hidden");
-      if(supportTrig) supportTrig.classList.add("hidden");
       if(statusBox) statusBox.style.display = "none";
     }else{
       if(layout) layout.classList.remove("hidden");
       if(topActions) topActions.classList.remove("hidden");
-      if(supportTrig) supportTrig.classList.remove("hidden");
     }
   }
 
@@ -1229,8 +1164,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     box.style.display = "block";
     $("#btnClearInvalid").style.display = showClear ? "inline-block" : "none";
   }
-
-  function hideHealthBox(){ $("#healthBox").style.display = "none"; }
 
   const btnHideHealth = $("#btnHideHealth");
   if(btnHideHealth){
@@ -1289,7 +1222,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     }
   }
 
-  // AO-04D: chips + selected count
   function updateSelectedUI(orgById){
     const role = normalizeRole($("#roleId").value);
     const numEl = document.getElementById("selectedCountNum");
@@ -1337,7 +1269,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     chipsWrap.style.display = "flex";
   }
 
-  // AO-04F: status + preview + save enable (UI-only)
   function computeFormValidity(orgById){
     if(!orgOkState) return { ok:false, status:"Skapa Org först", preview:"" };
 
@@ -1351,7 +1282,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
       return { ok:true, status:"Redo att spara", preview:"Kommer spara: SYSTEM_ADMIN • scope ignoreras" };
     }
 
-    // ADMIN
     const selected = getSelectedValues(document.getElementById("scopeIds"));
     let merged = selected;
 
@@ -1366,7 +1296,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
 
     if(merged.length === 0) return { ok:false, status:"Välj minst 1 ENHET", preview:"" };
 
-    // Fail-closed: stoppa om något ogiltigt (enligt AO)
     const invalid = merged.filter(id => !isValidEnhetId(orgById, id));
     if(invalid.length) return { ok:false, status:"Ogiltiga enhets-ID stoppar sparande", preview:"" };
 
@@ -1381,13 +1310,10 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
       btnNew.textContent = isEditing ? "Avsluta redigering" : "Ny";
     }
 
-    // AO-04B: visa Ändra-länk vid edit-läge
     const lnk = document.getElementById("lnkChangeEmpNo");
     if(lnk){
       lnk.style.display = isEditing ? "inline-flex" : "none";
     }
-
-    // status text hanteras av computeFormValidity/renderAll (inte “Redigerar #..” längre)
   }
 
   function resetForm(){
@@ -1432,9 +1358,9 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     if(orgById && sel){
       const valid = scopes.filter(id => isValidEnhetId(orgById, id));
       setSelectedValues(sel, valid);
+      applyScopeFilterNow();
     }
 
-    // Manual: fyll bara om avancerat togglas på
     const togg = document.getElementById("togManual");
     const mw = document.getElementById("manualWrap");
     if(togg && mw){
@@ -1481,7 +1407,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
       return;
     }
 
-    // ADMIN
     if(sel) sel.disabled = false;
 
     const manualOn = !!document.getElementById("togManual")?.checked;
@@ -1490,7 +1415,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     }
   }
 
-  // AO-04E: toggle manual
   const togManual = document.getElementById("togManual");
   if(togManual){
     togManual.addEventListener("change", () => {
@@ -1508,7 +1432,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     });
   }
 
-  // AO-04C: markera SYSTEM_ADMIN som avancerat + notis
   function syncRoleNote(){
     const role = normalizeRole($("#roleId").value);
     const note = document.getElementById("sysAdminNote");
@@ -1528,7 +1451,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     renderAll();
   });
 
-  // AO-04B: “Ändra” empNo i edit-läge -> fail-safe: avsluta redigering (ingen scope/logik-ändring)
   const lnkChange = document.getElementById("lnkChangeEmpNo");
   if(lnkChange){
     lnkChange.addEventListener("click", (e) => {
@@ -1542,9 +1464,15 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
 
   // -------------------------
   // Render scope multi-select (ENHET-only)
+  // PATCH v1.3: endast rebuild när org ändrats
   // -------------------------
   function renderScopeMultiSelect(orgNodes){
     const sel = $("#scopeIds");
+    if(!sel) return;
+
+    // preserve current selection before rebuild (P0)
+    const prevSelected = getSelectedValues(sel);
+
     while(sel.firstChild) sel.removeChild(sel.firstChild);
 
     const enheter = flattenOrgEnheter(orgNodes);
@@ -1566,6 +1494,14 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
       opt.textContent = `${indent} ${r.name} (${r.id})`;
       sel.appendChild(opt);
     }
+
+    // restore previous selection if still present
+    if(prevSelected.length){
+      setSelectedValues(sel, prevSelected);
+    }
+
+    // apply filter after rebuild
+    applyScopeFilterNow();
   }
 
   function applyManualToSelection(orgById){
@@ -1579,8 +1515,8 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
 
     const valid = ids.filter(id => isValidEnhetId(orgById, id));
     setSelectedValues($("#scopeIds"), valid);
+    applyScopeFilterNow();
 
-    // UI-only feedback
     const fb = document.getElementById("manualFeedback");
     if(fb){
       const invalidCount = ids.length - valid.length;
@@ -1629,14 +1565,15 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     renderAll();
   });
 
-  // Manual markera knapp
+  // Manual markera knapp (ENDa stället som gör manual->selection, P0)
   const btnMark = document.getElementById("btnMarkInList");
   if(btnMark){
     btnMark.addEventListener("click", () => {
-      const org = loadOrg();
-      if(!org.ok) return;
-      const orgById = buildOrgIndex(org.nodes).byId;
-      applyManualToSelection(orgById);
+      if(!UI_STATE.cachedOrgOk){
+        setMsg("err", "Fail-closed: Org saknas. Skapa org i Org Builder först.");
+        return;
+      }
+      applyManualToSelection(UI_STATE.cachedOrgById);
       renderAll();
     });
   }
@@ -1728,7 +1665,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
 
     const emptyEl = document.getElementById("listEmpty");
     if(emptyEl) emptyEl.style.display = (rows.length === 0) ? "block" : "none";
-
     if(rows.length === 0) return;
 
     for(const r of rows){
@@ -1882,7 +1818,7 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
   }
 
   // -------------------------
-  // Save handler (SYSTEM_ADMIN skapar ADMIN multi-enhet)
+  // Save handler
   // -------------------------
   $("#btnSave").addEventListener("click", () => {
     setMsg("", "");
@@ -1970,7 +1906,7 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
   $("#empNo").addEventListener("input", renderAll);
 
   // -------------------------
-  // AO-03: Health toggles
+  // Health toggles
   // -------------------------
   const btnShowHealth = document.getElementById("btnShowHealth");
   if(btnShowHealth){
@@ -1989,7 +1925,7 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
   }
 
   // -------------------------
-  // AO-05: List toggles
+  // List toggles
   // -------------------------
   const btnToggleList = document.getElementById("btnToggleList");
   const btnHideList = document.getElementById("btnHideList");
@@ -2013,7 +1949,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     const layout = document.getElementById("layoutRoot");
     const btn = document.getElementById("btnToggleList");
 
-    // AO-05: Göm listpanelen när inga assignments finns eller användaren inte klickat “Visa lista”
     const canShow = totalRows > 0;
     if(btn){
       btn.style.display = canShow ? "inline-flex" : "none";
@@ -2027,7 +1962,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     listPanel.style.display = shouldShow ? "block" : "none";
     layout.classList.toggle("hasList", !!shouldShow);
 
-    // Header stats
     const hdr = document.getElementById("listHeaderStats");
     if(hdr){
       hdr.textContent = `Totalt: ${totalRows} • Problem: ${problemRows} • Saknar enhet: ${missingRows}`;
@@ -2035,7 +1969,7 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
   }
 
   // -------------------------
-  // AO-08: Support panel (kompakt) — aldrig auto
+  // Support panel (kompakt) — aldrig auto
   // -------------------------
   (function supportPanelInit(){
     const btnOpen = document.getElementById("btnSupport");
@@ -2112,7 +2046,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
     }
 
     function getAnonStatusLine(){
-      // OBS: får ej kopiera empNo, scopeIds eller org-id.
       const orgOk = !!orgOkState;
       const roleSel = document.getElementById("roleId");
       const role = roleSel ? String(roleSel.value || "").trim() : "—";
@@ -2156,36 +2089,54 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
   })();
 
   // -------------------------
-  // Main render (single source of truth, race-safe)
+  // Main render
   // -------------------------
   function renderAll(){
+    // PATCH v1.3: wire filter once (no repeat listeners)
+    wireScopeFilterUIOnce();
+
+    // org cache / change detect
+    const orgRawNow = readOrgRaw();
+    const orgChanged = (UI_STATE.lastOrgRaw !== orgRawNow);
+
     const org = loadOrg();
     orgOkState = !!org.ok;
 
-    // Default: fail-closed
     let orgById = new Map();
 
     if(org.ok){
       hideBlocker();
       setBlockerOnlyMode(false);
 
-      renderScopeMultiSelect(org.nodes);
+      // Build index always for correctness, but cache for reuse in actions
       orgById = buildOrgIndex(org.nodes).byId;
 
-      wireScopeFilterUI();
+      UI_STATE.cachedOrgById = orgById;
+      UI_STATE.cachedOrgOk = true;
 
-      // AO-07: Org OK badge nära steg 3
+      // Rebuild select only if org changed OR first render (P0)
+      if(orgChanged || UI_STATE.lastOrgRaw === null){
+        renderScopeMultiSelect(org.nodes);
+      }
+
+      // update org raw marker
+      UI_STATE.lastOrgRaw = orgRawNow;
+
+      // badges
       const orgBadge = document.getElementById("orgBadge");
       if(orgBadge) orgBadge.style.display = "inline-flex";
 
-      // Markera manual->selection endast när avancerat är på
-      applyManualToSelection(orgById);
-
-      // UI: selected chips/count
+      // IMPORTANT (P0): do NOT auto-apply manual->selection here. Only on button.
+      // still update chips/count
       updateSelectedUI(orgById);
 
+      // apply filter (in case options exist)
+      applyScopeFilterNow();
+
     }else{
-      // AO-03: blocker-only-läge
+      UI_STATE.cachedOrgById = new Map();
+      UI_STATE.cachedOrgOk = false;
+
       showBlocker("Org saknas/är korrupt. Skapa org i Org Builder innan du kan spara assignments.");
       setBlockerOnlyMode(true);
 
@@ -2202,10 +2153,10 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
         sel.disabled = true;
       }
 
-      return; // blocker-only: visa endast blocker + åtgärdsknappar
+      // support trigger remains visible by design
+      return;
     }
 
-    // role note/badge
     syncRoleNote();
 
     const map = loadAssignments();
@@ -2213,9 +2164,10 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
 
     renderKpis(map, health);
 
-    // AO-03: Health kollapsad default, auto expand vid invalid>0
-    if(health.invalid > 0){
+    // PATCH v1.3 (P1): auto-expand health only once per load, and only if invalid>0
+    if(health.invalid > 0 && !UI_STATE.healthAutoExpandedOnce){
       UI_STATE.showHealth = true;
+      UI_STATE.healthAutoExpandedOnce = true;
       if(btnShowHealth) btnShowHealth.setAttribute("aria-expanded", "true");
     }
 
@@ -2228,7 +2180,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
       );
       setHealthCollapsed(false);
     }else{
-      // kollapsad (men kan vara dold helt)
       showHealthBox(
         health.invalid > 0
           ? `Varning: ${health.invalid} assignment(s) har ogiltig scope.`
@@ -2238,7 +2189,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
       setHealthCollapsed(true);
     }
 
-    // Fyll detaljer
     if(health.byType){
       const parts = [];
       const lines = [];
@@ -2278,7 +2228,6 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
       }
     }
 
-    // AO-04F: status + preview + save enable
     const validity = computeFormValidity(orgById);
     setStatus(validity.status);
 
@@ -2296,13 +2245,11 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
 
     setSaveEnabled(!!validity.ok);
 
-    // AO-05: list sekundär + toggle
     const totalRows = Object.keys(map).length;
     const problemRows = health.invalid;
     const missingRows = health.missing;
     syncListVisibility(totalRows, problemRows, missingRows);
 
-    // render list endast om list visas (performance + AO-05)
     if(UI_STATE.showList && totalRows > 0){
       renderList(map, orgById);
     }else{
@@ -2312,10 +2259,7 @@ Syfte: Fail-closed, requireAuth, logout, parsing/storage helpers.
       if(emptyEl) emptyEl.style.display = "none";
     }
 
-    // AO-04: editing UI controls
     syncEditingUI();
-
-    // Selected chips/count always in sync
     updateSelectedUI(orgById);
   }
 
