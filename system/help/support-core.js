@@ -1,11 +1,12 @@
 /* ============================================================
-   AO-SYS-SUPPORT-CORE-01 (PROD) — PATCH v1.1
+   AO-SYS-SUPPORT-CORE-01 (PROD) — PATCH v1.2
    FIL: system/support-core.js
 
-   Syfte (v1.1):
-   - Use existing Support button/panel if present (#btnSupport, #supportPanel)
-   - If missing → inject (as v1.0)
-   - Render all dynamic help content ONLY inside #supportContent (create if missing)
+   Syfte (v1.2):
+   - v1.1 (reuse existing #btnSupport/#supportPanel, inject if missing)
+   - Global Systemadmin mode ("systemadmin" pack) + Scope-toggle
+   - Tabs: Hjälp / Blockkarta
+   - Blockkarta render from pack.blocks (page-mode vs global-mode)
 
    POLICY (LÅST):
    - UI-only • Ingen backend • Inga nya storage-keys
@@ -100,6 +101,14 @@
       }
     }
 
+    // v1.2: page + global packs
+    function getPagePack() {
+      return getPack(pageId);
+    }
+    function getGlobalPack() {
+      return getPack("systemadmin");
+    }
+
     // ---------------------------
     // ID/Selectors (v1.1)
     // ---------------------------
@@ -142,21 +151,33 @@
           /* Panel default look (for injected panel OR if site uses #supportPanel without own styles) */
           "#" + IDS.panel + "{",
           "  position:fixed; right:16px; bottom:16px;",
-          "  width:min(420px, calc(100vw - 32px));",
-          "  max-height:min(78vh, 720px);",
+          "  width:min(460px, calc(100vw - 32px));",
+          "  max-height:min(78vh, 760px);",
           "  background:#fff; border:1px solid rgba(0,0,0,.10);",
           "  border-radius:16px; box-shadow:0 16px 44px rgba(0,0,0,.18);",
           "  overflow:hidden; display:none; z-index:9999;",
           "}",
           "#" + IDS.panel + ".open{ display:block; }",
-          "#" + IDS.panel + " .hdr{ display:flex; align-items:center; justify-content:space-between; gap:10px;",
+          "#" + IDS.panel + " .hdr{ display:flex; align-items:flex-start; justify-content:space-between; gap:10px;",
           "  padding:12px 12px; border-bottom:1px solid rgba(0,0,0,.08); }",
+          "#" + IDS.panel + " .hdrLeft{ display:flex; flex-direction:column; gap:8px; min-width:0; }",
           "#" + IDS.panel + " .hdr h2{ margin:0; font-size:14px; line-height:1.2; }",
+          "#" + IDS.panel + " .subHdr{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }",
+          "#" + IDS.panel + " .scopeRow{ display:flex; gap:8px; align-items:center; flex-wrap:wrap; }",
+          "#" + IDS.panel + " .scopeLbl{ font-size:12px; opacity:.85; }",
+          "#" + IDS.panel + " .scopeSel{ font-size:12px; padding:6px 8px; border-radius:10px; border:1px solid rgba(0,0,0,.12); background:#fff; }",
+          "#" + IDS.panel + " .scopeNote{ font-size:12px; opacity:.75; }",
+          "#" + IDS.panel + " .tabs{ display:flex; gap:8px; flex-wrap:wrap; }",
+          "#" + IDS.panel + " .tabBtn{",
+          "  font-size:12px; padding:6px 10px; border-radius:999px;",
+          "  border:1px solid rgba(0,0,0,.12); background:#fff; cursor:pointer;",
+          "}",
+          "#" + IDS.panel + " .tabBtn[aria-selected='true']{ background:rgba(0,0,0,.05); }",
           "#" + IDS.panel + " .close{",
           "  width:32px; height:32px; border-radius:10px;",
           "  border:1px solid rgba(0,0,0,.10); background:#fff; cursor:pointer;",
           "}",
-          "#" + IDS.panel + " .body{ padding:12px; overflow:auto; max-height:calc(min(78vh, 720px) - 56px); }",
+          "#" + IDS.panel + " .body{ padding:12px; overflow:auto; max-height:calc(min(78vh, 760px) - 66px); }",
           "#" + IDS.panel + " .sec{ margin:0 0 12px 0; }",
           "#" + IDS.panel + " .sec h3{ margin:0 0 6px 0; font-size:12px; opacity:.85; }",
           "#" + IDS.panel + " ul{ margin:0; padding-left:18px; }",
@@ -182,7 +203,11 @@
           "}",
           "#" + IDS.panel + " .muted{ opacity:.8; font-size:12px; }",
           "#" + IDS.panel + " .tools{ display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }",
-          "#" + IDS.panel + " .toolBtn{ padding:8px 10px; border-radius:12px; border:1px solid rgba(0,0,0,.12); background:#fff; cursor:pointer; }"
+          "#" + IDS.panel + " .toolBtn{ padding:8px 10px; border-radius:12px; border:1px solid rgba(0,0,0,.12); background:#fff; cursor:pointer; }",
+          "#" + IDS.panel + " .blockGroup{ margin:0 0 14px 0; padding:10px; border:1px solid rgba(0,0,0,.10); border-radius:14px; background:#fff; }",
+          "#" + IDS.panel + " .blockGroup h3{ margin:0 0 8px 0; font-size:12px; opacity:.85; }",
+          "#" + IDS.panel + " .blockItem{ margin:0 0 10px 0; }",
+          "#" + IDS.panel + " .blockItemTitle{ font-weight:700; font-size:12px; margin:0 0 6px 0; }"
         ].join("\n");
         (document.head || document.documentElement).appendChild(s);
       } catch (_) {}
@@ -255,8 +280,7 @@
           panel.setAttribute("aria-hidden", "false");
         } else {
           panel.setAttribute("aria-hidden", "true");
-          // Do NOT force hidden if page relies on other style; but it's safe if we keep class open/remove
-          // We only set hidden if it looks like it was hidden before by us.
+          // Only set hidden attribute; class handles visual
           panel.setAttribute("hidden", "hidden");
         }
       } catch (_) {}
@@ -335,8 +359,8 @@
     }
 
     // ---------------------------
-    // Build injected panel content (v1.0 layout)
-    // (If panel exists, we only create #supportContent and render there.)
+    // Build injected panel (v1.0 layout)
+    // If panel exists, we only create #supportContent and render there.
     // ---------------------------
     function createInjectedPanel() {
       var panel = el("section", {
@@ -347,7 +371,13 @@
       });
 
       var hdr = el("div", { className: "hdr" });
+
+      var hdrLeft = el("div", { className: "hdrLeft" });
       var h2 = el("h2", { id: "supportTitle", text: "Support för: " + pageId });
+      hdrLeft.appendChild(h2);
+
+      // v1.2: header controls container (scope + tabs) will be injected into #supportContent
+      // but for injected panel, we keep hdrLeft available.
       var closeBtn = el("button", {
         id: IDS.closeStd,
         type: "button",
@@ -355,7 +385,8 @@
         "aria-label": "Stäng supportpanel"
       });
       closeBtn.textContent = "×";
-      hdr.appendChild(h2);
+
+      hdr.appendChild(hdrLeft);
       hdr.appendChild(closeBtn);
 
       var bodyWrap = el("div", { className: "body" });
@@ -422,11 +453,27 @@
           }
         }
 
+        // Ensure header has left container (for title + controls)
+        var hdrLeft = hdr.querySelector(".hdrLeft");
+        if (!hdrLeft) {
+          hdrLeft = el("div", { className: "hdrLeft" });
+          try {
+            // Move existing h2 into hdrLeft if present
+            var existingH2 = hdr.querySelector("h2");
+            if (existingH2) {
+              hdrLeft.appendChild(existingH2);
+            }
+            hdr.insertBefore(hdrLeft, hdr.firstChild);
+          } catch (_) {
+            try { hdr.appendChild(hdrLeft); } catch (_) {}
+          }
+        }
+
         // Add title if missing (neutral)
-        var h = hdr.querySelector("h2");
+        var h = hdrLeft.querySelector("h2");
         if (!h) {
           h = el("h2", { id: "supportTitle", text: "Support för: " + pageId });
-          hdr.appendChild(h);
+          hdrLeft.appendChild(h);
         }
 
         var c = el("button", { id: IDS.closeStd, type: "button", className: "close", "aria-label": "Stäng supportpanel" });
@@ -439,28 +486,178 @@
     }
 
     // ---------------------------
-    // Render help pack into #supportContent (MUST)
+    // v1.2 UI state (no storage)
     // ---------------------------
-    function renderPackIntoContent(content, pack) {
-      try {
-        if (!content) return false;
+    var UI_STATE = {
+      scope: "page", // "page" | "global"
+      tab: "help"    // "help" | "blocks"
+    };
 
-        clearNode(content);
+    function getActivePack() {
+      try {
+        if (UI_STATE.scope === "global") return getGlobalPack();
+        return getPagePack();
+      } catch (_) {
+        return null;
+      }
+    }
+
+    // ---------------------------
+    // Render helpers for v1.2 controls
+    // ---------------------------
+    function ensureHeaderControls(panel) {
+      // Ensure header has a place for the scope + tabs
+      try {
+        if (!panel) return null;
+        var hdr = panel.querySelector(".hdr");
+        if (!hdr) return null;
+
+        var hdrLeft = hdr.querySelector(".hdrLeft");
+        if (!hdrLeft) {
+          hdrLeft = el("div", { className: "hdrLeft" });
+          try {
+            var h2 = hdr.querySelector("h2");
+            if (h2) hdrLeft.appendChild(h2);
+            hdr.insertBefore(hdrLeft, hdr.firstChild);
+          } catch (_) {
+            try { hdr.appendChild(hdrLeft); } catch (_) {}
+          }
+        }
+
+        // Reuse if already present
+        var existing = hdrLeft.querySelector("[data-support-controls='1']");
+        if (existing) return existing;
+
+        var wrap = el("div", { className: "subHdr" });
+        wrap.setAttribute("data-support-controls", "1");
+
+        // Scope row
+        var scopeRow = el("div", { className: "scopeRow" });
+        var lbl = el("span", { className: "scopeLbl", text: "Scope:" });
+
+        var sel = el("select", { className: "scopeSel", "aria-label": "Välj scope för support" });
+        // Options (MUST)
+        var opt1 = el("option", { value: "page", text: "Den här sidan" });
+        var opt2 = el("option", { value: "global", text: "Hela Systemadmin" });
+        sel.appendChild(opt1);
+        sel.appendChild(opt2);
+
+        var note = el("span", { className: "scopeNote", text: "" });
+
+        scopeRow.appendChild(lbl);
+        scopeRow.appendChild(sel);
+        scopeRow.appendChild(note);
+
+        // Tabs
+        var tabs = el("div", { className: "tabs", role: "tablist", "aria-label": "Supportflikar" });
+
+        var tabHelp = el("button", { type: "button", className: "tabBtn" });
+        tabHelp.textContent = "Hjälp";
+        tabHelp.setAttribute("role", "tab");
+        tabHelp.setAttribute("data-tab", "help");
+
+        var tabBlocks = el("button", { type: "button", className: "tabBtn" });
+        tabBlocks.textContent = "Blockkarta";
+        tabBlocks.setAttribute("role", "tab");
+        tabBlocks.setAttribute("data-tab", "blocks");
+
+        tabs.appendChild(tabHelp);
+        tabs.appendChild(tabBlocks);
+
+        wrap.appendChild(scopeRow);
+        wrap.appendChild(tabs);
+
+        hdrLeft.appendChild(wrap);
+
+        // Bind scope select (no storage)
+        if (markBound(sel)) {
+          sel.addEventListener("change", function () {
+            try {
+              UI_STATE.scope = sel.value === "global" ? "global" : "page";
+              refresh(); // rerender content + title + placeholders
+            } catch (_) {}
+          });
+        }
+
+        // Bind tabs (no storage)
+        function bindTab(btn) {
+          if (!btn || !markBound(btn)) return;
+          btn.addEventListener("click", function (e) {
+            stop(e);
+            try {
+              var t = btn.getAttribute("data-tab");
+              UI_STATE.tab = (t === "blocks") ? "blocks" : "help";
+              refresh();
+            } catch (_) {}
+          });
+        }
+        bindTab(tabHelp);
+        bindTab(tabBlocks);
+
+        return wrap;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function setTabA11y(panel) {
+      try {
+        var hdr = panel ? panel.querySelector(".hdr") : null;
+        if (!hdr) return;
+        var controls = hdr.querySelector("[data-support-controls='1']");
+        if (!controls) return;
+
+        var btnHelp = controls.querySelector("[data-tab='help']");
+        var btnBlocks = controls.querySelector("[data-tab='blocks']");
+
+        function setBtn(btn, selected) {
+          if (!btn) return;
+          btn.setAttribute("aria-selected", selected ? "true" : "false");
+          btn.setAttribute("tabindex", selected ? "0" : "-1");
+        }
+
+        setBtn(btnHelp, UI_STATE.tab === "help");
+        setBtn(btnBlocks, UI_STATE.tab === "blocks");
+
+        // Scope select state + disable global when missing
+        var sel = controls.querySelector("select.scopeSel");
+        var note = controls.querySelector(".scopeNote");
+        var globalPack = getGlobalPack();
+        var hasGlobal = !!globalPack;
+
+        if (sel) {
+          sel.value = UI_STATE.scope;
+          // If global missing → disable option + force page mode
+          try {
+            var optGlobal = sel.querySelector("option[value='global']");
+            if (optGlobal) optGlobal.disabled = !hasGlobal;
+          } catch (_) {}
+
+          if (!hasGlobal && UI_STATE.scope === "global") UI_STATE.scope = "page";
+          sel.value = UI_STATE.scope;
+        }
+
+        if (note) {
+          note.textContent = (!hasGlobal) ? "Global support saknas ännu." : "";
+        }
+      } catch (_) {}
+    }
+
+    // ---------------------------
+    // Render help pack into #supportContent (MUST)
+    // v1.2: includes tabs + scope logic
+    // ---------------------------
+    function renderHelpView(content, pack, isGlobalMode) {
+      try {
+        if (!content) return;
 
         // If pack missing → fail-closed fallback
         if (!pack) {
           var p = el("p", { className: "muted" });
-          p.textContent = "Hjälp är inte tillgänglig för denna sida ännu. Följ checklistan.";
+          p.textContent = "Hjälp är inte tillgänglig för detta läge ännu.";
           content.appendChild(p);
-          return true;
+          return;
         }
-
-        // Title
-        var title = safeStr(pack.title) ? safeStr(pack.title) : pageId;
-        var h = el("div", { className: "sec" });
-        var h3 = el("h3", { text: "Support för: " + title });
-        h.appendChild(h3);
-        content.appendChild(h);
 
         // Quick guide
         var qSec = el("div", { className: "sec" });
@@ -474,7 +671,7 @@
           });
         } else {
           var li0 = el("li");
-          li0.textContent = "Hjälp är inte tillgänglig för denna sida ännu. Följ checklistan.";
+          li0.textContent = "Hjälp är inte tillgänglig för detta läge ännu.";
           ulQ.appendChild(li0);
         }
         qSec.appendChild(ulQ);
@@ -484,6 +681,16 @@
         var faqSec = el("div", { className: "sec" });
         faqSec.appendChild(el("h3", { text: "Vanliga problem" }));
         var faqWrap = el("div", { className: "faqs" });
+
+        // Answer area for clicks + ask
+        var answerBox = el("div", { className: "answer" });
+        answerBox.setAttribute("data-support-answer", "1");
+        var fallback = el("div", { className: "muted" });
+        fallback.textContent = isGlobalMode
+          ? "Jag hittade inget säkert svar. Välj ett vanligt problem eller följ checklistan."
+          : "Jag kan bara hjälpa med denna sida. Välj ett vanligt problem eller följ checklistan.";
+        answerBox.appendChild(fallback);
+
         if (Array.isArray(pack.faqs) && pack.faqs.length) {
           pack.faqs.forEach(function (faq) {
             var q = safeStr(faq && faq.q);
@@ -495,17 +702,14 @@
 
             b.addEventListener("click", function () {
               try {
-                var aSec = content.querySelector("[data-support-answer]");
-                if (!aSec) return;
-                clearNode(aSec);
-
+                clearNode(answerBox);
                 var a = faq && faq.a;
                 if (a === undefined || a === null || a === "") {
                   var m = el("div", { className: "muted" });
                   m.textContent = "Svar saknas för detta problem.";
-                  aSec.appendChild(m);
+                  answerBox.appendChild(m);
                 } else {
-                  renderLines(aSec, a);
+                  renderLines(answerBox, a);
                 }
               } catch (_) {}
             });
@@ -514,9 +718,10 @@
           });
         } else {
           var none = el("div", { className: "muted" });
-          none.textContent = "Inga vanliga problem är definierade för denna sida ännu.";
+          none.textContent = "Inga vanliga problem är definierade för detta läge ännu.";
           faqWrap.appendChild(none);
         }
+
         faqSec.appendChild(faqWrap);
         content.appendChild(faqSec);
 
@@ -529,7 +734,7 @@
           type: "text",
           inputmode: "text",
           autocomplete: "off",
-          placeholder: "Skriv t.ex. “kan inte spara”"
+          placeholder: isGlobalMode ? "Skriv en fråga om Systemadmin…" : "Skriv en fråga om denna sida…"
         });
         var qBtn = el("button", { type: "button", className: "askBtn" });
         qBtn.textContent = "Svara";
@@ -537,13 +742,7 @@
         qaRow.appendChild(qBtn);
         askSec.appendChild(qaRow);
 
-        var answerBox = el("div", { className: "answer" });
-        answerBox.setAttribute("data-support-answer", "1");
-        var fallback = el("div", { className: "muted" });
-        fallback.textContent = "Jag kan bara hjälpa med denna sida. Välj ett vanligt problem eller följ checklistan.";
-        answerBox.appendChild(fallback);
         askSec.appendChild(answerBox);
-
         content.appendChild(askSec);
 
         // Troubleshoot
@@ -626,19 +825,19 @@
             }
             var faqId = matchQuestion(qn);
             if (!faqId) {
-              setAnswer("Jag kan bara hjälpa med denna sida. Välj ett vanligt problem eller följ checklistan.", true);
+              setAnswer("Jag hittade inget säkert svar. Välj ett vanligt problem eller följ checklistan.", true);
               return;
             }
             var faq = findFaqById(faqId);
             if (!faq) {
-              setAnswer("Jag kan bara hjälpa med denna sida. Välj ett vanligt problem eller följ checklistan.", true);
+              setAnswer("Jag hittade inget säkert svar. Välj ett vanligt problem eller följ checklistan.", true);
               return;
             }
             var a = faq.a;
             if (a === undefined || a === null || a === "") setAnswer("Svar saknas för detta problem.", true);
             else setAnswer(a, false);
           } catch (_) {
-            setAnswer("Jag kan bara hjälpa med denna sida. Välj ett vanligt problem eller följ checklistan.", true);
+            setAnswer("Jag hittade inget säkert svar. Välj ett vanligt problem eller följ checklistan.", true);
           }
         }
         qBtn.addEventListener("click", function (e) {
@@ -654,7 +853,7 @@
           } catch (_) {}
         });
 
-        // Optional anon status
+        // Optional anon status (same as v1.1, unchanged)
         function shouldShowAnon() {
           try {
             if (pack.enableAnonStatus !== true) return false;
@@ -704,9 +903,127 @@
           } catch (_) {}
         });
 
-        return true;
+        return { inputNode: qInput };
       } catch (_) {
-        return false;
+        return { inputNode: null };
+      }
+    }
+
+    function renderBlocksView(content, pack, isGlobalMode) {
+      try {
+        if (!content) return;
+
+        if (!pack) {
+          var p0 = el("p", { className: "muted" });
+          p0.textContent = "Hjälp är inte tillgänglig för detta läge ännu.";
+          content.appendChild(p0);
+          return;
+        }
+
+        var blocks = pack.blocks;
+        if (!Array.isArray(blocks) || !blocks.length) {
+          var p1 = el("p", { className: "muted" });
+          p1.textContent = isGlobalMode
+            ? "Ingen blockkarta finns i globalt pack ännu."
+            : "Ingen blockkarta finns för denna sida ännu.";
+          content.appendChild(p1);
+          return;
+        }
+
+        if (!isGlobalMode) {
+          // Page-mode: show block group only for this pageId if found
+          var group = null;
+          for (var i = 0; i < blocks.length; i++) {
+            if (normStr(blocks[i].pageId) === normStr(pageId)) {
+              group = blocks[i];
+              break;
+            }
+          }
+          if (!group) {
+            var p2 = el("p", { className: "muted" });
+            p2.textContent = "Ingen blockkarta finns för denna sida ännu.";
+            content.appendChild(p2);
+            return;
+          }
+          renderBlockGroup(content, group, true);
+          return;
+        }
+
+        // Global-mode: show all groups
+        for (var j = 0; j < blocks.length; j++) {
+          renderBlockGroup(content, blocks[j], false);
+        }
+      } catch (_) {}
+    }
+
+    function renderBlockGroup(content, group, isSingle) {
+      try {
+        if (!content || !group) return;
+
+        var title = safeStr(group.pageTitle) || safeStr(group.pageId) || "Sida";
+        var wrap = el("div", { className: "blockGroup" });
+
+        var h = el("h3", { text: title });
+        wrap.appendChild(h);
+
+        var items = group.items;
+        if (!Array.isArray(items) || !items.length) {
+          var m = el("div", { className: "muted" });
+          m.textContent = "Inga block är definierade ännu.";
+          wrap.appendChild(m);
+          content.appendChild(wrap);
+          return;
+        }
+
+        for (var i = 0; i < items.length; i++) {
+          var it = items[i];
+          if (!it) continue;
+
+          var blockId = safeStr(it.blockId);
+          var t = safeStr(it.title);
+
+          var itemWrap = el("div", { className: "blockItem" });
+          var p = el("div", { className: "blockItemTitle" });
+          p.textContent = (blockId ? (blockId + " — ") : "") + (t || "Block");
+          itemWrap.appendChild(p);
+
+          var checklist = it.checklist;
+          if (Array.isArray(checklist) && checklist.length) {
+            var ul = el("ul");
+            for (var k = 0; k < checklist.length; k++) {
+              var li = el("li");
+              li.textContent = safeStr(checklist[k]);
+              ul.appendChild(li);
+            }
+            itemWrap.appendChild(ul);
+          } else {
+            var mm = el("div", { className: "muted" });
+            mm.textContent = "Ingen checklista definierad.";
+            itemWrap.appendChild(mm);
+          }
+
+          wrap.appendChild(itemWrap);
+        }
+
+        content.appendChild(wrap);
+      } catch (_) {}
+    }
+
+    function renderPackIntoContentV12(content, activePack, isGlobalMode) {
+      try {
+        if (!content) return { preferredFocus: null };
+
+        clearNode(content);
+
+        if (UI_STATE.tab === "blocks") {
+          renderBlocksView(content, activePack, isGlobalMode);
+          return { preferredFocus: null };
+        }
+
+        var res = renderHelpView(content, activePack, isGlobalMode);
+        return { preferredFocus: res && res.inputNode ? res.inputNode : null };
+      } catch (_) {
+        return { preferredFocus: null };
       }
     }
 
@@ -728,12 +1045,6 @@
 
     // Ensure content mount exists (MUST)
     var content = ensureSupportContent(panel);
-
-    // If content cannot be injected → fail-closed minimal fallback
-    if (!content) {
-      // We can still toggle the panel; but skip rendering.
-      // Fail-closed: do nothing else.
-    }
 
     // Button strategy (MUST)
     var btn = null;
@@ -758,9 +1069,7 @@
     if (!btn || !panel) return;
 
     // Prevent double-binding (MUST fail-closed)
-    // - If markBound fails → already bound, exit quietly.
     if (!markBound(btn)) {
-      // Already bound; avoid conflicts (DoD requires no errors)
       return;
     }
 
@@ -772,18 +1081,33 @@
     function refresh() {
       try {
         if (!content) return;
-        var pack = getPack(pageId);
-        renderPackIntoContent(content, pack);
 
-        // Update title in panel header if present (do not duplicate outside #supportContent)
+        // Ensure header controls exist + state
+        ensureHeaderControls(panel);
+        setTabA11y(panel);
+
+        var pack = getActivePack();
+        var isGlobalMode = UI_STATE.scope === "global";
+
+        // Render into #supportContent only
+        var rr = renderPackIntoContentV12(content, pack, isGlobalMode);
+
+        // Update title in panel header if present
         try {
           var titleNode = panel.querySelector("#supportTitle") || panel.querySelector(".hdr h2");
           if (titleNode) {
-            var t = pack && safeStr(pack.title) ? safeStr(pack.title) : pageId;
+            var t = pack && safeStr(pack.title) ? safeStr(pack.title) : (isGlobalMode ? "Systemadmin" : pageId);
             titleNode.textContent = "Support för: " + t;
           }
         } catch (_) {}
-      } catch (_) {}
+
+        // Set placeholder helper already handled in renderHelpView
+
+        // Return preferred focus (if any)
+        return rr && rr.preferredFocus ? rr.preferredFocus : null;
+      } catch (_) {
+        return null;
+      }
     }
 
     function openPanel() {
@@ -793,13 +1117,8 @@
         setAriaExpanded(btn, true);
 
         // Render on open (packs may load after core)
-        refresh();
+        var preferred = refresh();
 
-        // Focus: prefer question input inside #supportContent if present
-        var preferred = null;
-        try {
-          preferred = panel.querySelector("#" + IDS.content + " input[type='text']");
-        } catch (_) {}
         focusInside(panel, preferred);
       } catch (_) {}
     }
@@ -891,4 +1210,3 @@
     // Fail-closed: do nothing (never throw)
   }
 })();
-
