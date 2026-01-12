@@ -27,6 +27,9 @@ Datamodell (enkel, tolerant):
   { id:"org_yyy", name:"Enhet 1", type:"Enhet", parentId:"org_xxx" }
 ]
 
+PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
+- Vid skapande av ENHET kan SYSTEM_ADMIN generera empNo (valfritt)
+- Vid sparande av ny ENHET med empNo: redirect till assignments.html?empNo=...&scopeId=...
 ============================================================ -->
 
 <!doctype html>
@@ -266,6 +269,21 @@ Datamodell (enkel, tolerant):
     .linkTitle{ margin: 0; font-weight: 900; }
     .linkDesc{ margin: 6px 0 0; color: var(--muted); font-size:.92rem; }
     .linkUrl{ margin: 10px 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.86rem; color: rgba(17,17,17,.70); }
+
+    /* --- PATCH UI: enhet empNo handoff (UI-only) --- */
+    .inlineCheck{
+      display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;
+      padding: 10px 12px;
+      border: 1px dashed rgba(0,0,0,.14);
+      border-radius: 12px;
+      background: rgba(17,17,17,.02);
+      margin-top: 10px;
+    }
+    .inlineCheck input[type="checkbox"]{
+      width:auto; margin: 4px 0 0;
+    }
+    .inlineCheck strong{ font-weight: 900; }
+    .inlineCheck .mutedText{ margin: 0; }
   </style>
 </head>
 
@@ -374,6 +392,39 @@ Datamodell (enkel, tolerant):
             <input id="nodeId" type="text" disabled value="—" />
             <div class="mutedText" style="margin-top:6px;">ID skapas automatiskt (org_...).</div>
           </label>
+        </div>
+
+        <!-- PATCH: ENHET -> empNo handoff (ingen storage-key) -->
+        <div id="unitEmpWrap" style="display:none;">
+          <div class="inlineCheck">
+            <input id="chkGenEmp" type="checkbox" />
+            <div style="min-width:240px; flex:1;">
+              <div><strong>Skapa empNo för ny ENHET</strong></div>
+              <p class="mutedText" style="margin-top:4px;">
+                Om du bockar i: empNo skickas vidare till Assignments automatiskt när du sparar ENHET (ingen lagring här).
+              </p>
+
+              <div class="row2" style="margin-top:10px;">
+                <label>
+                  EmpNo (auto)
+                  <input id="unitEmpNo" type="text" inputmode="numeric" autocomplete="off" placeholder="t.ex. 100234" />
+                  <div class="mutedText" style="margin-top:6px;">Endast siffror. Rek: 4–12 tecken.</div>
+                </label>
+
+                <div>
+                  <label style="opacity:.86;">Åtgärd</label>
+                  <div class="row" style="margin-top:6px;">
+                    <button class="miniBtn" id="btnGenEmp" type="button">Generera</button>
+                    <button class="miniBtn" id="btnClearEmp" type="button">Rensa</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="smallnote">
+                Nästa steg: Assignments kopplar empNo → (role + ENHET-scope).
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="row" style="margin-top:10px;">
@@ -516,6 +567,36 @@ Datamodell (enkel, tolerant):
   function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
   function trimStr(v){ return safeStr(v).trim(); }
 
+  // --- PATCH helpers: empNo (URL handoff only) ---
+  function isDigits(s){ return /^[0-9]+$/.test(s); }
+  function isValidEmpNo(s){
+    const v = trimStr(s);
+    if(!v) return false;
+    if(v.length < 4 || v.length > 12) return false;
+    return isDigits(v);
+  }
+  function genEmpNo(){
+    // 6-siffrig, UI-only, inte lagrat här
+    // (Sannolik unikhet inom en admin-session)
+    const base = String(Date.now()).slice(-6);
+    const salt = Math.floor(Math.random() * 90 + 10); // 10-99
+    const out = (base.slice(0,4) + String(salt)); // 6 digits
+    return out.replace(/^0+/, "1"); // säkerställ ej tom/0-start
+  }
+  function syncEmpUI(){
+    const wrap = $("unitEmpWrap");
+    if(!wrap) return;
+    const t = trimStr($("nodeType").value);
+    const show = (!editingId && t === "Enhet");
+    wrap.style.display = show ? "block" : "none";
+
+    if(!show){
+      // fail-safe reset when not visible
+      $("chkGenEmp").checked = false;
+      $("unitEmpNo").value = "";
+    }
+  }
+
   // --- UI state (UI-only) ---
   let editingId = ""; // node.id
 
@@ -581,7 +662,6 @@ Datamodell (enkel, tolerant):
     let problems = 0;
     const issues = [];
 
-    // duplicates (by normalize in byId we lose duplicates; detect by counting)
     const seen = new Set();
     const dups = new Set();
     for(const n of nodes){
@@ -608,7 +688,6 @@ Datamodell (enkel, tolerant):
       }
     }
 
-    // missing parent (excluding null and root)
     let missingParentCount = 0;
     for(const n of nodes){
       if(n.id === ROOT_ID) continue;
@@ -620,7 +699,6 @@ Datamodell (enkel, tolerant):
       issues.push(`Saknad/ogiltig parentId: ${missingParentCount} nod(er).`);
     }
 
-    // simple cycle detection (best effort)
     function hasCycle(){
       const visiting = new Set();
       const visited = new Set();
@@ -640,7 +718,6 @@ Datamodell (enkel, tolerant):
         return false;
       }
 
-      // start from root if exists, else from each node
       if(idx.byId.has(ROOT_ID)){
         return dfs(ROOT_ID);
       }
@@ -655,7 +732,6 @@ Datamodell (enkel, tolerant):
       issues.push("Cykel upptäckt (parent-loop).");
     }
 
-    // counts
     const bolag = nodes.filter(n => normalizeType(n.type) === "Bolag").length;
     const enhet = nodes.filter(n => normalizeType(n.type) === "Enhet").length;
 
@@ -668,7 +744,6 @@ Datamodell (enkel, tolerant):
   }
 
   function saveOrg(nodes){
-    // skriv tolerant format (id/name/type/parentId)
     const out = nodes.map(n => ({
       id: trimStr(n.id),
       name: trimStr(n.name),
@@ -687,8 +762,12 @@ Datamodell (enkel, tolerant):
     $("btnDelete").style.display = "none";
     setMsg("", "");
 
-    // parent select will be set by renderParents()
+    // PATCH resets
+    $("chkGenEmp").checked = false;
+    $("unitEmpNo").value = "";
+
     syncEditingUI();
+    syncEmpUI();
   }
 
   function syncEditingUI(){
@@ -698,7 +777,7 @@ Datamodell (enkel, tolerant):
 
     if(btnNew) btnNew.textContent = editingId ? "Avsluta redigering" : "Ny";
     if(btnDel) btnDel.style.display = (editingId && editingId !== ROOT_ID) ? "inline-flex" : "none";
-    if(nid) nid.value = editingId ? editingId : makeId(); // preview id even before save
+    if(nid) nid.value = editingId ? editingId : makeId();
   }
 
   function setEditing(node){
@@ -709,7 +788,6 @@ Datamodell (enkel, tolerant):
     const t = normalizeType(node.type);
     $("nodeType").value = (t === "Enhet") ? "Enhet" : (t === "Bolag" ? "Bolag" : "Bolag");
 
-    // parent select will be updated by renderParents, then set value
     renderParents();
     const pid = (node.parentId === null || node.parentId === undefined) ? "" : String(node.parentId);
     $("parentId").value = pid;
@@ -717,6 +795,11 @@ Datamodell (enkel, tolerant):
     $("nodeId").value = editingId;
     setMsg("", "");
     syncEditingUI();
+
+    // PATCH: hide empNo UI in edit mode (ingen data kopplad till org-noden)
+    $("chkGenEmp").checked = false;
+    $("unitEmpNo").value = "";
+    syncEmpUI();
   }
 
   // --- render parents select ---
@@ -729,7 +812,6 @@ Datamodell (enkel, tolerant):
     const nodes = loadOrg();
     const idx = buildIndex(nodes);
 
-    // If no root, parent select is still shown but disabled
     const optEmpty = document.createElement("option");
     optEmpty.value = "";
     optEmpty.textContent = "(parent saknas) — skapa Root först";
@@ -742,7 +824,6 @@ Datamodell (enkel, tolerant):
 
     sel.disabled = false;
 
-    // Build a stable display list (tree order)
     const order = [];
     const visited = new Set();
 
@@ -765,13 +846,9 @@ Datamodell (enkel, tolerant):
 
     walk(ROOT_ID, 0);
 
-    // parent options: allow selecting root and any other node EXCEPT the node itself (avoid trivial cycles)
-    // (Extra cycle prevention is handled in save validation.)
-    // Replace placeholder option
     while(sel.firstChild) sel.removeChild(sel.firstChild);
 
     for(const r of order){
-      // if editing, do not allow selecting itself as parent
       if(editingId && r.id === editingId) continue;
 
       const opt = document.createElement("option");
@@ -781,11 +858,9 @@ Datamodell (enkel, tolerant):
       sel.appendChild(opt);
     }
 
-    // If not editing, default parent = root
     if(!editingId){
       sel.value = ROOT_ID;
     }else{
-      // keep current if possible
       const cur = loadOrg().find(x => x.id === editingId);
       sel.value = (cur && cur.parentId) ? cur.parentId : ROOT_ID;
     }
@@ -807,7 +882,6 @@ Datamodell (enkel, tolerant):
     $("kpiBolag").textContent = String(health.bolag);
     $("kpiEnheter").textContent = String(health.enhet);
 
-    // pills
     const pillRoot = $("pillRoot");
     const pillShape = $("pillShape");
 
@@ -831,7 +905,6 @@ Datamodell (enkel, tolerant):
       $("pillWarn").style.display = "inline-flex";
     }
 
-    // blocker
     const blocker = $("blocker");
     const btnCreateRoot = $("btnCreateRoot");
     const btnResetOrg = $("btnResetOrg");
@@ -850,7 +923,6 @@ Datamodell (enkel, tolerant):
       blocker.style.display = "none";
     }
 
-    // tree render (filter/search)
     const tree = $("tree");
     while(tree.firstChild) tree.removeChild(tree.firstChild);
 
@@ -865,7 +937,6 @@ Datamodell (enkel, tolerant):
 
     const idx = buildIndex(nodes);
 
-    // build tree order from root; include orphans separately
     const rows = [];
     const visited = new Set();
 
@@ -874,7 +945,6 @@ Datamodell (enkel, tolerant):
     }
 
     function nodeHasProblem(n){
-      // problems: missing parent, wrong root shape, duplicate handled elsewhere
       if(n.id === ROOT_ID){
         if(normalizeType(n.type) !== "Root") return true;
         if(n.parentId !== null) return true;
@@ -907,7 +977,6 @@ Datamodell (enkel, tolerant):
       walk(ROOT_ID, 0);
     }
 
-    // orphans not visited
     for(const n of nodes){
       if(!visited.has(n.id)){
         includeNode(n, 0, { problem:true, orphan:true });
@@ -998,9 +1067,9 @@ Datamodell (enkel, tolerant):
       tree.appendChild(item);
     }
 
-    // parents select needs refresh because tree changed/loaded
     renderParents();
     syncEditingUI();
+    syncEmpUI();
   }
 
   function wouldCreateCycle(nodes, movingId, newParentId){
@@ -1009,11 +1078,10 @@ Datamodell (enkel, tolerant):
 
     const idx = buildIndex(nodes);
 
-    // walk up from newParentId and see if we reach movingId
     let cur = newParentId;
     const guard = new Set();
     while(cur){
-      if(guard.has(cur)) return true; // loop already
+      if(guard.has(cur)) return true;
       guard.add(cur);
       if(cur === movingId) return true;
       const n = idx.byId.get(cur);
@@ -1054,13 +1122,11 @@ Datamodell (enkel, tolerant):
     }
     const idx = buildIndex(nodes);
 
-    // Prevent delete if has children unless confirmed
     const kids = (idx.children.get(id) || []);
     if(kids.length){
       const ok = confirm(`Noden har ${kids.length} barn. Ta bort noden och flytta barnen till Root?`);
       if(!ok) return;
 
-      // move children to root (fail-safe)
       for(const cid of kids){
         const child = idx.byId.get(cid);
         if(child) child.parentId = ROOT_ID;
@@ -1105,7 +1171,6 @@ Datamodell (enkel, tolerant):
       return;
     }
 
-    // determine id
     let id = editingId ? editingId : trimStr($("nodeId").value);
     if(!id || id === "—") id = makeId();
     if(id === ROOT_ID){
@@ -1113,14 +1178,12 @@ Datamodell (enkel, tolerant):
       return;
     }
 
-    // cycle prevention
     const testNodes = normalizeOrgNodes(nodes.map(n => ({...n})));
     if(wouldCreateCycle(testNodes, id, parentId)){
       setMsg("err", "Fail-closed: Parent-val skapar cykel.");
       return;
     }
 
-    // upsert
     let found = false;
     const next = nodes.map(n => {
       if(n.id === id){
@@ -1131,17 +1194,29 @@ Datamodell (enkel, tolerant):
     });
 
     if(!found){
-      // ensure unique id
       if(idx.byId.has(id)){
-        // collision -> generate a new id (fail-safe)
         id = makeId();
       }
       next.push({ id, name, type, parentId });
     }
 
-    // Also ensure root shape remains correct if root exists
-    // (We keep it as-is; assignments requires root id)
     saveOrg(next);
+
+    // --- PATCH: redirect to Assignments with empNo + scopeId on NEW ENHET create ---
+    const wantsEmp = (!found && !editingId && type === "Enhet" && $("chkGenEmp").checked);
+    if(wantsEmp){
+      const empNo = trimStr($("unitEmpNo").value);
+      if(!isValidEmpNo(empNo)){
+        setMsg("err", "EmpNo saknas/ogiltigt. Ange 4–12 siffror eller klicka Generera.");
+        return;
+      }
+
+      setMsg("ok", "ENHET skapad. Öppnar Assignments...");
+      // URL handoff (ingen ny storage-key)
+      const url = `./assignments.html?empNo=${encodeURIComponent(empNo)}&scopeId=${encodeURIComponent(id)}&from=org`;
+      safeReplace(url);
+      return;
+    }
 
     setMsg("ok", found ? "Uppdaterat." : "Skapat.");
     resetForm();
@@ -1156,7 +1231,6 @@ Datamodell (enkel, tolerant):
       return;
     }
 
-    // pick parent: if there is any bolag under root and we create enhet -> default to first bolag, else root.
     let parentId = ROOT_ID;
     if(type === "Enhet"){
       const bolag = nodes.find(n => normalizeType(n.type) === "Bolag");
@@ -1169,6 +1243,14 @@ Datamodell (enkel, tolerant):
     renderParents();
     $("parentId").value = parentId;
     syncEditingUI();
+    syncEmpUI();
+
+    // PATCH: prime empNo UI for new enhet
+    if(type === "Enhet"){
+      $("chkGenEmp").checked = true;
+      $("unitEmpNo").value = genEmpNo();
+    }
+
     $("nodeName").focus({ preventScroll:true });
   }
 
@@ -1185,6 +1267,23 @@ Datamodell (enkel, tolerant):
       try{ HRApp.logout(); }catch{ safeReplace("../UI/UI-01-SKELETON.html?err=logout"); }
     });
   }
+
+  // --- PATCH: empNo UI events ---
+  $("chkGenEmp").addEventListener("change", () => {
+    if($("chkGenEmp").checked){
+      if(!trimStr($("unitEmpNo").value)) $("unitEmpNo").value = genEmpNo();
+    }else{
+      $("unitEmpNo").value = "";
+    }
+  });
+  $("btnGenEmp").addEventListener("click", () => {
+    $("chkGenEmp").checked = true;
+    $("unitEmpNo").value = genEmpNo();
+  });
+  $("btnClearEmp").addEventListener("click", () => {
+    $("chkGenEmp").checked = false;
+    $("unitEmpNo").value = "";
+  });
 
   // --- events ---
   $("btnRefresh").addEventListener("click", () => { setMsg("", ""); renderTree(); });
@@ -1204,6 +1303,7 @@ Datamodell (enkel, tolerant):
       resetForm();
       renderParents();
       syncEditingUI();
+      syncEmpUI();
     }
   });
 
@@ -1222,6 +1322,16 @@ Datamodell (enkel, tolerant):
   ["nodeName","nodeType"].forEach(id => {
     const el = $(id);
     if(el) el.addEventListener("input", () => { if(!editingId) syncEditingUI(); });
+  });
+
+  // PATCH: show/hide empNo UI when type changes
+  $("nodeType").addEventListener("change", () => {
+    syncEmpUI();
+    // auto-prime when switching to Enhet in create mode
+    if(!editingId && trimStr($("nodeType").value) === "Enhet"){
+      $("chkGenEmp").checked = true;
+      if(!trimStr($("unitEmpNo").value)) $("unitEmpNo").value = genEmpNo();
+    }
   });
 
   // init
