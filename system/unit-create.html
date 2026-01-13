@@ -1,1 +1,769 @@
+<!-- ============================================================
+AO-SYS-UNIT-CREATE-AUTO-ADMIN-01 (PROD • DEMO) | FIL-ID: system/unit-create.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: Skapa ny ENHET under valt BOLAG. Vid sparande skapas automatiskt:
+(1) Enhet (org-nod) med enhetsuppgifter
+(2) ADMIN-konto till den enheten med användarnamn + lösenord (DEMO)
+
+POLICY (LÅST):
+- UI-only • Ingen backend
+- SYSTEM_ADMIN-only • Fail-closed via HRApp.requireAuth
+- XSS-escape på allt från storage (endast textContent, ingen osäker innerHTML)
+- Hel-filsleverans (unit-create.html)
+- Inga nya storage-keys/datamodell i denna AO, förutom att återanvända samma DEMO user-register som AO3 skapade/använde
+- Ingen UX-redesign av global topbar
+
+KEYS (LÅST):
+- Org: AO-020_ORG_V1 (localStorage)
+- Session: AO-001_LOGIN_V1 via HRApp.requireAuth/getAuth
+- User/Konto-register (DEMO): ÅTERANVÄND exakt samma key + schema som AO3
+
+OBS (KOPPLING AO3):
+- AO3 (company-create.html) använder antingen existerande user-key eller skapar DEMO-key.
+- Den här sidan använder SAMMA detekteringslogik som AO3 och får INTE skapa ny key.
+  Om ingen key hittas -> fail-closed (eftersom AO3 ska ha etablerat den vid första skapandet).
+
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – System • Skapa enhet</title>
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <style>
+    .wrap { max-width: 980px; margin: 0 auto; padding: 16px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid rgba(0,0,0,.08); }
+    .topbar .left { display:flex; align-items:center; gap:10px; min-width:0; }
+    .topbar .brand { font-weight:800; white-space:nowrap; }
+    .topbar nav { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .topbar a { text-decoration:none; }
+    .topbar .right { display:flex; align-items:center; gap:10px; }
+    .pill { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px; font-size:12px; border:1px solid rgba(0,0,0,.12); }
+    .muted2 { opacity:.75; font-size:13px; }
+    .btn { display:inline-flex; align-items:center; justify-content:center; padding:10px 12px; border-radius:10px; border:1px solid rgba(0,0,0,.18); cursor:pointer; text-decoration:none; background:transparent; }
+    .btn.primary { font-weight:800; }
+    .btn[disabled] { opacity:.55; cursor:not-allowed; }
+    .btn.logout { border-color: rgba(200,0,0,.25); }
+    .btn.logout:hover { border-color: rgba(200,0,0,.40); }
+
+    .grid { display:grid; grid-template-columns: 1.2fr .8fr; gap: 14px; }
+    @media (max-width: 900px){ .grid{ grid-template-columns: 1fr; } }
+    .card { border:1px solid rgba(0,0,0,.10); border-radius:14px; padding:14px; background: rgba(255,255,255,.92); }
+    .hr { height:1px; background: rgba(0,0,0,.08); margin: 12px 0; }
+
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 700px){ .row{ grid-template-columns: 1fr; } }
+    label { display:block; font-size:13px; margin:0 0 6px 0; }
+    input { width:100%; padding:10px 10px; border-radius:10px; border:1px solid rgba(0,0,0,.18); }
+
+    .status { margin-top:10px; padding:10px; border-radius:12px; border:1px solid rgba(0,0,0,.12); }
+    .status.err { }
+    .status.ok { }
+
+    .kv { display:grid; grid-template-columns: 180px 1fr; gap: 8px 10px; margin-top: 10px; }
+    @media (max-width: 700px){ .kv { grid-template-columns: 1fr; } }
+    .k { font-size:12px; opacity:.75; }
+    .v { font-size:14px; word-break: break-word; }
+    .v.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size:13px; }
+
+    .actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+    .note { font-size:12px; opacity:.78; margin-top:8px; }
+  </style>
+</head>
+
+<body>
+  <header class="topbar" role="banner">
+    <div class="left">
+      <div class="brand" aria-label="HR-System">HR-System</div>
+      <span class="pill" id="authPill" aria-live="polite">SYSTEM_ADMIN</span>
+    </div>
+
+    <nav aria-label="Systemnavigation">
+      <a class="btn" href="./dashboard.html">Systemstart</a>
+      <a class="btn" href="./org.html">Org-karta</a>
+      <a class="btn" href="./company.html">Bolag</a>
+    </nav>
+
+    <div class="right">
+      <span class="muted2" id="whoami"></span>
+      <button class="btn logout" id="btnLogout" type="button">Logga ut</button>
+    </div>
+  </header>
+
+  <main class="wrap" role="main">
+    <div class="grid">
+      <!-- FORM -->
+      <section class="card" aria-labelledby="h1">
+        <h1 id="h1" style="margin:0 0 6px 0; font-size:22px;">Skapa enhet</h1>
+        <div class="muted2">
+          Enheten skapas under valt bolag. När enheten skapas skapas ett admin-konto automatiskt (DEMO).
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="kv" aria-label="Valt bolag">
+          <div class="k">Valt bolag</div>
+          <div class="v" id="companyName">—</div>
+
+          <div class="k">Org.nr</div>
+          <div class="v" id="companyOrgNo">—</div>
+
+          <div class="k">Bolag-ID</div>
+          <div class="v mono" id="companyIdOut">—</div>
+        </div>
+
+        <div id="status" class="status" role="status" aria-live="polite" style="display:none;"></div>
+
+        <div class="hr"></div>
+
+        <form id="formUnit" autocomplete="off" novalidate>
+          <div class="row">
+            <div>
+              <label for="unitName">Enhetsnamn *</label>
+              <input id="unitName" name="unitName" type="text" maxlength="120" required />
+            </div>
+
+            <div>
+              <label for="orgNo">Organisationsnummer *</label>
+              <input id="orgNo" name="orgNo" type="text" maxlength="32" required />
+            </div>
+
+            <div>
+              <label for="invoiceEmail">Faktura-mail *</label>
+              <input id="invoiceEmail" name="invoiceEmail" type="email" maxlength="120" required />
+            </div>
+
+            <div>
+              <label for="contactName">Kontaktperson *</label>
+              <input id="contactName" name="contactName" type="text" maxlength="120" required />
+            </div>
+
+            <div>
+              <label for="phone">Telefon *</label>
+              <input id="phone" name="phone" type="tel" maxlength="40" required />
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="btnSave" class="btn primary" type="submit">Spara enhet (skapar admin)</button>
+            <a class="btn" id="backToCompany" href="./company.html">Till bolaget</a>
+            <a class="btn" href="./org.html">Org-karta</a>
+          </div>
+
+          <div class="note" id="hint"></div>
+        </form>
+      </section>
+
+      <!-- RESULT -->
+      <aside class="card" aria-labelledby="h2">
+        <h2 id="h2" style="margin:0 0 8px 0; font-size:18px;">Resultat</h2>
+        <div class="muted2">Visas endast direkt efter skapande.</div>
+
+        <div id="resultEmpty" class="note">Ingen skapad enhet ännu.</div>
+
+        <div id="resultPanel" style="display:none;">
+          <div class="status ok"><strong>Enhet skapad</strong></div>
+
+          <div class="kv" aria-label="Skapad enhet + credentials">
+            <div class="k">Enhet</div>
+            <div class="v" id="outUnitName">—</div>
+
+            <div class="k">Enhet-ID</div>
+            <div class="v mono" id="outUnitId">—</div>
+
+            <div class="k">ADMIN användarnamn</div>
+            <div class="v mono" id="outUsername">—</div>
+
+            <div class="k">ADMIN lösenord</div>
+            <div class="v mono" id="outPassword">—</div>
+          </div>
+
+          <div class="note">Lösenordet visas bara här, en gång (DEMO). Det sparas inte i klartext.</div>
+
+          <div class="actions" style="margin-top:12px;">
+            <a class="btn" id="goCompany2" href="#">Till bolaget</a>
+            <a class="btn" id="createMore" href="#">Skapa fler enheter</a>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    (function(){
+      "use strict";
+
+      const KEY_ORG = "AO-020_ORG_V1";
+      const KEY_SESSION = "AO-001_LOGIN_V1";
+
+      // MUST match AO3 (company-create.html)
+      const USER_KEY_CANDIDATES = [
+        "AO-002_USERS_V1",
+        "AO-010_USERS_V1",
+        "AO-001_USERS_V1",
+        "AO-010_USER_REG_V1",
+        "AO-001_USER_REG_V1",
+        "AO-020_USERS_V1"
+      ];
+      const FALLBACK_USER_KEY_DEMO = "AO-030_USERS_DEMO_V1"; // AO3:s DEMO-key om ingen fanns (får INTE skapa ny här)
+
+      const $ = (id) => document.getElementById(id);
+
+      const elWho = $("whoami");
+      const btnLogout = $("btnLogout");
+      const elStatus = $("status");
+      const btnSave = $("btnSave");
+      const form = $("formUnit");
+
+      const companyName = $("companyName");
+      const companyOrgNo = $("companyOrgNo");
+      const companyIdOut = $("companyIdOut");
+      const backToCompany = $("backToCompany");
+      const hint = $("hint");
+
+      const resultEmpty = $("resultEmpty");
+      const resultPanel = $("resultPanel");
+      const outUnitName = $("outUnitName");
+      const outUnitId = $("outUnitId");
+      const outUsername = $("outUsername");
+      const outPassword = $("outPassword");
+      const goCompany2 = $("goCompany2");
+      const createMore = $("createMore");
+
+      let isSaving = false;
+      let lastCreated = null; // in-memory only
+
+      function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
+      function trimStr(v){ return safeStr(v).trim(); }
+      function parseJsonSafe(raw){ try { return JSON.parse(raw); } catch(_) { return null; } }
+      function looksLikeEmail(v){
+        const s = trimStr(v);
+        return s.length >= 3 && s.includes("@") && s.indexOf("@") > 0 && s.indexOf("@") < (s.length - 1);
+      }
+
+      function showStatus(kind, msg){
+        elStatus.style.display = "block";
+        elStatus.className = "status " + (kind === "ok" ? "ok" : "err");
+        elStatus.textContent = msg;
+      }
+      function clearStatus(){
+        elStatus.style.display = "none";
+        elStatus.textContent = "";
+      }
+
+      function requireSystemAdmin(){
+        if (window.HRApp && typeof window.HRApp.requireAuth === "function") {
+          const auth = window.HRApp.requireAuth({ role: "SYSTEM_ADMIN" });
+          try {
+            const a = (window.HRApp.getAuth && window.HRApp.getAuth()) || auth;
+            const who = a && (a.empNo || a.username || a.user || "");
+            if (who) elWho.textContent = String(who);
+          } catch(_) {}
+          return true;
+        }
+
+        // fallback: fail-closed om session saknas
+        let sess = null;
+        try { sess = JSON.parse(sessionStorage.getItem(KEY_SESSION) || "null"); } catch(_) {}
+        if (!sess) { try { sess = JSON.parse(localStorage.getItem(KEY_SESSION) || "null"); } catch(_) {} }
+
+        const role = sess && (sess.role || sess.roleId || sess.userRole);
+        const isSys = String(role || "").toUpperCase().includes("SYSTEM");
+        if (!sess || !isSys) {
+          location.href = "./login.html";
+          return false;
+        }
+        elWho.textContent = String(sess.empNo || sess.username || "");
+        return true;
+      }
+
+      function doLogout(){
+        if (window.HRApp && typeof window.HRApp.logout === "function") {
+          window.HRApp.logout();
+          return;
+        }
+        sessionStorage.removeItem(KEY_SESSION);
+        localStorage.removeItem(KEY_SESSION);
+        location.href = "./login.html";
+      }
+      btnLogout.addEventListener("click", doLogout);
+
+      function getCompanyId(){
+        const qs = new URLSearchParams(location.search || "");
+        return trimStr(qs.get("companyId"));
+      }
+
+      function loadOrgFailClosed(){
+        const raw = localStorage.getItem(KEY_ORG);
+        const data = parseJsonSafe(raw || "null");
+        if (!Array.isArray(data)) return { ok:false, err:"Org saknas/korrupt (AO-020_ORG_V1 är inte en array).", nodes:null };
+        return { ok:true, nodes:data };
+      }
+
+      function inferSchema(nodes){
+        const sample = nodes && nodes.length ? nodes[0] : null;
+        const idKey = sample && ("id" in sample) ? "id" : "id";
+        const parentKey = sample && ("parentId" in sample) ? "parentId" : (sample && ("parent" in sample) ? "parent" : "parentId");
+        const nameKey = sample && ("displayName" in sample) ? "displayName" : (sample && ("name" in sample) ? "name" : "displayName");
+        const typeKey = sample && ("type" in sample) ? "type" : (sample && ("kind" in sample) ? "kind" : "type");
+        const metaKey = sample && ("meta" in sample) ? "meta" : "meta";
+        return { idKey, parentKey, nameKey, typeKey, metaKey };
+      }
+
+      function findRoot(nodes, schema){
+        const { parentKey, typeKey } = schema;
+        for (const n of nodes){
+          if (!n) continue;
+          const p = n[parentKey];
+          const t = n[typeKey];
+          const isRootByParent = (p === null || p === undefined || p === "");
+          const isRootByType = String(t || "").toUpperCase() === "ROOT";
+          if (isRootByParent || isRootByType) return n;
+        }
+        return null;
+      }
+
+      function hasAnyTypedNodes(nodes, schema){
+        const { typeKey } = schema;
+        for (const n of nodes){
+          const t = n && n[typeKey];
+          if (trimStr(t)) return true;
+        }
+        return false;
+      }
+
+      function isCompanyNode(node, rootId, typedMode, schema){
+        if (!node) return false;
+        const { idKey, parentKey, typeKey } = schema;
+        const id = node[idKey];
+        if (!id) return false;
+        if (String(id) === String(rootId)) return false;
+
+        if (typedMode) {
+          const t = String(node[typeKey] || "").toUpperCase();
+          return t.includes("COMPANY") || t.includes("BOLAG");
+        }
+        return String(node[parentKey] || "") === String(rootId);
+      }
+
+      function pickMeta(node, schema){
+        const meta = node && node[schema.metaKey];
+        return (meta && typeof meta === "object") ? meta : null;
+      }
+
+      function genId(prefix){
+        const rnd = Math.random().toString(16).slice(2);
+        return (prefix || "org") + "_" + Date.now().toString(36) + "_" + rnd;
+      }
+
+      function normalizeOrgNo(orgNo){
+        return trimStr(orgNo).replace(/\s+/g, "");
+      }
+
+      function listLocalStorageKeys(){
+        const out = [];
+        for (let i=0; i<localStorage.length; i++){
+          const k = localStorage.key(i);
+          if (k) out.push(k);
+        }
+        return out;
+      }
+
+      function looksLikeUserArray(x){
+        if (!Array.isArray(x)) return false;
+        if (x.length === 0) return true;
+        const u = x[0];
+        if (!u || typeof u !== "object") return false;
+        return ("empNo" in u) || ("username" in u) || ("user" in u);
+      }
+
+      function findUserRegistryKeyReuseOnly(){
+        // SAMMA som AO3, men: får inte skapa ny här.
+        for (const k of USER_KEY_CANDIDATES){
+          const data = parseJsonSafe(localStorage.getItem(k) || "null");
+          if (looksLikeUserArray(data)) return { key:k, exists:true };
+        }
+        const keys = listLocalStorageKeys();
+        for (const k of keys){
+          const ku = k.toUpperCase();
+          if (!ku.startsWith("AO-")) continue;
+          if (!ku.includes("USER")) continue;
+          const data = parseJsonSafe(localStorage.getItem(k) || "null");
+          if (looksLikeUserArray(data)) return { key:k, exists:true };
+        }
+        // fallback: endast om DEMO-key redan finns som array
+        const demo = parseJsonSafe(localStorage.getItem(FALLBACK_USER_KEY_DEMO) || "null");
+        if (looksLikeUserArray(demo)) return { key:FALLBACK_USER_KEY_DEMO, exists:true };
+
+        return { key:"", exists:false };
+      }
+
+      function loadUsers(key){
+        const data = parseJsonSafe(localStorage.getItem(key) || "null");
+        if (data === null) return []; // tomt ok
+        if (!Array.isArray(data)) return null; // korrupt
+        return data;
+      }
+
+      function randomPassword(len){
+        const L = Math.max(10, Number(len || 12));
+        const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%+-_";
+        let out = "";
+        const arr = new Uint32Array(L);
+        if (window.crypto && window.crypto.getRandomValues) {
+          window.crypto.getRandomValues(arr);
+          for (let i=0; i<L; i++) out += chars[arr[i] % chars.length];
+          return out;
+        }
+        for (let i=0; i<L; i++) out += chars[Math.floor(Math.random()*chars.length)];
+        return out;
+      }
+
+      async function sha256Base64(text){
+        if (!(window.crypto && window.crypto.subtle && window.TextEncoder)) return null;
+        const enc = new TextEncoder().encode(String(text));
+        const buf = await crypto.subtle.digest("SHA-256", enc);
+        const bytes = new Uint8Array(buf);
+        let bin = "";
+        for (let i=0; i<bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin);
+      }
+
+      function findAdminForUnit(users, unitId){
+        for (const u of users){
+          if (!u) continue;
+          const scopeId = u.scopeId || u.unitId || u.scope || null;
+          const scopes = Array.isArray(u.scopeIds) ? u.scopeIds : (Array.isArray(u.scopes) ? u.scopes : null);
+          if (scopeId && String(scopeId) === String(unitId)) return u;
+          if (scopes && scopes.map(String).includes(String(unitId))) return u;
+        }
+        return null;
+      }
+
+      function dedupeUnit(nodes, schema, companyId, unitName, orgNo){
+        // Deduperegel: (companyId + unitName + orgNo)
+        const { parentKey, nameKey, metaKey } = schema;
+        const nOrg = normalizeOrgNo(orgNo);
+        const nName = trimStr(unitName).toLowerCase();
+        for (const n of nodes){
+          if (!n) continue;
+          if (String(n[parentKey] || "") !== String(companyId)) continue;
+          const dn = trimStr(n[nameKey]).toLowerCase();
+          const meta = n[metaKey] || {};
+          const mOrg = normalizeOrgNo(meta.orgNo || meta.orgnr || meta.org || "");
+          if (dn === nName && mOrg === nOrg) return n;
+        }
+        return null;
+      }
+
+      function disableCreateUI(msg){
+        btnSave.disabled = true;
+        showStatus("err", msg);
+      }
+
+      async function onSave(e){
+        e.preventDefault();
+        if (isSaving) return;
+
+        clearStatus();
+        resultPanel.style.display = "none";
+        resultEmpty.style.display = "block";
+        lastCreated = null;
+
+        const companyId = getCompanyId();
+        if (!companyId){
+          disableCreateUI("Välj ett bolag först. (companyId saknas)");
+          return;
+        }
+
+        const orgRes = loadOrgFailClosed();
+        if (!orgRes.ok){
+          disableCreateUI(orgRes.err);
+          return;
+        }
+
+        const nodes = orgRes.nodes;
+        const schema = inferSchema(nodes);
+        const root = findRoot(nodes, schema);
+        if (!root || !root[schema.idKey]){
+          disableCreateUI("Root saknas i org-trädet. Kan inte skapa enhet (fail-closed).");
+          return;
+        }
+
+        const rootId = root[schema.idKey];
+        const typedMode = hasAnyTypedNodes(nodes, schema);
+
+        // Validera companyId som bolag (inte root/enhet)
+        let companyNode = null;
+        for (const n of nodes){
+          if (!n) continue;
+          if (String(n[schema.idKey]) !== String(companyId)) continue;
+          if (isCompanyNode(n, rootId, typedMode, schema)) companyNode = n;
+          break;
+        }
+        if (!companyNode){
+          disableCreateUI("Ogiltigt bolag. Välj ett bolag först.");
+          return;
+        }
+
+        // Hitta user key (återanvänd)
+        const userKeyInfo = findUserRegistryKeyReuseOnly();
+        if (!userKeyInfo.exists){
+          disableCreateUI("User-register kunde inte hittas. Skapa bolag först (AO3) så user-key etableras. (fail-closed)");
+          return;
+        }
+
+        const users = loadUsers(userKeyInfo.key);
+        if (users === null){
+          disableCreateUI("User-register är korrupt (inte array). Kan inte skapa admin (fail-closed).");
+          return;
+        }
+
+        // Validera fält
+        const unitName = trimStr($("unitName").value);
+        const orgNo = trimStr($("orgNo").value);
+        const invoiceEmail = trimStr($("invoiceEmail").value);
+        const contactName = trimStr($("contactName").value);
+        const phone = trimStr($("phone").value);
+
+        if (![unitName, orgNo, invoiceEmail, contactName, phone].every(v => trimStr(v).length > 0)){
+          showStatus("err", "Alla fält måste fyllas i.");
+          return;
+        }
+        if (!looksLikeEmail(invoiceEmail)){
+          showStatus("err", "Faktura-mail verkar fel (måste innehålla @).");
+          return;
+        }
+
+        // Dedupe enhet (dubbelklick etc)
+        const existingUnit = dedupeUnit(nodes, schema, companyId, unitName, orgNo);
+        if (existingUnit){
+          showStatus("err", "Enhet med samma namn + org.nr finns redan under bolaget (dedupe). Avbryter.");
+          return;
+        }
+
+        // Förbered objekt men skriv inte ännu
+        const unitId = genId("unit");
+        const meta = {
+          orgNo: normalizeOrgNo(orgNo),
+          invoiceEmail,
+          contactName,
+          phone
+        };
+
+        // Admin credentials (DEMO)
+        const orgNoSuffix = normalizeOrgNo(orgNo).slice(-4) || "0000";
+        const username = "admin-" + orgNoSuffix + "-" + unitId.slice(-4);
+        const password = randomPassword(12);
+        const passHash = await sha256Base64(password);
+        if (!passHash){
+          showStatus("err", "Kan inte skapa säker hash (WebCrypto saknas). Avbryter (fail-closed).");
+          return;
+        }
+
+        // Dedupe admin kopplad till unitId (ska normalt inte finnas)
+        const existingAdmin = findAdminForUnit(users, unitId);
+        if (existingAdmin){
+          showStatus("err", "Admin finns redan kopplad till enheten (dedupe). Avbryter.");
+          return;
+        }
+
+        // Bygg unit node enligt schema (minimalt)
+        const unitNode = {};
+        unitNode[schema.idKey] = unitId;
+        unitNode[schema.parentKey] = companyId;
+        unitNode[schema.nameKey] = unitName;
+        unitNode[schema.typeKey] = "UNIT";
+        unitNode[schema.metaKey] = meta;
+        unitNode.createdAt = new Date().toISOString();
+
+        // Bygg user-objekt (samma schema-stil som AO3)
+        const user = {
+          id: genId("user"),
+          empNo: "", // ok att lämna tomt här? vi använder username som identifierare i DEMO
+          username,
+          passwordHashSha256: passHash,
+          scopeId: unitId,
+          roleHint: "ADMIN",
+          createdAt: new Date().toISOString(),
+          demo: true
+        };
+
+        // Ingen partial write: commit i minnet, skriv users först, sedan org, rollback users om org failar.
+        const nextNodes = nodes.slice();
+        const nextUsers = users.slice();
+        nextNodes.push(unitNode);
+        nextUsers.push(user);
+
+        // Extra dedupe guard: id-krock (fail-closed)
+        const ids = new Set();
+        for (const n of nextNodes){
+          const idv = n && n[schema.idKey];
+          if (!idv) { showStatus("err", "Org-node saknar id. Avbryter (fail-closed)."); return; }
+          if (ids.has(String(idv))) { showStatus("err", "ID-krock i org-data. Avbryter (fail-closed)."); return; }
+          ids.add(String(idv));
+        }
+
+        isSaving = true;
+        btnSave.disabled = true;
+        hint.textContent = "Sparar…";
+
+        try {
+          localStorage.setItem(userKeyInfo.key, JSON.stringify(nextUsers));
+
+          try {
+            localStorage.setItem(KEY_ORG, JSON.stringify(nextNodes));
+          } catch (orgErr) {
+            // rollback users
+            try { localStorage.setItem(userKeyInfo.key, JSON.stringify(users)); } catch(_) {}
+            throw orgErr;
+          }
+
+          // SUCCESS: render result (lösenord endast i minne)
+          lastCreated = { unitId, unitName, username, password, companyId, userKey: userKeyInfo.key };
+
+          showStatus("ok", "Sparat. Enhet + admin skapades (DEMO).");
+
+          resultEmpty.style.display = "none";
+          resultPanel.style.display = "block";
+          outUnitName.textContent = unitName;
+          outUnitId.textContent = unitId;
+          outUsername.textContent = username;
+          outPassword.textContent = password;
+
+          const companyHref = "./company.html?companyId=" + encodeURIComponent(companyId);
+          goCompany2.setAttribute("href", companyHref);
+          backToCompany.setAttribute("href", companyHref);
+
+          createMore.setAttribute("href", "./unit-create.html?companyId=" + encodeURIComponent(companyId));
+
+          form.reset();
+
+        } catch (err) {
+          console.error(err);
+          showStatus("err", "Kunde inte spara. Inget skrevs permanent (fail-closed).");
+        } finally {
+          isSaving = false;
+          btnSave.disabled = false;
+          hint.textContent = "";
+        }
+      }
+
+      // INIT
+      if (!requireSystemAdmin()) return;
+
+      const companyId = getCompanyId();
+      const orgRes = loadOrgFailClosed();
+
+      // Default links
+      backToCompany.setAttribute("href", companyId ? ("./company.html?companyId=" + encodeURIComponent(companyId)) : "./company.html");
+
+      if (!companyId){
+        // Fail-closed per AO
+        disableCreateUI("Välj ett bolag först.");
+        hint.textContent = "Gå till Bolagslista eller Org-karta för att välja bolag.";
+        return;
+      }
+
+      if (!orgRes.ok){
+        disableCreateUI(orgRes.err);
+        hint.textContent = "Org-karta och Bolagslista kan fortfarande öppnas.";
+        return;
+      }
+
+      const nodes = orgRes.nodes;
+      const schema = inferSchema(nodes);
+      const root = findRoot(nodes, schema);
+
+      if (!root || !root[schema.idKey]){
+        disableCreateUI("Root saknas i org-trädet. Kan inte skapa enhet (fail-closed).");
+        return;
+      }
+
+      const rootId = root[schema.idKey];
+      const typedMode = hasAnyTypedNodes(nodes, schema);
+
+      let companyNode = null;
+      for (const n of nodes){
+        if (!n) continue;
+        if (String(n[schema.idKey]) !== String(companyId)) continue;
+        if (isCompanyNode(n, rootId, typedMode, schema)) companyNode = n;
+        break;
+      }
+
+      if (!companyNode){
+        disableCreateUI("Ogiltigt bolag. Välj ett bolag först.");
+        hint.textContent = "Öppna bolagslistan och välj ett bolag.";
+        return;
+      }
+
+      // Render company context (read-only)
+      const meta = pickMeta(companyNode, schema);
+      companyName.textContent = trimStr(companyNode[schema.nameKey]) || "Bolag";
+      companyOrgNo.textContent = (meta && trimStr(meta.orgNo)) ? String(meta.orgNo) : "—";
+      companyIdOut.textContent = String(companyId);
+
+      // Pre-fill defaults from company meta (snabb demo)
+      if (meta){
+        $("orgNo").value = trimStr(meta.orgNo || "");
+        $("invoiceEmail").value = trimStr(meta.invoiceEmail || "");
+        $("contactName").value = trimStr(meta.contactName || "");
+        $("phone").value = trimStr(meta.phone || "");
+      }
+
+      // Hint: vilken user-key vi återanvänder (utan att skriva)
+      const userKeyInfo = findUserRegistryKeyReuseOnly();
+      hint.textContent = userKeyInfo.exists
+        ? ("User-register: återanvänder " + userKeyInfo.key + " (AO3).")
+        : ("User-register: saknas. Skapa bolag först (AO3).");
+
+      form.addEventListener("submit", onSave);
+
+      // Refresh: visa inte lösenord igen
+      window.addEventListener("pageshow", function(){
+        resultPanel.style.display = "none";
+        resultEmpty.style.display = "block";
+        outPassword.textContent = "";
+      });
+
+    })();
+  </script>
+
+  <!--
+  ============================================================
+  KONTROLLSVAR TILL FORGE (MÅSTE BESVARAS):
+
+  1) Exakt vilken user-register key och schema återanvänder du från AO3?
+     - Key: hittas via findUserRegistryKeyReuseOnly() med:
+       USER_KEY_CANDIDATES + scanning av AO-* keys som innehåller "USER" + fallback (endast om AO-030_USERS_DEMO_V1 redan finns som array).
+     - Schema: array av user-objekt med fält som AO3 använde:
+       { id, empNo, username, passwordHashSha256, scopeId, roleHint, createdAt, demo }
+       (Vi skriver samma fältset och sparar endast passwordHashSha256.)
+
+  2) Hur validerade du att companyId är ett bolag och inte root/enhet?
+     - Root identifieras (parent null/"" eller type/kind == ROOT).
+     - typedMode om någon nod har type/kind.
+     - isCompanyNode():
+       * typedMode: type/kind innehåller "COMPANY"/"BOLAG" och noden är inte root
+       * annars: parent == rootId och noden är inte root
+     - companyId accepteras endast om matchande nod uppfyller isCompanyNode().
+
+  3) Hur gör du “ingen partial write” om admin-skapandet misslyckas?
+     - Admin byggs i minnet först; om hash inte kan skapas -> abort innan write.
+     - Commit:
+       - Skriv users först.
+       - Skriv org därefter.
+       - Om org-write failar: rollback users till original (best-effort) och kasta fel.
+
+  4) Vilken dedupe-regel används för att hindra dubbla enheter vid dubbel-submit?
+     - dedupeUnit(): matchar befintlig enhet under samma bolag på:
+       (companyId == parent) AND (lower(displayName/name) == lower(enhetsnamn)) AND (normalize(meta.orgNo) == normalize(orgNo))
+     - Dessutom: Save-knapp låses med isSaving + disabled under operation.
+  ============================================================
+  -->
+</body>
+</html>
 
