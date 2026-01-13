@@ -1,1 +1,765 @@
+<!-- ============================================================
+AO-SYS-COMPANY-CREATE-AUTO-UNIT-ADMIN-01 (PROD • DEMO) | FIL-ID: system/company-create.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: SYSTEM_ADMIN skapar Bolag. Vid sparande skapas automatiskt:
+(1) Bolag (org-nod) + bolagsuppgifter
+(2) Första Enhet (org-nod) under bolaget + enhetsuppgifter
+(3) ADMIN-konto till enheten med användarnamn + lösenord (DEMO)
+
+POLICY (LÅST):
+- UI-only • Ingen backend
+- SYSTEM_ADMIN-only • Fail-closed via HRApp.requireAuth
+- XSS-escape på allt från storage (endast textContent, ingen osäker innerHTML)
+- Inga parallella AO: denna AO gäller bara denna nya sida
+- Leverans: hel fil (company-create.html)
+
+KEYS (LÅST):
+- Org: AO-020_ORG_V1 (localStorage) — org-träd (nodes)
+- Session: AO-001_LOGIN_V1 via HRApp.requireAuth/getAuth (fallback: remove key)
+- Assignments: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage) — (read-only här)
+- User/Konto-register (DEMO): ÅTERANVÄNDS om hittas, annars skapas NY DEMO-KEY (se JS)
+
+DEMO-SÄKERHET:
+- Lösenord sparas INTE i klartext.
+- Vi lagrar endast SHA-256-hash i user-registret (om WebCrypto finns).
+- Lösenord visas EN GÅNG direkt efter skapande (in-memory på sidan), och visas inte efter refresh.
+
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – System • Skapa bolag</title>
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+
+  <!-- (Valfritt) Om projektet normalt laddar global app här -->
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <style>
+    /* Scope: endast denna sida. Försiktig med globala class-namn. */
+    .wrap { max-width: 980px; margin: 0 auto; padding: 16px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding: 12px 16px; border-bottom: 1px solid rgba(0,0,0,.08); }
+    .topbar .left { display:flex; align-items:center; gap:10px; min-width: 0; }
+    .topbar .brand { font-weight: 700; white-space: nowrap; }
+    .topbar nav { display:flex; align-items:center; gap:10px; flex-wrap: wrap; }
+    .topbar a { text-decoration:none; }
+    .topbar .right { display:flex; align-items:center; gap:10px; }
+    .pill { display:inline-flex; align-items:center; gap:6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; border: 1px solid rgba(0,0,0,.12); }
+    .muted2 { opacity: .75; font-size: 13px; }
+    .grid { display:grid; grid-template-columns: 1.2fr .8fr; gap: 14px; }
+    @media (max-width: 900px){ .grid{ grid-template-columns: 1fr; } }
+
+    .card { border: 1px solid rgba(0,0,0,.10); border-radius: 14px; padding: 14px; background: rgba(255,255,255,.92); }
+    .card h2 { margin: 0 0 8px 0; font-size: 18px; }
+    .row { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 700px){ .row{ grid-template-columns: 1fr; } }
+    label { display:block; font-size: 13px; margin: 0 0 6px 0; }
+    input { width: 100%; padding: 10px 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,.18); }
+    .actions { display:flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; align-items:center; }
+    .btn { display:inline-flex; align-items:center; justify-content:center; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(0,0,0,.18); cursor:pointer; text-decoration:none; }
+    .btn.primary { font-weight: 700; }
+    .btn[disabled] { opacity: .6; cursor:not-allowed; }
+    .status { margin-top: 10px; padding: 10px; border-radius: 12px; border: 1px solid rgba(0,0,0,.12); }
+    .status.ok { }
+    .status.err { }
+    .kv { display:grid; grid-template-columns: 180px 1fr; gap: 8px 10px; margin-top: 10px; }
+    @media (max-width: 700px){ .kv{ grid-template-columns: 1fr; } }
+    .k { font-size: 12px; opacity: .75; }
+    .v { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 13px; word-break: break-word; }
+    .note { font-size: 12px; opacity: .78; margin-top: 8px; }
+    .hr { height: 1px; background: rgba(0,0,0,.08); margin: 12px 0; }
+  </style>
+</head>
+
+<body>
+  <!-- TOPBAR (krav: samma semantik som övriga system-sidor) -->
+  <header class="topbar" role="banner">
+    <div class="left">
+      <div class="brand" aria-label="HR-System">HR-System</div>
+      <span class="pill" id="authPill" aria-live="polite">SYSTEM</span>
+    </div>
+
+    <nav aria-label="Systemnavigation">
+      <a class="btn" href="./dashboard.html">Dashboard</a>
+      <a class="btn" href="./org.html">Org-karta</a>
+      <a class="btn" href="./assignments.html">Assignments</a>
+    </nav>
+
+    <div class="right">
+      <span class="muted2" id="whoami"></span>
+      <button class="btn" id="btnLogout" type="button">Logga ut</button>
+    </div>
+  </header>
+
+  <main class="wrap" role="main">
+    <div class="grid">
+      <!-- FORM -->
+      <section class="card" aria-labelledby="h1">
+        <h1 id="h1" style="margin:0 0 6px 0; font-size:22px;">Skapa bolag</h1>
+        <div class="muted2">
+          När bolaget skapas skapas första enheten + ett admin-konto automatiskt (DEMO).
+        </div>
+
+        <div class="hr"></div>
+
+        <form id="formCompany" autocomplete="off" novalidate>
+          <div class="row">
+            <div>
+              <label for="companyName">Bolagsnamn *</label>
+              <input id="companyName" name="companyName" type="text" maxlength="120" required />
+            </div>
+            <div>
+              <label for="orgNo">Organisationsnummer *</label>
+              <input id="orgNo" name="orgNo" type="text" maxlength="32" required />
+            </div>
+
+            <div>
+              <label for="invoiceEmail">Faktura-mail *</label>
+              <input id="invoiceEmail" name="invoiceEmail" type="email" maxlength="120" required />
+            </div>
+            <div>
+              <label for="contactName">Kontaktperson *</label>
+              <input id="contactName" name="contactName" type="text" maxlength="120" required />
+            </div>
+
+            <div>
+              <label for="phone">Telefon *</label>
+              <input id="phone" name="phone" type="tel" maxlength="40" required />
+            </div>
+          </div>
+
+          <div class="actions">
+            <button id="btnSave" class="btn primary" type="submit">
+              Spara bolag (skapar enhet + admin)
+            </button>
+            <span class="muted2" id="saveHint"></span>
+          </div>
+
+          <div id="status" class="status" role="status" aria-live="polite" style="display:none;"></div>
+        </form>
+      </section>
+
+      <!-- RESULT PANEL -->
+      <aside class="card" aria-labelledby="h2">
+        <h2 id="h2">Resultat</h2>
+        <div class="muted2">Visas endast direkt efter lyckat skapande.</div>
+
+        <div id="resultEmpty" class="note">Ingen skapad data ännu.</div>
+
+        <div id="resultPanel" style="display:none;">
+          <div class="status ok" id="resultOk">
+            <strong>Bolag skapat</strong>
+          </div>
+
+          <div class="kv" aria-label="Skapad information">
+            <div class="k">Bolag-ID</div>
+            <div class="v" id="outCompanyId"></div>
+
+            <div class="k">Auto-enhet</div>
+            <div class="v" id="outUnitName"></div>
+
+            <div class="k">Enhet-ID</div>
+            <div class="v" id="outUnitId"></div>
+
+            <div class="k">ADMIN användarnamn</div>
+            <div class="v" id="outUsername"></div>
+
+            <div class="k">ADMIN lösenord</div>
+            <div class="v" id="outPassword"></div>
+          </div>
+
+          <div class="note">
+            Lösenordet visas bara här, en gång (DEMO). Spara det säkert om du måste testa inloggning.
+          </div>
+
+          <div class="actions" style="margin-top:12px;">
+            <a class="btn" id="linkGoCompany" href="#">Gå till bolaget</a>
+            <a class="btn" href="./org.html">Org-karta</a>
+          </div>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    (function(){
+      "use strict";
+
+      // ==============================
+      // KONSTANTER (LÅST)
+      // ==============================
+      const KEY_ORG = "AO-020_ORG_V1";
+      const KEY_SESSION = "AO-001_LOGIN_V1";
+      const KEY_ASSIGNMENTS = "AO-020_ROLE_ASSIGNMENTS_V2"; // read-only här
+
+      // USER-REGISTRY: återanvänd om finns, annars skapa ny DEMO-key (enda tillåtna nya key i AO-packen)
+      const USER_KEY_CANDIDATES = [
+        "AO-002_USERS_V1",
+        "AO-010_USERS_V1",
+        "AO-001_USERS_V1",
+        "AO-010_USER_REG_V1",
+        "AO-001_USER_REG_V1",
+        "AO-020_USERS_V1"
+      ];
+      const FALLBACK_USER_KEY_DEMO = "AO-030_USERS_DEMO_V1"; // NY DEMO-KEY (bara om ingen existerande hittas)
+
+      // Dedupe-signatur
+      const AUTO_UNIT_SIGNATURE = "AUTO_UNIT_V1";
+
+      // UI refs
+      const $ = (id) => document.getElementById(id);
+
+      const elWho = $("whoami");
+      const elAuthPill = $("authPill");
+      const btnLogout = $("btnLogout");
+      const form = $("formCompany");
+      const btnSave = $("btnSave");
+      const elStatus = $("status");
+
+      const resultEmpty = $("resultEmpty");
+      const resultPanel = $("resultPanel");
+      const outCompanyId = $("outCompanyId");
+      const outUnitName = $("outUnitName");
+      const outUnitId = $("outUnitId");
+      const outUsername = $("outUsername");
+      const outPassword = $("outPassword");
+      const linkGoCompany = $("linkGoCompany");
+
+      // In-memory only (så password inte "läcker" på refresh)
+      let lastCreated = null;
+      let isSaving = false;
+
+      // ==============================
+      // AUTH (Fail-closed)
+      // ==============================
+      function requireSystemAdmin(){
+        // Primärt: HRApp.requireAuth (om finns i projektet)
+        if (window.HRApp && typeof window.HRApp.requireAuth === "function") {
+          const auth = window.HRApp.requireAuth({ role: "SYSTEM_ADMIN" });
+          // Visa vem
+          try {
+            const a = (window.HRApp.getAuth && window.HRApp.getAuth()) || auth;
+            const who = a && (a.empNo || a.username || a.user || "");
+            if (who) elWho.textContent = String(who);
+          } catch(_) {}
+          elAuthPill.textContent = "SYSTEM_ADMIN";
+          return true;
+        }
+
+        // Fallback: minimalt skydd så sidan inte kör utan session
+        // (Säkerheten är DEMO; men vi fail-closed om session saknas)
+        let sess = null;
+        try { sess = JSON.parse(sessionStorage.getItem(KEY_SESSION) || "null"); } catch(_) {}
+        if (!sess) {
+          // Försök localStorage som fallback om någon lagt session där (tolerant)
+          try { sess = JSON.parse(localStorage.getItem(KEY_SESSION) || "null"); } catch(_) {}
+        }
+        const role = sess && (sess.role || sess.roleId || sess.userRole);
+        const isSys = String(role || "").toUpperCase().includes("SYSTEM");
+        if (!sess || !isSys) {
+          // Fail-closed: redirect till login om sådan finns
+          location.href = "./login.html";
+          return false;
+        }
+        elAuthPill.textContent = "SYSTEM_ADMIN";
+        elWho.textContent = String(sess.empNo || sess.username || "");
+        return true;
+      }
+
+      function doLogout(){
+        if (window.HRApp && typeof window.HRApp.logout === "function") {
+          window.HRApp.logout();
+          return;
+        }
+        // fallback
+        sessionStorage.removeItem(KEY_SESSION);
+        localStorage.removeItem(KEY_SESSION);
+        location.href = "./login.html";
+      }
+
+      btnLogout.addEventListener("click", doLogout);
+
+      // ==============================
+      // SAFE HELPERS
+      // ==============================
+      function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
+      function trimStr(v){ return safeStr(v).trim(); }
+      function isNonEmpty(v){ return trimStr(v).length > 0; }
+      function looksLikeEmail(v){
+        const s = trimStr(v);
+        // enkel @-check enligt AO
+        return s.length >= 3 && s.includes("@") && s.indexOf("@") > 0 && s.indexOf("@") < (s.length - 1);
+      }
+
+      function showStatus(kind, msg){
+        elStatus.style.display = "block";
+        elStatus.className = "status " + (kind === "ok" ? "ok" : "err");
+        // XSS-safe: textContent
+        elStatus.textContent = msg;
+      }
+      function clearStatus(){
+        elStatus.style.display = "none";
+        elStatus.textContent = "";
+      }
+
+      function parseJsonSafe(raw){
+        try { return JSON.parse(raw); } catch(_) { return null; }
+      }
+
+      // ==============================
+      // ORG: load + schema inference + write
+      // ==============================
+      function loadOrgNodesFailClosed(){
+        const raw = localStorage.getItem(KEY_ORG);
+        const data = parseJsonSafe(raw || "null");
+        if (!Array.isArray(data)) return { ok:false, err:"Org-data saknas/är korrupt (AO-020_ORG_V1 måste vara en array).", nodes:null };
+        return { ok:true, nodes:data };
+      }
+
+      function inferOrgSchema(nodes){
+        // Försök hitta vilka fältnamn projektet använder, utan att anta för mycket.
+        const sample = nodes && nodes.length ? nodes[0] : null;
+
+        const idKey = sample && ("id" in sample) ? "id" : "id";
+        const parentKey = sample && ("parentId" in sample) ? "parentId" : (sample && ("parent" in sample) ? "parent" : "parentId");
+        const nameKey = sample && ("displayName" in sample) ? "displayName" : (sample && ("name" in sample) ? "name" : "displayName");
+        const typeKey = sample && ("type" in sample) ? "type" : (sample && ("kind" in sample) ? "kind" : "type");
+        const metaKey = sample && ("meta" in sample) ? "meta" : "meta";
+
+        return { idKey, parentKey, nameKey, typeKey, metaKey };
+      }
+
+      function findRoot(nodes, schema){
+        const { parentKey, typeKey } = schema;
+        // Root: parent null/"" OR type/kind === "ROOT"
+        for (const n of nodes) {
+          const p = n ? n[parentKey] : null;
+          const t = n ? n[typeKey] : null;
+          const isRootByParent = (p === null || p === undefined || p === "");
+          const isRootByType = String(t || "").toUpperCase() === "ROOT";
+          if (isRootByParent || isRootByType) return n;
+        }
+        return null;
+      }
+
+      function genId(prefix){
+        // Matcha "inte krocka": tidsbas + random.
+        const rnd = Math.random().toString(16).slice(2);
+        return (prefix || "org") + "_" + Date.now().toString(36) + "_" + rnd;
+      }
+
+      function normalizeOrgNo(orgNo){
+        // enkel normalisering för dedupe/username (ta bort mellanslag)
+        return trimStr(orgNo).replace(/\s+/g, "");
+      }
+
+      // ==============================
+      // USER REGISTRY: reuse if exists, else create DEMO key
+      // ==============================
+      function listLocalStorageKeys(){
+        const out = [];
+        for (let i=0; i<localStorage.length; i++){
+          const k = localStorage.key(i);
+          if (k) out.push(k);
+        }
+        return out;
+      }
+
+      function looksLikeUserArray(x){
+        if (!Array.isArray(x)) return false;
+        if (x.length === 0) return true; // tomt är ok
+        const u = x[0];
+        if (!u || typeof u !== "object") return false;
+        // tolerera olika scheman; kräver åtminstone empNo/username-fält
+        return ("empNo" in u) || ("username" in u) || ("user" in u);
+      }
+
+      function findUserRegistryKey(){
+        // 1) Kandidater
+        for (const k of USER_KEY_CANDIDATES){
+          const data = parseJsonSafe(localStorage.getItem(k) || "null");
+          if (looksLikeUserArray(data)) return { key:k, exists:true };
+        }
+        // 2) Sök bland AO-* keys som innehåller USER
+        const keys = listLocalStorageKeys();
+        for (const k of keys){
+          const ku = k.toUpperCase();
+          if (!ku.startsWith("AO-")) continue;
+          if (!ku.includes("USER")) continue;
+          const data = parseJsonSafe(localStorage.getItem(k) || "null");
+          if (looksLikeUserArray(data)) return { key:k, exists:true };
+        }
+        // 3) Skapa ny DEMO key (tillåtet endast här)
+        return { key:FALLBACK_USER_KEY_DEMO, exists:false };
+      }
+
+      function loadUsers(key){
+        const data = parseJsonSafe(localStorage.getItem(key) || "null");
+        if (data === null) return []; // tomt ok
+        if (!Array.isArray(data)) return null; // korrupt
+        return data;
+      }
+
+      // ==============================
+      // PASSWORD HASH (WebCrypto)
+      // ==============================
+      function randomPassword(len){
+        const L = Math.max(10, Number(len || 12));
+        const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%+-_";
+        let out = "";
+        const arr = new Uint32Array(L);
+        // crypto.getRandomValues om finns
+        if (window.crypto && window.crypto.getRandomValues) {
+          window.crypto.getRandomValues(arr);
+          for (let i=0; i<L; i++){
+            out += chars[arr[i] % chars.length];
+          }
+          return out;
+        }
+        // fallback (DEMO)
+        for (let i=0; i<L; i++){
+          out += chars[Math.floor(Math.random()*chars.length)];
+        }
+        return out;
+      }
+
+      async function sha256Base64(text){
+        // Returnerar null om inte möjligt (fail-closed hanteras i save)
+        if (!(window.crypto && window.crypto.subtle && window.TextEncoder)) return null;
+        const enc = new TextEncoder().encode(String(text));
+        const buf = await crypto.subtle.digest("SHA-256", enc);
+        // ArrayBuffer -> base64
+        const bytes = new Uint8Array(buf);
+        let bin = "";
+        for (let i=0; i<bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin);
+      }
+
+      // ==============================
+      // DEDUPE HELPERS
+      // ==============================
+      function companyAlreadyExistsByOrgNo(nodes, schema, orgNo){
+        // Dedupe bolag: om samma orgNo redan finns i meta (konservativt)
+        const { metaKey, typeKey } = schema;
+        const norm = normalizeOrgNo(orgNo);
+        for (const n of nodes){
+          const meta = n && n[metaKey];
+          const t = n && n[typeKey];
+          const isCompany = String(t || "").toUpperCase().includes("COMPANY") || String(t || "").toUpperCase().includes("BOLAG");
+          const mOrgNo = meta && normalizeOrgNo(meta.orgNo || meta.orgnr || meta.org || "");
+          if (isCompany && mOrgNo && mOrgNo === norm) return n;
+        }
+        return null;
+      }
+
+      function findAutoUnitUnderCompany(nodes, schema, companyId, expectedUnitName){
+        const { parentKey, nameKey, metaKey } = schema;
+        for (const n of nodes){
+          if (!n) continue;
+          const p = n[parentKey];
+          if (p !== companyId) continue;
+          const dn = safeStr(n[nameKey]);
+          const meta = n[metaKey] || {};
+          if (dn === expectedUnitName) return n;
+          if (meta && meta.autoSignature === AUTO_UNIT_SIGNATURE) return n;
+        }
+        return null;
+      }
+
+      function findAdminForUnit(users, unitId){
+        // Dedupe admin: om någon user redan har scopeId == unitId (tolerant)
+        for (const u of users){
+          if (!u) continue;
+          const scopeId = u.scopeId || u.unitId || u.scope || null;
+          const scopes = Array.isArray(u.scopeIds) ? u.scopeIds : (Array.isArray(u.scopes) ? u.scopes : null);
+          if (scopeId && String(scopeId) === String(unitId)) return u;
+          if (scopes && scopes.map(String).includes(String(unitId))) return u;
+        }
+        return null;
+      }
+
+      function nextDemoEmpNo(users){
+        // Generera nästa empNo som 6-siffrig (DEMO) baserat på max befintlig numerisk empNo
+        let max = 100000;
+        for (const u of users){
+          const e = u && (u.empNo || u.employeeNo || u.username);
+          const n = parseInt(String(e || "").replace(/\D/g, ""), 10);
+          if (Number.isFinite(n) && n > max) max = n;
+        }
+        return String(max + 1);
+      }
+
+      // ==============================
+      // CORE SAVE (ingen partial write)
+      // ==============================
+      async function handleSave(e){
+        e.preventDefault();
+        if (isSaving) return;
+
+        clearStatus();
+        resultPanel.style.display = "none";
+        resultEmpty.style.display = "block";
+        lastCreated = null;
+
+        // Validera inputs
+        const companyName = trimStr($("companyName").value);
+        const orgNo = trimStr($("orgNo").value);
+        const invoiceEmail = trimStr($("invoiceEmail").value);
+        const contactName = trimStr($("contactName").value);
+        const phone = trimStr($("phone").value);
+
+        if (![companyName, orgNo, invoiceEmail, contactName, phone].every(isNonEmpty)){
+          showStatus("err", "Alla fält måste fyllas i.");
+          return;
+        }
+        if (!looksLikeEmail(invoiceEmail)){
+          showStatus("err", "Faktura-mail verkar fel (måste innehålla @).");
+          return;
+        }
+
+        // Load org fail-closed
+        const orgRes = loadOrgNodesFailClosed();
+        if (!orgRes.ok){
+          showStatus("err", orgRes.err);
+          return;
+        }
+
+        const nodes = orgRes.nodes;
+        const schema = inferOrgSchema(nodes);
+        const root = findRoot(nodes, schema);
+        if (!root){
+          showStatus("err", "Root-nod saknas i AO-020_ORG_V1. Kan inte skapa bolag (fail-closed).");
+          return;
+        }
+
+        // Dedupe bolag (konservativt)
+        const existingCompany = companyAlreadyExistsByOrgNo(nodes, schema, orgNo);
+        if (existingCompany){
+          showStatus("err", "Bolag med samma organisationsnummer verkar redan finnas (dedupe). Avbryter.");
+          return;
+        }
+
+        // USER registry key
+        const userKeyInfo = findUserRegistryKey();
+        const users = loadUsers(userKeyInfo.key);
+        if (users === null){
+          showStatus("err", "User-register är korrupt (inte en array). Kan inte skapa admin (fail-closed).");
+          return;
+        }
+
+        // Förbered nya objekt (men skriv inte ännu)
+        const companyId = genId("company");
+        const unitId = genId("unit");
+
+        const meta = {
+          orgNo: normalizeOrgNo(orgNo),
+          invoiceEmail: invoiceEmail,
+          contactName: contactName,
+          phone: phone
+        };
+
+        // ADMIN cred (DEMO)
+        const empNo = nextDemoEmpNo(users);
+        const orgNoSuffix = normalizeOrgNo(orgNo).slice(-4) || "0000";
+        const username = "admin-" + orgNoSuffix + "-" + empNo;
+
+        const password = randomPassword(12);
+        const passHash = await sha256Base64(password);
+
+        // Fail-closed om vi inte kan hash:a (AO: minimera skada, ingen klartext om möjligt)
+        if (!passHash){
+          showStatus("err", "Kan inte skapa säker hash (WebCrypto saknas). Avbryter (fail-closed).");
+          return;
+        }
+
+        // Enhetens deterministiska namn (KRAV)
+        const unitName = "Enhet – #" + empNo;
+
+        // Dedupe auto-enhet under bolag (ska inte behövas vid nytt bolag, men krav)
+        // (Vi dedupar via signatur på meta och/eller exakt namn.)
+        // Här är bolaget nytt, men vi håller logiken konsekvent.
+        const existingAutoUnit = findAutoUnitUnderCompany(nodes, schema, companyId, unitName);
+        if (existingAutoUnit){
+          showStatus("err", "Auto-enhet verkar redan finnas under detta bolag (dedupe). Avbryter.");
+          return;
+        }
+
+        // Dedupe admin för enheten (ska inte behövas, men krav)
+        const existingAdmin = findAdminForUnit(users, unitId);
+        if (existingAdmin){
+          showStatus("err", "Admin verkar redan finnas kopplad till enheten (dedupe). Avbryter.");
+          return;
+        }
+
+        // Bygg org-noder enligt schema (minimalt, tolerant)
+        const { idKey, parentKey, nameKey, typeKey, metaKey } = schema;
+
+        const companyNode = {};
+        companyNode[idKey] = companyId;
+        companyNode[parentKey] = root[idKey] || root.id || null;
+        companyNode[nameKey] = companyName;
+        companyNode[typeKey] = "COMPANY"; // projekttolerant (kan ignoreras av andra sidor)
+        companyNode[metaKey] = Object.assign({}, meta, { autoSignature: "COMPANY_V1" });
+        companyNode.createdAt = new Date().toISOString();
+
+        const unitNode = {};
+        unitNode[idKey] = unitId;
+        unitNode[parentKey] = companyId;
+        unitNode[nameKey] = unitName;
+        unitNode[typeKey] = "UNIT";
+        // Förslag: kopiera bolagets meta som default (AO: tillåtet)
+        unitNode[metaKey] = Object.assign({}, meta, { autoSignature: AUTO_UNIT_SIGNATURE, companyId: companyId });
+        unitNode.createdAt = new Date().toISOString();
+
+        // Bygg user-objekt (DEMO) – lagra endast hash
+        const user = {
+          id: genId("user"),
+          empNo: empNo,
+          username: username,
+          passwordHashSha256: passHash,
+          scopeId: unitId,     // koppling till enheten (KRAV)
+          roleHint: "ADMIN",   // tolerant fält (assignments hanteras i kommande AO)
+          createdAt: new Date().toISOString(),
+          demo: true
+        };
+
+        // INGEN PARTIAL WRITE:
+        // Vi gör en atomisk "commit" i två steg i minnet och skriver först när allt är validerat.
+        // 1) Clone arrays
+        const nextNodes = nodes.slice();
+        const nextUsers = users.slice();
+
+        // 2) Push
+        nextNodes.push(companyNode, unitNode);
+        nextUsers.push(user);
+
+        // 3) Sista sanity: kontrollera att vi inte råkat duplicera IDs
+        const ids = new Set();
+        for (const n of nextNodes){
+          const idv = n && n[idKey];
+          if (!idv) { showStatus("err", "Org-node saknar id. Avbryter (fail-closed)."); return; }
+          if (ids.has(String(idv))) { showStatus("err", "ID-krock i org-data. Avbryter (fail-closed)."); return; }
+          ids.add(String(idv));
+        }
+
+        // 4) Commit: skriv båda. Om skrivning misslyckas fångar vi och skriver inget (best-effort).
+        isSaving = true;
+        btnSave.disabled = true;
+        $("saveHint").textContent = "Sparar…";
+
+        try {
+          // Skriv USER först? AO kräver "ingen partial write" om admin failar.
+          // Vi har redan skapad admin i minnet. Nu skriver vi ORG + USERS i samma try.
+          // Strategi: skriv USERS, sedan ORG. Om ORG failar, rulla tillbaka USERS till original (best-effort).
+          localStorage.setItem(userKeyInfo.key, JSON.stringify(nextUsers));
+
+          try {
+            localStorage.setItem(KEY_ORG, JSON.stringify(nextNodes));
+          } catch (orgErr) {
+            // rollback USERS (best-effort)
+            try {
+              localStorage.setItem(userKeyInfo.key, JSON.stringify(users));
+            } catch (_) {}
+            throw orgErr;
+          }
+
+          // SUCCESS: visa resultat (lösenord endast i minne)
+          lastCreated = {
+            companyId,
+            unitId,
+            unitName,
+            username,
+            password,
+            userKey: userKeyInfo.key,
+            userKeyWasExisting: userKeyInfo.exists
+          };
+
+          showStatus("ok", "Sparat. Bolag + auto-enhet + admin skapades (DEMO).");
+
+          // Render result panel (XSS-safe)
+          resultEmpty.style.display = "none";
+          resultPanel.style.display = "block";
+          outCompanyId.textContent = companyId;
+          outUnitName.textContent = unitName;
+          outUnitId.textContent = unitId;
+          outUsername.textContent = username;
+          outPassword.textContent = password;
+
+          linkGoCompany.setAttribute("href", "./company.html?companyId=" + encodeURIComponent(companyId));
+
+          // Efter lyckat: nollställ form (valfritt)
+          form.reset();
+
+        } catch (err) {
+          console.error(err);
+          showStatus("err", "Kunde inte spara. Inget skrevs permanent (fail-closed).");
+        } finally {
+          isSaving = false;
+          btnSave.disabled = false;
+          $("saveHint").textContent = "";
+        }
+      }
+
+      form.addEventListener("submit", handleSave);
+
+      // ==============================
+      // Init
+      // ==============================
+      if (!requireSystemAdmin()) return;
+
+      // Visa tydligt vilken user-key som används (utan att avslöja hemligheter)
+      // (read-only status / debug light)
+      (function(){
+        const userKeyInfo = findUserRegistryKey();
+        // Vi skriver inget här – endast informativt.
+        const note = userKeyInfo.exists
+          ? ("User-register: återanvänder " + userKeyInfo.key)
+          : ("User-register: skapar vid behov DEMO-key " + userKeyInfo.key);
+        // Säkert: textContent
+        $("saveHint").textContent = note;
+      })();
+
+      // Förhindra att password "återvisas" på refresh
+      window.addEventListener("pageshow", function(){
+        // rensa resultat vid back/forward cache också
+        resultPanel.style.display = "none";
+        resultEmpty.style.display = "block";
+        outPassword.textContent = "";
+      });
+
+      // ==============================
+      // KONTROLLSVAR (MÅSTE BESVARAS) – se längst ned i filen (kommentar)
+      // ==============================
+    })();
+  </script>
+
+  <!--
+  ============================================================
+  KONTROLLSVAR TILL FORGE (MÅSTE BESVARAS):
+
+  1) Vilken user-register key använde du (existerande eller ny DEMO-key)? Motivera och visa var den definieras.
+     - Denna sida försöker återanvända en existerande user-key via:
+       USER_KEY_CANDIDATES + scanning av AO-* keys som innehåller "USER".
+       Funktion: findUserRegistryKey()
+       Konstanter: USER_KEY_CANDIDATES, FALLBACK_USER_KEY_DEMO
+     - Om ingen hittas används (skapas vid första skrivning): AO-030_USERS_DEMO_V1 (FALLBACK_USER_KEY_DEMO).
+
+  2) Hur gör du “ingen partial write” (fail-closed) om admin-konto-skapandet misslyckas?
+     - Admin skapas först i minnet (inkl. SHA-256-hash). Om hash saknas -> abort innan någon write.
+     - Commit sker i try/catch:
+       - Skriv user-registret först.
+       - Skriv org därefter.
+       - Om org-write misslyckas: rollback user-registret till original (best-effort) och kasta fel.
+       - Vid fel: visar status och lämnar data oförändrad (fail-closed så långt som möjligt i localStorage).
+
+  3) Hur dedupar du auto-enhet och auto-admin (exakta villkor)?
+     - Auto-enhet: findAutoUnitUnderCompany(nodes, schema, companyId, unitName)
+       - match på (parent==companyId) och (displayName==unitName) ELLER meta.autoSignature === "AUTO_UNIT_V1"
+     - Auto-admin: findAdminForUnit(users, unitId)
+       - match om user.scopeId == unitId eller unitId finns i user.scopeIds[] / user.scopes[]
+  ============================================================
+  -->
+</body>
+</html>
 
