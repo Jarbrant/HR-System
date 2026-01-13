@@ -21,6 +21,10 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   * AO-060_PLANS_V1 (Array av Plan)
   * AO-061_PLAN_ASSIGNMENTS_V1 (Array av PlanAssignment)
 - Helpers: read/validate/save/upsert (UI-only, fail-closed, inga auto-writes)
+
+TILLÄGG (MASTER-AO-WORKER-STACK-01 | 1/2):
+- Runtime-only Worker Config Banner (SYSTEM_ADMIN-only)
+- Ingen storage, ingen token, init av HRWorkerSDK om den är laddad
 ============================================================ */
 
 (function () {
@@ -375,7 +379,7 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   function isHtmlLikeRoute(appRelPath) {
     const p = String(appRelPath || "").toLowerCase();
     if (!p) return false;
-    return p === "/" || p.endsWith(".html") || p.endsWith("/") ;
+    return p === "/" || p.endsWith(".html") || p.endsWith("/");
   }
 
   function normalizeRelPathForCheck(inputPath) {
@@ -1143,6 +1147,174 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     auditAppend("AUTH_LOGOUT", {});
     redirect(loginUrl("logout"));
   }
+
+  // ============================================================
+  // MASTER-AO-WORKER-STACK-01 — WORKER CONFIG BANNER (runtime only)
+  // POLICY: no storage, no token storage, XSS-safe, SYSTEM_ADMIN-only
+  // ============================================================
+
+  function __hrGetSessionRoleId(session) {
+    try {
+      if (!session || typeof session !== "object") return "";
+      if (session.auth && typeof session.auth === "object" && typeof session.auth.role === "string") return session.auth.role;
+      if (typeof session.roleId === "string") return session.roleId;
+      if (typeof session.role === "string") return session.role;
+      return "";
+    } catch {
+      return "";
+    }
+  }
+
+  function __hrIsSystemAdminSession() {
+    try {
+      if (!window.HRApp || typeof window.HRApp.mustGetSession !== "function") return false;
+      const s = window.HRApp.mustGetSession();
+      const r = __hrGetSessionRoleId(s);
+      return r === "SYSTEM_ADMIN";
+    } catch {
+      return false;
+    }
+  }
+
+  function __hrValidWorkerBaseUrl(input) {
+    const v = String(input || "").trim();
+    if (!v) return { ok: false, value: "", error: "Tom URL" };
+    if (!/^https:\/\/[^/\s]+/i.test(v)) return { ok: false, value: "", error: "Måste börja med https://" };
+    if (/\/$/.test(v)) return { ok: false, value: "", error: "Får inte sluta med /" };
+    return { ok: true, value: v, error: "" };
+  }
+
+  function __hrEnsureWorkerDefaults() {
+    if (typeof window.__HR_WORKER_REQUIRE_AUTH !== "boolean") {
+      window.__HR_WORKER_REQUIRE_AUTH = false; // default enligt AO
+    }
+  }
+
+  function __hrUpdateWorkerBannerStatus(statusEl, kind, text) {
+    if (!statusEl) return;
+    statusEl.className = "muted2 small";
+    if (kind === "ok") statusEl.className = "message ok";
+    if (kind === "err") statusEl.className = "message err";
+    statusEl.textContent = String(text || "");
+  }
+
+  function __hrTryInitWorkerSdk(baseUrl) {
+    __hrEnsureWorkerDefaults();
+
+    // GUARD: Om SDK inte är laddad, fail-closed men utan crash
+    if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.init !== "function") {
+      return { ok: false, error: "HRWorkerSDK saknas (ladda UI-04-WORKER-SDK.js före UI-03-APP.js)" };
+    }
+
+    // Init utan token (token lagras aldrig här)
+    const res = window.HRWorkerSDK.init({
+      baseUrl: baseUrl,
+      requireAuth: window.__HR_WORKER_REQUIRE_AUTH === true,
+      getToken: function () { return ""; }
+    });
+
+    if (!res || res.ok !== true) return { ok: false, error: "SDK init misslyckades" };
+    return { ok: true };
+  }
+
+  function __hrInjectWorkerConfigBanner() {
+    // Endast SYSTEM_ADMIN
+    if (!__hrIsSystemAdminSession()) return;
+
+    const body = document.body;
+    if (!body) return;
+
+    // Undvik dubbla banners
+    if (document.getElementById("__hrWorkerBanner")) return;
+
+    __hrEnsureWorkerDefaults();
+
+    // UI
+    const wrap = document.createElement("div");
+    wrap.id = "__hrWorkerBanner";
+    wrap.className = "card";
+    wrap.style.maxWidth = "1100px";
+    wrap.style.margin = "12px auto";
+    wrap.style.padding = "10px 12px";
+
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.gap = "10px";
+    row.style.flexWrap = "wrap";
+    row.style.alignItems = "center";
+
+    const label = document.createElement("div");
+    label.className = "muted2 small";
+    label.textContent = "Worker URL (v1)";
+
+    const input = document.createElement("input");
+    input.type = "url";
+    input.inputMode = "url";
+    input.autocomplete = "off";
+    input.placeholder = "https://… (utan / på slutet)";
+    input.style.minWidth = "320px";
+    input.style.flex = "1";
+
+    if (typeof window.__HR_WORKER_BASE_URL === "string" && window.__HR_WORKER_BASE_URL.trim()) {
+      input.value = window.__HR_WORKER_BASE_URL.trim();
+    }
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.textContent = "Använd";
+
+    const status = document.createElement("div");
+    status.className = "muted2 small";
+    status.style.marginTop = "8px";
+
+    if (typeof window.__HR_WORKER_BASE_URL === "string" && window.__HR_WORKER_BASE_URL.trim()) {
+      __hrUpdateWorkerBannerStatus(status, "ok", "Aktiv: URL satt (runtime).");
+    } else {
+      __hrUpdateWorkerBannerStatus(status, "", "Ej satt.");
+    }
+
+    btn.addEventListener("click", function () {
+      const v = __hrValidWorkerBaseUrl(input.value);
+      if (!v.ok) {
+        __hrUpdateWorkerBannerStatus(status, "err", "Fel: " + v.error);
+        return;
+      }
+
+      // Runtime-only (ingen storage)
+      window.__HR_WORKER_BASE_URL = v.value;
+
+      const initRes = __hrTryInitWorkerSdk(window.__HR_WORKER_BASE_URL);
+      if (!initRes.ok) {
+        __hrUpdateWorkerBannerStatus(status, "err", "Fel: " + initRes.error);
+        return;
+      }
+
+      __hrUpdateWorkerBannerStatus(status, "ok", "Aktiv: SDK initierad (runtime).");
+    });
+
+    row.appendChild(label);
+    row.appendChild(input);
+    row.appendChild(btn);
+    wrap.appendChild(row);
+    wrap.appendChild(status);
+
+    body.insertBefore(wrap, body.firstChild);
+  }
+
+  function __hrBootWorkerBanner() {
+    try {
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", __hrInjectWorkerConfigBanner);
+      } else {
+        __hrInjectWorkerConfigBanner();
+      }
+    } catch {
+      // fail-closed: gör inget
+    }
+  }
+
+  // Kör banner-boot (ingen effekt om inte SYSTEM_ADMIN)
+  __hrBootWorkerBanner();
 
   // ============================================================
   // PUBLIC API
