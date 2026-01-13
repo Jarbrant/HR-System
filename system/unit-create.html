@@ -5,23 +5,22 @@ Syfte: Skapa ny ENHET under valt BOLAG. Vid sparande skapas automatiskt:
 (1) Enhet (org-nod) med enhetsuppgifter
 (2) ADMIN-konto till den enheten med användarnamn + lösenord (DEMO)
 
+AO-SYS-AUTO-ASSIGN-ADMIN-SCOPE-01 (PROD • DEMO) — TILLÄGG:
+- Vid admin-skapande skriv även assignment i AO-020_ROLE_ASSIGNMENTS_V2 så kontot kan användas direkt.
+
 POLICY (LÅST):
 - UI-only • Ingen backend
 - SYSTEM_ADMIN-only • Fail-closed via HRApp.requireAuth
 - XSS-escape på allt från storage (endast textContent, ingen osäker innerHTML)
-- Hel-filsleverans (unit-create.html)
-- Inga nya storage-keys/datamodell i denna AO, förutom att återanvända samma DEMO user-register som AO3 skapade/använde
+- Hel-filsleverans
+- Inga nya storage-keys/datamodell i denna AO (återanvänd user-register från AO3)
 - Ingen UX-redesign av global topbar
 
 KEYS (LÅST):
 - Org: AO-020_ORG_V1 (localStorage)
-- Session: AO-001_LOGIN_V1 via HRApp.requireAuth/getAuth
-- User/Konto-register (DEMO): ÅTERANVÄND exakt samma key + schema som AO3
-
-OBS (KOPPLING AO3):
-- AO3 (company-create.html) använder antingen existerande user-key eller skapar DEMO-key.
-- Den här sidan använder SAMMA detekteringslogik som AO3 och får INTE skapa ny key.
-  Om ingen key hittas -> fail-closed (eftersom AO3 ska ha etablerat den vid första skapandet).
+- Assignments: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage)
+- Session: AO-001_LOGIN_V1
+- User/Konto-register: exakt samma key och schema som AO3 (reuse-only; ingen ny key här)
 
 ============================================================ -->
 <!doctype html>
@@ -95,7 +94,6 @@ OBS (KOPPLING AO3):
 
   <main class="wrap" role="main">
     <div class="grid">
-      <!-- FORM -->
       <section class="card" aria-labelledby="h1">
         <h1 id="h1" style="margin:0 0 6px 0; font-size:22px;">Skapa enhet</h1>
         <div class="muted2">
@@ -157,7 +155,6 @@ OBS (KOPPLING AO3):
         </form>
       </section>
 
-      <!-- RESULT -->
       <aside class="card" aria-labelledby="h2">
         <h2 id="h2" style="margin:0 0 8px 0; font-size:18px;">Resultat</h2>
         <div class="muted2">Visas endast direkt efter skapande.</div>
@@ -179,6 +176,9 @@ OBS (KOPPLING AO3):
 
             <div class="k">ADMIN lösenord</div>
             <div class="v mono" id="outPassword">—</div>
+
+            <div class="k">Roll</div>
+            <div class="v mono" id="outRole">—</div>
           </div>
 
           <div class="note">Lösenordet visas bara här, en gång (DEMO). Det sparas inte i klartext.</div>
@@ -197,9 +197,10 @@ OBS (KOPPLING AO3):
       "use strict";
 
       const KEY_ORG = "AO-020_ORG_V1";
+      const KEY_ASSIGNMENTS = "AO-020_ROLE_ASSIGNMENTS_V2";
       const KEY_SESSION = "AO-001_LOGIN_V1";
 
-      // MUST match AO3 (company-create.html)
+      // MUST match AO3 (reuse-only; ingen ny key här)
       const USER_KEY_CANDIDATES = [
         "AO-002_USERS_V1",
         "AO-010_USERS_V1",
@@ -208,7 +209,7 @@ OBS (KOPPLING AO3):
         "AO-001_USER_REG_V1",
         "AO-020_USERS_V1"
       ];
-      const FALLBACK_USER_KEY_DEMO = "AO-030_USERS_DEMO_V1"; // AO3:s DEMO-key om ingen fanns (får INTE skapa ny här)
+      const FALLBACK_USER_KEY_DEMO = "AO-030_USERS_DEMO_V1";
 
       const $ = (id) => document.getElementById(id);
 
@@ -230,11 +231,12 @@ OBS (KOPPLING AO3):
       const outUnitId = $("outUnitId");
       const outUsername = $("outUsername");
       const outPassword = $("outPassword");
+      const outRole = $("outRole");
       const goCompany2 = $("goCompany2");
       const createMore = $("createMore");
 
       let isSaving = false;
-      let lastCreated = null; // in-memory only
+      let lastCreated = null;
 
       function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
       function trimStr(v){ return safeStr(v).trim(); }
@@ -265,7 +267,6 @@ OBS (KOPPLING AO3):
           return true;
         }
 
-        // fallback: fail-closed om session saknas
         let sess = null;
         try { sess = JSON.parse(sessionStorage.getItem(KEY_SESSION) || "null"); } catch(_) {}
         if (!sess) { try { sess = JSON.parse(localStorage.getItem(KEY_SESSION) || "null"); } catch(_) {} }
@@ -363,6 +364,7 @@ OBS (KOPPLING AO3):
         return trimStr(orgNo).replace(/\s+/g, "");
       }
 
+      // ============= USER REGISTRY (reuse-only) =============
       function listLocalStorageKeys(){
         const out = [];
         for (let i=0; i<localStorage.length; i++){
@@ -381,7 +383,6 @@ OBS (KOPPLING AO3):
       }
 
       function findUserRegistryKeyReuseOnly(){
-        // SAMMA som AO3, men: får inte skapa ny här.
         for (const k of USER_KEY_CANDIDATES){
           const data = parseJsonSafe(localStorage.getItem(k) || "null");
           if (looksLikeUserArray(data)) return { key:k, exists:true };
@@ -394,20 +395,102 @@ OBS (KOPPLING AO3):
           const data = parseJsonSafe(localStorage.getItem(k) || "null");
           if (looksLikeUserArray(data)) return { key:k, exists:true };
         }
-        // fallback: endast om DEMO-key redan finns som array
         const demo = parseJsonSafe(localStorage.getItem(FALLBACK_USER_KEY_DEMO) || "null");
         if (looksLikeUserArray(demo)) return { key:FALLBACK_USER_KEY_DEMO, exists:true };
-
         return { key:"", exists:false };
       }
 
       function loadUsers(key){
         const data = parseJsonSafe(localStorage.getItem(key) || "null");
-        if (data === null) return []; // tomt ok
-        if (!Array.isArray(data)) return null; // korrupt
+        if (data === null) return [];
+        if (!Array.isArray(data)) return null;
         return data;
       }
 
+      function nextDemoEmpNo(users){
+        let max = 100000;
+        for (const u of users){
+          const e = u && (u.empNo || u.employeeNo || u.username);
+          const n = parseInt(String(e || "").replace(/\D/g, ""), 10);
+          if (Number.isFinite(n) && n > max) max = n;
+        }
+        return String(max + 1);
+      }
+
+      function findAdminForUnit(users, unitId){
+        for (const u of users){
+          if (!u) continue;
+          const scopeId = u.scopeId || u.unitId || u.scope || null;
+          const scopes = Array.isArray(u.scopeIds) ? u.scopeIds : (Array.isArray(u.scopes) ? u.scopes : null);
+          if (scopeId && String(scopeId) === String(unitId)) return u;
+          if (scopes && scopes.map(String).includes(String(unitId))) return u;
+        }
+        return null;
+      }
+
+      // ============= ASSIGNMENTS (fail-closed) =============
+      function loadAssignmentsFailClosed(){
+        const raw = localStorage.getItem(KEY_ASSIGNMENTS);
+        const data = parseJsonSafe(raw || "null");
+        if (data === null) return { ok:false, err:"Kunde inte koppla roll (assignments saknas). Inget sparades.", obj:null, raw:null };
+        if (!data || typeof data !== "object" || Array.isArray(data)) return { ok:false, err:"Kunde inte koppla roll (assignments korrupt). Inget sparades.", obj:null, raw:null };
+        return { ok:true, obj:data, raw:raw };
+      }
+
+      function resolveAdminRoleId(assignObj){
+        try {
+          for (const k of Object.keys(assignObj || {})){
+            const a = assignObj[k];
+            const rid = a && (a.roleId || a.role || a.roleID);
+            const s = String(rid || "");
+            if (s && s.toUpperCase().includes("ADMIN")) return rid;
+          }
+        } catch(_) {}
+        return "ADMIN";
+      }
+
+      function detectScopeMode(assignObj){
+        try {
+          for (const k of Object.keys(assignObj || {})){
+            const a = assignObj[k];
+            if (a && Array.isArray(a.scopeIds)) return "scopeIds";
+          }
+        } catch(_) {}
+        return "scopeId";
+      }
+
+      function ensureAssignmentIdempotent(assignObj, userKey, roleIdAdmin, unitId){
+        const existing = assignObj[userKey];
+        const mode = detectScopeMode(assignObj);
+
+        if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+          if (mode === "scopeIds") assignObj[userKey] = { roleId: roleIdAdmin, scopeIds: [unitId] };
+          else assignObj[userKey] = { roleId: roleIdAdmin, scopeId: unitId };
+          return { changed:true, mode };
+        }
+
+        const next = Object.assign({}, existing);
+        if ("roleId" in next) next.roleId = roleIdAdmin; else next.roleId = roleIdAdmin;
+
+        if (mode === "scopeIds") {
+          const arr = Array.isArray(next.scopeIds) ? next.scopeIds.slice() : [];
+          const has = arr.map(String).includes(String(unitId));
+          if (!has) arr.push(unitId);
+          next.scopeIds = arr;
+        } else {
+          if (!next.scopeId) next.scopeId = unitId;
+        }
+
+        assignObj[userKey] = next;
+
+        let already = false;
+        if (mode === "scopeIds") already = (Array.isArray(existing.scopeIds) && existing.scopeIds.map(String).includes(String(unitId)));
+        else already = (String(existing.scopeId || "") === String(unitId));
+
+        return { changed: !already, mode };
+      }
+
+      // ============= PASSWORD HASH =============
       function randomPassword(len){
         const L = Math.max(10, Number(len || 12));
         const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%+-_";
@@ -432,19 +515,8 @@ OBS (KOPPLING AO3):
         return btoa(bin);
       }
 
-      function findAdminForUnit(users, unitId){
-        for (const u of users){
-          if (!u) continue;
-          const scopeId = u.scopeId || u.unitId || u.scope || null;
-          const scopes = Array.isArray(u.scopeIds) ? u.scopeIds : (Array.isArray(u.scopes) ? u.scopes : null);
-          if (scopeId && String(scopeId) === String(unitId)) return u;
-          if (scopes && scopes.map(String).includes(String(unitId))) return u;
-        }
-        return null;
-      }
-
+      // ============= DEDUPE UNIT =============
       function dedupeUnit(nodes, schema, companyId, unitName, orgNo){
-        // Deduperegel: (companyId + unitName + orgNo)
         const { parentKey, nameKey, metaKey } = schema;
         const nOrg = normalizeOrgNo(orgNo);
         const nName = trimStr(unitName).toLowerCase();
@@ -479,6 +551,15 @@ OBS (KOPPLING AO3):
           return;
         }
 
+        // Assignments fail-closed (KRAV)
+        const asgRes = loadAssignmentsFailClosed();
+        if (!asgRes.ok){
+          disableCreateUI(asgRes.err);
+          return;
+        }
+        const assignmentsOrigObj = asgRes.obj;
+        const assignmentsOrigRaw = asgRes.raw;
+
         const orgRes = loadOrgFailClosed();
         if (!orgRes.ok){
           disableCreateUI(orgRes.err);
@@ -496,7 +577,7 @@ OBS (KOPPLING AO3):
         const rootId = root[schema.idKey];
         const typedMode = hasAnyTypedNodes(nodes, schema);
 
-        // Validera companyId som bolag (inte root/enhet)
+        // Validera companyId som bolag
         let companyNode = null;
         for (const n of nodes){
           if (!n) continue;
@@ -509,10 +590,10 @@ OBS (KOPPLING AO3):
           return;
         }
 
-        // Hitta user key (återanvänd)
+        // User key reuse-only
         const userKeyInfo = findUserRegistryKeyReuseOnly();
         if (!userKeyInfo.exists){
-          disableCreateUI("User-register kunde inte hittas. Skapa bolag först (AO3) så user-key etableras. (fail-closed)");
+          disableCreateUI("User-register kunde inte hittas. Skapa bolag först (AO3). (fail-closed)");
           return;
         }
 
@@ -523,13 +604,13 @@ OBS (KOPPLING AO3):
         }
 
         // Validera fält
-        const unitName = trimStr($("unitName").value);
+        const unitNameVal = trimStr($("unitName").value);
         const orgNo = trimStr($("orgNo").value);
         const invoiceEmail = trimStr($("invoiceEmail").value);
         const contactName = trimStr($("contactName").value);
         const phone = trimStr($("phone").value);
 
-        if (![unitName, orgNo, invoiceEmail, contactName, phone].every(v => trimStr(v).length > 0)){
+        if (![unitNameVal, orgNo, invoiceEmail, contactName, phone].every(v => trimStr(v).length > 0)){
           showStatus("err", "Alla fält måste fyllas i.");
           return;
         }
@@ -538,14 +619,13 @@ OBS (KOPPLING AO3):
           return;
         }
 
-        // Dedupe enhet (dubbelklick etc)
-        const existingUnit = dedupeUnit(nodes, schema, companyId, unitName, orgNo);
+        const existingUnit = dedupeUnit(nodes, schema, companyId, unitNameVal, orgNo);
         if (existingUnit){
           showStatus("err", "Enhet med samma namn + org.nr finns redan under bolaget (dedupe). Avbryter.");
           return;
         }
 
-        // Förbered objekt men skriv inte ännu
+        // Prepare objects
         const unitId = genId("unit");
         const meta = {
           orgNo: normalizeOrgNo(orgNo),
@@ -554,9 +634,11 @@ OBS (KOPPLING AO3):
           phone
         };
 
-        // Admin credentials (DEMO)
+        // ADMIN credentials
+        const empNo = nextDemoEmpNo(users); // viktigt: vi måste ha identifierare för assignments
         const orgNoSuffix = normalizeOrgNo(orgNo).slice(-4) || "0000";
-        const username = "admin-" + orgNoSuffix + "-" + unitId.slice(-4);
+        const username = "admin-" + orgNoSuffix + "-" + empNo;
+
         const password = randomPassword(12);
         const passHash = await sha256Base64(password);
         if (!passHash){
@@ -564,26 +646,25 @@ OBS (KOPPLING AO3):
           return;
         }
 
-        // Dedupe admin kopplad till unitId (ska normalt inte finnas)
         const existingAdmin = findAdminForUnit(users, unitId);
         if (existingAdmin){
           showStatus("err", "Admin finns redan kopplad till enheten (dedupe). Avbryter.");
           return;
         }
 
-        // Bygg unit node enligt schema (minimalt)
+        // Unit node
         const unitNode = {};
         unitNode[schema.idKey] = unitId;
         unitNode[schema.parentKey] = companyId;
-        unitNode[schema.nameKey] = unitName;
+        unitNode[schema.nameKey] = unitNameVal;
         unitNode[schema.typeKey] = "UNIT";
         unitNode[schema.metaKey] = meta;
         unitNode.createdAt = new Date().toISOString();
 
-        // Bygg user-objekt (samma schema-stil som AO3)
+        // User schema (match AO3)
         const user = {
           id: genId("user"),
-          empNo: "", // ok att lämna tomt här? vi använder username som identifierare i DEMO
+          empNo: empNo,
           username,
           passwordHashSha256: passHash,
           scopeId: unitId,
@@ -592,13 +673,22 @@ OBS (KOPPLING AO3):
           demo: true
         };
 
-        // Ingen partial write: commit i minnet, skriv users först, sedan org, rollback users om org failar.
+        // Prepare assignments update (idempotent)
+        const assignmentsNextObj = Object.assign({}, assignmentsOrigObj);
+        const roleIdAdmin = resolveAdminRoleId(assignmentsNextObj);
+        const userKeyForAssignments = empNo;
+        const asgUpdate = ensureAssignmentIdempotent(assignmentsNextObj, userKeyForAssignments, roleIdAdmin, unitId);
+
+        // Commit sets (no partial write) with rollback
+        const orgOrigRaw = localStorage.getItem(KEY_ORG);
+        const usersOrigRaw = localStorage.getItem(userKeyInfo.key);
+
         const nextNodes = nodes.slice();
         const nextUsers = users.slice();
         nextNodes.push(unitNode);
         nextUsers.push(user);
 
-        // Extra dedupe guard: id-krock (fail-closed)
+        // id-krock guard
         const ids = new Set();
         for (const n of nextNodes){
           const idv = n && n[schema.idKey];
@@ -613,26 +703,20 @@ OBS (KOPPLING AO3):
 
         try {
           localStorage.setItem(userKeyInfo.key, JSON.stringify(nextUsers));
+          localStorage.setItem(KEY_ORG, JSON.stringify(nextNodes));
+          localStorage.setItem(KEY_ASSIGNMENTS, JSON.stringify(assignmentsNextObj));
 
-          try {
-            localStorage.setItem(KEY_ORG, JSON.stringify(nextNodes));
-          } catch (orgErr) {
-            // rollback users
-            try { localStorage.setItem(userKeyInfo.key, JSON.stringify(users)); } catch(_) {}
-            throw orgErr;
-          }
+          lastCreated = { unitId, unitName: unitNameVal, username, password, companyId, empNo, userKey: userKeyInfo.key };
 
-          // SUCCESS: render result (lösenord endast i minne)
-          lastCreated = { unitId, unitName, username, password, companyId, userKey: userKeyInfo.key };
-
-          showStatus("ok", "Sparat. Enhet + admin skapades (DEMO).");
+          showStatus("ok", "Sparat. Enhet + admin + rollkoppling skapades (DEMO).");
 
           resultEmpty.style.display = "none";
           resultPanel.style.display = "block";
-          outUnitName.textContent = unitName;
+          outUnitName.textContent = unitNameVal;
           outUnitId.textContent = unitId;
           outUsername.textContent = username;
           outPassword.textContent = password;
+          outRole.textContent = "ADMIN (scope kopplat)";
 
           const companyHref = "./company.html?companyId=" + encodeURIComponent(companyId);
           goCompany2.setAttribute("href", companyHref);
@@ -644,7 +728,10 @@ OBS (KOPPLING AO3):
 
         } catch (err) {
           console.error(err);
-          showStatus("err", "Kunde inte spara. Inget skrevs permanent (fail-closed).");
+          try { if (usersOrigRaw === null) localStorage.removeItem(userKeyInfo.key); else localStorage.setItem(userKeyInfo.key, usersOrigRaw); } catch(_) {}
+          try { if (orgOrigRaw === null) localStorage.removeItem(KEY_ORG); else localStorage.setItem(KEY_ORG, orgOrigRaw); } catch(_) {}
+          try { if (assignmentsOrigRaw === null) localStorage.removeItem(KEY_ASSIGNMENTS); else localStorage.setItem(KEY_ASSIGNMENTS, assignmentsOrigRaw); } catch(_) {}
+          showStatus("err", "Kunde inte koppla roll (assignments korrupt). Inget sparades.");
         } finally {
           isSaving = false;
           btnSave.disabled = false;
@@ -656,18 +743,15 @@ OBS (KOPPLING AO3):
       if (!requireSystemAdmin()) return;
 
       const companyId = getCompanyId();
-      const orgRes = loadOrgFailClosed();
-
-      // Default links
       backToCompany.setAttribute("href", companyId ? ("./company.html?companyId=" + encodeURIComponent(companyId)) : "./company.html");
 
       if (!companyId){
-        // Fail-closed per AO
-        disableCreateUI("Välj ett bolag först.");
-        hint.textContent = "Gå till Bolagslista eller Org-karta för att välja bolag.";
+        disableCreateUI("Välj ett bolag först");
+        hint.textContent = "Gå till Org-karta eller Bolagslista för att välja bolag.";
         return;
       }
 
+      const orgRes = loadOrgFailClosed();
       if (!orgRes.ok){
         disableCreateUI(orgRes.err);
         hint.textContent = "Org-karta och Bolagslista kan fortfarande öppnas.";
@@ -677,7 +761,6 @@ OBS (KOPPLING AO3):
       const nodes = orgRes.nodes;
       const schema = inferSchema(nodes);
       const root = findRoot(nodes, schema);
-
       if (!root || !root[schema.idKey]){
         disableCreateUI("Root saknas i org-trädet. Kan inte skapa enhet (fail-closed).");
         return;
@@ -700,21 +783,20 @@ OBS (KOPPLING AO3):
         return;
       }
 
-      // Render company context (read-only)
+      // Render company context
       const meta = pickMeta(companyNode, schema);
       companyName.textContent = trimStr(companyNode[schema.nameKey]) || "Bolag";
       companyOrgNo.textContent = (meta && trimStr(meta.orgNo)) ? String(meta.orgNo) : "—";
       companyIdOut.textContent = String(companyId);
 
-      // Pre-fill defaults from company meta (snabb demo)
+      // Prefill defaults
       if (meta){
-        $("orgNo").value = trimStr(meta.orgNo || "");
         $("invoiceEmail").value = trimStr(meta.invoiceEmail || "");
         $("contactName").value = trimStr(meta.contactName || "");
         $("phone").value = trimStr(meta.phone || "");
       }
 
-      // Hint: vilken user-key vi återanvänder (utan att skriva)
+      // Hint user key
       const userKeyInfo = findUserRegistryKeyReuseOnly();
       hint.textContent = userKeyInfo.exists
         ? ("User-register: återanvänder " + userKeyInfo.key + " (AO3).")
@@ -722,7 +804,6 @@ OBS (KOPPLING AO3):
 
       form.addEventListener("submit", onSave);
 
-      // Refresh: visa inte lösenord igen
       window.addEventListener("pageshow", function(){
         resultPanel.style.display = "none";
         resultEmpty.style.display = "block";
@@ -737,33 +818,24 @@ OBS (KOPPLING AO3):
   KONTROLLSVAR TILL FORGE (MÅSTE BESVARAS):
 
   1) Exakt vilken user-register key och schema återanvänder du från AO3?
-     - Key: hittas via findUserRegistryKeyReuseOnly() med:
-       USER_KEY_CANDIDATES + scanning av AO-* keys som innehåller "USER" + fallback (endast om AO-030_USERS_DEMO_V1 redan finns som array).
-     - Schema: array av user-objekt med fält som AO3 använde:
-       { id, empNo, username, passwordHashSha256, scopeId, roleHint, createdAt, demo }
-       (Vi skriver samma fältset och sparar endast passwordHashSha256.)
+     - findUserRegistryKeyReuseOnly() återanvänder befintlig key från USER_KEY_CANDIDATES eller AO-* USER*,
+       alternativt AO-030_USERS_DEMO_V1 om den redan finns som array.
+     - Schema: { id, empNo, username, passwordHashSha256, scopeId, roleHint, createdAt, demo } (match AO3).
 
   2) Hur validerade du att companyId är ett bolag och inte root/enhet?
-     - Root identifieras (parent null/"" eller type/kind == ROOT).
-     - typedMode om någon nod har type/kind.
-     - isCompanyNode():
-       * typedMode: type/kind innehåller "COMPANY"/"BOLAG" och noden är inte root
-       * annars: parent == rootId och noden är inte root
-     - companyId accepteras endast om matchande nod uppfyller isCompanyNode().
+     - root hittas (parent null/"" eller type/kind ROOT)
+     - typedMode: om någon nod har type/kind
+     - isCompanyNode(): typed -> type/kind innehåller COMPANY/BOLAG; annars parent == rootId; root exkluderas.
 
   3) Hur gör du “ingen partial write” om admin-skapandet misslyckas?
-     - Admin byggs i minnet först; om hash inte kan skapas -> abort innan write.
-     - Commit:
-       - Skriv users först.
-       - Skriv org därefter.
-       - Om org-write failar: rollback users till original (best-effort) och kasta fel.
+     - assignments laddas fail-closed innan operation.
+     - commit: USERS -> ORG -> ASSIGNMENTS.
+     - vid fel: rollback alla tre keys till original raw (best-effort).
 
   4) Vilken dedupe-regel används för att hindra dubbla enheter vid dubbel-submit?
-     - dedupeUnit(): matchar befintlig enhet under samma bolag på:
-       (companyId == parent) AND (lower(displayName/name) == lower(enhetsnamn)) AND (normalize(meta.orgNo) == normalize(orgNo))
-     - Dessutom: Save-knapp låses med isSaving + disabled under operation.
+     - dedupeUnit(): (parent==companyId) AND (lower(name)==lower(unitName)) AND (normalize(meta.orgNo)==normalize(orgNo))
+     - samt isSaving + disabled på Save.
   ============================================================
   -->
 </body>
 </html>
-
