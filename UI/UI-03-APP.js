@@ -245,6 +245,24 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     return String((a.scopeId ?? s.scopeId) ?? "").trim();
   }
 
+  // GUARD/COMPAT: stöd både scopeIds[] (V2) och scopeId (legacy)
+  function pickFirstScopeIdFromRow(row) {
+    if (!row || typeof row !== "object") return "";
+
+    // V2: scopeIds kan vara array
+    const sArr = row.scopeIds ?? row.scopes ?? row.orgIds ?? null;
+    if (Array.isArray(sArr) && sArr.length > 0) {
+      for (let i = 0; i < sArr.length; i++) {
+        const v = String(sArr[i] ?? "").trim();
+        if (v) return v;
+      }
+    }
+
+    // Legacy: scopeId
+    const single = String(row.scopeId ?? row.scope ?? row.nodeId ?? row.orgId ?? "").trim();
+    return single || "";
+  }
+
   function resolveScopeIdFromAssignments(empNo) {
     const me = normalizeEmpNo(empNo);
     if (!me) return "";
@@ -252,6 +270,7 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     const data = readLocalStorage(ASSIGNMENTS_KEY);
     if (!data) return "";
 
+    // Array-form: [{empNo, roleId, scopeIds:[...]}] eller legacy scopeId
     if (Array.isArray(data)) {
       for (let i = 0; i < data.length; i++) {
         const row = data[i];
@@ -260,16 +279,18 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
         const rowEmp = normalizeEmpNo(row.empNo ?? row.employeeNo ?? row.emp ?? row.id ?? "");
         if (!rowEmp || rowEmp !== me) continue;
 
-        const scope = String(row.scopeId ?? row.scope ?? row.nodeId ?? row.orgId ?? "").trim();
+        const scope = pickFirstScopeIdFromRow(row);
         if (scope) return scope;
       }
       return "";
     }
 
+    // Objekt-form: kan vara map by empNo eller {byEmpNo:{...}}
     if (typeof data === "object") {
       const direct = data[me];
+
       if (direct && typeof direct === "object") {
-        const scope = String(direct.scopeId ?? direct.scope ?? direct.nodeId ?? direct.orgId ?? "").trim();
+        const scope = pickFirstScopeIdFromRow(direct);
         if (scope) return scope;
       }
       if (typeof direct === "string" || typeof direct === "number") {
@@ -280,8 +301,9 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
       const byEmpNo = data.byEmpNo;
       if (byEmpNo && typeof byEmpNo === "object") {
         const row = byEmpNo[me];
+
         if (row && typeof row === "object") {
-          const scope = String(row.scopeId ?? row.scope ?? row.nodeId ?? row.orgId ?? "").trim();
+          const scope = pickFirstScopeIdFromRow(row);
           if (scope) return scope;
         }
         if (typeof row === "string" || typeof row === "number") {
@@ -353,7 +375,7 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   function isHtmlLikeRoute(appRelPath) {
     const p = String(appRelPath || "").toLowerCase();
     if (!p) return false;
-    return p === "/" || p.endsWith(".html") || p.endsWith("/");
+    return p === "/" || p.endsWith(".html") || p.endsWith("/") ;
   }
 
   function normalizeRelPathForCheck(inputPath) {
@@ -526,18 +548,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     clearAuthState();
   }
 
-  function hexToBytes(hex) {
-    const s = String(hex || "").trim().toLowerCase();
-    if (!s || s.length % 2 !== 0) return null;
-    const out = new Uint8Array(s.length / 2);
-    for (let i = 0; i < out.length; i++) {
-      const b = parseInt(s.substr(i * 2, 2), 16);
-      if (!Number.isFinite(b)) return null;
-      out[i] = b;
-    }
-    return out;
-  }
-
   function bytesToHex(buf) {
     const b = buf instanceof ArrayBuffer ? new Uint8Array(buf) : (buf instanceof Uint8Array ? buf : null);
     if (!b) return "";
@@ -548,29 +558,34 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
 
   async function pbkdf2Hex(pin, salt, iterations, dkLenBytes) {
     // WebCrypto-only: funkar i moderna browsers
-    if (!window.crypto || !window.crypto.subtle) return "";
+    try {
+      if (!window.crypto || !window.crypto.subtle) return "";
 
-    const enc = new TextEncoder();
-    const keyMaterial = await window.crypto.subtle.importKey(
-      "raw",
-      enc.encode(String(pin || "")),
-      "PBKDF2",
-      false,
-      ["deriveBits"]
-    );
+      const enc = new TextEncoder();
+      const keyMaterial = await window.crypto.subtle.importKey(
+        "raw",
+        enc.encode(String(pin || "")),
+        "PBKDF2",
+        false,
+        ["deriveBits"]
+      );
 
-    const bits = await window.crypto.subtle.deriveBits(
-      {
-        name: "PBKDF2",
-        salt: enc.encode(String(salt || "")),
-        iterations: Number(iterations) || 120000,
-        hash: "SHA-256",
-      },
-      keyMaterial,
-      (Number(dkLenBytes) || 32) * 8
-    );
+      const bits = await window.crypto.subtle.deriveBits(
+        {
+          name: "PBKDF2",
+          salt: enc.encode(String(salt || "")),
+          iterations: Number(iterations) || 120000,
+          hash: "SHA-256",
+        },
+        keyMaterial,
+        (Number(dkLenBytes) || 32) * 8
+      );
 
-    return bytesToHex(bits);
+      return bytesToHex(bits);
+    } catch {
+      // Fail-closed: crypto-fel ska bara ge tomt (som leder till AUTH_CRYPTO_UNAVAILABLE)
+      return "";
+    }
   }
 
   async function verifyPinForRole(role, pin) {
@@ -637,6 +652,32 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
   }
 
   // AUDIT (UI-only) — logga aldrig empNo/persondata
+  function sanitizeAuditMeta(meta) {
+    if (!meta || typeof meta !== "object") return null;
+
+    const out = {};
+    const keys = Object.keys(meta);
+
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      const low = String(k).toLowerCase();
+
+      // Blockera allt som ser ut som person/emp/id
+      if (low.includes("emp") || low.includes("person") || low.includes("id") || low.includes("ssn") || low.includes("email") || low.includes("phone")) {
+        continue;
+      }
+
+      const v = meta[k];
+
+      // Bara primitiva typer
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+        out[k] = v;
+      }
+    }
+
+    return Object.keys(out).length ? out : null;
+  }
+
   function auditAppend(action, meta) {
     const cfg = getConfig();
     if (!cfg) return;
@@ -667,32 +708,6 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
     } catch {
       // Fail-closed: vi blockerar inte flödet pga audit-fel
     }
-  }
-
-  function sanitizeAuditMeta(meta) {
-    if (!meta || typeof meta !== "object") return null;
-
-    const out = {};
-    const keys = Object.keys(meta);
-
-    for (let i = 0; i < keys.length; i++) {
-      const k = keys[i];
-      const low = String(k).toLowerCase();
-
-      // Blockera allt som ser ut som person/emp/id
-      if (low.includes("emp") || low.includes("person") || low.includes("id") || low.includes("ssn") || low.includes("email") || low.includes("phone")) {
-        continue;
-      }
-
-      const v = meta[k];
-
-      // Bara primitiva typer
-      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
-        out[k] = v;
-      }
-    }
-
-    return Object.keys(out).length ? out : null;
   }
 
   // PUBLIC login helper (async)
@@ -1031,7 +1046,7 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
 
     const now = Date.now();
     const empNo = normalizeEmpNo(input && input.empNo);
-    const planId = String(input && input.planId || "").trim();
+    const planId = String((input && input.planId) || "").trim();
     const startDateTs = toTs(input && input.startDateTs);
 
     if (!empNo) return { ok: false, error: "VALIDATION_PA_EMPNO_REQUIRED" };
