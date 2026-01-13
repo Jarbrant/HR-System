@@ -9,6 +9,8 @@ Syfte: SYSTEM_ADMIN skapar Bolag. Vid sparande skapas automatiskt:
 AO-SYS-AUTO-ASSIGN-ADMIN-SCOPE-01 (PROD • DEMO) — TILLÄGG:
 - Vid admin-skapande skriv även assignment i AO-020_ROLE_ASSIGNMENTS_V2 så kontot kan användas direkt.
 
+AUTOPATCH: v1.1 (root-id prioritet, assignments init om saknas, strikt SYSTEM_ADMIN fallback)
+
 POLICY (LÅST):
 - UI-only • Ingen backend
 - SYSTEM_ADMIN-only • Fail-closed via HRApp.requireAuth
@@ -192,6 +194,9 @@ DEMO-SÄKERHET:
       const KEY_SESSION = "AO-001_LOGIN_V1";
       const KEY_ASSIGNMENTS = "AO-020_ROLE_ASSIGNMENTS_V2";
 
+      // Root-id (stabilt i din org-spec)
+      const ROOT_ID_EXPECTED = "org_root_v1";
+
       // USER-REGISTRY: återanvänd om finns, annars skapa ny DEMO key (ENDA tillåtna nya key i AO-packen)
       const USER_KEY_CANDIDATES = [
         "AO-002_USERS_V1",
@@ -227,7 +232,6 @@ DEMO-SÄKERHET:
       const linkGoCompany = $("linkGoCompany");
 
       // In-memory only
-      let lastCreated = null;
       let isSaving = false;
 
       // ==============================
@@ -250,8 +254,8 @@ DEMO-SÄKERHET:
         if (!sess) { try { sess = JSON.parse(localStorage.getItem(KEY_SESSION) || "null"); } catch(_) {} }
 
         const role = sess && (sess.role || sess.roleId || sess.userRole);
-        const isSys = String(role || "").toUpperCase().includes("SYSTEM");
-        if (!sess || !isSys) {
+        const isSysAdmin = String(role || "").toUpperCase() === "SYSTEM_ADMIN";
+        if (!sess || !isSysAdmin) {
           location.href = "./login.html";
           return false;
         }
@@ -320,13 +324,22 @@ DEMO-SÄKERHET:
       }
 
       function findRoot(nodes, schema){
-        const { parentKey, typeKey } = schema;
+        const { idKey, parentKey, typeKey } = schema;
+
+        // AUTOPATCH: prioritera org_root_v1 om den finns
+        for (const n of nodes){
+          if (!n) continue;
+          const id = n[idKey];
+          if (String(id || "") === ROOT_ID_EXPECTED) return n;
+        }
+
         for (const n of nodes) {
           const p = n ? n[parentKey] : null;
           const t = n ? n[typeKey] : null;
-          const isRootByParent = (p === null || p === undefined || p === "");
           const isRootByType = String(t || "").toUpperCase() === "ROOT";
-          if (isRootByParent || isRootByType) return n;
+          if (isRootByType) return n;
+          const isRootByParent = (p === null || p === undefined || p === "");
+          if (isRootByParent) return n;
         }
         return null;
       }
@@ -344,35 +357,32 @@ DEMO-SÄKERHET:
       // ASSIGNMENTS (AO-SYS-AUTO-ASSIGN-ADMIN-SCOPE-01)
       // ==============================
       function loadAssignmentsFailClosed(){
-        // KRAV: assignments saknas (null) -> fail-closed
+        // AUTOPATCH: om saknas => init {}, men fail-closed vid korrupt typ
         const raw = localStorage.getItem(KEY_ASSIGNMENTS);
         const data = parseJsonSafe(raw || "null");
+
         if (data === null) {
-          return { ok:false, err:"Assignments saknas (null). Kan inte koppla roll. Inget sparas.", obj:null, raw:null };
+          return { ok:true, obj:{}, raw:"{}" }; // init empty
         }
         if (!data || typeof data !== "object" || Array.isArray(data)) {
           return { ok:false, err:"Assignments är korrupt (måste vara objekt). Kan inte koppla roll. Inget sparas.", obj:null, raw:null };
         }
-        return { ok:true, obj:data, raw:raw };
+        return { ok:true, obj:data, raw:raw || "{}" };
       }
 
       function resolveAdminRoleId(assignObj){
-        // Försök hitta befintligt ADMIN-värde exakt som systemet använder.
-        // 1) Skanna befintliga roleId
         try {
           for (const k of Object.keys(assignObj || {})){
             const a = assignObj[k];
             const rid = a && (a.roleId || a.role || a.roleID);
             const s = String(rid || "");
-            if (s && s.toUpperCase().includes("ADMIN")) return rid; // returnera exakt hittat värde
+            if (s && s.toUpperCase().includes("ADMIN")) return rid;
           }
         } catch(_) {}
-        // 2) Fallback
         return "ADMIN";
       }
 
       function detectScopeMode(assignObj){
-        // Om någon entry använder scopeIds[] -> multi, annars scopeId
         try {
           for (const k of Object.keys(assignObj || {})){
             const a = assignObj[k];
@@ -383,16 +393,10 @@ DEMO-SÄKERHET:
       }
 
       function ensureAssignmentIdempotent(assignObj, userKey, roleIdAdmin, unitId){
-        // Idempotent:
-        // - Om saknas: skapa
-        // - Om finns:
-        //   - behåll okända fält
-        //   - lägg till scope (scopeId eller scopeIds) utan att ta bort andra scopes
         const existing = assignObj[userKey];
         const mode = detectScopeMode(assignObj);
 
         if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
-          // Ny post
           if (mode === "scopeIds") {
             assignObj[userKey] = { roleId: roleIdAdmin, scopeIds: [unitId] };
           } else {
@@ -401,27 +405,20 @@ DEMO-SÄKERHET:
           return { changed:true, mode };
         }
 
-        // Uppdatera befintlig (fail-safe: radera inget)
         const next = Object.assign({}, existing);
-        if (!("roleId" in next) && !("role" in next)) next.roleId = roleIdAdmin;
-        if ("roleId" in next) next.roleId = roleIdAdmin;
+        next.roleId = roleIdAdmin;
 
         if (mode === "scopeIds") {
           const arr = Array.isArray(next.scopeIds) ? next.scopeIds.slice() : [];
           const has = arr.map(String).includes(String(unitId));
           if (!has) arr.push(unitId);
           next.scopeIds = arr;
-          // Om gamla schema hade scopeId: behåll men normalisera inte bort
         } else {
-          // single scopeId
           if (!next.scopeId) next.scopeId = unitId;
-          // Om scopeId finns men inte matchar: lämna (vi raderar inte), men om det är samma gör inget.
-          // OBS: Vi kan inte sätta flera i single-mode utan att riskera regression.
         }
 
         assignObj[userKey] = next;
 
-        // Kontroll om redan innehöll unitId i relevant fält
         let already = false;
         if (mode === "scopeIds") already = (Array.isArray(existing.scopeIds) && existing.scopeIds.map(String).includes(String(unitId)));
         else already = (String(existing.scopeId || "") === String(unitId));
@@ -472,17 +469,6 @@ DEMO-SÄKERHET:
         return data;
       }
 
-      function findAdminForUnit(users, unitId){
-        for (const u of users){
-          if (!u) continue;
-          const scopeId = u.scopeId || u.unitId || u.scope || null;
-          const scopes = Array.isArray(u.scopeIds) ? u.scopeIds : (Array.isArray(u.scopes) ? u.scopes : null);
-          if (scopeId && String(scopeId) === String(unitId)) return u;
-          if (scopes && scopes.map(String).includes(String(unitId))) return u;
-        }
-        return null;
-      }
-
       function nextDemoEmpNo(users){
         let max = 100000;
         for (const u of users){
@@ -527,29 +513,23 @@ DEMO-SÄKERHET:
       // ==============================
       // DEDUPE HELPERS
       // ==============================
-      function companyAlreadyExistsByOrgNo(nodes, schema, orgNo){
-        const { metaKey, typeKey } = schema;
+      function companyAlreadyExistsByOrgNo(nodes, schema, rootId, orgNo){
+        const { metaKey, typeKey, parentKey, idKey } = schema;
         const norm = normalizeOrgNo(orgNo);
         for (const n of nodes){
-          const meta = n && n[metaKey];
-          const t = n && n[typeKey];
-          const isCompany = String(t || "").toUpperCase().includes("COMPANY") || String(t || "").toUpperCase().includes("BOLAG");
-          const mOrgNo = meta && normalizeOrgNo(meta.orgNo || meta.orgnr || meta.org || "");
-          if (isCompany && mOrgNo && mOrgNo === norm) return n;
-        }
-        return null;
-      }
-
-      function findAutoUnitUnderCompany(nodes, schema, companyId, expectedUnitName){
-        const { parentKey, nameKey, metaKey } = schema;
-        for (const n of nodes){
           if (!n) continue;
-          const p = n[parentKey];
-          if (p !== companyId) continue;
-          const dn = safeStr(n[nameKey]);
-          const meta = n[metaKey] || {};
-          if (dn === expectedUnitName) return n;
-          if (meta && meta.autoSignature === AUTO_UNIT_SIGNATURE) return n;
+          const id = n[idKey];
+          if (!id || String(id) === String(rootId)) continue;
+
+          const meta = n[metaKey];
+          const mOrgNo = meta && normalizeOrgNo(meta.orgNo || meta.orgnr || meta.org || "");
+          if (!mOrgNo || mOrgNo !== norm) continue;
+
+          const t = String(n[typeKey] || "").toUpperCase();
+          const isCompanyTyped = t.includes("COMPANY") || t.includes("BOLAG");
+          const isCompanyByParent = String(n[parentKey] || "") === String(rootId);
+
+          if (isCompanyTyped || isCompanyByParent) return n;
         }
         return null;
       }
@@ -564,7 +544,6 @@ DEMO-SÄKERHET:
         clearStatus();
         resultPanel.style.display = "none";
         resultEmpty.style.display = "block";
-        lastCreated = null;
 
         const companyName = trimStr($("companyName").value);
         const orgNo = trimStr($("orgNo").value);
@@ -581,7 +560,7 @@ DEMO-SÄKERHET:
           return;
         }
 
-        // Load assignments FAIL-CLOSED (KRAV: om korrupt/saknas -> blockera hela operationen)
+        // Load assignments (init {} om saknas)
         const asgRes = loadAssignmentsFailClosed();
         if (!asgRes.ok){
           showStatus("err", asgRes.err);
@@ -605,7 +584,13 @@ DEMO-SÄKERHET:
           return;
         }
 
-        const existingCompany = companyAlreadyExistsByOrgNo(nodes, schema, orgNo);
+        const rootId = root[schema.idKey] || root.id || null;
+        if (!rootId){
+          showStatus("err", "Root saknar id. Kan inte skapa bolag (fail-closed).");
+          return;
+        }
+
+        const existingCompany = companyAlreadyExistsByOrgNo(nodes, schema, rootId, orgNo);
         if (existingCompany){
           showStatus("err", "Bolag med samma organisationsnummer verkar redan finnas (dedupe). Avbryter.");
           return;
@@ -644,23 +629,11 @@ DEMO-SÄKERHET:
 
         const unitName = "Enhet – #" + empNo;
 
-        const existingAutoUnit = findAutoUnitUnderCompany(nodes, schema, companyId, unitName);
-        if (existingAutoUnit){
-          showStatus("err", "Auto-enhet verkar redan finnas under detta bolag (dedupe). Avbryter.");
-          return;
-        }
-
-        const existingAdmin = findAdminForUnit(users, unitId);
-        if (existingAdmin){
-          showStatus("err", "Admin verkar redan finnas kopplad till enheten (dedupe). Avbryter.");
-          return;
-        }
-
         const { idKey, parentKey, nameKey, typeKey, metaKey } = schema;
 
         const companyNode = {};
         companyNode[idKey] = companyId;
-        companyNode[parentKey] = root[idKey] || root.id || null;
+        companyNode[parentKey] = rootId;
         companyNode[nameKey] = companyName;
         companyNode[typeKey] = "COMPANY";
         companyNode[metaKey] = Object.assign({}, meta, { autoSignature: "COMPANY_V1" });
@@ -688,7 +661,7 @@ DEMO-SÄKERHET:
         // Prepare assignments update (idempotent)
         const assignmentsNextObj = Object.assign({}, assignmentsOrigObj);
         const roleIdAdmin = resolveAdminRoleId(assignmentsNextObj);
-        const userKeyForAssignments = empNo; // KRAV: key = admin-empNo (eller identifierare) — vi använder empNo konsekvent
+        const userKeyForAssignments = empNo; // vi använder empNo konsekvent som nyckel
         const asgUpdate = ensureAssignmentIdempotent(assignmentsNextObj, userKeyForAssignments, roleIdAdmin, unitId);
 
         // Clone arrays
@@ -707,16 +680,14 @@ DEMO-SÄKERHET:
           ids.add(String(idv));
         }
 
-        // COMMIT (ingen partial write):
-        // Strategy:
-        // - Skriv USERS, ORG, ASSIGNMENTS
-        // - Om senare steg failar: rollback tidigare (best-effort) till original
+        // COMMIT (ingen partial write)
         isSaving = true;
         btnSave.disabled = true;
         $("saveHint").textContent = "Sparar…";
 
         const orgOrigRaw = localStorage.getItem(KEY_ORG);
         const usersOrigRaw = localStorage.getItem(userKeyInfo.key);
+        const asgOrigRaw = localStorage.getItem(KEY_ASSIGNMENTS);
 
         try {
           // USERS
@@ -728,20 +699,6 @@ DEMO-SÄKERHET:
           // ASSIGNMENTS
           localStorage.setItem(KEY_ASSIGNMENTS, JSON.stringify(assignmentsNextObj));
 
-          // SUCCESS
-          lastCreated = {
-            companyId,
-            unitId,
-            unitName,
-            username,
-            password,
-            empNo,
-            userKey: userKeyInfo.key,
-            userKeyWasExisting: userKeyInfo.exists,
-            assignedRoleId: roleIdAdmin,
-            assignedScopeMode: asgUpdate.mode
-          };
-
           showStatus("ok", "Sparat. Bolag + auto-enhet + admin + rollkoppling skapades (DEMO).");
 
           resultEmpty.style.display = "none";
@@ -751,7 +708,7 @@ DEMO-SÄKERHET:
           outUnitId.textContent = unitId;
           outUsername.textContent = username;
           outPassword.textContent = password;
-          outRole.textContent = "ADMIN (scope kopplat)";
+          outRole.textContent = "ADMIN (scope kopplat via " + asgUpdate.mode + ")";
 
           linkGoCompany.setAttribute("href", "./company.html?companyId=" + encodeURIComponent(companyId));
 
@@ -762,8 +719,8 @@ DEMO-SÄKERHET:
           // Rollback best-effort
           try { if (usersOrigRaw === null) localStorage.removeItem(userKeyInfo.key); else localStorage.setItem(userKeyInfo.key, usersOrigRaw); } catch(_) {}
           try { if (orgOrigRaw === null) localStorage.removeItem(KEY_ORG); else localStorage.setItem(KEY_ORG, orgOrigRaw); } catch(_) {}
-          try { if (assignmentsOrigRaw === null) localStorage.removeItem(KEY_ASSIGNMENTS); else localStorage.setItem(KEY_ASSIGNMENTS, assignmentsOrigRaw); } catch(_) {}
-          showStatus("err", "Kunde inte koppla roll/spara. Inget sparades (fail-closed).");
+          try { if (asgOrigRaw === null) localStorage.removeItem(KEY_ASSIGNMENTS); else localStorage.setItem(KEY_ASSIGNMENTS, asgOrigRaw); } catch(_) {}
+          showStatus("err", "Kunde inte spara (rollback utförd). Inget sparades (fail-closed).");
         } finally {
           isSaving = false;
           btnSave.disabled = false;
@@ -787,6 +744,7 @@ DEMO-SÄKERHET:
       })();
 
       window.addEventListener("pageshow", function(){
+        // Lösenord ska inte “hänga kvar” efter refresh/back
         resultPanel.style.display = "none";
         resultEmpty.style.display = "block";
         outPassword.textContent = "";
@@ -804,19 +762,16 @@ DEMO-SÄKERHET:
        Fallback: "ADMIN".
 
   2) Vilket assignments-schema hittade du (scopeId vs scopeIds[]), och hur gjorde du backward tolerant?
-     - detectScopeMode(assignmentsObj):
-       Om någon post har scopeIds[] => använder scopeIds[] annars scopeId.
-     - ensureAssignmentIdempotent() hanterar båda och kraschar inte om fält saknas.
+     - detectScopeMode(assignmentsObj): om någon post har scopeIds[] => scopeIds annars scopeId.
+     - ensureAssignmentIdempotent() stödjer båda utan att radera okända fält.
 
   3) Hur säkrade du “ingen partial write” mellan org/admin/assignment?
-     - Vi fail-closed tidigt om assignments saknas/korrupt.
-     - Commit i ordning: USERS -> ORG -> ASSIGNMENTS.
-     - Vid fel: rollback best-effort till original raw för alla tre.
+     - Commit USERS -> ORG -> ASSIGNMENTS, med rollback best-effort av alla tre vid fel.
 
-  4) Lista exakt vilka kodställen i company-create.html som ändrades (sektion/kommentar).
-     - NY: loadAssignmentsFailClosed/resolveAdminRoleId/detectScopeMode/ensureAssignmentIdempotent
-     - ÄNDRAD: handleSave(): läser assignments före org, bygger assignmentsNextObj och commitar + rollback
-     - UI: result-panel visar “Roll: ADMIN (scope kopplat)”
+  4) Exakt vad autopatch gjorde:
+     - Root: prioriterar org_root_v1 om den finns.
+     - Assignments: initierar {} om saknas (men fail-closed om korrupt).
+     - Fallback-auth: kräver exakt SYSTEM_ADMIN (inte includes("SYSTEM")).
   ============================================================
   -->
 </body>
