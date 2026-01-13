@@ -1,43 +1,39 @@
 <!-- ============================================================
-AO-SYS-ORG-BUILDER-01 (PROD) | FIL-ID: system/org.html
+AO-SYS-ORG-EXPLORER-01 (PROD) | FIL-ID: system/org.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
-Syfte: SYSTEM_ADMIN – Org Builder (ROOT + Bolag + ENHET) för hela systemet
-Nivå: UI-only (GitHub Pages)
+Syfte: SYSTEM_ADMIN – ren “Org-Explorer” (karta/översikt + navigation) utan att blanda skap av bolag/enhet
+
+PATCH: v1.1 — Explorer/Navigator (read-only)
 
 POLICY (LÅST):
-- SYSTEM_ADMIN-only (ren systemförvaltning)
-- Ingen backend
-- Ingen känslig persondata (endast empNo i auth)
-- Inga nya storage-keys
-- Fail-closed: saknad core/auth => redirect till skeleton
-- XSS-escape på allt från storage (textContent, ingen osäker innerHTML)
-- Org används av Assignments (ENHET-only scope)
+- UI-only • Ingen backend • Inga nya storage-keys/datamodell (i denna AO)
+- SYSTEM_ADMIN-only • Fail-closed via HRApp.requireAuth
+- XSS-escape på allt som renderas från storage (endast textContent, ingen osäker innerHTML)
+- Fail-closed: saknad/korrupt org-data => blockera “Skapa enhet” och visa tydlig status
+- Org.html är read-only explorer + länkar (ingen org-write)
 
 Keys (LÅST):
-- Läs (session): AO-001_LOGIN_V1 (via HRApp.requireAuth)
-- Läs/Skriv: AO-020_ORG_V1 (localStorage) — org-träd (array)
+- Läs (session): AO-001_LOGIN_V1 via HRApp.requireAuth (som andra system-sidor)
+- Läs (read-only): AO-020_ORG_V1 (localStorage) — org-träd (array)
 
-Org-ID (LÅST):
-- ROOT_ID = "org_root_v1"  (måste finnas för Assignments)
+MÅL (EXAKT BETEENDE):
+A) Visa org-struktur: Root → Bolag → Enheter (Team kan visas om finns)
+B) Navigator:
+   1) “➕ Skapa bolag” → ./company-create.html
+   2) “➕ Skapa enhet” → ./unit-create.html?companyId=<VALT_BOLAG_ID> (disabled utan valt bolag)
+   3) Klick bolag → ./company.html?companyId=<BOLAG_ID>
+C) Inga create-formfält / inga “lägg till”-knappar som skriver org här
 
-Datamodell (enkel, tolerant):
-[
-  { id:"org_root_v1", name:"Root", type:"Root", parentId:null },
-  { id:"org_xxx", name:"Bolag A", type:"Bolag", parentId:"org_root_v1" },
-  { id:"org_yyy", name:"Enhet 1", type:"Enhet", parentId:"org_xxx" }
-]
-
-PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
-- Vid skapande av ENHET kan SYSTEM_ADMIN generera empNo (valfritt)
-- Vid sparande av ny ENHET med empNo: redirect till assignments.html?empNo=...&scopeId=...
+KONTROLLFRÅGOR (besvaras i leverans):
+1) Bolag vs enhet: type/kind om finns, annars parent-regel (barn till root = bolag, barn till bolag = enhet).
+2) Bekräfta: ingen write till AO-020_ORG_V1 i denna AO.
 ============================================================ -->
-
 <!doctype html>
 <html lang="sv">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – System • Org Builder</title>
+  <title>HR-System – System • Org-karta</title>
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
@@ -62,8 +58,6 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
       --danger-ink: #7f1d1d;
     }
 
-    .wrap{ max-width: var(--wrap-max); margin: 0 auto; padding: var(--wrap-pad); }
-
     header.top{ border-bottom: 1px solid var(--line); background: #fff; }
     .topInner{
       display:flex; align-items:center; justify-content:space-between; gap: 12px;
@@ -86,6 +80,7 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
     .topBtn:focus{ outline: 3px solid var(--accent-soft); outline-offset: 2px; }
     .topBtn:hover{ border-color: rgba(0,0,0,.18); box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); }
 
+    /* Topbar-semantik (LÅST): Min sida neutral/grå, Logga ut röd-tonad */
     .topBtn.my{ background: rgba(17,17,17,.04); border-color: rgba(0,0,0,.14); color: #111; }
     .topBtn.logout{ background: rgba(220,38,38,.08); border-color: rgba(220,38,38,.25); color: var(--danger-ink); }
     .topBtn.logout:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); border-color: rgba(220,38,38,.35); }
@@ -99,7 +94,7 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
 
     main.container{ max-width: var(--wrap-max); margin: 0 auto; padding: var(--wrap-pad); }
 
-    .layout{ display:grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items:start; }
+    .layout{ display:grid; grid-template-columns: 1.05fr .95fr; gap: 12px; align-items:start; }
     @media (max-width: 980px){ .layout{ grid-template-columns: 1fr; } }
 
     .tile{
@@ -121,8 +116,6 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
 
     .row{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
     .rowBetween{ display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; }
-    .row2{ display:grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    @media (max-width: 620px){ .row2{ grid-template-columns: 1fr; } }
 
     .kpis{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin: 10px 0 2px; }
     .kpi{
@@ -149,89 +142,114 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
 
     .mutedText{ color: var(--muted); font-size:.92rem; }
     .smallnote{ font-size:.9rem; color: var(--muted); margin-top:8px; }
-    code{ font-size:.95em; }
 
-    label{ display:block; font-size: 12px; opacity: .86; }
-    input, select, textarea{
-      width: 100%;
-      padding: 10px 12px;
-      border-radius: 10px;
-      border: 1px solid rgba(0,0,0,.12);
-      background:#fff;
-      outline: none;
-      margin-top:6px;
-      font: inherit;
-    }
-    input:focus, select:focus, textarea:focus{
-      outline: 3px solid var(--accent-soft);
-      outline-offset: 2px;
-    }
-
-    .miniBtn{
-      padding: 8px 10px;
-      border-radius: 10px;
-      border: 1px solid rgba(0,0,0,.12);
-      background:#fff;
-      cursor:pointer;
+    .ctaRow{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top: 10px; }
+    .btn{
       display:inline-flex;
-      gap:8px;
       align-items:center;
       justify-content:center;
+      gap:8px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,.12);
+      background:#fff;
       text-decoration:none;
       color:#111;
+      cursor:pointer;
+      box-shadow: var(--tile-shadow-1);
+      white-space: nowrap;
     }
-    .miniBtn:hover{ border-color: rgba(0,0,0,.18); box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); }
-    .miniBtn:focus{ outline: 3px solid var(--accent-soft); outline-offset: 2px; }
-
-    .miniBtn.delete{ background:#fff; border-color: rgba(0,0,0,.12); color:#111; }
-    .miniBtn.delete:hover{
-      background: rgba(254,226,226,.65);
-      border-color: rgba(220,38,38,.35);
-      color: var(--danger-ink);
+    .btn:hover{ border-color: rgba(0,0,0,.18); box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); }
+    .btn:focus{ outline: 3px solid var(--accent-soft); outline-offset: 2px; }
+    .btn.primary{
+      border-color: rgba(11,95,255,.22);
+      background: rgba(59,130,246,.08);
+      box-shadow: var(--tile-shadow-1), 0 10px 24px rgba(59,130,246,.10);
+      font-weight: 800;
+    }
+    .btn[aria-disabled="true"]{
+      opacity: .55;
+      pointer-events: none;
+      cursor: not-allowed;
     }
 
-    .blocker{
-      border: 1px solid var(--danger-border);
-      background: rgba(254,226,226,.45);
+    .hint{
+      border: 1px dashed rgba(0,0,0,.14);
       border-radius: 12px;
       padding: 10px 12px;
-      margin: 10px 0 0;
+      background: rgba(17,17,17,.02);
+      margin-top: 10px;
     }
-    .blocker strong{ font-weight: 900; }
 
-    .item{
+    .list{ margin-top: 10px; }
+    .companyRow{
       border:1px solid var(--line);
       border-radius: 12px;
       padding: 12px;
       background:#fff;
       box-shadow: var(--tile-shadow-1), var(--tile-shadow-2);
-      display:flex;
-      gap:10px;
-      justify-content:space-between;
-      align-items:flex-start;
-      flex-wrap:wrap;
-      margin-top:10px;
+      margin-top: 10px;
       position: relative;
       overflow:hidden;
+      cursor: pointer;
     }
-    .item::before{
+    .companyRow::before{
       content:"";
       position:absolute; top:0; left:0; right:0; height:6px;
-      background: rgba(148,163,184,.75);
+      background: rgba(59,130,246,.55);
     }
-    .item:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); border-color: rgba(0,0,0,.14); }
-
-    .item.danger{ border-color: var(--danger-border); background: rgba(254,226,226,.25); }
-    .item.danger::before{ background: rgba(220,38,38,.75); }
-
-    .item-title{ font-weight: 900; margin:0; color:#111; }
-    .meta{
-      color: var(--muted);
-      font-size:.9rem;
+    .companyRow:hover{ box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover); border-color: rgba(0,0,0,.14); }
+    .companyRow.selected{
+      border-color: rgba(11,95,255,.28);
+      box-shadow: var(--tile-shadow-1), 0 10px 24px rgba(59,130,246,.14);
+    }
+    .companyTitle{
+      margin: 0;
+      font-weight: 900;
+      color:#111;
       display:flex;
       gap:10px;
       flex-wrap:wrap;
-      margin-top:6px;
+      align-items: baseline;
+    }
+    .companyMeta{
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: .9rem;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+    }
+    .units{
+      margin-top: 10px;
+      padding-left: 14px;
+      border-left: 2px solid rgba(0,0,0,.08);
+      display:flex;
+      flex-direction: column;
+      gap:8px;
+    }
+    .unitRow{
+      border:1px solid rgba(0,0,0,.08);
+      border-radius: 12px;
+      padding: 10px 12px;
+      background:#fff;
+    }
+    .unitTitle{
+      margin:0;
+      font-weight: 800;
+      color:#111;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
+      align-items: baseline;
+    }
+    .unitMeta{
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: .9rem;
+      display:flex;
+      gap:10px;
+      flex-wrap:wrap;
     }
 
     .empty{
@@ -244,64 +262,29 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
       margin-top:10px;
     }
 
-    .linkTile{
-      display:block;
-      text-decoration:none;
-      color:#111;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background:#fff;
-      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2);
-      overflow:hidden;
-      position: relative;
-      margin-top:10px;
+    .srOnly{
+      position:absolute;
+      width:1px; height:1px;
+      padding:0; margin:-1px;
+      overflow:hidden; clip:rect(0,0,0,0);
+      white-space:nowrap; border:0;
     }
-    .linkTile::before{
-      content:"";
-      position:absolute; top:0; left:0; right:0; height:6px;
-      background: rgba(59,130,246,.75);
-    }
-    .linkTile:hover{
-      box-shadow: var(--tile-shadow-1), var(--tile-shadow-2-hover);
-      border-color: rgba(0,0,0,.14);
-    }
-    .linkTileInner{ padding: 12px; }
-    .linkTitle{ margin: 0; font-weight: 900; }
-    .linkDesc{ margin: 6px 0 0; color: var(--muted); font-size:.92rem; }
-    .linkUrl{ margin: 10px 0 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:.86rem; color: rgba(17,17,17,.70); }
-
-    /* --- PATCH UI: enhet empNo handoff (UI-only) --- */
-    .inlineCheck{
-      display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;
-      padding: 10px 12px;
-      border: 1px dashed rgba(0,0,0,.14);
-      border-radius: 12px;
-      background: rgba(17,17,17,.02);
-      margin-top: 10px;
-    }
-    .inlineCheck input[type="checkbox"]{
-      width:auto; margin: 4px 0 0;
-    }
-    .inlineCheck strong{ font-weight: 900; }
-    .inlineCheck .mutedText{ margin: 0; }
   </style>
 </head>
 
 <body>
-
 <header class="top">
   <div class="topInner" role="banner">
     <div class="topLeft">
       <div class="brandLine">
         <strong>HR-System</strong>
-        <span class="muted">• System • Org Builder</span>
-        <span class="pill okpill" id="pillReadOnly" style="display:none;">UI-only</span>
+        <span class="muted">• System • Org-karta</span>
       </div>
 
       <nav class="topNav" aria-label="Systemmeny">
         <a class="topBtn" href="./dashboard.html">Systemstart</a>
-        <a class="topBtn" href="./org.html" aria-current="page">Org</a>
-        <a class="topBtn" href="./assignments.html">Assignments</a>
+        <a class="topBtn" href="./org.html" aria-current="page">Org-karta</a>
+        <a class="topBtn" href="./assignments.html">Roller</a>
       </nav>
     </div>
 
@@ -313,193 +296,86 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
 </header>
 
 <main class="container">
-  <h1 class="tight">Org Builder</h1>
+  <h1 class="tight">Org-karta</h1>
   <p class="muted">
-    Bygg org-trädet som används av Assignments. För scope i Assignments gäller endast <strong>ENHET</strong>.
+    Explorer (read-only): översikt över org-strukturen och navigation till rätt sidor för skapande och detaljer.
   </p>
 
-  <section class="tile" aria-label="Status">
+  <section class="tile" aria-label="Status & navigation">
     <div class="panel">
       <div class="rowBetween">
         <div class="mutedText">
           Inloggad: <strong id="whoName">—</strong> • Roll <span id="whoRole">—</span>
         </div>
         <div class="row">
-          <button class="miniBtn" id="btnRefresh" type="button">Uppdatera</button>
-          <a class="miniBtn" href="./assignments.html">Öppna Assignments</a>
+          <button class="btn" id="btnRefresh" type="button">Uppdatera</button>
+          <a class="btn" href="./assignments.html">Öppna Roller</a>
         </div>
       </div>
 
-      <div class="kpis" aria-label="Nyckeltal">
-        <div class="kpi">Org-noder: <strong id="kpiNodes">0</strong></div>
+      <div class="kpis" aria-label="Statusrad">
         <div class="kpi">Bolag: <strong id="kpiBolag">0</strong></div>
-        <div class="kpi">ENHETER: <strong id="kpiEnheter">0</strong></div>
+        <div class="kpi">Enheter: <strong id="kpiEnheter">0</strong></div>
+        <div class="kpi">Org-status: <strong id="kpiStatus">—</strong></div>
       </div>
 
       <div class="row" style="margin-top:10px;">
-        <span class="pill" id="pillRoot">Root: —</span>
-        <span class="pill" id="pillShape">Datakoll: —</span>
+        <span class="pill" id="pillData">Data: —</span>
+        <span class="pill" id="pillSelection">Valt bolag: —</span>
       </div>
 
-      <div id="blocker" class="blocker" style="display:none;">
-        <div><strong>Åtgärd krävs:</strong> <span id="blockerText">—</span></div>
-        <div class="row" style="margin-top:10px;">
-          <button class="miniBtn" id="btnCreateRoot" type="button">Skapa Root</button>
-          <button class="miniBtn delete" id="btnResetOrg" type="button">Rensa Org (danger)</button>
-        </div>
+      <div class="ctaRow" aria-label="Navigator">
+        <a class="btn primary" id="ctaCreateCompany" href="./company-create.html">➕ Skapa bolag</a>
+        <a class="btn" id="ctaCreateUnit" href="./unit-create.html" aria-disabled="true">➕ Skapa enhet</a>
+        <span class="mutedText" id="ctaHint">Välj ett bolag först</span>
+      </div>
+
+      <div class="hint" id="hintBox" style="display:none;">
+        <strong>Obs:</strong>
+        <span id="hintText">—</span>
       </div>
 
       <div class="smallnote">
-        Lagring (RW): <code>AO-020_ORG_V1</code>. Root-id är låst till <code>org_root_v1</code>.
+        Läs (read-only): <code>AO-020_ORG_V1</code>. Ingen org-write i denna sida.
       </div>
     </div>
   </section>
 
   <div class="layout" style="margin-top:12px;">
-    <!-- LEFT: CREATE / EDIT -->
-    <section class="tile" aria-label="Skapa / Redigera">
-      <div class="panel">
-        <div class="panel-title">Skapa / Redigera nod</div>
-
-        <div class="row2">
-          <label>
-            Namn
-            <input id="nodeName" type="text" placeholder="t.ex. Aurora Kitchen Group" autocomplete="off" />
-            <div class="mutedText" style="margin-top:6px;">Krav: minst 2 tecken.</div>
-          </label>
-
-          <label>
-            Typ
-            <select id="nodeType">
-              <option value="Bolag" selected>Bolag</option>
-              <option value="Enhet">Enhet</option>
-            </select>
-            <div class="mutedText" style="margin-top:6px;">
-              Scope i Assignments = endast <strong>Enhet</strong>.
-            </div>
-          </label>
-        </div>
-
-        <div class="row2" style="margin-top:10px;">
-          <label>
-            Förälder (parent)
-            <select id="parentId"></select>
-            <div class="mutedText" style="margin-top:6px;">Tips: skapa Bolag under Root, skapa Enheter under Bolag.</div>
-          </label>
-
-          <label>
-            Nod-ID (auto)
-            <input id="nodeId" type="text" disabled value="—" />
-            <div class="mutedText" style="margin-top:6px;">ID skapas automatiskt (org_...).</div>
-          </label>
-        </div>
-
-        <!-- PATCH: ENHET -> empNo handoff (ingen storage-key) -->
-        <div id="unitEmpWrap" style="display:none;">
-          <div class="inlineCheck">
-            <input id="chkGenEmp" type="checkbox" />
-            <div style="min-width:240px; flex:1;">
-              <div><strong>Skapa empNo för ny ENHET</strong></div>
-              <p class="mutedText" style="margin-top:4px;">
-                Om du bockar i: empNo skickas vidare till Assignments automatiskt när du sparar ENHET (ingen lagring här).
-              </p>
-
-              <div class="row2" style="margin-top:10px;">
-                <label>
-                  EmpNo (auto)
-                  <input id="unitEmpNo" type="text" inputmode="numeric" autocomplete="off" placeholder="t.ex. 100234" />
-                  <div class="mutedText" style="margin-top:6px;">Endast siffror. Rek: 4–12 tecken.</div>
-                </label>
-
-                <div>
-                  <label style="opacity:.86;">Åtgärd</label>
-                  <div class="row" style="margin-top:6px;">
-                    <button class="miniBtn" id="btnGenEmp" type="button">Generera</button>
-                    <button class="miniBtn" id="btnClearEmp" type="button">Rensa</button>
-                  </div>
-                </div>
-              </div>
-
-              <div class="smallnote">
-                Nästa steg: Assignments kopplar empNo → (role + ENHET-scope).
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="row" style="margin-top:10px;">
-          <button class="miniBtn" id="btnSave" type="button">Spara nod</button>
-          <button class="miniBtn" id="btnNew" type="button">Ny</button>
-          <button class="miniBtn delete" id="btnDelete" type="button" style="display:none;">Ta bort</button>
-        </div>
-
-        <p id="msg" class="message" aria-live="polite"></p>
-
-        <div class="smallnote">
-          Regler: Root skapas separat. Du kan inte skapa assignments utan Root + minst 1 Enhet.
-        </div>
-
-        <a class="linkTile" href="./dashboard.html" aria-label="Gå till Systemstart">
-          <div class="linkTileInner">
-            <p class="linkTitle">Systemstart</p>
-            <p class="linkDesc">Överblick för Org + Assignments.</p>
-            <div class="linkUrl">/system/dashboard.html</div>
-          </div>
-        </a>
-
-        <a class="linkTile" href="./assignments.html" aria-label="Gå till Assignments">
-          <div class="linkTileInner">
-            <p class="linkTitle">Assignments</p>
-            <p class="linkDesc">Koppla empNo → (roll + ENHET-scope).</p>
-            <div class="linkUrl">/system/assignments.html</div>
-          </div>
-        </a>
-      </div>
-    </section>
-
-    <!-- RIGHT: TREE / SEARCH -->
-    <section class="tile" aria-label="Org-träd">
+    <section class="tile" aria-label="Org-lista">
       <div class="panel">
         <div class="rowBetween">
           <div>
-            <div class="panel-title" style="margin:0;">Org-träd</div>
-            <div class="mutedText" id="treeHint" style="margin-top:4px;">Klicka “Redigera” för att ändra namn/typ/parent.</div>
-          </div>
-          <div class="row">
-            <button class="miniBtn" id="btnQuickEnhet" type="button">+ Enhet</button>
-            <button class="miniBtn" id="btnQuickBolag" type="button">+ Bolag</button>
+            <div class="panel-title" style="margin:0;">Bolag & enheter</div>
+            <div class="mutedText" style="margin-top:4px;">
+              Klicka ett bolag för att markera (aktiverar “Skapa enhet”). Klicka igen för att öppna bolagssidan.
+            </div>
           </div>
         </div>
 
-        <div class="row2" style="margin:12px 0 10px;">
-          <label>
-            Sök (namn / ID)
-            <input id="search" type="text" placeholder="t.ex. Enhet eller org_" autocomplete="off" />
-          </label>
-          <label>
-            Filter
-            <select id="filter">
-              <option value="all" selected>Alla</option>
-              <option value="enhet">Endast ENHET</option>
-              <option value="bolag">Endast Bolag</option>
-              <option value="problems">Visa problem</option>
-            </select>
-          </label>
+        <div id="orgList" class="list" aria-label="Org-träd"></div>
+        <div id="orgEmpty" class="empty" style="display:none;">Ingen org-data att visa.</div>
+      </div>
+    </section>
+
+    <section class="tile" aria-label="Hjälp">
+      <div class="panel">
+        <div class="panel-title">Hur flödet hänger ihop</div>
+        <p class="mutedText" style="margin:0;">
+          1) Skapa bolag → 2) Skapa enheter i valt bolag → 3) Koppla roller/scope i Roller.
+        </p>
+
+        <div class="hint" style="margin-top:10px;">
+          <strong>Fail-closed:</strong> Om org-data saknas/är korrupt kan du fortfarande skapa bolag, men du kan inte skapa enhet här förrän ett bolag går att välja.
         </div>
 
-        <div class="row" style="margin-top:8px;">
-          <span class="pill okpill" id="pillOk" style="display:none;">OK</span>
-          <span class="pill warnpill" id="pillWarn" style="display:none;">Varning</span>
-        </div>
-
-        <div id="tree"></div>
-
-        <div id="treeEmpty" class="empty" style="display:none;">
-          Ingen data att visa.
+        <div class="hint" style="margin-top:10px;">
+          <strong>Scope:</strong> I Roller/Assignments sätts scope på bolag eller enhet beroende på policy i systemet.
         </div>
 
         <div class="smallnote">
-          Tips: Om du flyttar en nod (parent) — kontrollera att inga noder får “saknad parent”.
+          Navigator-länkar:
+          <code>company-create.html</code>, <code>unit-create.html</code>, <code>company.html</code>.
         </div>
       </div>
     </section>
@@ -517,6 +393,7 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
   const ROOT_ID = "org_root_v1";
 
   const HRApp = window.HRApp;
+
   function safeReplace(url){
     try{ window.location.replace(url); }catch{ window.location.href = url; }
   }
@@ -541,12 +418,13 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
 
   // --- DOM helpers ---
   const $ = (id) => document.getElementById(id);
+  function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
+  function trimStr(v){ return safeStr(v).trim(); }
 
-  function setMsg(kind, text){
-    const m = $("msg");
-    if(!m) return;
-    m.className = "message" + (kind ? (" " + kind) : "");
-    m.textContent = text || "";
+  function setPill(el, text, ok){
+    if(!el) return;
+    el.textContent = text;
+    el.className = "pill " + (ok ? "okpill" : "warnpill");
   }
 
   function safeParseLocal(key, fallback){
@@ -560,62 +438,26 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
     }
   }
 
-  function saveLocal(key, value){
-    localStorage.setItem(key, JSON.stringify(value));
-  }
-
-  function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
-  function trimStr(v){ return safeStr(v).trim(); }
-
-  // --- PATCH helpers: empNo (URL handoff only) ---
-  function isDigits(s){ return /^[0-9]+$/.test(s); }
-  function isValidEmpNo(s){
-    const v = trimStr(s);
-    if(!v) return false;
-    if(v.length < 4 || v.length > 12) return false;
-    return isDigits(v);
-  }
-  function genEmpNo(){
-    // 6-siffrig, UI-only, inte lagrat här
-    // (Sannolik unikhet inom en admin-session)
-    const base = String(Date.now()).slice(-6);
-    const salt = Math.floor(Math.random() * 90 + 10); // 10-99
-    const out = (base.slice(0,4) + String(salt)); // 6 digits
-    return out.replace(/^0+/, "1"); // säkerställ ej tom/0-start
-  }
-  function syncEmpUI(){
-    const wrap = $("unitEmpWrap");
-    if(!wrap) return;
-    const t = trimStr($("nodeType").value);
-    const show = (!editingId && t === "Enhet");
-    wrap.style.display = show ? "block" : "none";
-
-    if(!show){
-      // fail-safe reset when not visible
-      $("chkGenEmp").checked = false;
-      $("unitEmpNo").value = "";
-    }
-  }
-
-  // --- UI state (UI-only) ---
-  let editingId = ""; // node.id
-
-  // --- normalize org nodes (tolerant) ---
+  // --- Read org (read-only) ---
   function normalizeOrgNodes(raw){
-    const arr = Array.isArray(raw) ? raw : [];
+    const arr = Array.isArray(raw) ? raw : null;
+    if(!arr) return { ok:false, nodes:[], reason:"Org saknas/korrupt (inte array)." };
+
     const nodes = [];
     for(const it of arr){
-      const id = trimStr(it?.id || it?.scopeId);
-      const name = trimStr(it?.name || it?.label || it?.title);
-      const type = trimStr(it?.type || it?.kind);
-      const parentId = (it?.parentId === null || it?.parentId === undefined)
+      const id = trimStr(it && (it.id || it.scopeId));
+      const name = trimStr(it && (it.name || it.label || it.title));
+      const type = trimStr(it && (it.type || it.kind));
+      const parentId = (it && (it.parentId === null || it.parentId === undefined))
         ? null
-        : trimStr(it?.parentId || it?.parent);
+        : trimStr(it && (it.parentId || it.parent));
 
+      // Tolerant: behåll noder som har id + name
       if(!id || !name) continue;
       nodes.push({ id, name, type, parentId: parentId || null });
     }
-    return nodes;
+
+    return { ok:true, nodes, reason:"" };
   }
 
   function buildIndex(nodes){
@@ -632,630 +474,309 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
     return { byId, children };
   }
 
-  function normalizeType(t){
+  function normType(t){
     const s = trimStr(t);
     if(!s) return "";
     const low = s.toLowerCase();
     if(low === "root") return "Root";
     if(low === "bolag") return "Bolag";
     if(low === "enhet") return "Enhet";
-    return s; // tolerant
-  }
-
-  function isValidName(name){
-    const n = trimStr(name);
-    return n.length >= 2;
-  }
-
-  function makeId(){
-    // UI-only id generator (stabil nog för localStorage)
-    const rand = Math.random().toString(36).slice(2, 8);
-    const time = Date.now().toString(36).slice(-4);
-    return "org_" + rand + time;
-  }
-
-  // --- health / validation (fail-closed decisions only for critical actions) ---
-  function computeHealth(nodes){
-    const idx = buildIndex(nodes);
-    const hasRoot = idx.byId.has(ROOT_ID);
-
-    let problems = 0;
-    const issues = [];
-
-    const seen = new Set();
-    const dups = new Set();
-    for(const n of nodes){
-      if(seen.has(n.id)) dups.add(n.id);
-      seen.add(n.id);
-    }
-    if(dups.size){
-      problems++;
-      issues.push(`Dubblett-ID: ${Array.from(dups).slice(0,2).join(", ")}${dups.size>2 ? " +"+(dups.size-2) : ""}`);
-    }
-
-    if(!hasRoot){
-      problems++;
-      issues.push("Root saknas (org_root_v1).");
-    }else{
-      const root = idx.byId.get(ROOT_ID);
-      if(root && normalizeType(root.type) !== "Root"){
-        problems++;
-        issues.push("Root har fel typ (bör vara Root).");
-      }
-      if(root && root.parentId !== null){
-        problems++;
-        issues.push("Root ska ha parentId=null.");
-      }
-    }
-
-    let missingParentCount = 0;
-    for(const n of nodes){
-      if(n.id === ROOT_ID) continue;
-      if(n.parentId === null) { missingParentCount++; continue; }
-      if(!idx.byId.has(n.parentId)) missingParentCount++;
-    }
-    if(missingParentCount){
-      problems++;
-      issues.push(`Saknad/ogiltig parentId: ${missingParentCount} nod(er).`);
-    }
-
-    function hasCycle(){
-      const visiting = new Set();
-      const visited = new Set();
-
-      function dfs(id){
-        if(visiting.has(id)) return true;
-        if(visited.has(id)) return false;
-        visiting.add(id);
-
-        const kids = idx.children.get(id) || [];
-        for(const k of kids){
-          if(dfs(k)) return true;
-        }
-
-        visiting.delete(id);
-        visited.add(id);
-        return false;
-      }
-
-      if(idx.byId.has(ROOT_ID)){
-        return dfs(ROOT_ID);
-      }
-      for(const n of nodes){
-        if(dfs(n.id)) return true;
-      }
-      return false;
-    }
-
-    if(nodes.length && hasCycle()){
-      problems++;
-      issues.push("Cykel upptäckt (parent-loop).");
-    }
-
-    const bolag = nodes.filter(n => normalizeType(n.type) === "Bolag").length;
-    const enhet = nodes.filter(n => normalizeType(n.type) === "Enhet").length;
-
-    return { problems, issues, hasRoot, bolag, enhet, total: nodes.length };
-  }
-
-  function loadOrg(){
-    const raw = safeParseLocal(ORG_KEY, []);
-    return normalizeOrgNodes(raw);
-  }
-
-  function saveOrg(nodes){
-    const out = nodes.map(n => ({
-      id: trimStr(n.id),
-      name: trimStr(n.name),
-      type: normalizeType(n.type),
-      parentId: (n.parentId === null || n.parentId === undefined) ? null : trimStr(n.parentId)
-    }));
-    saveLocal(ORG_KEY, out);
-  }
-
-  // --- form helpers ---
-  function resetForm(){
-    editingId = "";
-    $("nodeName").value = "";
-    $("nodeType").value = "Bolag";
-    $("nodeId").value = "—";
-    $("btnDelete").style.display = "none";
-    setMsg("", "");
-
-    // PATCH resets
-    $("chkGenEmp").checked = false;
-    $("unitEmpNo").value = "";
-
-    syncEditingUI();
-    syncEmpUI();
-  }
-
-  function syncEditingUI(){
-    const btnNew = $("btnNew");
-    const btnDel = $("btnDelete");
-    const nid = $("nodeId");
-
-    if(btnNew) btnNew.textContent = editingId ? "Avsluta redigering" : "Ny";
-    if(btnDel) btnDel.style.display = (editingId && editingId !== ROOT_ID) ? "inline-flex" : "none";
-    if(nid) nid.value = editingId ? editingId : makeId();
-  }
-
-  function setEditing(node){
-    if(!node) return;
-    editingId = node.id;
-
-    $("nodeName").value = node.name;
-    const t = normalizeType(node.type);
-    $("nodeType").value = (t === "Enhet") ? "Enhet" : (t === "Bolag" ? "Bolag" : "Bolag");
-
-    renderParents();
-    const pid = (node.parentId === null || node.parentId === undefined) ? "" : String(node.parentId);
-    $("parentId").value = pid;
-
-    $("nodeId").value = editingId;
-    setMsg("", "");
-    syncEditingUI();
-
-    // PATCH: hide empNo UI in edit mode (ingen data kopplad till org-noden)
-    $("chkGenEmp").checked = false;
-    $("unitEmpNo").value = "";
-    syncEmpUI();
-  }
-
-  // --- render parents select ---
-  function renderParents(){
-    const sel = $("parentId");
-    if(!sel) return;
-
-    while(sel.firstChild) sel.removeChild(sel.firstChild);
-
-    const nodes = loadOrg();
-    const idx = buildIndex(nodes);
-
-    const optEmpty = document.createElement("option");
-    optEmpty.value = "";
-    optEmpty.textContent = "(parent saknas) — skapa Root först";
-    sel.appendChild(optEmpty);
-
-    if(!idx.byId.has(ROOT_ID)){
-      sel.disabled = true;
-      return;
-    }
-
-    sel.disabled = false;
-
-    const order = [];
-    const visited = new Set();
-
-    function walk(id, depth){
-      if(visited.has(id)) return;
-      visited.add(id);
-
-      const n = idx.byId.get(id);
-      if(!n) return;
-
-      order.push({ id:n.id, name:n.name, type:normalizeType(n.type), depth });
-
-      const kids = (idx.children.get(id) || []).slice().sort((a,b) => {
-        const na = idx.byId.get(a)?.name || "";
-        const nb = idx.byId.get(b)?.name || "";
-        return na.localeCompare(nb, "sv");
-      });
-      for(const k of kids) walk(k, depth+1);
-    }
-
-    walk(ROOT_ID, 0);
-
-    while(sel.firstChild) sel.removeChild(sel.firstChild);
-
-    for(const r of order){
-      if(editingId && r.id === editingId) continue;
-
-      const opt = document.createElement("option");
-      opt.value = r.id;
-      const indent = "—".repeat(Math.min(Math.max(r.depth, 0), 10));
-      opt.textContent = `${indent} ${r.name} [${r.type}] (${r.id})`;
-      sel.appendChild(opt);
-    }
-
-    if(!editingId){
-      sel.value = ROOT_ID;
-    }else{
-      const cur = loadOrg().find(x => x.id === editingId);
-      sel.value = (cur && cur.parentId) ? cur.parentId : ROOT_ID;
-    }
-  }
-
-  // --- render tree list ---
-  function makePill(text, cls){
-    const s = document.createElement("span");
-    s.className = "pill" + (cls ? (" " + cls) : "");
-    s.textContent = text;
     return s;
   }
 
-  function renderTree(){
-    const nodes = loadOrg();
-    const health = computeHealth(nodes);
-
-    $("kpiNodes").textContent = String(health.total);
-    $("kpiBolag").textContent = String(health.bolag);
-    $("kpiEnheter").textContent = String(health.enhet);
-
-    const pillRoot = $("pillRoot");
-    const pillShape = $("pillShape");
-
-    if(health.hasRoot){
-      pillRoot.textContent = "Root: OK";
-      pillRoot.className = "pill okpill";
-    }else{
-      pillRoot.textContent = "Root: SAKNAS";
-      pillRoot.className = "pill warnpill";
-    }
-
-    if(health.problems === 0){
-      pillShape.textContent = "Datakoll: OK";
-      pillShape.className = "pill okpill";
-      $("pillOk").style.display = "inline-flex";
-      $("pillWarn").style.display = "none";
-    }else{
-      pillShape.textContent = `Datakoll: Varning (${health.problems})`;
-      pillShape.className = "pill warnpill";
-      $("pillOk").style.display = "none";
-      $("pillWarn").style.display = "inline-flex";
-    }
-
-    const blocker = $("blocker");
-    const btnCreateRoot = $("btnCreateRoot");
-    const btnResetOrg = $("btnResetOrg");
-
-    if(!health.hasRoot){
-      blocker.style.display = "block";
-      $("blockerText").textContent = "Root saknas. Skapa Root för att kunna använda Assignments.";
-      if(btnCreateRoot) btnCreateRoot.style.display = "inline-flex";
-      if(btnResetOrg) btnResetOrg.style.display = "inline-flex";
-    }else if(health.enhet === 0){
-      blocker.style.display = "block";
-      $("blockerText").textContent = "Org finns men saknar ENHET. Lägg till minst en ENHET för att kunna spara assignments.";
-      if(btnCreateRoot) btnCreateRoot.style.display = "none";
-      if(btnResetOrg) btnResetOrg.style.display = "inline-flex";
-    }else{
-      blocker.style.display = "none";
-    }
-
-    const tree = $("tree");
-    while(tree.firstChild) tree.removeChild(tree.firstChild);
-
-    const q = trimStr($("search").value).toLowerCase();
-    const filter = $("filter").value;
-
-    if(nodes.length === 0){
-      $("treeEmpty").style.display = "block";
-      return;
-    }
-    $("treeEmpty").style.display = "none";
-
+  // --- Identify company vs unit (BACKWARD TOLERANT) ---
+  // Priority:
+  // 1) use type/kind if present and recognized
+  // 2) else infer via parent rule:
+  //    children of root = company, children of company = unit
+  function classify(nodes){
     const idx = buildIndex(nodes);
 
-    const rows = [];
-    const visited = new Set();
+    const root = idx.byId.get(ROOT_ID) || null;
+    const hasRoot = !!root;
 
-    function includeNode(n, depth, flags){
-      rows.push({ n, depth, flags });
-    }
+    const companies = []; // {id, node, units:[node], extras:[node]}
+    const unitsByCompany = new Map();
 
-    function nodeHasProblem(n){
-      if(n.id === ROOT_ID){
-        if(normalizeType(n.type) !== "Root") return true;
-        if(n.parentId !== null) return true;
-        return false;
+    // helper: infer parent-based type if type missing/unknown
+    function inferType(n){
+      const t = normType(n.type);
+      if(t === "Root" || t === "Bolag" || t === "Enhet") return t;
+
+      // parent-rule fallback
+      if(n.id === ROOT_ID) return "Root";
+      if(!hasRoot) return ""; // cannot infer safely
+
+      if(n.parentId === ROOT_ID) return "Bolag";
+      if(n.parentId && idx.byId.has(n.parentId)){
+        const p = idx.byId.get(n.parentId);
+        const pt = inferType(p);
+        if(pt === "Bolag") return "Enhet";
       }
-      if(n.parentId === null) return true;
-      if(!idx.byId.has(n.parentId)) return true;
-      return false;
+      return "";
     }
 
-    function walk(id, depth){
-      if(visited.has(id)) return;
-      visited.add(id);
-
-      const n = idx.byId.get(id);
-      if(!n) return;
-
-      const isProblem = nodeHasProblem(n);
-      includeNode(n, depth, { problem:isProblem });
-
-      const kids = (idx.children.get(id) || []).slice().sort((a,b) => {
-        const na = idx.byId.get(a)?.name || "";
-        const nb = idx.byId.get(b)?.name || "";
-        return na.localeCompare(nb, "sv");
-      });
-      for(const k of kids) walk(k, depth+1);
-    }
-
-    if(idx.byId.has(ROOT_ID)){
-      walk(ROOT_ID, 0);
-    }
-
+    // collect companies
     for(const n of nodes){
-      if(!visited.has(n.id)){
-        includeNode(n, 0, { problem:true, orphan:true });
+      if(n.id === ROOT_ID) continue;
+      const t = inferType(n);
+      if(t === "Bolag"){
+        companies.push(n);
+        unitsByCompany.set(n.id, []);
       }
     }
 
-    function matchesRow(r){
-      const t = normalizeType(r.n.type);
-      if(filter === "enhet" && t !== "Enhet") return false;
-      if(filter === "bolag" && t !== "Bolag") return false;
-      if(filter === "problems" && !r.flags.problem) return false;
-
-      if(q){
-        const blob = `${r.n.name} ${r.n.id}`.toLowerCase();
-        if(!blob.includes(q)) return false;
+    // collect units under companies
+    for(const n of nodes){
+      if(n.id === ROOT_ID) continue;
+      const t = inferType(n);
+      if(t === "Enhet" && n.parentId && unitsByCompany.has(n.parentId)){
+        unitsByCompany.get(n.parentId).push(n);
       }
-      return true;
     }
 
-    const shown = rows.filter(matchesRow);
+    // sort
+    companies.sort((a,b) => (a.name || "").localeCompare((b.name || ""), "sv"));
+    for(const cid of unitsByCompany.keys()){
+      unitsByCompany.get(cid).sort((a,b) => (a.name || "").localeCompare((b.name || ""), "sv"));
+    }
 
-    if(shown.length === 0){
-      $("treeEmpty").style.display = "block";
+    // counts
+    let unitCount = 0;
+    for(const cid of unitsByCompany.keys()) unitCount += unitsByCompany.get(cid).length;
+
+    return { hasRoot, companies, unitsByCompany, inferType, unitCount };
+  }
+
+  // --- UI state ---
+  let selectedCompanyId = "";
+
+  function setSelectedCompany(id){
+    selectedCompanyId = trimStr(id);
+    renderSelectionUI();
+  }
+
+  function renderSelectionUI(){
+    const pillSel = $("pillSelection");
+    const ctaUnit = $("ctaCreateUnit");
+    const hint = $("ctaHint");
+
+    if(selectedCompanyId){
+      if(pillSel) setPill(pillSel, "Valt bolag: " + selectedCompanyId, true);
+
+      if(ctaUnit){
+        ctaUnit.setAttribute("aria-disabled", "false");
+        ctaUnit.href = "./unit-create.html?companyId=" + encodeURIComponent(selectedCompanyId);
+      }
+      if(hint) hint.textContent = "Skapa enhet i valt bolag";
+    }else{
+      if(pillSel) setPill(pillSel, "Valt bolag: —", false);
+
+      if(ctaUnit){
+        ctaUnit.setAttribute("aria-disabled", "true");
+        ctaUnit.href = "./unit-create.html";
+      }
+      if(hint) hint.textContent = "Välj ett bolag först";
+    }
+  }
+
+  function setDataState(ok, msg){
+    const pill = $("pillData");
+    const kpiStatus = $("kpiStatus");
+    const hintBox = $("hintBox");
+    const hintText = $("hintText");
+
+    if(kpiStatus) kpiStatus.textContent = ok ? "OK" : "Varning";
+    if(pill) setPill(pill, ok ? "Data: OK" : "Data: " + msg, ok);
+
+    if(!ok){
+      if(hintBox) hintBox.style.display = "block";
+      if(hintText) hintText.textContent = msg;
+    }else{
+      if(hintBox) hintBox.style.display = "none";
+      if(hintText) hintText.textContent = "";
+    }
+  }
+
+  function hardDisableUnitCTA(reason){
+    setSelectedCompany(""); // clears selection too
+    const ctaUnit = $("ctaCreateUnit");
+    const hint = $("ctaHint");
+    if(ctaUnit){
+      ctaUnit.setAttribute("aria-disabled", "true");
+      ctaUnit.href = "./unit-create.html";
+    }
+    if(hint) hint.textContent = reason || "Välj ett bolag först";
+  }
+
+  function renderOrg(){
+    const raw = safeParseLocal(ORG_KEY, null);
+    const norm = normalizeOrgNodes(raw);
+
+    const list = $("orgList");
+    const empty = $("orgEmpty");
+    while(list.firstChild) list.removeChild(list.firstChild);
+
+    // Default: disable unit CTA until we can safely enable
+    hardDisableUnitCTA("Välj ett bolag först");
+
+    if(!norm.ok){
+      // org missing/corrupt (not array)
+      setDataState(false, norm.reason);
+      $("kpiBolag").textContent = "0";
+      $("kpiEnheter").textContent = "0";
+      if(empty) empty.style.display = "block";
       return;
     }
-    $("treeEmpty").style.display = "none";
 
-    for(const r of shown){
-      const n = r.n;
-      const t = normalizeType(n.type);
+    const nodes = norm.nodes;
+    const cls = classify(nodes);
 
-      const item = document.createElement("div");
-      item.className = "item" + (r.flags.problem ? " danger" : "");
+    // Data validation for fail-closed behavior
+    // If no root, we consider org unreliable for navigation selection.
+    if(!cls.hasRoot){
+      setDataState(false, "Org saknas/korrupt (Root saknas: " + ROOT_ID + ").");
+      $("kpiBolag").textContent = "0";
+      $("kpiEnheter").textContent = "0";
+      if(empty) empty.style.display = "block";
+      return;
+    }
 
-      const left = document.createElement("div");
-      left.style.minWidth = "0";
+    // If org exists but only root or no companies -> still OK but no selection possible
+    $("kpiBolag").textContent = String(cls.companies.length);
+    $("kpiEnheter").textContent = String(cls.unitCount);
+
+    if(cls.companies.length === 0){
+      setDataState(true, "");
+      if(empty) empty.style.display = "block";
+      empty.textContent = "0 bolag. Skapa ditt första bolag via “Skapa bolag”.";
+      return;
+    }
+
+    setDataState(true, "");
+    if(empty) empty.style.display = "none";
+
+    // Render each company with nested units
+    for(const c of cls.companies){
+      const row = document.createElement("div");
+      row.className = "companyRow" + (selectedCompanyId === c.id ? " selected" : "");
+      row.setAttribute("role", "button");
+      row.setAttribute("tabindex", "0");
+      row.setAttribute("aria-label", "Bolag: " + c.name);
 
       const title = document.createElement("p");
-      title.className = "item-title";
-      const indent = "—".repeat(Math.min(Math.max(r.depth, 0), 12));
-      title.textContent = `${indent} ${n.name}`;
-      left.appendChild(title);
+      title.className = "companyTitle";
+      title.textContent = c.name;
 
       const meta = document.createElement("div");
-      meta.className = "meta";
-      meta.appendChild(makePill(`Typ: ${t}`, t === "Enhet" ? "okpill" : ""));
-      meta.appendChild(makePill(`ID: ${n.id}`));
-      meta.appendChild(makePill(`Parent: ${n.parentId === null ? "null" : n.parentId}`));
+      meta.className = "companyMeta";
 
-      if(n.id === ROOT_ID) meta.appendChild(makePill("ROOT (låst)", "okpill"));
-      if(r.flags.orphan) meta.appendChild(makePill("Orphan", "warnpill"));
-      if(r.flags.problem) meta.appendChild(makePill("Problem", "warnpill"));
+      const idPill = document.createElement("span");
+      idPill.className = "pill";
+      idPill.textContent = "ID: " + c.id;
 
-      left.appendChild(meta);
+      const typePill = document.createElement("span");
+      typePill.className = "pill okpill";
+      typePill.textContent = "Bolag";
 
-      const right = document.createElement("div");
-      right.className = "row";
-      right.style.gap = "8px";
+      const units = cls.unitsByCompany.get(c.id) || [];
+      const countPill = document.createElement("span");
+      countPill.className = "pill";
+      countPill.textContent = "Enheter: " + String(units.length);
 
-      const btnEdit = document.createElement("button");
-      btnEdit.type = "button";
-      btnEdit.className = "miniBtn";
-      btnEdit.textContent = "Redigera";
-      btnEdit.addEventListener("click", () => {
-        const fresh = loadOrg();
-        const node = fresh.find(x => x.id === n.id);
-        if(!node) return;
-        setEditing(node);
-        setMsg("", "");
+      meta.appendChild(typePill);
+      meta.appendChild(idPill);
+      meta.appendChild(countPill);
+
+      row.appendChild(title);
+      row.appendChild(meta);
+
+      const unitWrap = document.createElement("div");
+      unitWrap.className = "units";
+      unitWrap.setAttribute("aria-label", "Enheter under " + c.name);
+
+      if(units.length === 0){
+        const u = document.createElement("div");
+        u.className = "unitRow";
+        const ut = document.createElement("p");
+        ut.className = "unitTitle";
+        ut.textContent = "Inga enheter ännu";
+        const um = document.createElement("div");
+        um.className = "unitMeta";
+        um.textContent = "Skapa enhet via knappen “Skapa enhet” när bolaget är valt.";
+        u.appendChild(ut);
+        u.appendChild(um);
+        unitWrap.appendChild(u);
+      }else{
+        for(const un of units){
+          const u = document.createElement("div");
+          u.className = "unitRow";
+
+          const ut = document.createElement("p");
+          ut.className = "unitTitle";
+          ut.textContent = un.name;
+
+          const um = document.createElement("div");
+          um.className = "unitMeta";
+
+          const uType = document.createElement("span");
+          uType.className = "pill okpill";
+          uType.textContent = "Enhet";
+
+          const uId = document.createElement("span");
+          uId.className = "pill";
+          uId.textContent = "ID: " + un.id;
+
+          um.appendChild(uType);
+          um.appendChild(uId);
+
+          u.appendChild(ut);
+          u.appendChild(um);
+          unitWrap.appendChild(u);
+        }
+      }
+
+      row.appendChild(unitWrap);
+
+      // click behavior:
+      // - first click selects company (enables create unit)
+      // - second click on same selected company navigates to company page
+      function handleActivate(){
+        if(selectedCompanyId === c.id){
+          safeReplace("./company.html?companyId=" + encodeURIComponent(c.id));
+          return;
+        }
+        setSelectedCompany(c.id);
+        // refresh highlight without rebuilding the entire list
+        // simplest reliable: re-render list (small lists; UI-only)
+        renderOrg();
+      }
+
+      row.addEventListener("click", (e) => {
+        e.preventDefault();
+        handleActivate();
       });
 
-      const btnDel = document.createElement("button");
-      btnDel.type = "button";
-      btnDel.className = "miniBtn delete";
-      btnDel.textContent = "Ta bort";
-      btnDel.disabled = (n.id === ROOT_ID);
-      btnDel.title = (n.id === ROOT_ID) ? "Root kan inte tas bort här" : "";
-      btnDel.addEventListener("click", () => {
-        if(n.id === ROOT_ID) return;
-        deleteNode(n.id);
+      row.addEventListener("keydown", (e) => {
+        const k = e.key;
+        if(k === "Enter" || k === " "){
+          e.preventDefault();
+          handleActivate();
+        }
       });
 
-      right.appendChild(btnEdit);
-      right.appendChild(btnDel);
-
-      item.appendChild(left);
-      item.appendChild(right);
-      tree.appendChild(item);
+      list.appendChild(row);
     }
 
-    renderParents();
-    syncEditingUI();
-    syncEmpUI();
+    // If selected company no longer exists, clear selection (fail-safe)
+    const exists = cls.companies.some(x => x.id === selectedCompanyId);
+    if(!exists){
+      setSelectedCompany("");
+      renderSelectionUI();
+    }
   }
 
-  function wouldCreateCycle(nodes, movingId, newParentId){
-    if(!movingId || !newParentId) return false;
-    if(movingId === newParentId) return true;
-
-    const idx = buildIndex(nodes);
-
-    let cur = newParentId;
-    const guard = new Set();
-    while(cur){
-      if(guard.has(cur)) return true;
-      guard.add(cur);
-      if(cur === movingId) return true;
-      const n = idx.byId.get(cur);
-      if(!n) return false;
-      cur = n.parentId;
-    }
-    return false;
-  }
-
-  function createRoot(){
-    const nodes = loadOrg();
-    const idx = buildIndex(nodes);
-    if(idx.byId.has(ROOT_ID)){
-      setMsg("err", "Root finns redan.");
-      return;
-    }
-    const root = { id: ROOT_ID, name: "Root", type: "Root", parentId: null };
-    nodes.unshift(root);
-    saveOrg(nodes);
-    setMsg("ok", "Root skapad.");
-    resetForm();
-    renderTree();
-  }
-
-  function resetOrgDanger(){
-    if(!confirm("Rensa hela Org? Detta tar bort alla noder och kan påverka Assignments (fail-closed).")) return;
-    saveOrg([]);
-    setMsg("ok", "Org rensad.");
-    resetForm();
-    renderTree();
-  }
-
-  function deleteNode(id){
-    const nodes = loadOrg();
-    if(id === ROOT_ID){
-      setMsg("err", "Root kan inte tas bort.");
-      return;
-    }
-    const idx = buildIndex(nodes);
-
-    const kids = (idx.children.get(id) || []);
-    if(kids.length){
-      const ok = confirm(`Noden har ${kids.length} barn. Ta bort noden och flytta barnen till Root?`);
-      if(!ok) return;
-
-      for(const cid of kids){
-        const child = idx.byId.get(cid);
-        if(child) child.parentId = ROOT_ID;
-      }
-    }
-
-    const next = nodes.filter(n => n.id !== id);
-    saveOrg(next);
-
-    if(editingId === id) resetForm();
-    setMsg("ok", "Borttaget.");
-    renderTree();
-  }
-
-  function saveNode(){
-    setMsg("", "");
-
-    const name = trimStr($("nodeName").value);
-    const type = normalizeType($("nodeType").value);
-    const parentId = trimStr($("parentId").value);
-
-    const nodes = loadOrg();
-    const idx = buildIndex(nodes);
-
-    if(!idx.byId.has(ROOT_ID)){
-      setMsg("err", "Fail-closed: Root saknas. Skapa Root först.");
-      return;
-    }
-
-    if(!isValidName(name)){
-      setMsg("err", "Namn måste vara minst 2 tecken.");
-      return;
-    }
-
-    if(type !== "Bolag" && type !== "Enhet"){
-      setMsg("err", "Ogiltig typ.");
-      return;
-    }
-
-    if(!parentId || !idx.byId.has(parentId)){
-      setMsg("err", "Välj giltig parent.");
-      return;
-    }
-
-    let id = editingId ? editingId : trimStr($("nodeId").value);
-    if(!id || id === "—") id = makeId();
-    if(id === ROOT_ID){
-      setMsg("err", "Root kan inte redigeras via denna form (endast via Root-knappen).");
-      return;
-    }
-
-    const testNodes = normalizeOrgNodes(nodes.map(n => ({...n})));
-    if(wouldCreateCycle(testNodes, id, parentId)){
-      setMsg("err", "Fail-closed: Parent-val skapar cykel.");
-      return;
-    }
-
-    let found = false;
-    const next = nodes.map(n => {
-      if(n.id === id){
-        found = true;
-        return { id, name, type, parentId };
-      }
-      return n;
-    });
-
-    if(!found){
-      if(idx.byId.has(id)){
-        id = makeId();
-      }
-      next.push({ id, name, type, parentId });
-    }
-
-    saveOrg(next);
-
-    // --- PATCH: redirect to Assignments with empNo + scopeId on NEW ENHET create ---
-    const wantsEmp = (!found && !editingId && type === "Enhet" && $("chkGenEmp").checked);
-    if(wantsEmp){
-      const empNo = trimStr($("unitEmpNo").value);
-      if(!isValidEmpNo(empNo)){
-        setMsg("err", "EmpNo saknas/ogiltigt. Ange 4–12 siffror eller klicka Generera.");
-        return;
-      }
-
-      setMsg("ok", "ENHET skapad. Öppnar Assignments...");
-      // URL handoff (ingen ny storage-key)
-      const url = `./assignments.html?empNo=${encodeURIComponent(empNo)}&scopeId=${encodeURIComponent(id)}&from=org`;
-      safeReplace(url);
-      return;
-    }
-
-    setMsg("ok", found ? "Uppdaterat." : "Skapat.");
-    resetForm();
-    renderTree();
-  }
-
-  function quickCreate(type){
-    const nodes = loadOrg();
-    const idx = buildIndex(nodes);
-    if(!idx.byId.has(ROOT_ID)){
-      setMsg("err", "Skapa Root först.");
-      return;
-    }
-
-    let parentId = ROOT_ID;
-    if(type === "Enhet"){
-      const bolag = nodes.find(n => normalizeType(n.type) === "Bolag");
-      if(bolag) parentId = bolag.id;
-    }
-
-    editingId = "";
-    $("nodeType").value = (type === "Enhet") ? "Enhet" : "Bolag";
-    $("nodeName").value = (type === "Enhet") ? "Ny enhet" : "Nytt bolag";
-    renderParents();
-    $("parentId").value = parentId;
-    syncEditingUI();
-    syncEmpUI();
-
-    // PATCH: prime empNo UI for new enhet
-    if(type === "Enhet"){
-      $("chkGenEmp").checked = true;
-      $("unitEmpNo").value = genEmpNo();
-    }
-
-    $("nodeName").focus({ preventScroll:true });
-  }
-
-  // --- wire auth header ---
-  $("pillReadOnly").style.display = "inline-flex";
+  // --- Wire header ---
   const emp = trimStr(auth.empNo);
   $("whoName").textContent = emp ? ("#" + emp) : "SYSTEM_ADMIN";
   $("whoRole").textContent = "SYSTEM_ADMIN";
@@ -1268,77 +789,19 @@ PATCH (v1.0) – Enhet -> empNo (URL-handoff, ingen ny storage-key):
     });
   }
 
-  // --- PATCH: empNo UI events ---
-  $("chkGenEmp").addEventListener("change", () => {
-    if($("chkGenEmp").checked){
-      if(!trimStr($("unitEmpNo").value)) $("unitEmpNo").value = genEmpNo();
-    }else{
-      $("unitEmpNo").value = "";
-    }
-  });
-  $("btnGenEmp").addEventListener("click", () => {
-    $("chkGenEmp").checked = true;
-    $("unitEmpNo").value = genEmpNo();
-  });
-  $("btnClearEmp").addEventListener("click", () => {
-    $("chkGenEmp").checked = false;
-    $("unitEmpNo").value = "";
-  });
+  // --- CTAs (unit CTA is controlled by selection) ---
+  renderSelectionUI();
 
-  // --- events ---
-  $("btnRefresh").addEventListener("click", () => { setMsg("", ""); renderTree(); });
-
-  $("btnCreateRoot").addEventListener("click", createRoot);
-  $("btnResetOrg").addEventListener("click", resetOrgDanger);
-
-  $("btnSave").addEventListener("click", saveNode);
-
-  $("btnNew").addEventListener("click", () => {
-    if(editingId){
-      resetForm();
-      renderParents();
-      syncEditingUI();
-      renderTree();
-    }else{
-      resetForm();
-      renderParents();
-      syncEditingUI();
-      syncEmpUI();
-    }
-  });
-
-  $("btnDelete").addEventListener("click", () => {
-    if(!editingId || editingId === ROOT_ID) return;
-    deleteNode(editingId);
-  });
-
-  $("search").addEventListener("input", renderTree);
-  $("filter").addEventListener("change", renderTree);
-
-  $("btnQuickEnhet").addEventListener("click", () => quickCreate("Enhet"));
-  $("btnQuickBolag").addEventListener("click", () => quickCreate("Bolag"));
-
-  // keep nodeId preview fresh when not editing
-  ["nodeName","nodeType"].forEach(id => {
-    const el = $(id);
-    if(el) el.addEventListener("input", () => { if(!editingId) syncEditingUI(); });
-  });
-
-  // PATCH: show/hide empNo UI when type changes
-  $("nodeType").addEventListener("change", () => {
-    syncEmpUI();
-    // auto-prime when switching to Enhet in create mode
-    if(!editingId && trimStr($("nodeType").value) === "Enhet"){
-      $("chkGenEmp").checked = true;
-      if(!trimStr($("unitEmpNo").value)) $("unitEmpNo").value = genEmpNo();
-    }
+  // --- Refresh ---
+  $("btnRefresh").addEventListener("click", () => {
+    renderOrg();
   });
 
   // init
-  resetForm();
-  renderParents();
-  renderTree();
+  renderOrg();
 
+  // SAFETY NOTE:
+  // - No localStorage writes in this file (read-only explorer).
 })();
 </script>
 
