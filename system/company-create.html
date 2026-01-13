@@ -27,9 +27,8 @@ DEMO-SÄKERHET:
 - Vi lagrar endast SHA-256-hash i user-registret (om WebCrypto finns).
 - Lösenord visas EN GÅNG direkt efter skapande (in-memory), och visas inte efter refresh.
 
-AUTOPATCH v1.1:
-- FIX: inkluderar ../UI/UI-04-CONFIG.js före ../UI/UI-03-APP.js (löser ?err=config)
-- FIX: requireAuth-signatur kompatibel med dashboard (allowRoles + redirectTo) + fail-closed redirect
+AUTOPATCH v1.2:
+- UI FIX: tvinga svart text i input + resultat-rutor + status (löser vit text på vit bakgrund)
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -39,7 +38,7 @@ AUTOPATCH v1.1:
   <title>HR-System – System • Skapa bolag</title>
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
-  <!-- AUTOPATCH: CONFIG MÅSTE IN FÖRE APP (annars ?err=config) -->
+  <!-- CONFIG före APP (LÅST av tidigare patch) -->
   <script src="../UI/UI-04-CONFIG.js"></script>
   <script src="../UI/UI-03-APP.js"></script>
 
@@ -61,17 +60,57 @@ AUTOPATCH v1.1:
     .row { display:grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     @media (max-width: 700px){ .row{ grid-template-columns: 1fr; } }
     label { display:block; font-size: 13px; margin: 0 0 6px 0; }
-    input { width: 100%; padding: 10px 10px; border-radius: 10px; border: 1px solid rgba(0,0,0,.18); }
+
+    /* ==============================
+       AUTOPATCH: tvinga läsbar text
+       ============================== */
+    input{
+      width: 100%;
+      padding: 10px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,.18);
+      background: #fff;
+      color: #111; /* FIX: svart text i fälten */
+      caret-color: #111;
+    }
+    input::placeholder{ color: rgba(17,17,17,.55); }
+
     .actions { display:flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; align-items:center; }
     .btn { display:inline-flex; align-items:center; justify-content:center; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(0,0,0,.18); cursor:pointer; text-decoration:none; background: transparent; }
     .btn.primary { font-weight: 700; }
     .btn[disabled] { opacity: .6; cursor:not-allowed; }
-    .status { margin-top: 10px; padding: 10px; border-radius: 12px; border: 1px solid rgba(0,0,0,.12); }
+
+    .status {
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 12px;
+      border: 1px solid rgba(0,0,0,.12);
+      background: #fff;
+      color: #111; /* FIX: svart text i status */
+    }
+    .status.ok{
+      background: rgba(209,250,229,.85);
+      border-color: rgba(16,185,129,.28);
+      color:#111; /* FIX */
+    }
+    .status.err{
+      background: rgba(254,226,226,.85);
+      border-color: rgba(239,68,68,.28);
+      color:#111; /* FIX */
+    }
+
     .kv { display:grid; grid-template-columns: 180px 1fr; gap: 8px 10px; margin-top: 10px; }
     @media (max-width: 700px){ .kv{ grid-template-columns: 1fr; } }
-    .k { font-size: 12px; opacity: .75; }
-    .v { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 13px; word-break: break-word; }
-    .note { font-size: 12px; opacity: .78; margin-top: 8px; }
+    .k { font-size: 12px; opacity: .75; color:#111; }
+
+    .v {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+      word-break: break-word;
+      color:#111; /* FIX: svart text i resultat-rutorna */
+    }
+
+    .note { font-size: 12px; opacity: .78; margin-top: 8px; color:#111; }
     .hr { height: 1px; background: rgba(0,0,0,.08); margin: 12px 0; }
   </style>
 </head>
@@ -190,14 +229,10 @@ AUTOPATCH v1.1:
     (function(){
       "use strict";
 
-      // ==============================
-      // KONSTANTER (LÅST)
-      // ==============================
       const KEY_ORG = "AO-020_ORG_V1";
       const KEY_SESSION = "AO-001_LOGIN_V1";
       const KEY_ASSIGNMENTS = "AO-020_ROLE_ASSIGNMENTS_V2";
 
-      // USER-REGISTRY: återanvänd om finns, annars skapa ny DEMO key (ENDA tillåtna nya key i AO-packen)
       const USER_KEY_CANDIDATES = [
         "AO-002_USERS_V1",
         "AO-010_USERS_V1",
@@ -208,10 +243,8 @@ AUTOPATCH v1.1:
       ];
       const FALLBACK_USER_KEY_DEMO = "AO-030_USERS_DEMO_V1";
 
-      // Dedupe-signatur
       const AUTO_UNIT_SIGNATURE = "AUTO_UNIT_V1";
 
-      // UI refs
       const $ = (id) => document.getElementById(id);
 
       const elWho = $("whoami");
@@ -231,20 +264,13 @@ AUTOPATCH v1.1:
       const outRole = $("outRole");
       const linkGoCompany = $("linkGoCompany");
 
-      // In-memory only
       let lastCreated = null;
       let isSaving = false;
 
-      // ==============================
-      // FAIL-CLOSED NAV HELPERS
-      // ==============================
       function safeReplace(url){
         try { window.location.replace(url); } catch { window.location.href = url; }
       }
 
-      // ==============================
-      // AUTH (Fail-closed) — matchar dashboard
-      // ==============================
       function requireSystemAdmin(){
         var HRApp = window.HRApp;
         if(!HRApp || typeof HRApp.requireAuth !== "function"){
@@ -252,7 +278,6 @@ AUTOPATCH v1.1:
           return false;
         }
 
-        // dashboard-signatur
         var session = HRApp.requireAuth({
           allowRoles: ["SYSTEM_ADMIN"],
           redirectTo: "/UI/UI-01-SKELETON.html"
@@ -285,9 +310,6 @@ AUTOPATCH v1.1:
 
       btnLogout.addEventListener("click", doLogout);
 
-      // ==============================
-      // SAFE HELPERS
-      // ==============================
       function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
       function trimStr(v){ return safeStr(v).trim(); }
       function isNonEmpty(v){ return trimStr(v).length > 0; }
@@ -310,9 +332,6 @@ AUTOPATCH v1.1:
         try { return JSON.parse(raw); } catch(_) { return null; }
       }
 
-      // ==============================
-      // ORG: load + schema inference + write
-      // ==============================
       function loadOrgNodesFailClosed(){
         const raw = localStorage.getItem(KEY_ORG);
         const data = parseJsonSafe(raw || "null");
@@ -322,13 +341,11 @@ AUTOPATCH v1.1:
 
       function inferOrgSchema(nodes){
         const sample = nodes && nodes.length ? nodes[0] : null;
-
         const idKey = sample && ("id" in sample) ? "id" : "id";
         const parentKey = sample && ("parentId" in sample) ? "parentId" : (sample && ("parent" in sample) ? "parent" : "parentId");
         const nameKey = sample && ("displayName" in sample) ? "displayName" : (sample && ("name" in sample) ? "name" : "displayName");
         const typeKey = sample && ("type" in sample) ? "type" : (sample && ("kind" in sample) ? "kind" : "type");
         const metaKey = sample && ("meta" in sample) ? "meta" : "meta";
-
         return { idKey, parentKey, nameKey, typeKey, metaKey };
       }
 
@@ -353,9 +370,6 @@ AUTOPATCH v1.1:
         return trimStr(orgNo).replace(/\s+/g, "");
       }
 
-      // ==============================
-      // ASSIGNMENTS (AO-SYS-AUTO-ASSIGN-ADMIN-SCOPE-01)
-      // ==============================
       function loadAssignmentsFailClosed(){
         const raw = localStorage.getItem(KEY_ASSIGNMENTS);
         const data = parseJsonSafe(raw || "null");
@@ -425,9 +439,6 @@ AUTOPATCH v1.1:
         return { changed: !already, mode };
       }
 
-      // ==============================
-      // USER REGISTRY
-      // ==============================
       function listLocalStorageKeys(){
         const out = [];
         for (let i=0; i<localStorage.length; i++){
@@ -489,9 +500,6 @@ AUTOPATCH v1.1:
         return String(max + 1);
       }
 
-      // ==============================
-      // PASSWORD HASH (WebCrypto)
-      // ==============================
       function randomPassword(len){
         const L = Math.max(10, Number(len || 12));
         const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%+-_";
@@ -520,9 +528,6 @@ AUTOPATCH v1.1:
         return btoa(bin);
       }
 
-      // ==============================
-      // DEDUPE HELPERS
-      // ==============================
       function companyAlreadyExistsByOrgNo(nodes, schema, orgNo){
         const { metaKey, typeKey } = schema;
         const norm = normalizeOrgNo(orgNo);
@@ -550,9 +555,6 @@ AUTOPATCH v1.1:
         return null;
       }
 
-      // ==============================
-      // CORE SAVE (ingen partial write)
-      // ==============================
       async function handleSave(e){
         e.preventDefault();
         if (isSaving) return;
@@ -750,9 +752,6 @@ AUTOPATCH v1.1:
 
       form.addEventListener("submit", handleSave);
 
-      // ==============================
-      // Init
-      // ==============================
       if (!requireSystemAdmin()) return;
 
       (function(){
