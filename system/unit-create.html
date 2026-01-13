@@ -26,6 +26,9 @@ KEYS (LÅST):
 - Session: AO-001_LOGIN_V1 (sessionStorage/localStorage)
 - User/Konto-register: exakt samma key och schema som AO3 (reuse-only; ingen ny key här)
 
+PATCH (404FIX-01):
+- Endast länkar: “Bolag” och “Till bolaget” pekar nu på ./company-create.html för att undvika 404
+  (placeholder-sida, ingen org-write/konto-logik där).
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -86,7 +89,8 @@ KEYS (LÅST):
     <nav aria-label="Systemnavigation">
       <a class="btn" href="./dashboard.html">Systemstart</a>
       <a class="btn" href="./org.html">Org-karta</a>
-      <a class="btn" href="./company.html">Bolag</a>
+      <!-- PATCH 404FIX: Bolag pekar på placeholder istället för ev. 404 -->
+      <a class="btn" href="./company-create.html">Bolag</a>
     </nav>
 
     <div class="right">
@@ -150,7 +154,8 @@ KEYS (LÅST):
 
           <div class="actions">
             <button id="btnSave" class="btn primary" type="submit">Spara enhet (skapar admin)</button>
-            <a class="btn" id="backToCompany" href="./company.html">Till bolaget</a>
+            <!-- PATCH 404FIX: “Till bolaget” pekar på placeholder för att undvika 404 -->
+            <a class="btn" id="backToCompany" href="./company-create.html">Till bolaget</a>
             <a class="btn" href="./org.html">Org-karta</a>
           </div>
 
@@ -757,7 +762,9 @@ KEYS (LÅST):
           outPassword.textContent = password;
           outRole.textContent = "ADMIN (scope kopplat)";
 
-          const companyHref = "./company.html?companyId=" + encodeURIComponent(companyId);
+          // PATCH 404FIX: vi låter “Till bolaget” vara placeholder och inte company.html?companyId
+          // men vi behåller query i createMore så du kan skapa fler enheter i samma bolag
+          const companyHref = "./company-create.html";
           goCompany2.setAttribute("href", companyHref);
           backToCompany.setAttribute("href", companyHref);
           createMore.setAttribute("href", "./unit-create.html?companyId=" + encodeURIComponent(companyId));
@@ -784,18 +791,20 @@ KEYS (LÅST):
       if (!requireSystemAdmin()) return;
 
       const companyId = getCompanyId();
-      backToCompany.setAttribute("href", companyId ? ("./company.html?companyId=" + encodeURIComponent(companyId)) : "./company.html");
+
+      // PATCH 404FIX: backToCompany ska inte försöka använda company.html?companyId
+      backToCompany.setAttribute("href", "./company-create.html");
 
       if (!companyId){
         disableCreateUI("Välj ett bolag först");
-        hint.textContent = "Gå till Org-karta eller Bolagslista för att välja bolag.";
+        hint.textContent = "Gå till Org-karta eller Bolagslistan (placeholder: Skapa bolag) för att välja bolag.";
         return;
       }
 
       const orgRes = loadOrgFailClosed();
       if (!orgRes.ok){
         disableCreateUI(orgRes.err);
-        hint.textContent = "Org-karta och Bolagslista kan fortfarande öppnas.";
+        hint.textContent = "Org-karta och Bolag (placeholder) kan fortfarande öppnas.";
         return;
       }
 
@@ -820,7 +829,7 @@ KEYS (LÅST):
 
       if (!companyNode){
         disableCreateUI("Ogiltigt bolag. Välj ett bolag först.");
-        hint.textContent = "Öppna bolagslistan och välj ett bolag.";
+        hint.textContent = "Öppna Org-karta och välj ett bolag.";
         return;
       }
 
@@ -858,36 +867,16 @@ KEYS (LÅST):
   <!--
   ============================================================
   ÄNDRINGSLOGG (≤8 rader)
-  1) FIX: Tog bort ../UI/UI-03-APP.js för att stoppa redirect till /?err=config i din miljö.
-  2) Auth/logout: Fail-closed via AO-001_LOGIN_V1 (session/localStorage), SYSTEM_ADMIN-only.
-  3) Dedupe förbättrad: deterministiskt unitId (stableUnitId) så dubbel-submit inte skapar dubletter.
-  4) Admin dedupe: kontrollerar admin kopplad till unitId (nu stabilt).
-  5) Fail-closed: assignments måste vara ok innan någon write; rollback på USERS/ORG/ASSIGNMENTS vid fel.
-  6) Refresh-säkerhet: lösenord visas aldrig igen efter pageshow.
+  1) PATCH 404FIX: Nav-länk “Bolag” ändrad till ./company-create.html (placeholder).
+  2) PATCH 404FIX: “Till bolaget” (backToCompany) ändrad till ./company-create.html.
+  3) PATCH 404FIX: Resultatpanelen “Till bolaget” (goCompany2) pekar nu på ./company-create.html.
+  4) Inga övriga ändringar i logik, storage, schema eller UI-struktur.
   ============================================================
 
   TESTNOTERINGAR
-  - Öppna utan companyId => blockerat + tydlig hint.
-  - Ogiltigt companyId => blockerat.
-  - assignments saknas/korrupt => blockerat (inget sparas).
-  - Normal save => 1 unit + 1 admin + assignment skapas; credentials visas direkt.
-  - Dubbelklick save => samma unitId => dedupe stoppar dublett.
-  - Refresh => resultPanel göms och lösenord töms.
-
-  VAD SOM INTE RÖRTS
-  - Inga ändringar i dashboard.html, org.html, assignments.html eller global CSS.
-  - Inga nya storage-keys/datamodell; user-register key återanvänds (reuse-only).
-
-  KONTROLLSVAR TILL FORGE (MÅSTE BESVARAS):
-  1) User-register key/schema:
-     - Key: hittas via findUserRegistryKeyReuseOnly() (USER_KEY_CANDIDATES eller AO-*USER*), fallback endast om AO-030_USERS_DEMO_V1 redan finns.
-     - Schema: { id, empNo, username, passwordHashSha256, scopeId, roleHint, createdAt, demo } (match AO3).
-  2) Validering companyId:
-     - Root hittas; typedMode avgör; isCompanyNode() exkluderar root och kräver COMPANY/BOLAG eller parent==rootId.
-  3) Ingen partial write:
-     - assignments valideras innan org/users; commit; rollback på alla tre keys vid fel.
-  4) Dedupe-regel:
-     - dedupeUnit() (name+orgNo under company) + deterministiskt unitId stableUnitId(companyId, unitName, orgNo).
+  - Klick “Bolag” -> ./company-create.html (ingen 404 om filen finns i /system).
+  - Klick “Till bolaget” -> ./company-create.html
+  - Skapa enhet fungerar oförändrat (org/users/assignments writes enligt befintlig logik).
   ============================================================
   -->
 </body>
