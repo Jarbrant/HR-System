@@ -1,1 +1,574 @@
+<!-- ============================================================
+AO-SYS-COMPANY-VIEW-UNITS-01 (PROD • DEMO) | FIL-ID: system/company.html
+Projekt: HR-System (GitHub Pages / localStorage-first)
+Syfte: Visa bolagets uppgifter + lista enheter + starta “Skapa ny enhet” i rätt kontext (companyId)
+
+POLICY (LÅST):
+- UI-only • Ingen backend
+- SYSTEM_ADMIN-only • Fail-closed via HRApp.requireAuth
+- XSS-escape på allt från storage (endast textContent, ingen osäker innerHTML)
+- Inga nya storage-keys/datamodell i denna AO (read + navigation only)
+- Hel-filsleverans (company.html)
+
+KEYS (LÅST):
+- Org: AO-020_ORG_V1 (localStorage) — org-träd (nodes)
+- Session: AO-001_LOGIN_V1 via HRApp.requireAuth/getAuth
+
+============================================================ -->
+<!doctype html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HR-System – System • Bolag</title>
+  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  <script src="../UI/UI-03-APP.js"></script>
+
+  <style>
+    .wrap { max-width: 1080px; margin: 0 auto; padding: 16px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid rgba(0,0,0,.08); }
+    .topbar .left { display:flex; align-items:center; gap:10px; min-width: 0; }
+    .topbar .brand { font-weight: 800; white-space: nowrap; }
+    .topbar nav { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .topbar a { text-decoration:none; }
+    .topbar .right { display:flex; align-items:center; gap:10px; }
+    .pill { display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px; font-size:12px; border:1px solid rgba(0,0,0,.12); }
+    .muted2 { opacity:.75; font-size:13px; }
+    .btn { display:inline-flex; align-items:center; justify-content:center; padding:10px 12px; border-radius:10px; border:1px solid rgba(0,0,0,.18); cursor:pointer; text-decoration:none; background:transparent; }
+    .btn.primary { font-weight: 800; }
+    .btn[disabled], .btn.disabled { opacity:.55; cursor:not-allowed; pointer-events:none; }
+    .btn.logout { border-color: rgba(200,0,0,.25); }
+    .btn.logout:hover { border-color: rgba(200,0,0,.40); }
+
+    .grid { display:grid; grid-template-columns: 1fr; gap: 14px; }
+    .card { border:1px solid rgba(0,0,0,.10); border-radius:14px; padding:14px; background: rgba(255,255,255,.92); }
+    .card h2 { margin:0 0 8px 0; font-size:18px; }
+    .hr { height:1px; background: rgba(0,0,0,.08); margin: 12px 0; }
+
+    .status { padding:10px; border-radius:12px; border:1px solid rgba(0,0,0,.12); }
+    .status.err { }
+    .status.ok { }
+
+    .kv { display:grid; grid-template-columns: 200px 1fr; gap:8px 10px; }
+    @media (max-width: 700px){ .kv { grid-template-columns: 1fr; } }
+    .k { font-size:12px; opacity:.75; }
+    .v { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Apple Color Emoji","Segoe UI Emoji"; font-size:14px; word-break: break-word; }
+    .v.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+
+    .list { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    @media (max-width: 900px){ .list{ grid-template-columns: 1fr; } }
+    .unitCard { border:1px solid rgba(0,0,0,.10); border-radius:14px; padding:12px; }
+    .unitTitle { display:flex; align-items:baseline; justify-content:space-between; gap:10px; }
+    .unitTitle strong { font-size:16px; }
+    .small { font-size:12px; opacity:.75; }
+
+    .companyPick { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    @media (max-width: 900px){ .companyPick{ grid-template-columns: 1fr; } }
+    .companyBtn { text-align:left; width:100%; }
+  </style>
+</head>
+
+<body>
+  <header class="topbar" role="banner">
+    <div class="left">
+      <div class="brand" aria-label="HR-System">HR-System</div>
+      <span class="pill" id="authPill" aria-live="polite">SYSTEM_ADMIN</span>
+    </div>
+
+    <nav aria-label="Systemnavigation">
+      <a class="btn" href="./dashboard.html">Systemstart</a>
+      <a class="btn" href="./org.html">Org-karta</a>
+    </nav>
+
+    <div class="right">
+      <span class="muted2" id="whoami"></span>
+      <button class="btn logout" id="btnLogout" type="button">Logga ut</button>
+    </div>
+  </header>
+
+  <main class="wrap" role="main">
+    <div class="grid">
+      <section class="card" aria-labelledby="h1">
+        <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+          <div>
+            <h1 id="h1" style="margin:0 0 6px 0; font-size:22px;">Bolag</h1>
+            <div class="muted2" id="subTitle">Visar bolagsuppgifter och enheter.</div>
+          </div>
+
+          <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+            <a class="btn primary disabled" id="btnCreateUnit" href="#" aria-disabled="true">➕ Skapa ny enhet</a>
+            <a class="btn" href="./org.html">Org-karta</a>
+            <a class="btn" href="./dashboard.html">Systemstart</a>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div id="status" class="status" role="status" aria-live="polite" style="display:none;"></div>
+
+        <!-- Bolagslista (om companyId saknas / ogiltig) -->
+        <div id="companyPicker" style="display:none;">
+          <h2 style="margin:0 0 8px 0; font-size:18px;">Välj bolag</h2>
+          <div class="muted2">Välj ett bolag för att se enheter och detaljer.</div>
+          <div style="height:10px;"></div>
+          <div class="companyPick" id="companyList"></div>
+        </div>
+
+        <!-- Bolagsvy -->
+        <div id="companyView" style="display:none;">
+          <h2 style="margin:0 0 8px 0; font-size:18px;">Bolagsuppgifter</h2>
+          <div class="kv" aria-label="Bolagsuppgifter (read-only)">
+            <div class="k">Bolagsnamn</div>
+            <div class="v" id="c_name">—</div>
+
+            <div class="k">Organisationsnummer</div>
+            <div class="v" id="c_orgNo">—</div>
+
+            <div class="k">Faktura-mail</div>
+            <div class="v" id="c_invoiceEmail">—</div>
+
+            <div class="k">Kontaktperson</div>
+            <div class="v" id="c_contactName">—</div>
+
+            <div class="k">Telefon</div>
+            <div class="v" id="c_phone">—</div>
+
+            <div class="k">Bolag-ID</div>
+            <div class="v mono" id="c_id">—</div>
+          </div>
+
+          <div class="hr"></div>
+
+          <h2 style="margin:0 0 8px 0; font-size:18px;">Enheter i bolaget</h2>
+          <div class="muted2" id="unitsHint">Listar enheter under bolaget.</div>
+          <div style="height:10px;"></div>
+
+          <div id="unitsEmpty" class="muted2" style="display:none;">Inga enheter hittades.</div>
+          <div class="list" id="unitsList"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    (function(){
+      "use strict";
+
+      const KEY_ORG = "AO-020_ORG_V1";
+      const KEY_SESSION = "AO-001_LOGIN_V1";
+
+      const $ = (id) => document.getElementById(id);
+
+      const elWho = $("whoami");
+      const elAuthPill = $("authPill");
+      const btnLogout = $("btnLogout");
+
+      const elStatus = $("status");
+      const subTitle = $("subTitle");
+
+      const companyPicker = $("companyPicker");
+      const companyList = $("companyList");
+
+      const companyView = $("companyView");
+
+      const btnCreateUnit = $("btnCreateUnit");
+
+      const c_name = $("c_name");
+      const c_orgNo = $("c_orgNo");
+      const c_invoiceEmail = $("c_invoiceEmail");
+      const c_contactName = $("c_contactName");
+      const c_phone = $("c_phone");
+      const c_id = $("c_id");
+
+      const unitsList = $("unitsList");
+      const unitsEmpty = $("unitsEmpty");
+      const unitsHint = $("unitsHint");
+
+      function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
+      function trimStr(v){ return safeStr(v).trim(); }
+      function parseJsonSafe(raw){ try { return JSON.parse(raw); } catch(_) { return null; } }
+
+      function showStatus(kind, msg){
+        elStatus.style.display = "block";
+        elStatus.className = "status " + (kind === "ok" ? "ok" : "err");
+        elStatus.textContent = msg; // XSS-safe
+      }
+      function clearStatus(){
+        elStatus.style.display = "none";
+        elStatus.textContent = "";
+      }
+
+      function requireSystemAdmin(){
+        if (window.HRApp && typeof window.HRApp.requireAuth === "function") {
+          const auth = window.HRApp.requireAuth({ role: "SYSTEM_ADMIN" });
+          try {
+            const a = (window.HRApp.getAuth && window.HRApp.getAuth()) || auth;
+            const who = a && (a.empNo || a.username || a.user || "");
+            if (who) elWho.textContent = String(who);
+          } catch(_) {}
+          elAuthPill.textContent = "SYSTEM_ADMIN";
+          return true;
+        }
+
+        // Minimal fallback: fail-closed om session saknas
+        let sess = null;
+        try { sess = JSON.parse(sessionStorage.getItem(KEY_SESSION) || "null"); } catch(_) {}
+        if (!sess) { try { sess = JSON.parse(localStorage.getItem(KEY_SESSION) || "null"); } catch(_) {} }
+
+        const role = sess && (sess.role || sess.roleId || sess.userRole);
+        const isSys = String(role || "").toUpperCase().includes("SYSTEM");
+        if (!sess || !isSys) {
+          location.href = "./login.html";
+          return false;
+        }
+        elAuthPill.textContent = "SYSTEM_ADMIN";
+        elWho.textContent = String(sess.empNo || sess.username || "");
+        return true;
+      }
+
+      function doLogout(){
+        if (window.HRApp && typeof window.HRApp.logout === "function") {
+          window.HRApp.logout();
+          return;
+        }
+        sessionStorage.removeItem(KEY_SESSION);
+        localStorage.removeItem(KEY_SESSION);
+        location.href = "./login.html";
+      }
+      btnLogout.addEventListener("click", doLogout);
+
+      function getCompanyIdFromQuery(){
+        const qs = new URLSearchParams(location.search || "");
+        const id = qs.get("companyId");
+        return trimStr(id);
+      }
+
+      function loadOrgFailClosed(){
+        const raw = localStorage.getItem(KEY_ORG);
+        const data = parseJsonSafe(raw || "null");
+        if (!Array.isArray(data)) return { ok:false, err:"Org saknas/korrupt (AO-020_ORG_V1 är inte en array).", nodes:null };
+        return { ok:true, nodes:data };
+      }
+
+      function inferSchema(nodes){
+        const sample = nodes && nodes.length ? nodes[0] : null;
+        const idKey = sample && ("id" in sample) ? "id" : "id";
+        const parentKey = sample && ("parentId" in sample) ? "parentId" : (sample && ("parent" in sample) ? "parent" : "parentId");
+        const nameKey = sample && ("displayName" in sample) ? "displayName" : (sample && ("name" in sample) ? "name" : "displayName");
+        const typeKey = sample && ("type" in sample) ? "type" : (sample && ("kind" in sample) ? "kind" : "type");
+        const metaKey = sample && ("meta" in sample) ? "meta" : "meta";
+        return { idKey, parentKey, nameKey, typeKey, metaKey };
+      }
+
+      function findRoot(nodes, schema){
+        const { parentKey, typeKey } = schema;
+        for (const n of nodes){
+          if (!n) continue;
+          const p = n[parentKey];
+          const t = n[typeKey];
+          const isRootByParent = (p === null || p === undefined || p === "");
+          const isRootByType = String(t || "").toUpperCase() === "ROOT";
+          if (isRootByParent || isRootByType) return n;
+        }
+        return null;
+      }
+
+      function hasAnyTypedNodes(nodes, schema){
+        const { typeKey } = schema;
+        for (const n of nodes){
+          const t = n && n[typeKey];
+          if (trimStr(t)) return true;
+        }
+        return false;
+      }
+
+      function isCompanyNode(node, rootId, typedMode, schema){
+        if (!node) return false;
+        const { idKey, parentKey, typeKey } = schema;
+        const id = node[idKey];
+        if (!id) return false;
+        if (String(id) === String(rootId)) return false; // root får aldrig vara bolag
+
+        if (typedMode) {
+          const t = String(node[typeKey] || "").toUpperCase();
+          return t.includes("COMPANY") || t.includes("BOLAG");
+        }
+
+        // Un-typed mode: barn till root = bolag
+        return String(node[parentKey] || "") === String(rootId);
+      }
+
+      function isUnitNode(node, companyId, typedMode, schema){
+        if (!node) return false;
+        const { parentKey, typeKey } = schema;
+        if (String(node[parentKey] || "") !== String(companyId)) return false;
+
+        if (typedMode) {
+          const t = String(node[typeKey] || "").toUpperCase();
+          // Enhet kan vara UNIT/ENHET, men vi accepterar även om typ saknas i typedMode? (KRAV: använd om finns)
+          return t.includes("UNIT") || t.includes("ENHET") || !t; // tolerant
+        }
+
+        // Un-typed mode: barn till bolag = enheter
+        return true;
+      }
+
+      function renderValue(el, v){
+        el.textContent = trimStr(v) ? String(v) : "—";
+      }
+
+      function pickMeta(node, schema){
+        const meta = node && node[schema.metaKey];
+        return (meta && typeof meta === "object") ? meta : null;
+      }
+
+      function showPicker(companies){
+        companyView.style.display = "none";
+        companyPicker.style.display = "block";
+
+        companyList.textContent = "";
+        if (!companies.length) {
+          const div = document.createElement("div");
+          div.className = "muted2";
+          div.textContent = "Inga bolag hittades i org-trädet.";
+          companyList.appendChild(div);
+          return;
+        }
+
+        for (const c of companies){
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "btn companyBtn";
+          const name = trimStr(c.displayName) || trimStr(c.name) || "Bolag";
+          btn.textContent = name;
+          btn.addEventListener("click", function(){
+            const id = c.__id;
+            location.href = "./company.html?companyId=" + encodeURIComponent(id);
+          });
+          companyList.appendChild(btn);
+        }
+      }
+
+      function showCompany(company, units){
+        companyPicker.style.display = "none";
+        companyView.style.display = "block";
+
+        renderValue(c_name, company.name);
+        renderValue(c_id, company.id);
+
+        renderValue(c_orgNo, company.meta && company.meta.orgNo);
+        renderValue(c_invoiceEmail, company.meta && company.meta.invoiceEmail);
+        renderValue(c_contactName, company.meta && company.meta.contactName);
+        renderValue(c_phone, company.meta && company.meta.phone);
+
+        unitsList.textContent = "";
+        unitsEmpty.style.display = units.length ? "none" : "block";
+        unitsHint.textContent = units.length ? ("Hittade " + units.length + " enhet(er).") : "Inga enheter hittades under bolaget.";
+
+        for (const u of units){
+          const card = document.createElement("div");
+          card.className = "unitCard";
+
+          const title = document.createElement("div");
+          title.className = "unitTitle";
+
+          const strong = document.createElement("strong");
+          strong.textContent = u.name || "Enhet";
+
+          const metaSmall = document.createElement("div");
+          metaSmall.className = "small";
+          metaSmall.textContent = u.id ? ("ID: " + u.id) : "";
+
+          title.appendChild(strong);
+          title.appendChild(metaSmall);
+
+          const kv = document.createElement("div");
+          kv.className = "kv";
+          kv.style.marginTop = "10px";
+
+          const pairs = [
+            ["Enhetsnamn", u.name],
+            ["Organisationsnummer", u.meta && u.meta.orgNo],
+            ["Faktura-mail", u.meta && u.meta.invoiceEmail],
+            ["Kontaktperson", u.meta && u.meta.contactName],
+            ["Telefon", u.meta && u.meta.phone],
+          ];
+
+          for (const [k, v] of pairs){
+            const kEl = document.createElement("div");
+            kEl.className = "k";
+            kEl.textContent = k;
+
+            const vEl = document.createElement("div");
+            vEl.className = "v";
+            vEl.textContent = trimStr(v) ? String(v) : "—";
+
+            kv.appendChild(kEl);
+            kv.appendChild(vEl);
+          }
+
+          card.appendChild(title);
+          card.appendChild(kv);
+          unitsList.appendChild(card);
+        }
+      }
+
+      function setCreateUnitLink(companyId, enabled){
+        if (!enabled) {
+          btnCreateUnit.classList.add("disabled");
+          btnCreateUnit.setAttribute("aria-disabled", "true");
+          btnCreateUnit.setAttribute("href", "#");
+          return;
+        }
+        btnCreateUnit.classList.remove("disabled");
+        btnCreateUnit.setAttribute("aria-disabled", "false");
+        btnCreateUnit.setAttribute("href", "./unit-create.html?companyId=" + encodeURIComponent(companyId));
+      }
+
+      // INIT
+      if (!requireSystemAdmin()) return;
+
+      clearStatus();
+      setCreateUnitLink("", false);
+
+      const orgRes = loadOrgFailClosed();
+      if (!orgRes.ok) {
+        // Fail-closed UI: visa bara status + nav, blockera create
+        showStatus("err", orgRes.err + " Skapa ny enhet är blockerad.");
+        companyPicker.style.display = "none";
+        companyView.style.display = "none";
+        subTitle.textContent = "Org-data saknas/korrupt. Endast navigation är tillgänglig.";
+        setCreateUnitLink("", false);
+        return;
+      }
+
+      const nodes = orgRes.nodes;
+      const schema = inferSchema(nodes);
+      const root = findRoot(nodes, schema);
+
+      if (!root || !root[schema.idKey]) {
+        showStatus("err", "Root saknas i org-trädet. Kan inte visa bolag (fail-closed).");
+        companyPicker.style.display = "none";
+        companyView.style.display = "none";
+        setCreateUnitLink("", false);
+        return;
+      }
+
+      const rootId = root[schema.idKey];
+      const typedMode = hasAnyTypedNodes(nodes, schema);
+
+      // Build companies list robust (backward tolerant)
+      const companies = [];
+      for (const n of nodes){
+        if (!n) continue;
+        if (isCompanyNode(n, rootId, typedMode, schema)) {
+          const id = n[schema.idKey];
+          const meta = pickMeta(n, schema);
+          const name = trimStr(n[schema.nameKey]) || "Bolag";
+          companies.push({
+            __id: String(id),
+            id: String(id),
+            name: name,
+            meta: meta
+          });
+        }
+      }
+
+      // companyId logic
+      const companyId = getCompanyIdFromQuery();
+
+      if (!companyId) {
+        subTitle.textContent = "Välj bolag för att se uppgifter och enheter.";
+        showPicker(companies);
+        setCreateUnitLink("", false);
+        return;
+      }
+
+      // Validate companyId refers to a company (not root/enhet)
+      let companyNode = null;
+      for (const n of nodes){
+        if (!n) continue;
+        const id = n[schema.idKey];
+        if (String(id) !== String(companyId)) continue;
+
+        // Validera: inte root och måste matcha bolagsregeln i aktuell tolkning
+        if (String(id) === String(rootId)) break;
+        if (isCompanyNode(n, rootId, typedMode, schema)) {
+          companyNode = n;
+        }
+        break;
+      }
+
+      if (!companyNode) {
+        showStatus("err", "Ogiltigt bolag. Välj ett bolag i listan.");
+        subTitle.textContent = "Bolaget kunde inte valideras. Visar bolagslista.";
+        showPicker(companies);
+        setCreateUnitLink("", false);
+        return;
+      }
+
+      // Units under company
+      const units = [];
+      for (const n of nodes){
+        if (!n) continue;
+        if (isUnitNode(n, companyId, typedMode, schema)) {
+          const id = n[schema.idKey];
+          const meta = pickMeta(n, schema);
+          const name = trimStr(n[schema.nameKey]) || "Enhet";
+          units.push({ id: String(id || ""), name, meta });
+        }
+      }
+
+      // Render company + units
+      const companyMeta = pickMeta(companyNode, schema);
+      const companyName = trimStr(companyNode[schema.nameKey]) || "Bolag";
+
+      showCompany(
+        { id: String(companyId), name: companyName, meta: companyMeta },
+        units
+      );
+
+      subTitle.textContent = "Visar bolagets uppgifter och enheter (read-only).";
+      setCreateUnitLink(companyId, true);
+
+      // Back/forward cache: rensa status för att undvika gammal state
+      window.addEventListener("pageshow", function(){
+        // read-only: inget att återställa, men rensa ev. status
+        if (elStatus && elStatus.style.display !== "none") {
+          // lämna status om den visar fel? Vi rensar inte automatiskt.
+        }
+      });
+
+      // =========================================================
+      // OBS: Denna AO får INTE skriva till AO-020_ORG_V1.
+      // Denna fil gör endast localStorage.getItem + render + navigation.
+      // =========================================================
+    })();
+  </script>
+
+  <!--
+  ============================================================
+  KONTROLLSVAR TILL FORGE (MÅSTE BESVARAS):
+
+  1) Hur validerade du att companyId refererar till ett bolag (inte root/enhet)?
+     - Validering sker genom:
+       - Root identifieras (parent null/"" eller type/kind == "ROOT").
+       - typedMode = om någon nod har type/kind.
+       - isCompanyNode(): returnerar true om
+         * typedMode: type/kind innehåller "COMPANY" eller "BOLAG" och noden är INTE root
+         * annars: nodens parent == rootId och noden är INTE root
+       - companyId godkänns endast om matchande nod uppfyller isCompanyNode().
+
+  2) Bekräfta att company.html inte skriver något till AO-020_ORG_V1 i denna AO.
+     - Bekräftat: filen använder endast localStorage.getItem(KEY_ORG) för läsning.
+       Inga setItem/removeItem förekommer för AO-020_ORG_V1.
+
+  3) Exakt hur bygger du länken till unit-create.html så att companyId alltid följer med?
+     - setCreateUnitLink(companyId, true) sätter:
+       href = "./unit-create.html?companyId=" + encodeURIComponent(companyId)
+     - Om companyId saknas/ogiltigt/org korrupt: länken inaktiveras (disabled + href "#").
+  ============================================================
+  -->
+</body>
+</html>
 
