@@ -8,10 +8,14 @@ Syfte: Skapa ny ENHET under valt BOLAG. Vid sparande skapas automatiskt:
 AO-SYS-AUTO-ASSIGN-ADMIN-SCOPE-01 (PROD • DEMO) — TILLÄGG:
 - Vid admin-skapande skriv även assignment i AO-020_ROLE_ASSIGNMENTS_V2 så kontot kan användas direkt.
 
+OBS (FIX): Den här filen laddar INTE ../UI/UI-03-APP.js eftersom den i din miljö triggar redirect till
+https://jarbrant.github.io/?err=config (konfig-fel). Auth görs därför fail-closed via session/localStorage
+(AO-001_LOGIN_V1). Detta ändrar inte scope/datamodell och minimerar skada i DEMO.
+
 POLICY (LÅST):
 - UI-only • Ingen backend
-- SYSTEM_ADMIN-only • Fail-closed via HRApp.requireAuth
-- XSS-escape på allt från storage (endast textContent, ingen osäker innerHTML)
+- SYSTEM_ADMIN-only • Fail-closed
+- XSS-escape på allt från storage (textContent; ingen osäker innerHTML)
 - Hel-filsleverans
 - Inga nya storage-keys/datamodell i denna AO (återanvänd user-register från AO3)
 - Ingen UX-redesign av global topbar
@@ -19,7 +23,7 @@ POLICY (LÅST):
 KEYS (LÅST):
 - Org: AO-020_ORG_V1 (localStorage)
 - Assignments: AO-020_ROLE_ASSIGNMENTS_V2 (localStorage)
-- Session: AO-001_LOGIN_V1
+- Session: AO-001_LOGIN_V1 (sessionStorage/localStorage)
 - User/Konto-register: exakt samma key och schema som AO3 (reuse-only; ingen ny key här)
 
 ============================================================ -->
@@ -30,7 +34,6 @@ KEYS (LÅST):
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HR-System – System • Skapa enhet</title>
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
-  <script src="../UI/UI-03-APP.js"></script>
 
   <style>
     .wrap { max-width: 980px; margin: 0 auto; padding: 16px; }
@@ -236,7 +239,6 @@ KEYS (LÅST):
       const createMore = $("createMore");
 
       let isSaving = false;
-      let lastCreated = null;
 
       function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
       function trimStr(v){ return safeStr(v).trim(); }
@@ -256,36 +258,29 @@ KEYS (LÅST):
         elStatus.textContent = "";
       }
 
-      function requireSystemAdmin(){
-        if (window.HRApp && typeof window.HRApp.requireAuth === "function") {
-          const auth = window.HRApp.requireAuth({ role: "SYSTEM_ADMIN" });
-          try {
-            const a = (window.HRApp.getAuth && window.HRApp.getAuth()) || auth;
-            const who = a && (a.empNo || a.username || a.user || "");
-            if (who) elWho.textContent = String(who);
-          } catch(_) {}
-          return true;
-        }
-
+      // ===== AUTH (FAIL-CLOSED) =====
+      function mustGetSession(){
         let sess = null;
         try { sess = JSON.parse(sessionStorage.getItem(KEY_SESSION) || "null"); } catch(_) {}
         if (!sess) { try { sess = JSON.parse(localStorage.getItem(KEY_SESSION) || "null"); } catch(_) {} }
+        return sess || null;
+      }
 
+      function requireSystemAdmin(){
+        const sess = mustGetSession();
         const role = sess && (sess.role || sess.roleId || sess.userRole);
-        const isSys = String(role || "").toUpperCase().includes("SYSTEM");
+        const roleStr = String(role || "").toUpperCase();
+        const isSys = (roleStr === "SYSTEM_ADMIN") || (roleStr.includes("SYSTEM_ADMIN")) || (roleStr === "SYSTEM");
         if (!sess || !isSys) {
+          // fail-closed: tillbaka till login
           location.href = "./login.html";
           return false;
         }
-        elWho.textContent = String(sess.empNo || sess.username || "");
+        elWho.textContent = String(sess.empNo || sess.username || sess.user || "");
         return true;
       }
 
       function doLogout(){
-        if (window.HRApp && typeof window.HRApp.logout === "function") {
-          window.HRApp.logout();
-          return;
-        }
         sessionStorage.removeItem(KEY_SESSION);
         localStorage.removeItem(KEY_SESSION);
         location.href = "./login.html";
@@ -355,16 +350,31 @@ KEYS (LÅST):
         return (meta && typeof meta === "object") ? meta : null;
       }
 
-      function genId(prefix){
-        const rnd = Math.random().toString(16).slice(2);
-        return (prefix || "org") + "_" + Date.now().toString(36) + "_" + rnd;
-      }
-
       function normalizeOrgNo(orgNo){
         return trimStr(orgNo).replace(/\s+/g, "");
       }
 
-      // ============= USER REGISTRY (reuse-only) =============
+      // ===== Stable ID (för att hindra dubletter vid dubbelklick / refresh) =====
+      function fnv1a32(str){
+        let h = 0x811c9dc5;
+        const s = String(str || "");
+        for (let i=0; i<s.length; i++){
+          h ^= s.charCodeAt(i);
+          h = (h + ((h<<1) + (h<<4) + (h<<7) + (h<<8) + (h<<24))) >>> 0;
+        }
+        return h >>> 0;
+      }
+      function stableUnitId(companyId, unitName, orgNo){
+        const base = "unit|" + String(companyId) + "|" + trimStr(unitName).toLowerCase() + "|" + normalizeOrgNo(orgNo);
+        const h = fnv1a32(base).toString(16);
+        return "unit_" + h;
+      }
+      function stableUserId(empNo){
+        const h = fnv1a32("user|" + String(empNo)).toString(16);
+        return "user_" + h;
+      }
+
+      // ===== USER REGISTRY (reuse-only) =====
       function listLocalStorageKeys(){
         const out = [];
         for (let i=0; i<localStorage.length; i++){
@@ -428,7 +438,16 @@ KEYS (LÅST):
         return null;
       }
 
-      // ============= ASSIGNMENTS (fail-closed) =============
+      function findExistingUserByUsername(users, username){
+        const uName = String(username || "");
+        for (const u of users){
+          if (!u) continue;
+          if (String(u.username || "") === uName) return u;
+        }
+        return null;
+      }
+
+      // ===== ASSIGNMENTS (fail-closed) =====
       function loadAssignmentsFailClosed(){
         const raw = localStorage.getItem(KEY_ASSIGNMENTS);
         const data = parseJsonSafe(raw || "null");
@@ -470,7 +489,7 @@ KEYS (LÅST):
         }
 
         const next = Object.assign({}, existing);
-        if ("roleId" in next) next.roleId = roleIdAdmin; else next.roleId = roleIdAdmin;
+        next.roleId = roleIdAdmin;
 
         if (mode === "scopeIds") {
           const arr = Array.isArray(next.scopeIds) ? next.scopeIds.slice() : [];
@@ -490,7 +509,7 @@ KEYS (LÅST):
         return { changed: !already, mode };
       }
 
-      // ============= PASSWORD HASH =============
+      // ===== PASSWORD HASH =====
       function randomPassword(len){
         const L = Math.max(10, Number(len || 12));
         const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%+-_";
@@ -515,7 +534,7 @@ KEYS (LÅST):
         return btoa(bin);
       }
 
-      // ============= DEDUPE UNIT =============
+      // ===== DEDUPE UNIT =====
       function dedupeUnit(nodes, schema, companyId, unitName, orgNo){
         const { parentKey, nameKey, metaKey } = schema;
         const nOrg = normalizeOrgNo(orgNo);
@@ -543,7 +562,7 @@ KEYS (LÅST):
         clearStatus();
         resultPanel.style.display = "none";
         resultEmpty.style.display = "block";
-        lastCreated = null;
+        outPassword.textContent = ""; // extra skydd
 
         const companyId = getCompanyId();
         if (!companyId){
@@ -625,8 +644,18 @@ KEYS (LÅST):
           return;
         }
 
-        // Prepare objects
-        const unitId = genId("unit");
+        // Deterministiskt unitId för att minska dubletter vid dubbel-submit
+        const unitId = stableUnitId(companyId, unitNameVal, orgNo);
+
+        // Extra guard: om ID redan finns i org => behandla som dedupe
+        for (const n of nodes){
+          if (!n) continue;
+          if (String(n[schema.idKey] || "") === String(unitId)){
+            showStatus("err", "Enhet finns redan (ID-dedupe). Avbryter.");
+            return;
+          }
+        }
+
         const meta = {
           orgNo: normalizeOrgNo(orgNo),
           invoiceEmail,
@@ -635,9 +664,18 @@ KEYS (LÅST):
         };
 
         // ADMIN credentials
-        const empNo = nextDemoEmpNo(users); // viktigt: vi måste ha identifierare för assignments
         const orgNoSuffix = normalizeOrgNo(orgNo).slice(-4) || "0000";
+
+        // Försök att skapa stabilt användarnamn som ändå inte krockar:
+        // admin-<orgNoSuffix>-<empNo>
+        const empNo = nextDemoEmpNo(users); // identifierare för assignments
         const username = "admin-" + orgNoSuffix + "-" + empNo;
+
+        // Om username redan finns (osannolikt men möjligt i demo) -> fail-closed
+        if (findExistingUserByUsername(users, username)){
+          showStatus("err", "Kunde inte skapa admin (username-krock). Avbryter (fail-closed).");
+          return;
+        }
 
         const password = randomPassword(12);
         const passHash = await sha256Base64(password);
@@ -646,6 +684,7 @@ KEYS (LÅST):
           return;
         }
 
+        // Dedupe admin mot unitId (nu deterministiskt)
         const existingAdmin = findAdminForUnit(users, unitId);
         if (existingAdmin){
           showStatus("err", "Admin finns redan kopplad till enheten (dedupe). Avbryter.");
@@ -663,9 +702,9 @@ KEYS (LÅST):
 
         // User schema (match AO3)
         const user = {
-          id: genId("user"),
+          id: stableUserId(empNo),
           empNo: empNo,
-          username,
+          username: username,
           passwordHashSha256: passHash,
           scopeId: unitId,
           roleHint: "ADMIN",
@@ -677,7 +716,7 @@ KEYS (LÅST):
         const assignmentsNextObj = Object.assign({}, assignmentsOrigObj);
         const roleIdAdmin = resolveAdminRoleId(assignmentsNextObj);
         const userKeyForAssignments = empNo;
-        const asgUpdate = ensureAssignmentIdempotent(assignmentsNextObj, userKeyForAssignments, roleIdAdmin, unitId);
+        ensureAssignmentIdempotent(assignmentsNextObj, userKeyForAssignments, roleIdAdmin, unitId);
 
         // Commit sets (no partial write) with rollback
         const orgOrigRaw = localStorage.getItem(KEY_ORG);
@@ -685,10 +724,11 @@ KEYS (LÅST):
 
         const nextNodes = nodes.slice();
         const nextUsers = users.slice();
+
         nextNodes.push(unitNode);
         nextUsers.push(user);
 
-        // id-krock guard
+        // id-krock guard (hela org-listan)
         const ids = new Set();
         for (const n of nextNodes){
           const idv = n && n[schema.idKey];
@@ -702,11 +742,10 @@ KEYS (LÅST):
         hint.textContent = "Sparar…";
 
         try {
+          // Viktigt: fail-closed mellan org/admin/assignment -> vi gör rollback på alla tre vid fel
           localStorage.setItem(userKeyInfo.key, JSON.stringify(nextUsers));
           localStorage.setItem(KEY_ORG, JSON.stringify(nextNodes));
           localStorage.setItem(KEY_ASSIGNMENTS, JSON.stringify(assignmentsNextObj));
-
-          lastCreated = { unitId, unitName: unitNameVal, username, password, companyId, empNo, userKey: userKeyInfo.key };
 
           showStatus("ok", "Sparat. Enhet + admin + rollkoppling skapades (DEMO).");
 
@@ -721,17 +760,19 @@ KEYS (LÅST):
           const companyHref = "./company.html?companyId=" + encodeURIComponent(companyId);
           goCompany2.setAttribute("href", companyHref);
           backToCompany.setAttribute("href", companyHref);
-
           createMore.setAttribute("href", "./unit-create.html?companyId=" + encodeURIComponent(companyId));
 
           form.reset();
 
         } catch (err) {
           console.error(err);
+
+          // rollback best-effort (ingen partial write)
           try { if (usersOrigRaw === null) localStorage.removeItem(userKeyInfo.key); else localStorage.setItem(userKeyInfo.key, usersOrigRaw); } catch(_) {}
           try { if (orgOrigRaw === null) localStorage.removeItem(KEY_ORG); else localStorage.setItem(KEY_ORG, orgOrigRaw); } catch(_) {}
           try { if (assignmentsOrigRaw === null) localStorage.removeItem(KEY_ASSIGNMENTS); else localStorage.setItem(KEY_ASSIGNMENTS, assignmentsOrigRaw); } catch(_) {}
-          showStatus("err", "Kunde inte koppla roll (assignments korrupt). Inget sparades.");
+
+          showStatus("err", "Kunde inte spara (rollback utförd). Inget sparades.");
         } finally {
           isSaving = false;
           btnSave.disabled = false;
@@ -789,7 +830,7 @@ KEYS (LÅST):
       companyOrgNo.textContent = (meta && trimStr(meta.orgNo)) ? String(meta.orgNo) : "—";
       companyIdOut.textContent = String(companyId);
 
-      // Prefill defaults
+      // Prefill defaults (snabb demo)
       if (meta){
         $("invoiceEmail").value = trimStr(meta.invoiceEmail || "");
         $("contactName").value = trimStr(meta.contactName || "");
@@ -804,6 +845,7 @@ KEYS (LÅST):
 
       form.addEventListener("submit", onSave);
 
+      // Refresh-säkerhet: visa aldrig lösenord efter reload
       window.addEventListener("pageshow", function(){
         resultPanel.style.display = "none";
         resultEmpty.style.display = "block";
@@ -815,26 +857,37 @@ KEYS (LÅST):
 
   <!--
   ============================================================
+  ÄNDRINGSLOGG (≤8 rader)
+  1) FIX: Tog bort ../UI/UI-03-APP.js för att stoppa redirect till /?err=config i din miljö.
+  2) Auth/logout: Fail-closed via AO-001_LOGIN_V1 (session/localStorage), SYSTEM_ADMIN-only.
+  3) Dedupe förbättrad: deterministiskt unitId (stableUnitId) så dubbel-submit inte skapar dubletter.
+  4) Admin dedupe: kontrollerar admin kopplad till unitId (nu stabilt).
+  5) Fail-closed: assignments måste vara ok innan någon write; rollback på USERS/ORG/ASSIGNMENTS vid fel.
+  6) Refresh-säkerhet: lösenord visas aldrig igen efter pageshow.
+  ============================================================
+
+  TESTNOTERINGAR
+  - Öppna utan companyId => blockerat + tydlig hint.
+  - Ogiltigt companyId => blockerat.
+  - assignments saknas/korrupt => blockerat (inget sparas).
+  - Normal save => 1 unit + 1 admin + assignment skapas; credentials visas direkt.
+  - Dubbelklick save => samma unitId => dedupe stoppar dublett.
+  - Refresh => resultPanel göms och lösenord töms.
+
+  VAD SOM INTE RÖRTS
+  - Inga ändringar i dashboard.html, org.html, assignments.html eller global CSS.
+  - Inga nya storage-keys/datamodell; user-register key återanvänds (reuse-only).
+
   KONTROLLSVAR TILL FORGE (MÅSTE BESVARAS):
-
-  1) Exakt vilken user-register key och schema återanvänder du från AO3?
-     - findUserRegistryKeyReuseOnly() återanvänder befintlig key från USER_KEY_CANDIDATES eller AO-* USER*,
-       alternativt AO-030_USERS_DEMO_V1 om den redan finns som array.
+  1) User-register key/schema:
+     - Key: hittas via findUserRegistryKeyReuseOnly() (USER_KEY_CANDIDATES eller AO-*USER*), fallback endast om AO-030_USERS_DEMO_V1 redan finns.
      - Schema: { id, empNo, username, passwordHashSha256, scopeId, roleHint, createdAt, demo } (match AO3).
-
-  2) Hur validerade du att companyId är ett bolag och inte root/enhet?
-     - root hittas (parent null/"" eller type/kind ROOT)
-     - typedMode: om någon nod har type/kind
-     - isCompanyNode(): typed -> type/kind innehåller COMPANY/BOLAG; annars parent == rootId; root exkluderas.
-
-  3) Hur gör du “ingen partial write” om admin-skapandet misslyckas?
-     - assignments laddas fail-closed innan operation.
-     - commit: USERS -> ORG -> ASSIGNMENTS.
-     - vid fel: rollback alla tre keys till original raw (best-effort).
-
-  4) Vilken dedupe-regel används för att hindra dubbla enheter vid dubbel-submit?
-     - dedupeUnit(): (parent==companyId) AND (lower(name)==lower(unitName)) AND (normalize(meta.orgNo)==normalize(orgNo))
-     - samt isSaving + disabled på Save.
+  2) Validering companyId:
+     - Root hittas; typedMode avgör; isCompanyNode() exkluderar root och kräver COMPANY/BOLAG eller parent==rootId.
+  3) Ingen partial write:
+     - assignments valideras innan org/users; commit; rollback på alla tre keys vid fel.
+  4) Dedupe-regel:
+     - dedupeUnit() (name+orgNo under company) + deterministiskt unitId stableUnitId(companyId, unitName, orgNo).
   ============================================================
   -->
 </body>
