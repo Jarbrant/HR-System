@@ -1,13 +1,15 @@
 <!-- ============================================================
-AO-TRAININGS-PATCH-01 (PROD AUTOPATCH v2.2.2) | FIL-ID: admin/trainings.html
+AO-TRAININGS-PATCH-01 (PROD AUTOPATCH v2.3.0) | FIL-ID: admin/trainings.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN – Skapa/Redigera utbildningar (återanvändbart innehåll) + AI-stöd
 
-PATCH (v2.2.2) – DESIGN/FLOW-FIX (utan funktionsborttag):
-- Fixar dubbla html/head/doctypes (orsakar konstig layout)
-- Lägger BLOCK 5–10 i högerkolumn (så de inte hamnar “utanför” layouten)
-- Lägger “Skapa ny”-koden i rätt script-del
-- Synkar dubbel “Visa bara problem” utan att bryta befintlig logik
+PATCH (v2.3.0) – SDK-REWIRE (utan funktionsborttag):
+- Byter AI-uppringning: klassrummet ringer inte själv längre (ingen fetch för AI)
+- AI går via HRWorkerSDK (UI/UI-04-WORKER-SDK.js) + runtime-config (window.__HR_WORKER_BASE_URL)
+- Tar bort hårdkodat worker-url i <body> (fail-closed om anslagstavlan saknas)
+- Testa AI använder HRWorkerSDK.health()
+- Generera block använder HRWorkerSDK.aiGenerate({ mode,count,context,language })
+- Robust blocks-extraktion från SDK-svar (data.blocks / data.training.blocks)
 
 POLICY (LÅST):
 - UI-only • Fail-closed • localStorage-first (data), sessionStorage först (auth) • fallback localStorage
@@ -16,6 +18,7 @@ POLICY (LÅST):
 - ADMIN-only (SYSTEM_ADMIN hanteras ej här enligt önskemål)
 - Ingen “vem/vilka” / inga assignments här (kommer i egen sida)
 - Publish fail-closed: status=published kräver blocks.length > 0
+- Token får inte lagras i webbläsaren (SDK getToken() => "" i denna AO)
 ============================================================ -->
 
 <!doctype html>
@@ -34,6 +37,9 @@ POLICY (LÅST):
 <!-- PATCH: Core HR-system (MÅSTE laddas i denna ordning) -->
 <script src="../UI/UI-04-CONFIG.js"></script>
 <script src="../UI/UI-03-APP.js"></script>
+
+<!-- PATCH v2.3.0: Handen som ringer telefonen (SDK) -->
+<script src="../UI/UI-04-WORKER-SDK.js"></script>
 
   <!-- =========================
        AO-TRN-B02 — BLOCK 2/10 – CSS-stilar (sid-specifika) (PATCH v2)
@@ -566,7 +572,8 @@ POLICY (LÅST):
   </style>
 </head>
 
-<body data-worker-url="https://hrsystem.andersmenyit.workers.dev">
+<!-- PATCH v2.3.0: Klassrummet bär inte telefonnummer längre -->
+<body>
   <div class="wrap">
 
     <!-- =========================
@@ -1222,10 +1229,12 @@ POLICY (LÅST):
     }catch(_){}
   })();
 </script>
+
  <!-- =========================
-     BLOCK 11/11 — CORE ENGINE (JS) [NYTT BLOCK]
+     BLOCK 11/11 — CORE ENGINE (JS) [PROD]
      AO-TRN-B11-CORE-ENGINE-01 (PROD)
-     Syfte: Driva hela sidan (lista, editor, blocks, spara, AI) utan att röra BLOCK 1–10.
+     Syfte: Driva hela sidan (lista, editor, blocks, spara, AI).
+     PATCH v2.3.0: AI går via HRWorkerSDK + runtime-config (ingen fetch för AI i klassrummet).
 ========================== -->
 <script>
 (function(){
@@ -1282,12 +1291,53 @@ POLICY (LÅST):
     setPill($("aiModePill"), $("aiModeText"), "", label);
   }
 
-  function getWorkerUrl(){
+  // PATCH v2.3.0: Worker URL kommer från runtime-config (anslagstavlan)
+  function getWorkerBaseUrl(){
     try{
-      const b = document.body;
-      const u = b ? b.getAttribute("data-worker-url") : "";
-      return trimStr(u);
+      return trimStr(window.__HR_WORKER_BASE_URL || "");
     }catch(_){ return ""; }
+  }
+
+  // PATCH v2.3.0: Initiera SDK en gång (runtime, fail-closed)
+  function ensureSDKOrFail(){
+    try{
+      const hint = $("aiHint") || $("revertHint");
+      function say(msg){ try{ if (hint) hint.textContent = msg; }catch(_){ } }
+
+      if (!window.HRWorkerSDK){
+        setWorkerInfo(false, "SDK saknas");
+        say("Fail-closed: Handen (HRWorkerSDK) saknas.");
+        return { ok:false };
+      }
+
+      const baseUrl = getWorkerBaseUrl();
+      if (!baseUrl){
+        setWorkerInfo(false, "Worker URL saknas");
+        say("Fail-closed: Worker URL saknas (anslagstavlan).");
+        return { ok:false };
+      }
+
+      if (!window.__HR_WORKER_SDK_INITED__){
+        const requireAuth = !!window.__HR_WORKER_REQUIRE_AUTH;
+        const r = window.HRWorkerSDK.init({
+          baseUrl: baseUrl,
+          requireAuth: requireAuth,
+          getToken: function(){ return ""; } // token lagras aldrig i denna AO
+        });
+        if (!r || r.ok !== true){
+          window.__HR_WORKER_SDK_INITED__ = false;
+          setWorkerInfo(false, "SDK init misslyckades");
+          say("Fail-closed: Kunde inte initiera Handen (SDK). Kontrollera Worker URL.");
+          return { ok:false };
+        }
+        window.__HR_WORKER_SDK_INITED__ = true;
+      }
+
+      return { ok:true };
+    }catch(_){
+      try{ setWorkerInfo(false, "SDK init fel"); }catch(__){}
+      return { ok:false };
+    }
   }
 
   function readJSONStorage(key){
@@ -2068,24 +2118,60 @@ POLICY (LÅST):
     }catch(_){}
   };
 
-  async function postJSON(url, payload){
-    const ctrl = new AbortController();
-    const timeout = setTimeout(()=>{ try{ ctrl.abort(); }catch(_){ } }, 12000);
+  // PATCH v2.3.0: Adapter — gör klassrummets val till kort text (max 2000) för SDK
+  function buildSDKContextString(payload){
     try{
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "content-type":"application/json" },
-        body: JSON.stringify(payload || {}),
-        signal: ctrl.signal
-      });
-      const txt = await res.text();
-      let data = null;
-      try{ data = JSON.parse(txt); }catch(_){ data = { ok:false, message: txt }; }
-      return { ok: res.ok && data && data.ok !== false, status: res.status, data };
-    }catch(e){
-      return { ok:false, status: 0, data: { ok:false, message: safeStr(e && e.message ? e.message : "Nätfel") } };
-    }finally{
-      clearTimeout(timeout);
+      const t = window.STATE.edit || {};
+      const modeUi = safeStr(payload && payload.mode ? payload.mode : ($("aiMode") ? $("aiMode").value : "training"));
+      const isScenario = (modeUi === "scenario");
+
+      const diff = safeStr(payload && payload.difficulty ? payload.difficulty : ($("aiDifficulty") ? $("aiDifficulty").value : "auto"));
+      const fb = !!(payload && payload.feedbackEnabled !== undefined ? payload.feedbackEnabled : ($("aiFeedbackEnabled") ? $("aiFeedbackEnabled").checked : false));
+      const incP = !!(payload && payload.includePersonality !== undefined ? payload.includePersonality : ($("aiIncludePersonality") ? $("aiIncludePersonality").checked : false));
+      const pCount = safeStr(payload && payload.personalityCount ? payload.personalityCount : ($("aiPersonalityCount") ? $("aiPersonalityCount").value : "1"));
+
+      const lines = [];
+      if (isScenario) lines.push("Scenario: ja (tolka som training)");
+      lines.push("Titel: " + safeStr(t.title || ""));
+      lines.push("Beskrivning: " + safeStr(t.desc || ""));
+      lines.push("Mål: " + safeStr(t.goals || ""));
+      lines.push("Modul: " + safeStr(t.mod || "") + " / Område: " + safeStr(t.area || ""));
+      lines.push("Svårighet: " + safeStr(diff || "auto"));
+      lines.push("Feedback: " + (fb ? "ja" : "nej"));
+      lines.push("Reflektion: " + (incP ? ("ja (" + (pCount === "2" ? "2" : "1") + ")") : "nej"));
+
+      let out = lines.join("\n").trim();
+      if (out.length > 2000) out = out.slice(0, 2000);
+      return out;
+    }catch(_){
+      return "";
+    }
+  }
+
+  function pickBlocksFromSDKData(data){
+    try{
+      if (!data) return [];
+      if (Array.isArray(data.blocks)) return data.blocks;
+      if (data.training && Array.isArray(data.training.blocks)) return data.training.blocks;
+      return [];
+    }catch(_){ return []; }
+  }
+
+  function formatSdkErrorForUI(err){
+    try{
+      const code = err && err.error && err.error.code ? safeStr(err.error.code) : "ERROR";
+      const rid = err && err.requestId ? safeStr(err.requestId) : "";
+      const msg = err && err.error && err.error.message ? safeStr(err.error.message) : "Fel";
+
+      if (code === "NETWORK_ERROR") return "Nät/CORS-fel – kontrollera Worker URL och origin";
+      if (code === "UNAUTHORIZED") return "Token krävs eller fel token (REQUIRE_AUTH=true)";
+      if (code === "NOT_FOUND") return "Fel endpoint – kontrollera att SDK använder /v1";
+      if (code === "VERSION_NOT_AVAILABLE") return "/v2 är reserverad (ska ej användas)";
+      if (code === "VALIDATION_ERROR") return msg;
+
+      return msg + (rid ? (" (requestId: " + rid + ")") : "");
+    }catch(_){
+      return "Fel";
     }
   }
 
@@ -2115,29 +2201,35 @@ POLICY (LÅST):
     };
   }
 
+  // PATCH v2.3.0: Testa AI via SDK health()
   window.HRTrainingsTestWorker = async function(){
     try{
-      const u = getWorkerUrl();
-      if (!u){
-        setWorkerInfo(false, "Saknar worker-url");
-        return;
-      }
-      setWorkerInfo(null, "");
-      const payload = { mode:"training", count:1, difficulty:"auto", includePersonality:false, feedbackEnabled:false, context:{} };
-      const r = await postJSON(u.replace(/\/$/,"") + "/ai/training", payload);
+      const hint = $("aiHint");
+      if (hint) hint.textContent = "";
 
-      if (r.ok && r.data && r.data.ok){
+      const okSdk = ensureSDKOrFail();
+      if (!okSdk.ok) return;
+
+      setWorkerInfo(null, "");
+      const r = await window.HRWorkerSDK.health();
+
+      if (r && r.ok === true){
         setWorkerInfo(true, "OK");
         setStateInfo(window.STATE.dirty ? "warn" : "ok", window.STATE.dirty ? "Status: Osparade ändringar" : "Status: OK");
-      }else{
-        const msg = (r.data && (r.data.message || r.data.error)) ? (r.data.message || r.data.error) : "Fel";
-        setWorkerInfo(false, msg);
+        if (hint) hint.textContent = "AI: OK";
+        return;
       }
+
+      const msg = formatSdkErrorForUI(r);
+      setWorkerInfo(false, msg);
+      if (hint) hint.textContent = "Test misslyckades: " + msg;
     }catch(_){
       setWorkerInfo(false, "Fel");
+      try{ const hint = $("aiHint"); if (hint) hint.textContent = "Test misslyckades."; }catch(__){}
     }
   };
 
+  // PATCH v2.3.0: Generera AI via SDK aiGenerate()
   window.HRTrainingsGenerateAI = async function(){
     try{
       const t = window.STATE.edit;
@@ -2146,32 +2238,46 @@ POLICY (LÅST):
         return;
       }
 
-      const u = getWorkerUrl();
-      if (!u){
-        setWorkerInfo(false, "Saknar worker-url");
-        return;
-      }
-
       const hint = $("aiHint");
       if (hint) hint.textContent = "Genererar…";
 
       setAIModePill();
 
-      const payload = buildAIPayload();
-      const r = await postJSON(u.replace(/\/$/,"") + "/ai/training", payload);
+      const okSdk = ensureSDKOrFail();
+      if (!okSdk.ok) return;
 
-      if (!(r.ok && r.data && r.data.ok)){
-        const msg = (r.data && (r.data.message || r.data.error)) ? (r.data.message || r.data.error) : "Fel";
-        if (hint) hint.textContent = "Misslyckades: " + safeStr(msg);
+      const p = buildAIPayload();
+
+      // SDK tillåter bara training/document → scenario mappas till training + textmarkering
+      let sdkMode = (p.mode === "document") ? "document" : "training";
+      const contextText = buildSDKContextString(p);
+
+      const count = (typeof p.count === "number" && isFinite(p.count)) ? p.count : 1;
+      const language = "sv";
+
+      const r = await window.HRWorkerSDK.aiGenerate({
+        mode: sdkMode,
+        count: count,
+        context: contextText,
+        language: language
+      });
+
+      if (!(r && r.ok === true)){
+        const msg = formatSdkErrorForUI(r);
+        if (hint) hint.textContent = "Misslyckades: " + msg;
         setWorkerInfo(false, msg);
         return;
       }
 
       setWorkerInfo(true, "OK");
 
-      let incoming = [];
-      if (r.data && r.data.training && Array.isArray(r.data.training.blocks)) incoming = r.data.training.blocks;
-      else if (r.data && Array.isArray(r.data.blocks)) incoming = r.data.blocks;
+      const incoming = pickBlocksFromSDKData(r.data);
+      if (!Array.isArray(incoming) || incoming.length === 0){
+        const msg = "Inga block i svaret.";
+        if (hint) hint.textContent = "Misslyckades: " + msg;
+        setWorkerInfo(false, msg);
+        return;
+      }
 
       const normBlocks = incoming.map((b, idx)=>{
         const nb = normalizeBlock(b);
@@ -2345,11 +2451,20 @@ POLICY (LÅST):
   }
 
   /* ============================================================
-     ÄNDRINGSLOGG (≤8)
-     - FIX: Endast ett <script> och en IIFE (tog bort dubletter).
-     - FIX: Inga funktioner/kommentarer utanför <script>.
-     - FIX: Dubbletter av helper ($/safeStr/etc) borttagna.
-     - Fail-closed bibehållet, XSS-säkert (textContent/createElement).
+     ÄNDRINGSLOGG (≤8) — v2.3.0
+     - ADD: Laddar UI/UI-04-WORKER-SDK.js i head.
+     - CHANGE: Tar bort hårdkodat data-worker-url i body.
+     - CHANGE: Worker URL läses från window.__HR_WORKER_BASE_URL (fail-closed).
+     - CHANGE: HRTrainingsTestWorker använder HRWorkerSDK.health().
+     - CHANGE: HRTrainingsGenerateAI använder HRWorkerSDK.aiGenerate().
+     - ADD: Adapter som gör context till text (≤2000) + scenario→training.
+     - ADD: Robust blocks-extraktion (data.blocks / data.training.blocks).
+     - POLICY: Ingen ny lagring, ingen datamodelländring, XSS-safe kvar.
   ============================================================ */
 })();
 </script>
+
+</main>
+</div>
+</body>
+</html>
