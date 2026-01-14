@@ -16,7 +16,14 @@
     auth/readonly, validering, trainings preview counts, STATE-shape, selection,
     templates + live preview, save/publish summary, export auto-select, safe bootstrap).
 
-  NYTT i denna patch (EXPORT-STEGET):
+  NYTT i denna patch (KONTROLLRUM / VERIFIERING / UTSKRIFT):
+  - Verifieringssteg: “Verifiera” (utan att ändra datamodell) använder befintliga fält:
+    verifiedAt + verifiedBy på blocket. (Ingen ny storage-key, ingen ny schema-nyckel.)
+  - Filter: “Ej verifierade” (visar block där verifiedAt saknas/0)
+  - Utskrift: “Skriv ut” (print) för vald block – skriver ut dokument + frågor + uppgifter i en säker print-vy.
+  - Design: tar bort hover-brightness (följer “hover = endast skugga/border”)
+
+  EXPORT-STEGET:
   - Import/Export-steg: “Hämta från Utbildningar (AO-057_TRAININGS_V1)” → exportera som block till block-banken (AO-0XX_BLOCKS_V1)
   - Fail-closed: export blockas om trainings-data är korrupt; SYSTEM_ADMIN = read-only
   - Back-compat: stöder flera shapes i trainings (array/wrapper, olika fältnamn för block/items/content/rawText osv.)
@@ -78,11 +85,10 @@
       background:#fff;
       cursor:pointer;
       box-shadow: var(--shadow-soft);
-      transition: box-shadow .15s ease, filter .15s ease, outline-color .15s ease;
+      transition: box-shadow .15s ease, outline-color .15s ease, border-color .15s ease;
     }
     .itemRow:hover{
       box-shadow: 0 10px 26px rgba(17,17,17,.08);
-      filter: brightness(1.01);
     }
 
     .itemRow.type-document{ background: var(--doc-bg); border-color: var(--doc-line); color: var(--doc-ink); }
@@ -134,10 +140,10 @@
       background:#fff;
       cursor:pointer;
       box-shadow: var(--shadow-soft);
-      transition: box-shadow .15s ease, filter .15s ease, outline-color .15s ease;
+      transition: box-shadow .15s ease, outline-color .15s ease, border-color .15s ease;
       margin-bottom:10px;
     }
-    .rowItem:hover{ box-shadow: 0 10px 26px rgba(17,17,17,.08); filter: brightness(1.01); }
+    .rowItem:hover{ box-shadow: 0 10px 26px rgba(17,17,17,.08); }
     .rowItem.active{ outline:2px solid rgba(59,130,246,.35); }
 
     .rowTop{ display:flex; gap:10px; justify-content:space-between; align-items:flex-start; }
@@ -148,6 +154,7 @@
     .qaPill{ display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; border:1px solid var(--line); background:#fff; }
     .qaPill.ok{ border-color: rgba(16,185,129,.35); background: rgba(209,250,229,.55); }
     .qaPill.bad{ border-color: rgba(239,68,68,.35); background: rgba(254,226,226,.75); }
+    .qaPill.warn{ border-color: rgba(245,158,11,.35); background: rgba(254,243,199,.7); }
 
     .lockbox{
       border:1px solid rgba(239,68,68,.35);
@@ -166,13 +173,13 @@
       background:#fff;
       cursor:pointer;
       box-shadow: var(--shadow-soft);
-      transition: box-shadow .15s ease, filter .15s ease, outline-color .15s ease;
+      transition: box-shadow .15s ease, outline-color .15s ease, border-color .15s ease;
       margin-bottom:10px;
       display:flex;
       justify-content:space-between;
       gap:10px;
     }
-    .exportRow:hover{ box-shadow: 0 10px 26px rgba(17,17,17,.08); filter: brightness(1.01); }
+    .exportRow:hover{ box-shadow: 0 10px 26px rgba(17,17,17,.08); }
     .exportRow.active{ outline:2px solid rgba(16,185,129,.35); }
     .exportRow .left{ min-width:0; }
     .exportRow .t{ font-weight:950; }
@@ -228,6 +235,21 @@
       margin-top:10px;
     }
     .infoBox ul{ margin:8px 0 0 18px; color:#1e3a8a; }
+
+    /* Kontrollrum: små verifieringspiller */
+    .verifyPill{
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:3px 10px;
+      border-radius:999px;
+      border:1px solid var(--line);
+      background:#fff;
+      font-size:.86rem;
+      white-space:nowrap;
+    }
+    .verifyPill.ok{ border-color: rgba(16,185,129,.35); background: rgba(209,250,229,.55); }
+    .verifyPill.warn{ border-color: rgba(245,158,11,.35); background: rgba(254,243,199,.7); }
   </style>
 </head>
 
@@ -264,6 +286,10 @@
       <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
         <span class="pill" id="statePill" title="Översikt: items / frågor utan facit / dokument-only">Status: —</span>
         <span class="pill" id="selPill">Val: —</span>
+
+        <!-- Kontrollrum: verifieringstatus för valt block -->
+        <span class="verifyPill warn" id="verifyPill" title="Verifiering gäller valt block" style="display:none;">Verifiering: —</span>
+
         <span class="pill" id="whoPill" style="display:none;">Inloggad: —</span>
         <span class="pill" id="modePill" style="display:none;">Läge: —</span>
         <button class="miniBtn" id="btnToggleInfo" type="button">Visa info</button>
@@ -271,6 +297,8 @@
 
       <div class="actionBar" aria-label="Åtgärder">
         <button class="btn secondary" id="btnEdit" type="button" disabled title="Välj ett block för att redigera">Redigera</button>
+        <button class="btn secondary" id="btnVerify" type="button" disabled title="Verifiera blockerad">Verifiera</button>
+        <button class="btn secondary" id="btnPrint" type="button" disabled title="Välj ett block för att skriva ut">Skriv ut</button>
         <button class="btn" id="btnSave" type="button" disabled title="Inga ändringar att spara">Spara</button>
         <button class="btn secondary" id="btnPublish" type="button" disabled title="Publicering blockerad">Publicera</button>
       </div>
@@ -290,6 +318,9 @@
         <li>✅ Task (uppgift)</li>
         <li>Mixed = flera typer i samma block</li>
       </ul>
+      <div class="tiny" style="margin-top:8px;">
+        <strong>Kontrollrum:</strong> En admin kan skapa innehåll i <span class="mono">admin/trainings.html</span> → här kan en annan admin <strong>verifiera</strong> och <strong>skriva ut</strong>.
+      </div>
     </div>
 
     <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
@@ -328,6 +359,7 @@
               <label><input type="checkbox" id="fHasQ"> Har frågor</label>
               <label><input type="checkbox" id="fHasD"> Har dokument</label>
               <label><input type="checkbox" id="fNoKey"> Saknar facit</label>
+              <label><input type="checkbox" id="fUnverified"> Ej verifierade</label>
             </div>
           </div>
         </div>
@@ -434,6 +466,8 @@
               </div>
 
               <label style="margin-top:10px;">Rubrik (post-it)<input id="titleInp" type="text" maxlength="80" autocomplete="off" /></label>
+
+              <div class="tiny muted2" id="verifiedHint" style="margin-top:8px; display:none;"></div>
             </div>
 
             <div style="margin-top:14px; border-top:1px dashed var(--line); padding-top:12px;" aria-label="Items">
@@ -556,12 +590,16 @@
     const elSel   = document.getElementById("selPill");
     const elWho   = document.getElementById("whoPill");
     const elMode  = document.getElementById("modePill");
+    const elVerifyPill = document.getElementById("verifyPill");
+    const elVerifiedHint = document.getElementById("verifiedHint");
 
     const btnToggleInfo = document.getElementById("btnToggleInfo");
     const btnToggleExport = document.getElementById("btnToggleExport");
     const exportBody = document.getElementById("exportBody");
 
     const btnEdit = document.getElementById("btnEdit");
+    const btnVerify = document.getElementById("btnVerify");
+    const btnPrint = document.getElementById("btnPrint");
     const btnSave = document.getElementById("btnSave");
     const btnPublish = document.getElementById("btnPublish");
 
@@ -571,6 +609,7 @@
     const fHasQ = document.getElementById("fHasQ");
     const fHasD = document.getElementById("fHasD");
     const fNoKey = document.getElementById("fNoKey");
+    const fUnverified = document.getElementById("fUnverified");
     const blockList = document.getElementById("blockList");
 
     const editorPanel = document.getElementById("editorPanel");
@@ -682,15 +721,19 @@
       elMsg.style.display = (text ? "block" : "none");
     }
 
+    function clear(el){
+      while(el && el.firstChild) el.removeChild(el.firstChild);
+    }
+
     function showLockBox(lines){
       const arr = Array.isArray(lines) ? lines.filter(Boolean) : [];
       if(!arr.length){
         lockBox.style.display = "none";
-        lockBox.textContent = "";
+        clear(lockBox);
         return;
       }
       lockBox.style.display = "block";
-      lockBox.innerHTML = "";
+      clear(lockBox);
       const strong = document.createElement("strong");
       strong.textContent = "Åtgärd krävs";
       lockBox.appendChild(strong);
@@ -701,10 +744,6 @@
         ul.appendChild(li);
       });
       lockBox.appendChild(ul);
-    }
-
-    function clear(el){
-      while(el && el.firstChild) el.removeChild(el.firstChild);
     }
 
     function normText(v, max){
@@ -820,6 +859,19 @@
         verifiedBy: normText(b.verifiedBy ?? "", 60),
         items
       };
+    }
+
+    function isVerified(block){
+      const v = Number(block?.verifiedAt || 0) || 0;
+      return v > 0;
+    }
+
+    function formatVerified(block){
+      if(!block) return { text:"Verifiering: —", cls:"verifyPill warn" };
+      if(!isVerified(block)) return { text:"Verifiering: Ej verifierad", cls:"verifyPill warn" };
+      const who = String(block.verifiedBy || "—");
+      const when = new Date(Number(block.verifiedAt||0)).toLocaleString("sv-SE");
+      return { text:`Verifiering: ${who} • ${when}`, cls:"verifyPill ok" };
     }
 
     // ---------- storage (fail-closed) ----------
@@ -968,6 +1020,30 @@
       elSel.textContent = `Val: ${b.title || "(utan rubrik)"} • ${items} item(s)`;
     }
 
+    function setVerifyPill(){
+      const b = STATE.edit;
+      if(!b){
+        elVerifyPill.style.display = "none";
+        elVerifyPill.textContent = "Verifiering: —";
+        elVerifyPill.className = "verifyPill warn";
+        if(elVerifiedHint){ elVerifiedHint.style.display="none"; elVerifiedHint.textContent=""; }
+        return;
+      }
+      const fv = formatVerified(b);
+      elVerifyPill.style.display = "inline-flex";
+      elVerifyPill.textContent = fv.text;
+      elVerifyPill.className = fv.cls;
+
+      if(elVerifiedHint){
+        elVerifiedHint.style.display = "block";
+        if(isVerified(b)){
+          elVerifiedHint.textContent = `Verifierad av ${String(b.verifiedBy||"—")} • ${new Date(Number(b.verifiedAt||0)).toLocaleString("sv-SE")}`;
+        }else{
+          elVerifiedHint.textContent = "Ej verifierad ännu. (Använd knappen Verifiera när du har kontrollerat facit och innehåll.)";
+        }
+      }
+    }
+
     function updateStatePill(){
       const b = STATE.edit;
       if(!b){
@@ -1000,6 +1076,8 @@
       btnSave.disabled = true;
       btnPublish.disabled = true;
       btnEdit.disabled = true;
+      btnVerify.disabled = true;
+      btnPrint.disabled = true;
 
       btnItemUp.disabled = true;
       btnItemDown.disabled = true;
@@ -1010,6 +1088,8 @@
       STATE.selectedItemType = "";
       setTopbarEditing();
       hideItemEditor();
+
+      setVerifyPill();
     }
 
     function showEditor(){
@@ -1033,6 +1113,7 @@
       setSelectionPill();
       updateStatePill();
       setTopbarEditing();
+      setVerifyPill();
 
       renderItems();
       updateActionEnablement();
@@ -1043,6 +1124,10 @@
       const hasBlock = !!STATE.edit;
 
       btnEdit.disabled = !hasBlock;
+
+      // Print: tillåts även read-only (kontrollrum)
+      btnPrint.disabled = !hasBlock;
+      btnPrint.title = hasBlock ? "Skriv ut vald block" : "Välj ett block först.";
 
       btnSave.disabled = !(canWrite && hasBlock && STATE.dirtyBlock);
       btnSave.title = !hasBlock ? "Välj ett block först."
@@ -1060,6 +1145,19 @@
         const chk = validateForPublish(STATE.edit);
         btnPublish.disabled = !chk.ok;
         btnPublish.title = chk.ok ? "Redo att publicera" : ("Publicering stoppad: " + chk.reasons.join(" • "));
+      }
+
+      // verify rules: samma som publish (du verifierar att standarden håller)
+      if(!canWrite || !hasBlock){
+        btnVerify.disabled = true;
+        btnVerify.title = isSystemAdmin ? "Steward-läge (read-only)." : "Välj ett block först.";
+      }else if(STATE.dirtyBlock){
+        btnVerify.disabled = true;
+        btnVerify.title = "Spara först (osparade ändringar).";
+      }else{
+        const chkV = validateForVerify(STATE.edit);
+        btnVerify.disabled = !chkV.ok;
+        btnVerify.title = chkV.ok ? "Markera blocket som verifierat (utan att publicera)" : ("Verifiering stoppad: " + chkV.reasons.join(" • "));
       }
 
       moduleInp.disabled = !canWrite;
@@ -1116,6 +1214,7 @@
       try{ editorPanel.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
       setMsg("", "");
       setTopbarEditing();
+      setVerifyPill();
     }
 
     // ---------- block list (AO-05 + opt) ----------
@@ -1136,6 +1235,7 @@
         if(fHasQ.checked && comp.q === 0) continue;
         if(fHasD.checked && comp.d === 0) continue;
         if(fNoKey.checked && comp.miss === 0) continue;
+        if(fUnverified.checked && isVerified(b)) continue;
 
         if(q){
           const hay = [b.title||"", b.module||"", b.area||"", b.step||"", b.blockId||""].join(" ").toLowerCase();
@@ -1153,13 +1253,14 @@
 
     function buildRenderKey(){
       computeVisible();
-      const ids = (STATE.visible || []).map(b => `${b.blockId}:${b.status}`).join("|");
+      const ids = (STATE.visible || []).map(b => `${b.blockId}:${b.status}:${Number(b.verifiedAt||0)}`).join("|");
       const f = [
         String(filterStatus?.value||""),
         String(qBlocks?.value||""),
         fHasQ?.checked ? "q" : "",
         fHasD?.checked ? "d" : "",
-        fNoKey?.checked ? "m" : ""
+        fNoKey?.checked ? "m" : "",
+        fUnverified?.checked ? "uv" : ""
       ].join(",");
       return ids + "||" + f;
     }
@@ -1223,6 +1324,13 @@
           pill.className = "pill " + (st === "published" ? "ok" : "warn");
           pill.textContent = blockStatusLabel(st);
           right.appendChild(pill);
+
+          // Verifieringsindikator
+          const v = document.createElement("span");
+          v.className = isVerified(b) ? "verifyPill ok" : "verifyPill warn";
+          v.style.marginTop = "6px";
+          v.textContent = isVerified(b) ? "Verifierad" : "Ej verifierad";
+          right.appendChild(v);
 
           // AO-04: highlight missing facit quickly
           if(comp.miss > 0){
@@ -1467,6 +1575,7 @@
       updateStatePill();
       setSelectionPill();
       setTopbarEditing();
+      setVerifyPill();
       updateActionEnablement();
     }
 
@@ -1480,6 +1589,7 @@
       statusInp.value = blockStatusLabel(b.status);
       statusTag.textContent = blockStatusLabel(b.status);
       setTopbarEditing();
+      setVerifyPill();
     }
 
     function applyItemEditorToState(){
@@ -1520,6 +1630,7 @@
       updateLivePreview(ref.items[ref.idx]);
       updateStatePill();
       setTopbarEditing();
+      setVerifyPill();
     }
 
     function markDirty(){
@@ -1549,7 +1660,12 @@
       return { ok: reasons.length === 0, reasons };
     }
 
-    // ---------- save/publish ----------
+    function validateForVerify(block){
+      // Samma regel som publish: verifiering = “håller standard”
+      return validateForPublish(block);
+    }
+
+    // ---------- save/publish/verify ----------
     function syncEditBackToAll(){
       const edit = STATE.edit;
       if(!edit) return { ok:false, err:"Ingen vald block." };
@@ -1608,6 +1724,39 @@
       return parts.join(", ") || "Inga items";
     }
 
+    function verifyBlock(){
+      if(STATE.locked){ setMsg("err","Låst (för säkerhet)."); return; }
+      if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte verifiera."); return; }
+      if(!STATE.edit){ setMsg("err","Välj ett block först."); return; }
+      if(STATE.dirtyBlock){ setMsg("warn","Spara först (osparade ändringar)."); return; }
+
+      applyEditorToBlock();
+      applyItemEditorToState();
+
+      const chk = validateForVerify(STATE.edit);
+      if(!chk.ok){
+        setMsg("err","Kan inte verifiera. Åtgärda följande:");
+        showLockBox(chk.reasons);
+        updateActionEnablement();
+        return;
+      }
+
+      const now = Date.now();
+      STATE.edit.verifiedAt = now;
+      STATE.edit.verifiedBy = String(empNo || "");
+      STATE.edit.updatedAt = now;
+
+      const res = syncEditBackToAll();
+      if(!res.ok){ setMsg("err", res.err); return; }
+
+      showLockBox([]);
+      renderBlockList(true);
+      showEditor();
+      setVerifyPill();
+
+      setMsg("ok", `Verifierad av ${String(empNo||"—")} • ${new Date(now).toLocaleString("sv-SE")}`);
+    }
+
     function publishBlock(){
       if(STATE.locked){ setMsg("err","Låst (för säkerhet)."); return; }
       if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte publicera."); return; }
@@ -1627,6 +1776,7 @@
 
       const now = Date.now();
       STATE.edit.status = "published";
+      // Publicering räknas som verifiering också (kontrollrum)
       STATE.edit.verifiedAt = now;
       STATE.edit.verifiedBy = String(empNo || "");
       STATE.edit.updatedAt = now;
@@ -1641,8 +1791,119 @@
       showLockBox([]);
       renderBlockList(true);
       showEditor();
+      setVerifyPill();
 
       setMsg("ok", `Publicerad. ${summary}. Verifierad av ${who} • ${when}`);
+    }
+
+    // ---------- print (Kontrollrum) ----------
+    function escapeHtml(s){
+      return String(s ?? "")
+        .replace(/&/g,"&amp;")
+        .replace(/</g,"&lt;")
+        .replace(/>/g,"&gt;")
+        .replace(/"/g,"&quot;")
+        .replace(/'/g,"&#39;");
+    }
+
+    function buildPrintHtmlForBlock(block){
+      const b = normalizeBlock(block);
+      const comp = blockComposition(b);
+      const v = formatVerified(b);
+
+      const head = `
+<!doctype html>
+<html lang="sv">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Utskrift – ${escapeHtml(b.title || "Block")}</title>
+<style>
+  body{ font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; padding:16px; }
+  h1{ font-size:18px; margin:0 0 8px; }
+  .meta{ color:#333; font-size:12px; white-space:pre-line; margin:0 0 12px; }
+  .section{ margin-top:14px; padding-top:10px; border-top:1px solid #ddd; }
+  .item{ margin:10px 0; }
+  .tag{ display:inline-block; padding:2px 8px; border:1px solid #ddd; border-radius:999px; font-size:12px; }
+  .t{ font-weight:700; margin-top:6px; }
+  pre{ white-space:pre-wrap; word-wrap:break-word; background:#f7f7f7; padding:10px; border-radius:10px; border:1px solid #e6e6e6; }
+  .warn{ color:#7f1d1d; }
+</style>
+</head>
+<body>
+`;
+      const metaLines = [
+        `Modul: ${b.module || "—"}`,
+        `Område: ${b.area || "—"}`,
+        `Steg: ${b.step || "—"}`,
+        `Status: ${blockStatusLabel(b.status)}`,
+        `Items: ${comp.q+comp.t+comp.d} • Frågor: ${comp.q} • Dokument: ${comp.d} • Uppgifter: ${comp.t}`,
+        `${v.text}`
+      ].join("\n");
+
+      let body = `<h1>${escapeHtml(b.title || "Block")}</h1><div class="meta">${escapeHtml(metaLines)}</div>`;
+
+      if(comp.miss > 0){
+        body += `<div class="meta warn">OBS: ${comp.miss} fråga(or) saknar facit enligt reglerna.</div>`;
+      }
+
+      const items = Array.isArray(b.items) ? b.items : [];
+      if(items.length === 0){
+        body += `<div class="meta warn">Inga items i blocket.</div>`;
+      }else{
+        body += `<div class="section"><strong>Innehåll</strong></div>`;
+        items.forEach((it0, idx)=>{
+          const it = normalizeItem(it0, idx);
+          const kind = it.kind;
+          const label = kind === "question" ? "Fråga" : (kind === "task" ? "Uppgift" : "Dokument");
+          const tag = `${emojiForKind(kind)} ${label}`;
+
+          let extra = "";
+          if(kind === "question"){
+            const ok = facitOkForQuestion(it);
+            const opts = Array.isArray(it.options) ? it.options.filter(Boolean) : [];
+            extra += `<div class="meta">Svarstyp: ${opts.length>=2 ? "Val" : "Fri text"} • Facit: ${ok ? "OK" : "SAKNAS"}</div>`;
+            if(opts.length>=2){
+              extra += `<div class="meta">Alternativ:\n- ${escapeHtml(opts.join("\n- "))}</div>`;
+            }
+            extra += `<div class="meta">Facit: ${escapeHtml(String(it.answerKey||""))}</div>`;
+          }
+          if(kind === "task"){
+            extra += `<div class="meta">Kräver klar: ${it.requiresDone !== false ? "Ja" : "Nej"}</div>`;
+          }
+          if(kind === "document"){
+            extra += `<div class="meta">Kräver signering: ${it.requiresSign !== false ? "Ja" : "Nej"}</div>`;
+          }
+
+          body += `
+<div class="item">
+  <span class="tag">${escapeHtml(tag)}</span>
+  <div class="t">${escapeHtml(String(idx+1) + ") " + label)}</div>
+  ${extra}
+  <pre>${escapeHtml(String(it.text || "").trim() || "—")}</pre>
+</div>`;
+        });
+      }
+
+      const foot = `</body></html>`;
+      return head + body + foot;
+    }
+
+    function printSelectedBlock(){
+      if(!STATE.edit){ setMsg("warn","Välj ett block först."); return; }
+      try{
+        const html = buildPrintHtmlForBlock(STATE.edit);
+        const w = window.open("", "_blank", "noopener,noreferrer");
+        if(!w){ setMsg("err","Kunde inte öppna utskriftsfönster (pop-up blockerad)."); return; }
+        w.document.open();
+        w.document.write(html);
+        w.document.close();
+        try{ w.focus(); }catch{}
+        try{ w.print(); }catch{}
+      }catch(e){
+        console.error(e);
+        setMsg("err","Utskrift misslyckades.");
+      }
     }
 
     // ---------- item actions ----------
@@ -2121,6 +2382,7 @@
       if(fHasQ) fHasQ.checked = false;
       if(fHasD) fHasD.checked = false;
       if(fNoKey) fNoKey.checked = false;
+      if(fUnverified) fUnverified.checked = false;
 
       renderBlockList(true);
 
@@ -2148,6 +2410,7 @@
       renderItems();
       showItemEditorById(STATE.selectedItem);
       updateStatePill();
+      setVerifyPill();
       updateActionEnablement();
     }
 
@@ -2213,13 +2476,28 @@
       if(!STATE.dirtyBlock) return;
       saveEdits();
       updateStatePill();
+      setVerifyPill();
       updateActionEnablement();
+    });
+
+    btnVerify.addEventListener("click", ()=>{
+      setMsg("", "");
+      verifyBlock();
+      updateStatePill();
+      setVerifyPill();
+      updateActionEnablement();
+    });
+
+    btnPrint.addEventListener("click", ()=>{
+      setMsg("", "");
+      printSelectedBlock();
     });
 
     btnPublish.addEventListener("click", ()=>{
       setMsg("", "");
       publishBlock();
       updateStatePill();
+      setVerifyPill();
       updateActionEnablement();
     });
 
@@ -2244,6 +2522,7 @@
     fHasQ.addEventListener("change", ()=>renderBlockList(true));
     fHasD.addEventListener("change", ()=>renderBlockList(true));
     fNoKey.addEventListener("change", ()=>renderBlockList(true));
+    fUnverified.addEventListener("change", ()=>renderBlockList(true));
 
     // focused mode
     btnFocus.addEventListener("click", ()=>{
@@ -2302,7 +2581,7 @@
       clear(blockList);
       const wrap = document.createElement("div");
       wrap.className = "muted2";
-      wrap.textContent = "Tomt läge: Skapa nytt block eller exportera från utbildning.";
+      wrap.textContent = "Tomt läge: Exportera från utbildning, eller skapa block i bank.";
       blockList.appendChild(wrap);
       hideEditor();
     }
@@ -2368,7 +2647,7 @@
       setModePill();
 
       if(isSystemAdmin){
-        setMsg("warn", "Read-only (Systemansvarig): Ändringar är låsta.");
+        setMsg("warn", "Read-only (Systemansvarig): Ändringar/verifiering/publicering är låsta. Utskrift är tillåten.");
       }
 
       safeInitBlocks();
@@ -2377,6 +2656,7 @@
       updateStatePill();
       setSelectionPill();
       setTopbarEditing();
+      setVerifyPill();
       updateActionEnablement();
     }
 
