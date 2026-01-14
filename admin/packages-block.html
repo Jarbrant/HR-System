@@ -30,6 +30,12 @@
   - Ingen auto-selektion av första blocket
   - “Visa alla” runtime-toggle (ingen lagring)
 
+  AO-UX-LEFT-MODULE-GROUP-01 (PROD) – “Sök först → visa MODUL-grupper”:
+  - Vid sök/filter (utan “Visa alla”): vänsterlistan visar 1 rad per modul (samlingsblock)
+  - Klick på modul: visar block i modulen (i vänsterblocket) + “Tillbaka”
+  - Töm sök + inga filter: tillbaka till “Sök för att visa block”
+  - Ingen lagring: endast runtime-state
+
   EXPORT-STEGET:
   - Import/Export-steg: “Hämta från Utbildningar (AO-057_TRAININGS_V1)” → exportera som block till block-banken (AO-0XX_BLOCKS_V1)
   - Fail-closed: export blockas om trainings-data är korrupt; SYSTEM_ADMIN = read-only
@@ -42,6 +48,12 @@
   - XSS-safe rendering (textContent, inga osäkra innerHTML)
   - Inga nya storage-keys (endast AO-0XX_BLOCKS_V1 skrivs här; AO-057_TRAININGS_V1 läses)
   - SYSTEM_ADMIN = steward-läge (read-only)
+
+  ÄNDRINGSLOGG (AO-UX-LEFT-MODULE-GROUP-01):
+  - vNext: Vänsterlista grupperar resultat per modul (1 rad per modul) vid sök/filter
+  - vNext: Klick modul → visar block i modulen (vänster) + “Tillbaka”
+  - vNext: “Visa alla” visar alltid block (ingen gruppering)
+  - vNext: Fix: Export-toggle visar/döljer body korrekt (visningslogik)
   ============================================================ -->
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
@@ -976,6 +988,9 @@
       // AO-UX-COLLAPSE-SEARCHFIRST-01: runtime-flag (ingen lagring)
       showAllBlocks: false,
 
+      // AO-UX-LEFT-MODULE-GROUP-01: runtime (ingen lagring)
+      leftModule: "",
+
       // AO-05 optimization: cheap render cache
       _lastBlockRenderKey: ""
     };
@@ -1246,7 +1261,7 @@
       setVerifyPill();
     }
 
-    // ---------- block list (AO-05 + opt + SEARCHFIRST) ----------
+    // ---------- block list (AO-05 + opt + SEARCHFIRST + MODULE GROUP) ----------
     function hasDiscoveryActive(){
       const q = String(qBlocks?.value || "").trim();
       const f = String(filterStatus?.value || "all");
@@ -1304,19 +1319,228 @@
       STATE.visible = out;
     }
 
-    function buildRenderKey(){
+    function buildRenderKey(extra){
       computeVisible();
       const ids = (STATE.visible || []).map(b => `${b.blockId}:${b.status}:${Number(b.verifiedAt||0)}`).join("|");
       const f = [
         String(filterStatus?.value||""),
         String(qBlocks?.value||""),
         (STATE.showAllBlocks ? "SHOWALL" : ""),
+        (STATE.leftModule ? ("MOD:" + STATE.leftModule) : ""),
         fHasQ?.checked ? "q" : "",
         fHasD?.checked ? "d" : "",
         fNoKey?.checked ? "m" : "",
-        fUnverified?.checked ? "uv" : ""
+        fUnverified?.checked ? "uv" : "",
+        String(extra || "")
       ].join(",");
       return ids + "||" + f;
+    }
+
+    function safeModuleLabel(m){
+      const s = String(m || "").trim();
+      return s || "Okänd modul";
+    }
+
+    function renderModuleGroups(){
+      // group on STATE.visible
+      const list = Array.isArray(STATE.visible) ? STATE.visible : [];
+      const groups = new Map();
+
+      for(const b of list){
+        const key = safeModuleLabel(b.module).toLowerCase();
+        const label = safeModuleLabel(b.module);
+        if(!groups.has(key)){
+          groups.set(key, { key, label, n:0, last:0, q:0, d:0, t:0, miss:0, anyUnverified:0, anyPublished:0, anyDraft:0 });
+        }
+        const g = groups.get(key);
+        g.n += 1;
+        g.last = Math.max(g.last, Number(b.updatedAt||0));
+        const c = b.__comp || blockComposition(b);
+        g.q += c.q; g.d += c.d; g.t += c.t; g.miss += c.miss;
+        g.anyUnverified += (isVerified(b) ? 0 : 1);
+        const st = normStatus(b.status);
+        if(st === "published") g.anyPublished += 1;
+        else g.anyDraft += 1;
+      }
+
+      const arr = [...groups.values()];
+      arr.sort((a,b)=> b.last - a.last);
+
+      clear(blockList);
+
+      if(arr.length === 0){
+        const d = document.createElement("div");
+        d.className = "muted2";
+        d.textContent = (Array.isArray(STATE.all) && STATE.all.length) ? "Inga träffar (justera sök/filter)." : "Inga block ännu.";
+        blockList.appendChild(d);
+        return { groupsCount:0 };
+      }
+
+      arr.slice(0, 250).forEach(g=>{
+        const row = document.createElement("div");
+        row.className = "rowItem";
+        row.setAttribute("role","button");
+        row.setAttribute("tabindex","0");
+        row.dataset.modulekey = g.key;
+
+        const top = document.createElement("div");
+        top.className = "rowTop";
+
+        const left = document.createElement("div");
+        const title = document.createElement("div");
+        title.className = "rowTitle";
+        title.textContent = `${g.label} (${g.n} block)`;
+
+        const meta = document.createElement("div");
+        meta.className = "tiny";
+        meta.textContent = `❓ ${g.q} • 📄 ${g.d} • ✅ ${g.t}` + (g.miss ? ` • Facit saknas: ${g.miss}` : "");
+
+        const ico = document.createElement("div");
+        ico.className = "icoRow";
+        const pB = document.createElement("span"); pB.className = "icoPill"; pB.textContent = `🧱 ${g.n}`;
+        const pP = document.createElement("span"); pP.className = "icoPill"; pP.textContent = `🟢 ${g.anyPublished}`;
+        const pD = document.createElement("span"); pD.className = "icoPill"; pD.textContent = `🟡 ${g.anyDraft}`;
+        const pV = document.createElement("span"); pV.className = "icoPill"; pV.textContent = `🔎 ${g.anyUnverified} ej verifierade`;
+        ico.appendChild(pB); ico.appendChild(pP); ico.appendChild(pD); ico.appendChild(pV);
+
+        left.appendChild(title);
+        left.appendChild(meta);
+        left.appendChild(ico);
+
+        const right = document.createElement("div");
+        const pill = document.createElement("span");
+        pill.className = "pill ok";
+        pill.textContent = "Öppna";
+        right.appendChild(pill);
+
+        top.appendChild(left);
+        top.appendChild(right);
+        row.appendChild(top);
+
+        function choose(){
+          STATE.leftModule = g.label; // store human label (stable)
+          renderBlockList(true);
+        }
+        row.addEventListener("click", choose);
+        row.addEventListener("keydown", (e)=>{
+          if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
+        });
+
+        blockList.appendChild(row);
+      });
+
+      return { groupsCount: arr.length };
+    }
+
+    function renderBackRow(){
+      const row = document.createElement("div");
+      row.className = "rowItem";
+      row.setAttribute("role","button");
+      row.setAttribute("tabindex","0");
+
+      const title = document.createElement("div");
+      title.className = "rowTitle";
+      title.textContent = "← Tillbaka till moduler";
+      row.appendChild(title);
+
+      const meta = document.createElement("div");
+      meta.className = "tiny muted2";
+      meta.style.marginTop = "4px";
+      meta.textContent = "Visar block i vald modul. (Sök/filter gäller fortfarande.)";
+      row.appendChild(meta);
+
+      function goBack(){
+        STATE.leftModule = "";
+        renderBlockList(true);
+      }
+      row.addEventListener("click", goBack);
+      row.addEventListener("keydown", (e)=>{
+        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); goBack(); }
+      });
+
+      blockList.appendChild(row);
+    }
+
+    function renderBlockRows(list){
+      const nAll = Array.isArray(STATE.all) ? STATE.all.length : 0;
+      const nVis = Array.isArray(list) ? list.length : 0;
+
+      if(nVis === 0){
+        const d = document.createElement("div");
+        d.className = "muted2";
+        d.textContent = nAll ? "Inga träffar (justera sök/filter)." : "Inga block ännu.";
+        blockList.appendChild(d);
+        return;
+      }
+
+      list.slice(0, 400).forEach(b => {
+        const row = document.createElement("div");
+        row.className = "rowItem" + (String(b.blockId) === String(STATE.selectedBlock) ? " active" : "");
+        row.setAttribute("role","button");
+        row.setAttribute("tabindex","0");
+        row.dataset.blockid = String(b.blockId||"");
+
+        const top = document.createElement("div");
+        top.className = "rowTop";
+
+        const left = document.createElement("div");
+        const title = document.createElement("div");
+        title.className = "rowTitle";
+        title.textContent = b.title || "(utan rubrik)";
+
+        const meta = document.createElement("div");
+        meta.className = "tiny";
+        const st = normStatus(b.status);
+        const comp = b.__comp || blockComposition(b);
+        meta.textContent = `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"} • ${comp.q+comp.t+comp.d} item(s)`;
+
+        // AO-05: icons per type
+        const ico = document.createElement("div");
+        ico.className = "icoRow";
+        const pQ = document.createElement("span"); pQ.className = "icoPill"; pQ.textContent = `❓ ${comp.q}`;
+        const pD = document.createElement("span"); pD.className = "icoPill"; pD.textContent = `📄 ${comp.d}`;
+        const pT = document.createElement("span"); pT.className = "icoPill"; pT.textContent = `✅ ${comp.t}`;
+        const pM = document.createElement("span"); pM.className = "icoPill"; pM.textContent = `🧩 ${comp.kind === "mixed" ? "Mixed" : (comp.kind === "empty" ? "Tomt" : "Single")}`;
+        ico.appendChild(pQ); ico.appendChild(pD); ico.appendChild(pT); ico.appendChild(pM);
+
+        left.appendChild(title);
+        left.appendChild(meta);
+        left.appendChild(ico);
+
+        const right = document.createElement("div");
+        const pill = document.createElement("span");
+        pill.className = "pill " + (st === "published" ? "ok" : "warn");
+        pill.textContent = blockStatusLabel(st);
+        right.appendChild(pill);
+
+        // Verifieringsindikator
+        const v = document.createElement("span");
+        v.className = isVerified(b) ? "verifyPill ok" : "verifyPill warn";
+        v.style.marginTop = "6px";
+        v.textContent = isVerified(b) ? "Verifierad" : "Ej verifierad";
+        right.appendChild(v);
+
+        // AO-04: highlight missing facit quickly
+        if(comp.miss > 0){
+          const miss = document.createElement("span");
+          miss.className = "qaPill bad";
+          miss.style.marginTop = "6px";
+          miss.textContent = `Facit saknas: ${comp.miss}`;
+          right.appendChild(miss);
+        }
+
+        top.appendChild(left);
+        top.appendChild(right);
+        row.appendChild(top);
+
+        function choose(){ selectBlockByObject(b); }
+        row.addEventListener("click", choose);
+        row.addEventListener("keydown", (e)=>{
+          if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
+        });
+
+        blockList.appendChild(row);
+      });
     }
 
     function renderBlockList(forceFull){
@@ -1326,106 +1550,84 @@
       if(!hasDiscoveryActive()){
         STATE.visible = [];
         STATE._lastBlockRenderKey = "SEARCHFIRST";
+        STATE.leftModule = ""; // reset när man går tillbaka till “lugnt läge”
         countBlocks.textContent = `0 / ${nAll}`;
         renderSearchFirstPlaceholder(nAll);
         return;
       }
 
-      const key = buildRenderKey();
-      const nVis = Array.isArray(STATE.visible) ? STATE.visible.length : 0;
-      countBlocks.textContent = `${nVis} / ${nAll}`;
+      const q = String(qBlocks?.value || "").trim();
+      const inShowAll = !!STATE.showAllBlocks;
 
+      // AO-UX-LEFT-MODULE-GROUP-01:
+      // - Om “Visa alla” = alltid blocklista
+      // - Annars: modulgrupper, och vid klick: block i modulen
+      const mode =
+        inShowAll ? "ALLBLOCKS" :
+        (STATE.leftModule ? ("MODBLOCKS:" + STATE.leftModule) : "MODULEGROUPS");
+
+      const key = buildRenderKey(mode);
       const needsFull = !!forceFull || key !== STATE._lastBlockRenderKey;
 
-      if(needsFull){
-        STATE._lastBlockRenderKey = key;
-        clear(blockList);
+      // count text
+      const nVisBlocks = Array.isArray(STATE.visible) ? STATE.visible.length : 0;
 
-        if(nVis === 0){
-          const d = document.createElement("div");
-          d.className = "muted2";
-          d.textContent = nAll ? "Inga träffar (justera sök/filter)." : "Inga block ännu.";
-          blockList.appendChild(d);
-          return;
-        }
-
-        STATE.visible.slice(0, 400).forEach(b => {
-          const row = document.createElement("div");
-          row.className = "rowItem" + (String(b.blockId) === String(STATE.selectedBlock) ? " active" : "");
-          row.setAttribute("role","button");
-          row.setAttribute("tabindex","0");
-          row.dataset.blockid = String(b.blockId||"");
-
-          const top = document.createElement("div");
-          top.className = "rowTop";
-
-          const left = document.createElement("div");
-          const title = document.createElement("div");
-          title.className = "rowTitle";
-          title.textContent = b.title || "(utan rubrik)";
-
-          const meta = document.createElement("div");
-          meta.className = "tiny";
-          const st = normStatus(b.status);
-          const comp = b.__comp || blockComposition(b);
-          meta.textContent = `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"} • ${comp.q+comp.t+comp.d} item(s)`;
-
-          // AO-05: icons per type
-          const ico = document.createElement("div");
-          ico.className = "icoRow";
-          const pQ = document.createElement("span"); pQ.className = "icoPill"; pQ.textContent = `❓ ${comp.q}`;
-          const pD = document.createElement("span"); pD.className = "icoPill"; pD.textContent = `📄 ${comp.d}`;
-          const pT = document.createElement("span"); pT.className = "icoPill"; pT.textContent = `✅ ${comp.t}`;
-          const pM = document.createElement("span"); pM.className = "icoPill"; pM.textContent = `🧩 ${comp.kind === "mixed" ? "Mixed" : (comp.kind === "empty" ? "Tomt" : "Single")}`;
-          ico.appendChild(pQ); ico.appendChild(pD); ico.appendChild(pT); ico.appendChild(pM);
-
-          left.appendChild(title);
-          left.appendChild(meta);
-          left.appendChild(ico);
-
-          const right = document.createElement("div");
-          const pill = document.createElement("span");
-          pill.className = "pill " + (st === "published" ? "ok" : "warn");
-          pill.textContent = blockStatusLabel(st);
-          right.appendChild(pill);
-
-          // Verifieringsindikator
-          const v = document.createElement("span");
-          v.className = isVerified(b) ? "verifyPill ok" : "verifyPill warn";
-          v.style.marginTop = "6px";
-          v.textContent = isVerified(b) ? "Verifierad" : "Ej verifierad";
-          right.appendChild(v);
-
-          // AO-04: highlight missing facit quickly
-          if(comp.miss > 0){
-            const miss = document.createElement("span");
-            miss.className = "qaPill bad";
-            miss.style.marginTop = "6px";
-            miss.textContent = `Facit saknas: ${comp.miss}`;
-            right.appendChild(miss);
-          }
-
-          top.appendChild(left);
-          top.appendChild(right);
-          row.appendChild(top);
-
-          function choose(){ selectBlockByObject(b); }
-          row.addEventListener("click", choose);
-          row.addEventListener("keydown", (e)=>{
-            if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
+      if(!needsFull){
+        // cheap active update only (gäller endast när vi faktiskt visar blockrader)
+        if(mode.startsWith("ALLBLOCKS") || mode.startsWith("MODBLOCKS")){
+          const rows = blockList.querySelectorAll(".rowItem");
+          rows.forEach(r=>{
+            const id = String(r.dataset.blockid || "");
+            if(id && id === String(STATE.selectedBlock)) r.classList.add("active");
+            else if(id) r.classList.remove("active");
           });
-
-          blockList.appendChild(row);
-        });
-      }else{
-        // cheap active update only
-        const rows = blockList.querySelectorAll(".rowItem");
-        rows.forEach(r=>{
-          const id = String(r.dataset.blockid || "");
-          if(id && id === String(STATE.selectedBlock)) r.classList.add("active");
-          else r.classList.remove("active");
-        });
+        }
+        return;
       }
+
+      STATE._lastBlockRenderKey = key;
+      clear(blockList);
+
+      // VIEW: ALL BLOCKS
+      if(inShowAll){
+        countBlocks.textContent = `${nVisBlocks} / ${nAll}`;
+        renderBlockRows(STATE.visible);
+        return;
+      }
+
+      // VIEW: MODULE GROUPS
+      if(!STATE.leftModule){
+        const g = renderModuleGroups();
+        // Text: “X moduler • Y / Z block”
+        countBlocks.textContent = `${g.groupsCount} moduler • ${nVisBlocks} / ${nAll} block`;
+        return;
+      }
+
+      // VIEW: BLOCKS IN MODULE
+      // Säkerställ att vald modul fortfarande finns i resultaten,
+      // annars backa till grupper (fail-soft i visningen).
+      const wanted = String(STATE.leftModule || "").trim().toLowerCase();
+      const filtered = (STATE.visible || []).filter(b => safeModuleLabel(b.module).toLowerCase() === wanted);
+
+      if(filtered.length === 0){
+        // Om modulen inte längre matchar (t.ex. sök/filter ändrats), gå tillbaka.
+        STATE.leftModule = "";
+        const g = renderModuleGroups();
+        countBlocks.textContent = `${g.groupsCount} moduler • ${nVisBlocks} / ${nAll} block`;
+        return;
+      }
+
+      // Render module header/back row + block rows
+      renderBackRow();
+
+      const head = document.createElement("div");
+      head.className = "tiny muted2";
+      head.style.margin = "10px 0 12px";
+      head.textContent = `Modul: ${STATE.leftModule} • ${filtered.length} block`;
+      blockList.appendChild(head);
+
+      countBlocks.textContent = `${filtered.length} / ${nAll}`;
+      renderBlockRows(filtered);
     }
 
     // ---------- item editor (AO-14) ----------
@@ -2448,8 +2650,9 @@
       if(fNoKey) fNoKey.checked = false;
       if(fUnverified) fUnverified.checked = false;
 
-      // Återgå till “Sök först” efter export (listan syns via valt block ändå när man söker/visar alla)
+      // Återgå till “Sök först”
       STATE.showAllBlocks = false;
+      STATE.leftModule = "";
       if(btnShowAllBlocks){
         btnShowAllBlocks.setAttribute("aria-pressed","false");
         btnShowAllBlocks.textContent = "Visa alla";
@@ -2605,6 +2808,8 @@
         btnShowAllBlocks.textContent = next ? "Sök först" : "Visa alla";
         btnShowAllBlocks.title = next ? "Återgå till sök-läge" : "Visa hela listan utan sök";
         STATE.showAllBlocks = next;
+        // När man växlar “Visa alla” tar vi bort modul-detalj (lugnar visuellt)
+        if(next){ STATE.leftModule = ""; }
         renderBlockList(true);
       });
     }
@@ -2617,12 +2822,13 @@
       if(sideCard) sideCard.style.display = on ? "" : "none";
     });
 
-    // export collapse
+    // export collapse (FIX: korrekt visa/dölj)
     btnToggleExport.addEventListener("click", ()=>{
-      const open = btnToggleExport.getAttribute("aria-expanded") !== "false";
-      btnToggleExport.setAttribute("aria-expanded", String(!open));
-      btnToggleExport.textContent = open ? "Visa" : "Dölj";
-      exportBody.style.display = open ? "block" : "none";
+      const isOpen = btnToggleExport.getAttribute("aria-expanded") === "true";
+      const next = !isOpen;
+      btnToggleExport.setAttribute("aria-expanded", String(next));
+      btnToggleExport.textContent = next ? "Dölj" : "Visa";
+      exportBody.style.display = next ? "block" : "none";
     });
 
     // info toggle (döljer/visar InfoBox – lugn start)
@@ -2690,7 +2896,7 @@
         return;
       }
 
-      // AO-UX-COLLAPSE-SEARCHFIRST-01: ingen auto-selektion vid init
+      // ingen auto-selektion vid init
       renderBlockList(true);
       hideEditor();
     }
@@ -2721,12 +2927,12 @@
       setWhoPill();
       setModePill();
 
-      // AO-UX-COLLAPSE-SEARCHFIRST-01: lugn start
+      // lugn start
       if(introBox) introBox.style.display = "none";
       btnToggleInfo.dataset.on = "0";
       btnToggleInfo.textContent = "Visa info";
 
-      // Export stängd vid start (markup är redan stängd, men vi säkrar här också)
+      // Export stängd vid start
       btnToggleExport.setAttribute("aria-expanded","false");
       btnToggleExport.textContent = "Visa";
       if(exportBody) exportBody.style.display = "none";
@@ -2737,6 +2943,7 @@
         btnShowAllBlocks.title = "Visa hela listan utan sök";
       }
       STATE.showAllBlocks = false;
+      STATE.leftModule = "";
 
       if(isSystemAdmin){
         setMsg("warn", "Read-only (Systemansvarig): Ändringar/verifiering/publicering är låsta. Utskrift är tillåten.");
