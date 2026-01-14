@@ -10,6 +10,32 @@
   Projekt: HR-System
   Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
 
+  AO 1–17 (koppling per BLOCK) – IMPLEMENTERAT I DENNA FIL:
+  - AO-01..AO-17 enligt PRC-lista (förklarande intro, typ-färger, kontext i topbar,
+    tydliga status/felorsaker, filter + ikoner, editor-sektioner, null-safe helpers,
+    auth/readonly, validering, trainings preview counts, STATE-shape, selection,
+    templates + live preview, save/publish summary, export auto-select, safe bootstrap).
+
+  NYTT i denna patch (KONTROLLRUM / VERIFIERING / UTSKRIFT):
+  - Verifieringssteg: “Verifiera” (utan att ändra datamodell) använder befintliga fält:
+    verifiedAt + verifiedBy på blocket. (Ingen ny storage-key, ingen ny schema-nyckel.)
+  - Filter: “Ej verifierade” (visar block där verifiedAt saknas/0)
+  - Utskrift: “Skriv ut” (print) för vald block – skriver ut dokument + frågor + uppgifter i en säker print-vy.
+  - Design: tar bort hover-brightness (följer “hover = endast skugga/border”)
+
+  AO-UX-COLLAPSE-SEARCHFIRST-01 (PROD) – “Sök först – visa sen”:
+  - Blocklista visar starttext vid init (ingen lång lista direkt)
+  - Export-ruta stängd vid init
+  - InfoBox dold vid init (knapp visar/döljer)
+  - Ingen auto-selektion av första blocket
+  - “Visa alla” runtime-toggle (ingen lagring)
+
+  EXPORT-STEGET:
+  - Import/Export-steg: “Hämta från Utbildningar (AO-057_TRAININGS_V1)” → exportera som block till block-banken (AO-0XX_BLOCKS_V1)
+  - Fail-closed: export blockas om trainings-data är korrupt; SYSTEM_ADMIN = read-only
+  - Back-compat: stöder flera shapes i trainings (array/wrapper, olika fältnamn för block/items/content/rawText osv.)
+  - Ingen ny storage-key: Läser AO-057_TRAININGS_V1, skriver endast AO-0XX_BLOCKS_V1
+
   POLICY (LÅST):
   - UI-only • Fail-closed
   - sessionStorage först (auth) • fallback localStorage via CORE (HRApp)
@@ -17,25 +43,9 @@
   - Inga nya storage-keys (endast AO-0XX_BLOCKS_V1 skrivs här; AO-057_TRAININGS_V1 läses)
   - SYSTEM_ADMIN = steward-läge (read-only)
 
-  Keys (LÅSTA):
-  - BLOCKS_KEY:   AO-0XX_BLOCKS_V1 (read/write)  [wrapper: {blocks:[]}]
-  - TRAININGS_KEY: AO-057_TRAININGS_V1 (read-only)
-
-  NYTT i denna patch (UX-FÖRTYDLIGANDE / FÖRENKLING):
-  - “Start här”-hjälp i InfoBox: 3 tydliga steg (Sök → Välj → Redigera/Verifiera/Print)
-  - Rensa-knappar:
-    - “Rensa” i block-sök (återgår till Sök först-läge, nollställer filter)
-    - “Rensa” i export-sök (nollställer modul/område/titel + vald utbildning)
-  - Snabbknappar (runtime, ingen lagring): “Endast utkast”, “Saknar facit”, “Ej verifierade”
-  - Tydligare tomlägen/placeholder-text: guidar användaren vad som krävs för nästa steg
-
-  ÄNDRINGSLOGG (≤8 rader):
-  - UX: 3-stegs “Start här” + tydligare tomlägen
-  - UX: Rensa block-sök/filter → tillbaka till “Sök först”
-  - UX: Rensa export-sök/val → snabb omstart av exportflöde
-  - UX: Snabbfilter-knappar (runtime) för vanligaste vyerna
-  - Robusthet: säkrare init (fail-closed) + extra guards vid saknade element
-  - QoL: Ctrl/Cmd+S (spara), Ctrl/Cmd+P (print), Esc (avsluta fokus) — kvar
+  PATCH v1.1 (autopatch inom AO-scope):
+  - FIX: Export-ruta toggle (btnToggleExport) visade/dol­de inte exportBody korrekt (P0)
+  - FIX: Tooltips i låst läge för Publicera/Verifiera (P1)
   ============================================================ -->
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
@@ -71,9 +81,6 @@
       grid-template-columns: 420px 1fr;
       gap:12px;
       align-items:start;
-    }
-    .grid2.focused{
-      grid-template-columns: 1fr;
     }
     @media (max-width: 980px){
       .grid2{ grid-template-columns: 1fr; }
@@ -266,15 +273,6 @@
     }
     .verifyPill.ok{ border-color: rgba(16,185,129,.35); background: rgba(209,250,229,.55); }
     .verifyPill.warn{ border-color: rgba(245,158,11,.35); background: rgba(254,243,199,.7); }
-
-    /* UX: små knapp-rader i vänster kort (snabbfilter) */
-    .miniRow{
-      display:flex;
-      gap:8px;
-      flex-wrap:wrap;
-      align-items:center;
-      margin-top:8px;
-    }
   </style>
 </head>
 
@@ -333,25 +331,24 @@
 
     <!-- AO-01: tydlig introtext (dold vid init enligt “Sök först”) -->
     <div class="infoBox" id="introBox" style="display:none;">
-      <strong>Start här (3 steg):</strong>
+      <strong>Det här bygger du här:</strong>
+      <div class="tiny" style="margin-top:6px;">
+        Denna sida redigerar <strong>block</strong> som kan innehålla <strong>dokument</strong>, <strong>frågor</strong> och <strong>uppgifter</strong>.
+      </div>
       <ul class="tiny">
-        <li><strong>1) Sök</strong> efter block (vänster) – eller exportera från utbildningar.</li>
-        <li><strong>2) Välj</strong> ett block – då laddas editor (höger).</li>
-        <li><strong>3) Redigera</strong> items → <strong>Spara</strong> → (valfritt) <strong>Verifiera</strong> eller <strong>Publicera</strong> → <strong>Skriv ut</strong> vid behov.</li>
+        <li>📄 Document (info)</li>
+        <li>❓ Question (fråga + facit)</li>
+        <li>✅ Task (uppgift)</li>
+        <li>Mixed = flera typer i samma block</li>
       </ul>
       <div class="tiny" style="margin-top:8px;">
-        Block kan innehålla <strong>dokument</strong>, <strong>frågor</strong> och <strong>uppgifter</strong>:
-        📄 Dokument • ❓ Fråga (facit krävs) • ✅ Uppgift
-      </div>
-      <div class="tiny" style="margin-top:8px;">
-        <strong>Kontrollrum:</strong> En admin kan skapa innehåll i <span class="mono">admin/trainings.html</span> →
-        här kan en annan admin <strong>verifiera</strong> och <strong>skriva ut</strong>.
+        <strong>Kontrollrum:</strong> En admin kan skapa innehåll i <span class="mono">admin/trainings.html</span> → här kan en annan admin <strong>verifiera</strong> och <strong>skriva ut</strong>.
       </div>
     </div>
 
     <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
 
-    <div class="grid2" id="mainGrid" style="margin-top:12px;">
+    <div class="grid2" style="margin-top:12px;">
       <!-- =========================================
          BLOCK 5/17 – Left column: Blocklista + Export-box + filter + listcontainer
          ========================================= -->
@@ -366,14 +363,12 @@
           </div>
 
           <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px;">
-            <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
-              <label class="tiny" style="margin:0; font-weight:900; flex:1; min-width:220px;">
+            <div style="display:flex; gap:10px; align-items:flex-end;">
+              <label class="tiny" style="margin:0; font-weight:900; flex:1;">
                 Sök block
                 <input id="qBlocks" type="text" placeholder="Rubrik, modul, område…" autocomplete="off" />
               </label>
-
               <button class="miniBtn" id="btnShowAllBlocks" type="button" aria-pressed="false" title="Visa hela listan utan sök">Visa alla</button>
-              <button class="miniBtn" id="btnClearBlocks" type="button" title="Rensa sök och filter (tillbaka till Sök först)">Rensa</button>
             </div>
 
             <label class="tiny" style="margin:0; font-weight:900;">
@@ -391,17 +386,6 @@
               <label><input type="checkbox" id="fHasD"> Har dokument</label>
               <label><input type="checkbox" id="fNoKey"> Saknar facit</label>
               <label><input type="checkbox" id="fUnverified"> Ej verifierade</label>
-            </div>
-
-            <!-- UX: snabbfilter-knappar (runtime) -->
-            <div class="miniRow" aria-label="Snabbfilter">
-              <button class="miniBtn" id="btnQuickDraft" type="button" title="Sätt Visa=Utkast">Endast utkast</button>
-              <button class="miniBtn" id="btnQuickNoKey" type="button" title="Sätt filter Saknar facit">Saknar facit</button>
-              <button class="miniBtn" id="btnQuickUnverified" type="button" title="Sätt filter Ej verifierade">Ej verifierade</button>
-            </div>
-
-            <div class="tiny muted2" id="leftHint" style="margin-top:2px;">
-              Sök eller använd snabbfilter för att visa block.
             </div>
           </div>
         </div>
@@ -447,11 +431,6 @@
               </div>
             </div>
 
-            <div class="miniRow" style="justify-content:space-between;">
-              <button class="miniBtn" id="btnClearExport" type="button" title="Rensa export-sök och vald utbildning">Rensa</button>
-              <button class="miniBtn" id="btnReloadTrainings" type="button">Uppdatera</button>
-            </div>
-
             <div class="exportList" id="trainPreview" aria-label="Träffar" style="margin-top:10px;">
               <div class="muted2">Laddar utbildningar…</div>
             </div>
@@ -460,6 +439,7 @@
 
             <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
               <button class="miniBtn" id="btnExportTraining" type="button" disabled>Exportera vald utbildning</button>
+              <button class="miniBtn" id="btnReloadTrainings" type="button">Uppdatera</button>
             </div>
 
             <div class="softNote" id="trainExportHint" style="margin-top:10px;">
@@ -490,12 +470,8 @@
             </div>
           </div>
 
-          <div class="tiny" id="panelHint" aria-live="polite" style="margin-top:6px;">
-            Välj ett block i vänsterlistan.
-          </div>
-          <div class="tiny muted2" id="editorEmptyHint" style="margin-top:8px;">
-            Tips: Sök och välj ett block (vänster). Då kan du redigera items här.
-          </div>
+          <div class="tiny" id="panelHint" aria-live="polite" style="margin-top:6px;">Välj ett block i listan.</div>
+          <div class="tiny muted2" id="editorEmptyHint" style="margin-top:8px;">Tips: Välj ett block i vänsterlistan för att se och redigera innehållet här.</div>
 
           <div id="editorWrap" style="margin-top:10px; display:none;">
             <div aria-label="Block-metadata">
@@ -614,6 +590,7 @@
                 </label>
               </div>
             </div>
+
           </div>
 
           <div class="tiny" style="margin-top:12px;">
@@ -657,12 +634,6 @@
     const countBlocks = document.getElementById("countBlocks");
     const qBlocks = document.getElementById("qBlocks");
     const btnShowAllBlocks = document.getElementById("btnShowAllBlocks");
-    const btnClearBlocks = document.getElementById("btnClearBlocks");
-
-    const btnQuickDraft = document.getElementById("btnQuickDraft");
-    const btnQuickNoKey = document.getElementById("btnQuickNoKey");
-    const btnQuickUnverified = document.getElementById("btnQuickUnverified");
-    const leftHint = document.getElementById("leftHint");
 
     const filterStatus = document.getElementById("filterStatus");
     const fHasQ = document.getElementById("fHasQ");
@@ -718,7 +689,6 @@
 
     const btnFocus = document.getElementById("btnFocus");
     const sideCard = document.querySelector(".sideCard");
-    const mainGrid = document.getElementById("mainGrid");
 
     const qTrainModule = document.getElementById("qTrainModule");
     const qTrainArea = document.getElementById("qTrainArea");
@@ -728,7 +698,6 @@
     const trainPreviewDetail = document.getElementById("trainPreviewDetail");
     const btnExportTraining = document.getElementById("btnExportTraining");
     const btnReloadTrainings = document.getElementById("btnReloadTrainings");
-    const btnClearExport = document.getElementById("btnClearExport");
     const trainExportHint = document.getElementById("trainExportHint");
 
     const navLogout = document.getElementById("navLogout");
@@ -789,13 +758,10 @@
     function showLockBox(lines){
       const arr = Array.isArray(lines) ? lines.filter(Boolean) : [];
       if(!arr.length){
-        if(lockBox){
-          lockBox.style.display = "none";
-          clear(lockBox);
-        }
+        lockBox.style.display = "none";
+        clear(lockBox);
         return;
       }
-      if(!lockBox) return;
       lockBox.style.display = "block";
       clear(lockBox);
       const strong = document.createElement("strong");
@@ -989,7 +955,7 @@
       return { ok:true, corrupt:false, missing:false, trainings };
     }
 
-    // ---------- STATE ----------
+    // ---------- STATE (AO-12) ----------
     const STATE = {
       locked: false,
       lockReasons: [],
@@ -999,7 +965,7 @@
 
       selectedBlock: "",
       selectedItem: null,
-      selectedItemType: "",
+      selectedItemType: "",   // AO-12: explicit
       edit: null,
 
       dirtyBlock: false,
@@ -1011,14 +977,10 @@
       selectedTrainingIndex: -1,
       trainingVisibleIndexes: [],
 
-      // runtime (ingen lagring)
+      // AO-UX-COLLAPSE-SEARCHFIRST-01: runtime-flag (ingen lagring)
       showAllBlocks: false,
 
-      // runtime (ingen lagring)
-      leftModuleKey: "",
-      leftModuleLabel: "",
-
-      // cheap cache
+      // AO-05 optimization: cheap render cache
       _lastBlockRenderKey: ""
     };
 
@@ -1040,8 +1002,8 @@
     function setTopbarEditing(){
       const b = STATE.edit;
       if(!b){
-        if(topEditing) topEditing.style.display = "none";
-        if(topEditingText) topEditingText.textContent = "—";
+        topEditing.style.display = "none";
+        topEditingText.textContent = "—";
         return;
       }
       const comp = blockComposition(b);
@@ -1056,12 +1018,11 @@
         "Document";
 
       const main = `${b.module || "—"} • ${b.area || "—"} • ${b.title || "(utan rubrik)"} — ${typeLabel}`;
-      if(topEditing) topEditing.style.display = "inline-flex";
-      if(topEditingText) topEditingText.textContent = main;
+      topEditing.style.display = "inline-flex";
+      topEditingText.textContent = main;
     }
 
     function setModePill(){
-      if(!elMode) return;
       elMode.style.display = "inline-flex";
       if(STATE.locked){
         elMode.textContent = "Läge: Låst (för säkerhet)";
@@ -1078,14 +1039,12 @@
     }
 
     function setWhoPill(){
-      if(!elWho) return;
       elWho.style.display = "inline-flex";
       elWho.textContent = "Inloggad: " + (empNo || "—");
     }
 
     function setSelectionPill(){
       const b = STATE.edit;
-      if(!elSel) return;
       if(!b){
         elSel.textContent = "Val: —";
         return;
@@ -1096,8 +1055,6 @@
 
     function setVerifyPill(){
       const b = STATE.edit;
-      if(!elVerifyPill) return;
-
       if(!b){
         elVerifyPill.style.display = "none";
         elVerifyPill.textContent = "Verifiering: —";
@@ -1115,14 +1072,13 @@
         if(isVerified(b)){
           elVerifiedHint.textContent = `Verifierad av ${String(b.verifiedBy||"—")} • ${new Date(Number(b.verifiedAt||0)).toLocaleString("sv-SE")}`;
         }else{
-          elVerifiedHint.textContent = "Ej verifierad ännu. (Använd Verifiera när du har kontrollerat facit och innehåll.)";
+          elVerifiedHint.textContent = "Ej verifierad ännu. (Använd knappen Verifiera när du har kontrollerat facit och innehåll.)";
         }
       }
     }
 
     function updateStatePill(){
       const b = STATE.edit;
-      if(!elState) return;
       if(!b){
         elState.textContent = "Status: —";
         elState.className = "pill";
@@ -1143,28 +1099,29 @@
 
     // ---------- editor show/hide ----------
     function hideEditor(){
-      if(editorWrap) editorWrap.style.display = "none";
-      if(editorEmptyHint) editorEmptyHint.style.display = "block";
-      if(panelHint) panelHint.textContent = "Välj ett block i vänsterlistan.";
-      if(blockTag) blockTag.textContent = "—";
-      if(statusTag) statusTag.textContent = "—";
-      if(statusInp) statusInp.value = "";
+      editorWrap.style.display = "none";
+      editorEmptyHint.style.display = "block";
+      panelHint.textContent = "Välj ett block i listan.";
+      blockTag.textContent = "—";
+      statusTag.textContent = "—";
+      statusInp.value = "";
 
-      if(btnSave) btnSave.disabled = true;
-      if(btnPublish) btnPublish.disabled = true;
-      if(btnEdit) btnEdit.disabled = true;
-      if(btnVerify) btnVerify.disabled = true;
-      if(btnPrint) btnPrint.disabled = true;
+      btnSave.disabled = true;
+      btnPublish.disabled = true;
+      btnEdit.disabled = true;
+      btnVerify.disabled = true;
+      btnPrint.disabled = true;
 
-      if(btnItemUp) btnItemUp.disabled = true;
-      if(btnItemDown) btnItemDown.disabled = true;
-      if(btnItemDelete) btnItemDelete.disabled = true;
-      if(btnItemDuplicate) btnItemDuplicate.disabled = true;
-      if(btnAddItem) btnAddItem.disabled = true;
+      btnItemUp.disabled = true;
+      btnItemDown.disabled = true;
+      btnItemDelete.disabled = true;
+      btnItemDuplicate.disabled = true;
+      btnAddItem.disabled = true;
 
       STATE.selectedItemType = "";
       setTopbarEditing();
       hideItemEditor();
+
       setVerifyPill();
     }
 
@@ -1172,21 +1129,19 @@
       const b = STATE.edit;
       if(!b){ hideEditor(); return; }
 
-      if(editorWrap) editorWrap.style.display = "block";
-      if(editorEmptyHint) editorEmptyHint.style.display = "none";
-      if(panelHint) panelHint.textContent = "Redigera block och items. Spara när du är klar.";
+      editorWrap.style.display = "block";
+      editorEmptyHint.style.display = "none";
+      panelHint.textContent = "Redigera block och items. Spara när du är klar.";
 
-      if(blockTag) blockTag.textContent = b.blockId ? ("ID: " + b.blockId) : "—";
-      if(moduleInp) moduleInp.value = String(b.module || "");
-      if(areaInp) areaInp.value = String(b.area || "");
-      if(stepInp) stepInp.value = String(b.step || "");
-      if(titleInp) titleInp.value = String(b.title || "");
+      blockTag.textContent = b.blockId ? ("ID: " + b.blockId) : "—";
+      moduleInp.value = String(b.module || "");
+      areaInp.value = String(b.area || "");
+      stepInp.value = String(b.step || "");
+      titleInp.value = String(b.title || "");
 
-      if(statusInp) statusInp.value = blockStatusLabel(b.status);
-      if(statusTag){
-        statusTag.textContent = blockStatusLabel(b.status);
-        statusTag.className = "tag";
-      }
+      statusInp.value = blockStatusLabel(b.status);
+      statusTag.textContent = blockStatusLabel(b.status);
+      statusTag.className = "tag";
 
       setSelectionPill();
       updateStatePill();
@@ -1201,63 +1156,57 @@
       const canWrite = (!STATE.locked && !isSystemAdmin);
       const hasBlock = !!STATE.edit;
 
-      if(btnEdit) btnEdit.disabled = !hasBlock;
+      btnEdit.disabled = !hasBlock;
 
       // Print: tillåts även read-only (kontrollrum)
-      if(btnPrint){
-        btnPrint.disabled = !hasBlock;
-        btnPrint.title = hasBlock ? "Skriv ut vald block" : "Välj ett block först.";
+      btnPrint.disabled = !hasBlock;
+      btnPrint.title = hasBlock ? "Skriv ut vald block" : "Välj ett block först.";
+
+      btnSave.disabled = !(canWrite && hasBlock && STATE.dirtyBlock);
+      btnSave.title = !hasBlock ? "Välj ett block först."
+        : (!canWrite ? (isSystemAdmin ? "Steward-läge (read-only)." : "Låst (för säkerhet).")
+        : (STATE.dirtyBlock ? "Spara ändringar" : "Inga ändringar att spara"));
+
+      // publish rules (AO-04/09/10)
+      if(!canWrite || !hasBlock){
+        btnPublish.disabled = true;
+        btnPublish.title = !hasBlock
+          ? "Välj ett block först."
+          : (STATE.locked ? "Låst (för säkerhet)." : (isSystemAdmin ? "Steward-läge (read-only)." : "Saknar rättigheter."));
+      }else if(STATE.dirtyBlock){
+        btnPublish.disabled = true;
+        btnPublish.title = "Spara först (osparade ändringar).";
+      }else{
+        const chk = validateForPublish(STATE.edit);
+        btnPublish.disabled = !chk.ok;
+        btnPublish.title = chk.ok ? "Redo att publicera" : ("Publicering stoppad: " + chk.reasons.join(" • "));
       }
 
-      if(btnSave){
-        btnSave.disabled = !(canWrite && hasBlock && STATE.dirtyBlock);
-        btnSave.title = !hasBlock ? "Välj ett block först."
-          : (!canWrite ? (isSystemAdmin ? "Steward-läge (read-only)." : "Låst (för säkerhet).")
-          : (STATE.dirtyBlock ? "Spara ändringar" : "Inga ändringar att spara"));
+      // verify rules: samma som publish (du verifierar att standarden håller)
+      if(!canWrite || !hasBlock){
+        btnVerify.disabled = true;
+        btnVerify.title = !hasBlock
+          ? "Välj ett block först."
+          : (STATE.locked ? "Låst (för säkerhet)." : (isSystemAdmin ? "Steward-läge (read-only)." : "Saknar rättigheter."));
+      }else if(STATE.dirtyBlock){
+        btnVerify.disabled = true;
+        btnVerify.title = "Spara först (osparade ändringar).";
+      }else{
+        const chkV = validateForVerify(STATE.edit);
+        btnVerify.disabled = !chkV.ok;
+        btnVerify.title = chkV.ok ? "Markera blocket som verifierat (utan att publicera)" : ("Verifiering stoppad: " + chkV.reasons.join(" • "));
       }
 
-      // publish rules
-      if(btnPublish){
-        if(!canWrite || !hasBlock){
-          btnPublish.disabled = true;
-          btnPublish.title = isSystemAdmin ? "Steward-läge (read-only)." : "Välj ett block först.";
-        }else if(STATE.dirtyBlock){
-          btnPublish.disabled = true;
-          btnPublish.title = "Spara först (osparade ändringar).";
-        }else{
-          const chk = validateForPublish(STATE.edit);
-          btnPublish.disabled = !chk.ok;
-          btnPublish.title = chk.ok ? "Redo att publicera" : ("Publicering stoppad: " + chk.reasons.join(" • "));
-        }
-      }
+      moduleInp.disabled = !canWrite;
+      areaInp.disabled = !canWrite;
+      stepInp.disabled = !canWrite;
+      titleInp.disabled = !canWrite;
 
-      // verify rules
-      if(btnVerify){
-        if(!canWrite || !hasBlock){
-          btnVerify.disabled = true;
-          btnVerify.title = isSystemAdmin ? "Steward-läge (read-only)." : "Välj ett block först.";
-        }else if(STATE.dirtyBlock){
-          btnVerify.disabled = true;
-          btnVerify.title = "Spara först (osparade ändringar).";
-        }else{
-          const chkV = validateForVerify(STATE.edit);
-          btnVerify.disabled = !chkV.ok;
-          btnVerify.title = chkV.ok ? "Markera blocket som verifierat (utan att publicera)" : ("Verifiering stoppad: " + chkV.reasons.join(" • "));
-        }
-      }
-
-      if(moduleInp) moduleInp.disabled = !canWrite;
-      if(areaInp) areaInp.disabled = !canWrite;
-      if(stepInp) stepInp.disabled = !canWrite;
-      if(titleInp) titleInp.disabled = !canWrite;
-
-      if(btnExportTraining){
-        btnExportTraining.disabled = !(canWrite && !STATE.trainingsCorrupt && STATE.selectedTrainingIndex >= 0);
-        btnExportTraining.title = isSystemAdmin ? "Steward-läge (read-only)." : (STATE.trainingsCorrupt ? "Trainings-data är korrupt (låst)." : "Exportera vald utbildning till block-banken.");
-      }
+      btnExportTraining.disabled = !(canWrite && !STATE.trainingsCorrupt && STATE.selectedTrainingIndex >= 0);
+      btnExportTraining.title = isSystemAdmin ? "Steward-läge (read-only)." : (STATE.trainingsCorrupt ? "Trainings-data är korrupt (låst)." : "Exportera vald utbildning till block-banken.");
     }
 
-    // ---------- selection ----------
+    // ---------- selection (AO-13) ----------
     function selectBlockByObject(block){
       if(STATE.dirtyBlock){
         const ok = confirm("Du har osparade ändringar. Byta block och kasta ändringar?");
@@ -1281,22 +1230,31 @@
       STATE.selectedBlock = id;
       STATE.edit = normalizeBlock(block);
       STATE.dirtyBlock = false;
-
-      // Ingen auto-selektion av första item
       STATE.selectedItem = null;
       STATE.selectedItemType = "";
 
       renderBlockList(false);
       showEditor();
-      hideItemEditor();
 
-      try{ editorPanel && editorPanel.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
+      const items = Array.isArray(STATE.edit.items) ? STATE.edit.items : [];
+      if(items.length > 0){
+        const first = normalizeItem(items[0], 0);
+        items[0] = first;
+        STATE.selectedItem = getItemIdSafe(first, 0);
+        STATE.selectedItemType = String(first.kind || "");
+        showItemEditorById(STATE.selectedItem);
+        renderItems();
+      }else{
+        hideItemEditor();
+      }
+
+      try{ editorPanel.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
       setMsg("", "");
       setTopbarEditing();
       setVerifyPill();
     }
 
-    // ---------- block list ----------
+    // ---------- block list (AO-05 + opt + SEARCHFIRST) ----------
     function hasDiscoveryActive(){
       const q = String(qBlocks?.value || "").trim();
       const f = String(filterStatus?.value || "all");
@@ -1316,13 +1274,9 @@
       t.className = "tiny muted2";
       t.style.marginTop = "6px";
       t.textContent = nAll
-        ? "Tips: Du kan också trycka “Visa alla”, eller använda snabbfilter."
+        ? "Tips: Du kan också trycka “Visa alla”."
         : "Tips: Exportera från utbildningar för att skapa ett block.";
       blockList.appendChild(t);
-
-      if(leftHint){
-        leftHint.textContent = "Sök, använd snabbfilter – eller exportera.";
-      }
     }
 
     function computeVisible(){
@@ -1339,358 +1293,172 @@
 
         const comp = blockComposition(b);
 
-        if(fHasQ?.checked && comp.q === 0) continue;
-        if(fHasD?.checked && comp.d === 0) continue;
-        if(fNoKey?.checked && comp.miss === 0) continue;
-        if(fUnverified?.checked && isVerified(b)) continue;
+        if(fHasQ.checked && comp.q === 0) continue;
+        if(fHasD.checked && comp.d === 0) continue;
+        if(fNoKey.checked && comp.miss === 0) continue;
+        if(fUnverified.checked && isVerified(b)) continue;
 
         if(q){
           const hay = [b.title||"", b.module||"", b.area||"", b.step||"", b.blockId||""].join(" ").toLowerCase();
           if(!hay.includes(q)) continue;
         }
 
+        // store comp for faster render
         b.__comp = comp;
         out.push(b);
       }
 
       out.sort((a,b) => Number(b.updatedAt||0) - Number(a.updatedAt||0));
       STATE.visible = out;
-
-      if(leftHint){
-        if(!hasDiscoveryActive()){
-          leftHint.textContent = "Sök, snabbfilter – eller exportera.";
-        }else{
-          leftHint.textContent = "Visar resultat baserat på sök/filter.";
-        }
-      }
     }
 
-    function buildRenderKey(extra){
+    function buildRenderKey(){
       computeVisible();
       const ids = (STATE.visible || []).map(b => `${b.blockId}:${b.status}:${Number(b.verifiedAt||0)}`).join("|");
       const f = [
         String(filterStatus?.value||""),
         String(qBlocks?.value||""),
         (STATE.showAllBlocks ? "SHOWALL" : ""),
-        (STATE.leftModuleKey ? ("MOD:" + STATE.leftModuleKey) : ""),
         fHasQ?.checked ? "q" : "",
         fHasD?.checked ? "d" : "",
         fNoKey?.checked ? "m" : "",
-        fUnverified?.checked ? "uv" : "",
-        String(extra || "")
+        fUnverified?.checked ? "uv" : ""
       ].join(",");
       return ids + "||" + f;
-    }
-
-    function safeModuleLabel(m){
-      const s = String(m || "").trim();
-      return s || "Okänd modul";
-    }
-    function safeModuleKey(m){
-      return safeModuleLabel(m).toLowerCase();
-    }
-
-    function renderModuleGroups(){
-      const list = Array.isArray(STATE.visible) ? STATE.visible : [];
-      const groups = new Map();
-
-      for(const b of list){
-        const key = safeModuleKey(b.module);
-        const label = safeModuleLabel(b.module);
-        if(!groups.has(key)){
-          groups.set(key, { key, label, n:0, last:0, q:0, d:0, t:0, miss:0, anyUnverified:0, anyPublished:0, anyDraft:0 });
-        }
-        const g = groups.get(key);
-        g.n += 1;
-        g.last = Math.max(g.last, Number(b.updatedAt||0));
-        const c = b.__comp || blockComposition(b);
-        g.q += c.q; g.d += c.d; g.t += c.t; g.miss += c.miss;
-        g.anyUnverified += (isVerified(b) ? 0 : 1);
-        const st = normStatus(b.status);
-        if(st === "published") g.anyPublished += 1;
-        else g.anyDraft += 1;
-      }
-
-      const arr = [...groups.values()];
-      arr.sort((a,b)=> b.last - a.last);
-
-      clear(blockList);
-
-      if(arr.length === 0){
-        const d = document.createElement("div");
-        d.className = "muted2";
-        d.textContent = (Array.isArray(STATE.all) && STATE.all.length) ? "Inga träffar (justera sök/filter)." : "Inga block ännu.";
-        blockList.appendChild(d);
-        return { groupsCount:0 };
-      }
-
-      arr.slice(0, 250).forEach(g=>{
-        const row = document.createElement("div");
-        row.className = "rowItem";
-        row.setAttribute("role","button");
-        row.setAttribute("tabindex","0");
-        row.dataset.modulekey = g.key;
-
-        const top = document.createElement("div");
-        top.className = "rowTop";
-
-        const left = document.createElement("div");
-        const title = document.createElement("div");
-        title.className = "rowTitle";
-        title.textContent = `${g.label} (${g.n} block)`;
-
-        const meta = document.createElement("div");
-        meta.className = "tiny";
-        meta.textContent = `❓ ${g.q} • 📄 ${g.d} • ✅ ${g.t}` + (g.miss ? ` • Facit saknas: ${g.miss}` : "");
-
-        const ico = document.createElement("div");
-        ico.className = "icoRow";
-        const pB = document.createElement("span"); pB.className = "icoPill"; pB.textContent = `🧱 ${g.n}`;
-        const pP = document.createElement("span"); pP.className = "icoPill"; pP.textContent = `🟢 ${g.anyPublished}`;
-        const pD = document.createElement("span"); pD.className = "icoPill"; pD.textContent = `🟡 ${g.anyDraft}`;
-        const pV = document.createElement("span"); pV.className = "icoPill"; pV.textContent = `🔎 ${g.anyUnverified} ej verifierade`;
-        ico.appendChild(pB); ico.appendChild(pP); ico.appendChild(pD); ico.appendChild(pV);
-
-        left.appendChild(title);
-        left.appendChild(meta);
-        left.appendChild(ico);
-
-        const right = document.createElement("div");
-        const pill = document.createElement("span");
-        pill.className = "pill ok";
-        pill.textContent = "Öppna";
-        right.appendChild(pill);
-
-        top.appendChild(left);
-        top.appendChild(right);
-        row.appendChild(top);
-
-        function choose(){
-          STATE.leftModuleKey = g.key;
-          STATE.leftModuleLabel = g.label;
-          renderBlockList(true);
-        }
-        row.addEventListener("click", choose);
-        row.addEventListener("keydown", (e)=>{
-          if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
-        });
-
-        blockList.appendChild(row);
-      });
-
-      return { groupsCount: arr.length };
-    }
-
-    function renderBackRow(){
-      const row = document.createElement("div");
-      row.className = "rowItem";
-      row.setAttribute("role","button");
-      row.setAttribute("tabindex","0");
-
-      const title = document.createElement("div");
-      title.className = "rowTitle";
-      title.textContent = "← Tillbaka till moduler";
-      row.appendChild(title);
-
-      const meta = document.createElement("div");
-      meta.className = "tiny muted2";
-      meta.style.marginTop = "4px";
-      meta.textContent = "Visar block i vald modul. (Sök/filter gäller fortfarande.)";
-      row.appendChild(meta);
-
-      function goBack(){
-        STATE.leftModuleKey = "";
-        STATE.leftModuleLabel = "";
-        renderBlockList(true);
-      }
-      row.addEventListener("click", goBack);
-      row.addEventListener("keydown", (e)=>{
-        if(e.key === "Enter" || e.key === " "){ e.preventDefault(); goBack(); }
-      });
-
-      blockList.appendChild(row);
-    }
-
-    function renderBlockRows(list){
-      const nAll = Array.isArray(STATE.all) ? STATE.all.length : 0;
-      const nVis = Array.isArray(list) ? list.length : 0;
-
-      if(nVis === 0){
-        const d = document.createElement("div");
-        d.className = "muted2";
-        d.textContent = nAll ? "Inga träffar (justera sök/filter)." : "Inga block ännu.";
-        blockList.appendChild(d);
-        return;
-      }
-
-      list.slice(0, 400).forEach(b => {
-        const row = document.createElement("div");
-        row.className = "rowItem" + (String(b.blockId) === String(STATE.selectedBlock) ? " active" : "");
-        row.setAttribute("role","button");
-        row.setAttribute("tabindex","0");
-        row.dataset.blockid = String(b.blockId||"");
-
-        const top = document.createElement("div");
-        top.className = "rowTop";
-
-        const left = document.createElement("div");
-        const title = document.createElement("div");
-        title.className = "rowTitle";
-        title.textContent = b.title || "(utan rubrik)";
-
-        const meta = document.createElement("div");
-        meta.className = "tiny";
-        const st = normStatus(b.status);
-        const comp = b.__comp || blockComposition(b);
-        meta.textContent = `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"} • ${comp.q+comp.t+comp.d} item(s)`;
-
-        const ico = document.createElement("div");
-        ico.className = "icoRow";
-        const pQ = document.createElement("span"); pQ.className = "icoPill"; pQ.textContent = `❓ ${comp.q}`;
-        const pD = document.createElement("span"); pD.className = "icoPill"; pD.textContent = `📄 ${comp.d}`;
-        const pT = document.createElement("span"); pT.className = "icoPill"; pT.textContent = `✅ ${comp.t}`;
-        const pM = document.createElement("span"); pM.className = "icoPill"; pM.textContent = `🧩 ${comp.kind === "mixed" ? "Mixed" : (comp.kind === "empty" ? "Tomt" : "Single")}`;
-        ico.appendChild(pQ); ico.appendChild(pD); ico.appendChild(pT); ico.appendChild(pM);
-
-        left.appendChild(title);
-        left.appendChild(meta);
-        left.appendChild(ico);
-
-        const right = document.createElement("div");
-        const pill = document.createElement("span");
-        pill.className = "pill " + (st === "published" ? "ok" : "warn");
-        pill.textContent = blockStatusLabel(st);
-        right.appendChild(pill);
-
-        const v = document.createElement("span");
-        v.className = isVerified(b) ? "verifyPill ok" : "verifyPill warn";
-        v.style.marginTop = "6px";
-        v.textContent = isVerified(b) ? "Verifierad" : "Ej verifierad";
-        right.appendChild(v);
-
-        if(comp.miss > 0){
-          const miss = document.createElement("span");
-          miss.className = "qaPill bad";
-          miss.style.marginTop = "6px";
-          miss.textContent = `Facit saknas: ${comp.miss}`;
-          right.appendChild(miss);
-        }
-
-        top.appendChild(left);
-        top.appendChild(right);
-        row.appendChild(top);
-
-        function choose(){ selectBlockByObject(b); }
-        row.addEventListener("click", choose);
-        row.addEventListener("keydown", (e)=>{
-          if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
-        });
-
-        blockList.appendChild(row);
-      });
     }
 
     function renderBlockList(forceFull){
       const nAll = Array.isArray(STATE.all) ? STATE.all.length : 0;
 
-      // “Sök först – visa sen”
+      // AO-UX-COLLAPSE-SEARCHFIRST-01: “Sök först – visa sen”
       if(!hasDiscoveryActive()){
         STATE.visible = [];
         STATE._lastBlockRenderKey = "SEARCHFIRST";
-        STATE.leftModuleKey = "";
-        STATE.leftModuleLabel = "";
-        if(countBlocks) countBlocks.textContent = `0 / ${nAll}`;
+        countBlocks.textContent = `0 / ${nAll}`;
         renderSearchFirstPlaceholder(nAll);
         return;
       }
 
-      const inShowAll = !!STATE.showAllBlocks;
+      const key = buildRenderKey();
+      const nVis = Array.isArray(STATE.visible) ? STATE.visible.length : 0;
+      countBlocks.textContent = `${nVis} / ${nAll}`;
 
-      const mode =
-        inShowAll ? "ALLBLOCKS" :
-        (STATE.leftModuleKey ? ("MODBLOCKS:" + STATE.leftModuleKey) : "MODULEGROUPS");
-
-      const key = buildRenderKey(mode);
       const needsFull = !!forceFull || key !== STATE._lastBlockRenderKey;
 
-      const nVisBlocks = Array.isArray(STATE.visible) ? STATE.visible.length : 0;
+      if(needsFull){
+        STATE._lastBlockRenderKey = key;
+        clear(blockList);
 
-      if(!needsFull){
-        if(mode.startsWith("ALLBLOCKS") || mode.startsWith("MODBLOCKS")){
-          const rows = blockList.querySelectorAll(".rowItem");
-          rows.forEach(r=>{
-            const id = String(r.dataset.blockid || "");
-            if(id && id === String(STATE.selectedBlock)) r.classList.add("active");
-            else if(id) r.classList.remove("active");
-          });
+        if(nVis === 0){
+          const d = document.createElement("div");
+          d.className = "muted2";
+          d.textContent = nAll ? "Inga träffar (justera sök/filter)." : "Inga block ännu.";
+          blockList.appendChild(d);
+          return;
         }
-        return;
+
+        STATE.visible.slice(0, 400).forEach(b => {
+          const row = document.createElement("div");
+          row.className = "rowItem" + (String(b.blockId) === String(STATE.selectedBlock) ? " active" : "");
+          row.setAttribute("role","button");
+          row.setAttribute("tabindex","0");
+          row.dataset.blockid = String(b.blockId||"");
+
+          const top = document.createElement("div");
+          top.className = "rowTop";
+
+          const left = document.createElement("div");
+          const title = document.createElement("div");
+          title.className = "rowTitle";
+          title.textContent = b.title || "(utan rubrik)";
+
+          const meta = document.createElement("div");
+          meta.className = "tiny";
+          const st = normStatus(b.status);
+          const comp = b.__comp || blockComposition(b);
+          meta.textContent = `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"} • ${comp.q+comp.t+comp.d} item(s)`;
+
+          // AO-05: icons per type
+          const ico = document.createElement("div");
+          ico.className = "icoRow";
+          const pQ = document.createElement("span"); pQ.className = "icoPill"; pQ.textContent = `❓ ${comp.q}`;
+          const pD = document.createElement("span"); pD.className = "icoPill"; pD.textContent = `📄 ${comp.d}`;
+          const pT = document.createElement("span"); pT.className = "icoPill"; pT.textContent = `✅ ${comp.t}`;
+          const pM = document.createElement("span"); pM.className = "icoPill"; pM.textContent = `🧩 ${comp.kind === "mixed" ? "Mixed" : (comp.kind === "empty" ? "Tomt" : "Single")}`;
+          ico.appendChild(pQ); ico.appendChild(pD); ico.appendChild(pT); ico.appendChild(pM);
+
+          left.appendChild(title);
+          left.appendChild(meta);
+          left.appendChild(ico);
+
+          const right = document.createElement("div");
+          const pill = document.createElement("span");
+          pill.className = "pill " + (st === "published" ? "ok" : "warn");
+          pill.textContent = blockStatusLabel(st);
+          right.appendChild(pill);
+
+          // Verifieringsindikator
+          const v = document.createElement("span");
+          v.className = isVerified(b) ? "verifyPill ok" : "verifyPill warn";
+          v.style.marginTop = "6px";
+          v.textContent = isVerified(b) ? "Verifierad" : "Ej verifierad";
+          right.appendChild(v);
+
+          // AO-04: highlight missing facit quickly
+          if(comp.miss > 0){
+            const miss = document.createElement("span");
+            miss.className = "qaPill bad";
+            miss.style.marginTop = "6px";
+            miss.textContent = `Facit saknas: ${comp.miss}`;
+            right.appendChild(miss);
+          }
+
+          top.appendChild(left);
+          top.appendChild(right);
+          row.appendChild(top);
+
+          function choose(){ selectBlockByObject(b); }
+          row.addEventListener("click", choose);
+          row.addEventListener("keydown", (e)=>{
+            if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
+          });
+
+          blockList.appendChild(row);
+        });
+      }else{
+        // cheap active update only
+        const rows = blockList.querySelectorAll(".rowItem");
+        rows.forEach(r=>{
+          const id = String(r.dataset.blockid || "");
+          if(id && id === String(STATE.selectedBlock)) r.classList.add("active");
+          else r.classList.remove("active");
+        });
       }
-
-      STATE._lastBlockRenderKey = key;
-      clear(blockList);
-
-      if(inShowAll){
-        if(countBlocks) countBlocks.textContent = `${nVisBlocks} / ${nAll}`;
-        renderBlockRows(STATE.visible);
-        return;
-      }
-
-      if(!STATE.leftModuleKey){
-        const g = renderModuleGroups();
-        if(countBlocks) countBlocks.textContent = `${g.groupsCount} moduler • ${nVisBlocks} / ${nAll} block`;
-        return;
-      }
-
-      const wantedKey = String(STATE.leftModuleKey || "").trim().toLowerCase();
-      const filtered = (STATE.visible || []).filter(b => safeModuleKey(b.module) === wantedKey);
-
-      if(filtered.length === 0){
-        STATE.leftModuleKey = "";
-        STATE.leftModuleLabel = "";
-        const g = renderModuleGroups();
-        if(countBlocks) countBlocks.textContent = `${g.groupsCount} moduler • ${nVisBlocks} / ${nAll} block`;
-        return;
-      }
-
-      renderBackRow();
-
-      const head = document.createElement("div");
-      head.className = "tiny muted2";
-      head.style.margin = "10px 0 12px";
-      head.textContent = `Modul: ${STATE.leftModuleLabel || STATE.leftModuleKey} • ${filtered.length} block`;
-      blockList.appendChild(head);
-
-      if(countBlocks) countBlocks.textContent = `${filtered.length} / ${nAll}`;
-      renderBlockRows(filtered);
     }
 
-    // ---------- item editor ----------
+    // ---------- item editor (AO-14) ----------
     function hideItemEditor(){
-      if(itemEditor) itemEditor.style.display = "none";
-      if(itemKindInp) itemKindInp.value = "";
-      if(itemTextInp) itemTextInp.value = "";
-      if(wrapQuestion) wrapQuestion.style.display = "none";
-      if(wrapTask) wrapTask.style.display = "none";
-      if(wrapDocument) wrapDocument.style.display = "none";
+      itemEditor.style.display = "none";
+      itemKindInp.value = "";
+      itemTextInp.value = "";
+      wrapQuestion.style.display = "none";
+      wrapTask.style.display = "none";
+      wrapDocument.style.display = "none";
 
-      if(qOptionsInp) qOptionsInp.value = "";
-      if(qFacitInp) qFacitInp.value = "";
-      if(qFacitPill){
-        qFacitPill.textContent = "Facit: —";
-        qFacitPill.className = "qaPill";
-      }
+      qOptionsInp.value = "";
+      qFacitInp.value = "";
+      qFacitPill.textContent = "Facit: —";
+      qFacitPill.className = "qaPill";
 
-      if(tReqInp) tReqInp.checked = true;
-      if(dSignInp) dSignInp.checked = true;
+      tReqInp.checked = true;
+      dSignInp.checked = true;
 
-      if(lpTitle) lpTitle.textContent = "Preview";
-      if(lpMeta) lpMeta.textContent = "—";
-      if(lpText) lpText.textContent = "—";
+      lpTitle.textContent = "Preview";
+      lpMeta.textContent = "—";
+      lpText.textContent = "—";
     }
 
     function setFacitPillFor(it){
-      if(!qFacitPill) return;
       if(!it || it.kind !== "question"){
         qFacitPill.textContent = "Facit: —";
         qFacitPill.className = "qaPill";
@@ -1707,7 +1475,7 @@
       const title =
         (k === "question") ? "Fråga" :
         (k === "task") ? "Uppgift" : "Information";
-      if(lpTitle) lpTitle.textContent = title;
+      lpTitle.textContent = title;
 
       let meta = [];
       if(k === "question"){
@@ -1721,8 +1489,8 @@
       if(k === "document"){
         meta.push(it.requiresSign !== false ? "Kräver signering" : "Ingen signering");
       }
-      if(lpMeta) lpMeta.textContent = meta.join(" • ") || "—";
-      if(lpText) lpText.textContent = String(it.text || "").trim() || "—";
+      lpMeta.textContent = meta.join(" • ") || "—";
+      lpText.textContent = String(it.text || "").trim() || "—";
     }
 
     function renderItems(){
@@ -1734,19 +1502,19 @@
         d.className = "muted2";
         d.textContent = "Välj ett block först.";
         itemRows.appendChild(d);
-        if(itemsSummary) itemsSummary.textContent = "—";
+        itemsSummary.textContent = "—";
         hideItemEditor();
         return;
       }
 
       const items = Array.isArray(b.items) ? b.items : [];
       const comp = blockComposition(b);
-      if(itemsSummary) itemsSummary.textContent = `${items.length} item(s) • ❓ ${comp.q} • 📄 ${comp.d} • ✅ ${comp.t}`;
+      itemsSummary.textContent = `${items.length} item(s) • ❓ ${comp.q} • 📄 ${comp.d} • ✅ ${comp.t}`;
 
       if(items.length === 0){
         const d = document.createElement("div");
         d.className = "muted2";
-        d.textContent = "Inga items ännu. Lägg till med “+ Lägg till” eller en mini-mall.";
+        d.textContent = "Inga items ännu.";
         itemRows.appendChild(d);
         hideItemEditor();
         return;
@@ -1793,10 +1561,9 @@
         function choose(){
           STATE.selectedItem = id;
           STATE.selectedItemType = String(it.kind || "");
-          showItemEditorById();
+          showItemEditorById(id);
           renderItems();
           setTopbarEditing();
-          try{ itemEditor && itemEditor.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
         }
         row.addEventListener("click", choose);
         row.addEventListener("keydown", (e)=>{
@@ -1809,15 +1576,15 @@
       const canWrite = (!STATE.locked && !isSystemAdmin);
       const hasSel = !!STATE.selectedItem;
 
-      if(btnItemUp) btnItemUp.disabled = !(canWrite && hasSel && getSelectedIndex() > 0);
-      if(btnItemDown) btnItemDown.disabled = !(canWrite && hasSel && getSelectedIndex() < (items.length - 1));
-      if(btnItemDelete) btnItemDelete.disabled = !(canWrite && hasSel);
-      if(btnItemDuplicate) btnItemDuplicate.disabled = !(canWrite && hasSel);
-      if(btnAddItem) btnAddItem.disabled = !canWrite;
+      btnItemUp.disabled = !(canWrite && hasSel && getSelectedIndex() > 0);
+      btnItemDown.disabled = !(canWrite && hasSel && getSelectedIndex() < (items.length - 1));
+      btnItemDelete.disabled = !(canWrite && hasSel);
+      btnItemDuplicate.disabled = !(canWrite && hasSel);
+      btnAddItem.disabled = !canWrite;
 
-      if(btnTemplateStandard) btnTemplateStandard.disabled = !canWrite;
-      if(btnTemplateYesNo) btnTemplateYesNo.disabled = !canWrite;
-      if(btnTemplateInfo) btnTemplateInfo.disabled = !canWrite;
+      btnTemplateStandard.disabled = !canWrite;
+      btnTemplateYesNo.disabled = !canWrite;
+      btnTemplateInfo.disabled = !canWrite;
     }
 
     function getSelectedIndex(){
@@ -1847,36 +1614,34 @@
       const it = normalizeItem(ref.it, ref.idx);
       ref.items[ref.idx] = it;
 
-      if(itemEditor) itemEditor.style.display = "block";
-      if(itemKindInp) itemKindInp.value = itemKindLabel(it);
+      itemEditor.style.display = "block";
+      itemKindInp.value = itemKindLabel(it);
 
-      if(wrapQuestion) wrapQuestion.style.display = (it.kind === "question") ? "block" : "none";
-      if(wrapTask) wrapTask.style.display = (it.kind === "task") ? "block" : "none";
-      if(wrapDocument) wrapDocument.style.display = (it.kind === "document") ? "block" : "none";
+      wrapQuestion.style.display = (it.kind === "question") ? "block" : "none";
+      wrapTask.style.display = (it.kind === "task") ? "block" : "none";
+      wrapDocument.style.display = (it.kind === "document") ? "block" : "none";
 
-      if(itemTextInp){
-        itemTextInp.maxLength = (it.kind === "document") ? 2000 : 1000;
-        itemTextInp.value = String(it.text || "");
-      }
+      itemTextInp.maxLength = (it.kind === "document") ? 2000 : 1000;
+      itemTextInp.value = String(it.text || "");
 
       if(it.kind === "question"){
-        if(qOptionsInp) qOptionsInp.value = (Array.isArray(it.options) ? it.options : []).join("\n");
-        if(qFacitInp) qFacitInp.value = String(it.answerKey || "");
+        qOptionsInp.value = (Array.isArray(it.options) ? it.options : []).join("\n");
+        qFacitInp.value = String(it.answerKey || "");
         setFacitPillFor(it);
       }
       if(it.kind === "task"){
-        if(tReqInp) tReqInp.checked = (it.requiresDone !== false);
+        tReqInp.checked = (it.requiresDone !== false);
       }
       if(it.kind === "document"){
-        if(dSignInp) dSignInp.checked = (it.requiresSign !== false);
+        dSignInp.checked = (it.requiresSign !== false);
       }
 
       const canWrite = (!STATE.locked && !isSystemAdmin);
-      if(itemTextInp) itemTextInp.disabled = !canWrite;
-      if(qOptionsInp) qOptionsInp.disabled = !canWrite;
-      if(qFacitInp) qFacitInp.disabled = !canWrite;
-      if(tReqInp) tReqInp.disabled = !canWrite;
-      if(dSignInp) dSignInp.disabled = !canWrite;
+      itemTextInp.disabled = !canWrite;
+      qOptionsInp.disabled = !canWrite;
+      qFacitInp.disabled = !canWrite;
+      tReqInp.disabled = !canWrite;
+      dSignInp.disabled = !canWrite;
 
       updateLivePreview(it);
       updateStatePill();
@@ -1889,12 +1654,12 @@
     function applyEditorToBlock(){
       const b = STATE.edit;
       if(!b) return;
-      b.module = normText(moduleInp?.value, 60);
-      b.area   = normText(areaInp?.value, 60);
-      b.step   = normText(stepInp?.value, 60);
-      b.title  = normText(titleInp?.value, 80);
-      if(statusInp) statusInp.value = blockStatusLabel(b.status);
-      if(statusTag) statusTag.textContent = blockStatusLabel(b.status);
+      b.module = normText(moduleInp.value, 60);
+      b.area   = normText(areaInp.value, 60);
+      b.step   = normText(stepInp.value, 60);
+      b.title  = normText(titleInp.value, 80);
+      statusInp.value = blockStatusLabel(b.status);
+      statusTag.textContent = blockStatusLabel(b.status);
       setTopbarEditing();
       setVerifyPill();
     }
@@ -1904,17 +1669,17 @@
       if(!ref) return;
       const it = normalizeItem(ref.it, ref.idx);
 
-      it.text = String(itemTextInp?.value || "").slice(0, it.kind === "document" ? 2000 : 1000);
+      it.text = String(itemTextInp.value || "").slice(0, it.kind === "document" ? 2000 : 1000);
 
       if(it.kind === "question"){
-        const lines = String(qOptionsInp?.value || "").split("\n").map(s=>s.trim()).filter(Boolean).slice(0, 20);
+        const lines = String(qOptionsInp.value || "").split("\n").map(s=>s.trim()).filter(Boolean).slice(0, 20);
         const uniq = [];
         lines.forEach(x=>{
           const s = x.slice(0,60);
           if(s && !uniq.includes(s)) uniq.push(s);
         });
         it.options = uniq.slice(0,10);
-        it.answerKey = normText(qFacitInp?.value || "", 200);
+        it.answerKey = normText(qFacitInp.value || "", 200);
 
         if(it.options.length >= 2 && it.answerKey && !it.options.includes(it.answerKey)){
           it.answerKey = "";
@@ -1923,11 +1688,11 @@
       }
 
       if(it.kind === "task"){
-        it.requiresDone = !!tReqInp?.checked;
+        it.requiresDone = !!tReqInp.checked;
       }
 
       if(it.kind === "document"){
-        it.requiresSign = !!dSignInp?.checked;
+        it.requiresSign = !!dSignInp.checked;
       }
 
       ref.items[ref.idx] = normalizeItem(it, ref.idx);
@@ -1945,7 +1710,7 @@
       updateActionEnablement();
     }
 
-    // ---------- validation ----------
+    // ---------- validation (AO-09/10) ----------
     function validateForPublish(block){
       const b = block && typeof block === "object" ? block : null;
       const reasons = [];
@@ -1968,6 +1733,7 @@
     }
 
     function validateForVerify(block){
+      // Samma regel som publish: verifiering = “håller standard”
       return validateForPublish(block);
     }
 
@@ -2082,6 +1848,7 @@
 
       const now = Date.now();
       STATE.edit.status = "published";
+      // Publicering räknas som verifiering också (kontrollrum)
       STATE.edit.verifiedAt = now;
       STATE.edit.verifiedBy = String(empNo || "");
       STATE.edit.updatedAt = now;
@@ -2259,9 +2026,9 @@
       STATE.dirtyBlock = true;
 
       renderItems();
-      showItemEditorById();
+      showItemEditorById(STATE.selectedItem);
       markDirty();
-      try{ itemTextInp && itemTextInp.focus(); }catch{}
+      try{ itemTextInp.focus(); }catch{}
     }
 
     function duplicateSelectedItem(){
@@ -2286,7 +2053,7 @@
       STATE.dirtyBlock = true;
 
       renderItems();
-      showItemEditorById();
+      showItemEditorById(STATE.selectedItem);
       markDirty();
     }
 
@@ -2313,7 +2080,7 @@
       STATE.dirtyBlock = true;
 
       renderItems();
-      showItemEditorById();
+      showItemEditorById(STATE.selectedItem);
       markDirty();
     }
 
@@ -2337,7 +2104,7 @@
         STATE.selectedItem = getItemIdSafe(items[nextIdx], nextIdx);
         STATE.selectedItemType = String(items[nextIdx]?.kind || "");
         renderItems();
-        showItemEditorById();
+        showItemEditorById(STATE.selectedItem);
       }else{
         STATE.selectedItem = null;
         STATE.selectedItemType = "";
@@ -2348,7 +2115,7 @@
       markDirty();
     }
 
-    // ---------- trainings helpers ----------
+    // ---------- trainings helpers (AO-11) ----------
     function trainingTitle(t){
       const o = t && typeof t === "object" ? t : {};
       return String(o.title || o.name || o.trainingTitle || "—").trim() || "—";
@@ -2453,26 +2220,26 @@
         if(m.area) areas.add(m.area);
       });
 
-      while(qTrainModule && qTrainModule.options.length > 1) qTrainModule.remove(1);
+      while(qTrainModule.options.length > 1) qTrainModule.remove(1);
       [...mods].sort((a,b)=>a.localeCompare(b,"sv")).forEach(m=>{
         const op = document.createElement("option");
         op.value = m;
         op.textContent = m;
-        if(qTrainModule) qTrainModule.appendChild(op);
+        qTrainModule.appendChild(op);
       });
 
       clear(dlTrainAreas);
       [...areas].sort((a,b)=>a.localeCompare(b,"sv")).forEach(a=>{
         const op = document.createElement("option");
         op.value = a;
-        if(dlTrainAreas) dlTrainAreas.appendChild(op);
+        dlTrainAreas.appendChild(op);
       });
     }
 
     function computeVisibleTrainings(){
-      const qMod = String(qTrainModule?.value || "").trim().toLowerCase();
-      const qArea = String(qTrainArea?.value || "").trim().toLowerCase();
-      const qFree = String(qTrainFree?.value || "").trim().toLowerCase();
+      const qMod = String(qTrainModule.value || "").trim().toLowerCase();
+      const qArea = String(qTrainArea.value || "").trim().toLowerCase();
+      const qFree = String(qTrainFree.value || "").trim().toLowerCase();
 
       const idxs = [];
       (STATE.trainings || []).forEach((t, idx) => {
@@ -2498,7 +2265,6 @@
     }
 
     function renderExportPreviewForTraining(idx){
-      if(!trainPreviewDetail) return;
       trainPreviewDetail.style.display = "none";
       clear(trainPreviewDetail);
 
@@ -2548,22 +2314,18 @@
       const hasTrainings = Array.isArray(STATE.trainings) && STATE.trainings.length > 0;
       const selOk = (STATE.selectedTrainingIndex >= 0 && STATE.selectedTrainingIndex < (STATE.trainings?.length || 0));
 
-      if(btnExportTraining){
-        btnExportTraining.disabled = !(canWrite && hasTrainings && selOk && !STATE.trainingsCorrupt);
-        btnExportTraining.title = isSystemAdmin
-          ? "Steward-läge (read-only)."
-          : (STATE.trainingsCorrupt ? "Trainings-data är korrupt (låst för säkerhet)." : "Exportera vald utbildning till block-banken.");
-      }
+      btnExportTraining.disabled = !(canWrite && hasTrainings && selOk && !STATE.trainingsCorrupt);
+      btnExportTraining.title = isSystemAdmin
+        ? "Steward-läge (read-only)."
+        : (STATE.trainingsCorrupt ? "Trainings-data är korrupt (låst för säkerhet)." : "Exportera vald utbildning till block-banken.");
 
-      if(trainExportHint){
-        trainExportHint.textContent = STATE.trainingsCorrupt
-          ? "Låst för säkerhet: utbildningsdata verkar vara trasig. Åtgärda/rensa innan export."
-          : (STATE.trainingsMissing
-              ? "Inga utbildningar hittades ännu."
-              : (selOk
-                  ? "Vald utbildning: klicka på Exportera."
-                  : "Välj en utbildning i listan. Export skapar 1 nytt block (utkast)."));
-      }
+      trainExportHint.textContent = STATE.trainingsCorrupt
+        ? "Låst för säkerhet: utbildningsdata verkar vara trasig. Åtgärda/rensa innan export."
+        : (STATE.trainingsMissing
+            ? "Inga utbildningar hittades ännu."
+            : (selOk
+                ? "Vald utbildning: klicka på Exportera."
+                : "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)."));
     }
 
     function renderTrainingHits(){
@@ -2687,18 +2449,15 @@
 
       STATE.all = all;
 
-      // nollställ filter
-      if(filterStatus) filterStatus.value = "all";
-      if(qBlocks) qBlocks.value = "";
+      if(filterStatus && filterStatus.value !== "all") filterStatus.value = "all";
+      if(qBlocks && qBlocks.value.trim()) qBlocks.value = "";
       if(fHasQ) fHasQ.checked = false;
       if(fHasD) fHasD.checked = false;
       if(fNoKey) fNoKey.checked = false;
       if(fUnverified) fUnverified.checked = false;
 
-      // tillbaka till “Sök först”
+      // Återgå till “Sök först” efter export (listan syns via valt block ändå när man söker/visar alla)
       STATE.showAllBlocks = false;
-      STATE.leftModuleKey = "";
-      STATE.leftModuleLabel = "";
       if(btnShowAllBlocks){
         btnShowAllBlocks.setAttribute("aria-pressed","false");
         btnShowAllBlocks.textContent = "Visa alla";
@@ -2720,34 +2479,34 @@
       showEditor();
     }
 
-    if(moduleInp) moduleInp.addEventListener("input", onBlockFieldChange);
-    if(areaInp) areaInp.addEventListener("input", onBlockFieldChange);
-    if(stepInp) stepInp.addEventListener("input", onBlockFieldChange);
-    if(titleInp) titleInp.addEventListener("input", onBlockFieldChange);
+    moduleInp.addEventListener("input", onBlockFieldChange);
+    areaInp.addEventListener("input", onBlockFieldChange);
+    stepInp.addEventListener("input", onBlockFieldChange);
+    titleInp.addEventListener("input", onBlockFieldChange);
 
     function onItemChange(){
       applyItemEditorToState();
       markDirty();
       renderItems();
-      showItemEditorById();
+      showItemEditorById(STATE.selectedItem);
       updateStatePill();
       setVerifyPill();
       updateActionEnablement();
     }
 
-    if(itemTextInp) itemTextInp.addEventListener("input", onItemChange);
-    if(qOptionsInp) qOptionsInp.addEventListener("input", onItemChange);
-    if(qFacitInp) qFacitInp.addEventListener("input", onItemChange);
-    if(tReqInp) tReqInp.addEventListener("change", onItemChange);
-    if(dSignInp) dSignInp.addEventListener("change", onItemChange);
+    itemTextInp.addEventListener("input", onItemChange);
+    qOptionsInp.addEventListener("input", onItemChange);
+    qFacitInp.addEventListener("input", onItemChange);
+    tReqInp.addEventListener("change", onItemChange);
+    dSignInp.addEventListener("change", onItemChange);
 
-    if(btnAddItem) btnAddItem.addEventListener("click", ()=> addItem(String(addItemKind?.value || "document")));
-    if(btnItemDuplicate) btnItemDuplicate.addEventListener("click", duplicateSelectedItem);
-    if(btnItemUp) btnItemUp.addEventListener("click", ()=> moveSelected(-1));
-    if(btnItemDown) btnItemDown.addEventListener("click", ()=> moveSelected(+1));
-    if(btnItemDelete) btnItemDelete.addEventListener("click", deleteSelected);
+    btnAddItem.addEventListener("click", ()=> addItem(String(addItemKind.value || "document")));
+    btnItemDuplicate.addEventListener("click", duplicateSelectedItem);
+    btnItemUp.addEventListener("click", ()=> moveSelected(-1));
+    btnItemDown.addEventListener("click", ()=> moveSelected(+1));
+    btnItemDelete.addEventListener("click", deleteSelected);
 
-    if(btnTemplateStandard) btnTemplateStandard.addEventListener("click", ()=>{
+    btnTemplateStandard.addEventListener("click", ()=>{
       addItem("question");
       const b = STATE.edit; if(!b) return;
       const items = Array.isArray(b.items) ? b.items : [];
@@ -2758,11 +2517,11 @@
       STATE.selectedItemType = String(it.kind||"");
       STATE.dirtyBlock = true;
       renderItems();
-      showItemEditorById();
+      showItemEditorById(STATE.selectedItem);
       markDirty();
     });
 
-    if(btnTemplateYesNo) btnTemplateYesNo.addEventListener("click", ()=>{
+    btnTemplateYesNo.addEventListener("click", ()=>{
       addItem("question");
       const b = STATE.edit; if(!b) return;
       const items = Array.isArray(b.items) ? b.items : [];
@@ -2773,11 +2532,11 @@
       STATE.selectedItemType = String(it.kind||"");
       STATE.dirtyBlock = true;
       renderItems();
-      showItemEditorById();
+      showItemEditorById(STATE.selectedItem);
       markDirty();
     });
 
-    if(btnTemplateInfo) btnTemplateInfo.addEventListener("click", ()=>{
+    btnTemplateInfo.addEventListener("click", ()=>{
       addItem("document");
       const b = STATE.edit; if(!b) return;
       const items = Array.isArray(b.items) ? b.items : [];
@@ -2788,11 +2547,11 @@
       STATE.selectedItemType = String(it.kind||"");
       STATE.dirtyBlock = true;
       renderItems();
-      showItemEditorById();
+      showItemEditorById(STATE.selectedItem);
       markDirty();
     });
 
-    if(btnSave) btnSave.addEventListener("click", ()=>{
+    btnSave.addEventListener("click", ()=>{
       setMsg("", "");
       if(!STATE.dirtyBlock) return;
       saveEdits();
@@ -2801,7 +2560,7 @@
       updateActionEnablement();
     });
 
-    if(btnVerify) btnVerify.addEventListener("click", ()=>{
+    btnVerify.addEventListener("click", ()=>{
       setMsg("", "");
       verifyBlock();
       updateStatePill();
@@ -2809,12 +2568,12 @@
       updateActionEnablement();
     });
 
-    if(btnPrint) btnPrint.addEventListener("click", ()=>{
+    btnPrint.addEventListener("click", ()=>{
       setMsg("", "");
       printSelectedBlock();
     });
 
-    if(btnPublish) btnPublish.addEventListener("click", ()=>{
+    btnPublish.addEventListener("click", ()=>{
       setMsg("", "");
       publishBlock();
       updateStatePill();
@@ -2822,29 +2581,30 @@
       updateActionEnablement();
     });
 
-    if(btnEdit) btnEdit.addEventListener("click", ()=>{
+    btnEdit.addEventListener("click", ()=>{
       if(!STATE.edit) return;
-      try{ titleInp && titleInp.focus(); }catch{}
+      try{ titleInp.focus(); }catch{}
     });
 
+    // filters
+    let tDeb;
     function debounce(fn, ms){
-      let t = null;
       return function(){
-        if(t) clearTimeout(t);
+        clearTimeout(tDeb);
         const args = arguments;
-        t = setTimeout(()=>fn.apply(null,args), ms);
+        tDeb = setTimeout(()=>fn.apply(null,args), ms);
       };
     }
     const renderDeb = debounce(()=>{ renderBlockList(true); }, 180);
 
-    if(qBlocks) qBlocks.addEventListener("input", renderDeb);
-    if(filterStatus) filterStatus.addEventListener("change", ()=>renderBlockList(true));
-    if(fHasQ) fHasQ.addEventListener("change", ()=>renderBlockList(true));
-    if(fHasD) fHasD.addEventListener("change", ()=>renderBlockList(true));
-    if(fNoKey) fNoKey.addEventListener("change", ()=>renderBlockList(true));
-    if(fUnverified) fUnverified.addEventListener("change", ()=>renderBlockList(true));
+    qBlocks.addEventListener("input", renderDeb);
+    filterStatus.addEventListener("change", ()=>renderBlockList(true));
+    fHasQ.addEventListener("change", ()=>renderBlockList(true));
+    fHasD.addEventListener("change", ()=>renderBlockList(true));
+    fNoKey.addEventListener("change", ()=>renderBlockList(true));
+    fUnverified.addEventListener("change", ()=>renderBlockList(true));
 
-    // “Visa alla” toggle (runtime)
+    // AO-UX-COLLAPSE-SEARCHFIRST-01: “Visa alla” toggle (runtime)
     if(btnShowAllBlocks){
       btnShowAllBlocks.addEventListener("click", ()=>{
         const on = btnShowAllBlocks.getAttribute("aria-pressed") === "true";
@@ -2853,106 +2613,29 @@
         btnShowAllBlocks.textContent = next ? "Sök först" : "Visa alla";
         btnShowAllBlocks.title = next ? "Återgå till sök-läge" : "Visa hela listan utan sök";
         STATE.showAllBlocks = next;
-        if(next){
-          STATE.leftModuleKey = "";
-          STATE.leftModuleLabel = "";
-        }
         renderBlockList(true);
       });
     }
 
-    // UX: Rensa block-sök/filter → tillbaka till Sök först (ingen lagring)
-    function clearBlockDiscovery(){
-      if(qBlocks) qBlocks.value = "";
-      if(filterStatus) filterStatus.value = "all";
-      if(fHasQ) fHasQ.checked = false;
-      if(fHasD) fHasD.checked = false;
-      if(fNoKey) fNoKey.checked = false;
-      if(fUnverified) fUnverified.checked = false;
-
-      STATE.showAllBlocks = false;
-      STATE.leftModuleKey = "";
-      STATE.leftModuleLabel = "";
-      if(btnShowAllBlocks){
-        btnShowAllBlocks.setAttribute("aria-pressed","false");
-        btnShowAllBlocks.textContent = "Visa alla";
-        btnShowAllBlocks.title = "Visa hela listan utan sök";
-      }
-      renderBlockList(true);
-    }
-    if(btnClearBlocks) btnClearBlocks.addEventListener("click", ()=>{
-      setMsg("", "");
-      clearBlockDiscovery();
-    });
-
-    // UX: snabbfilter-knappar (runtime)
-    function applyQuickDraft(){
-      if(filterStatus) filterStatus.value = "draft";
-      if(fNoKey) fNoKey.checked = false;
-      if(fUnverified) fUnverified.checked = false;
-      STATE.showAllBlocks = true;
-      if(btnShowAllBlocks){
-        btnShowAllBlocks.setAttribute("aria-pressed","true");
-        btnShowAllBlocks.textContent = "Sök först";
-        btnShowAllBlocks.title = "Återgå till sök-läge";
-      }
-      renderBlockList(true);
-    }
-    function applyQuickNoKey(){
-      if(filterStatus) filterStatus.value = "all";
-      if(fNoKey) fNoKey.checked = true;
-      STATE.showAllBlocks = true;
-      if(btnShowAllBlocks){
-        btnShowAllBlocks.setAttribute("aria-pressed","true");
-        btnShowAllBlocks.textContent = "Sök först";
-        btnShowAllBlocks.title = "Återgå till sök-läge";
-      }
-      renderBlockList(true);
-    }
-    function applyQuickUnverified(){
-      if(filterStatus) filterStatus.value = "all";
-      if(fUnverified) fUnverified.checked = true;
-      STATE.showAllBlocks = true;
-      if(btnShowAllBlocks){
-        btnShowAllBlocks.setAttribute("aria-pressed","true");
-        btnShowAllBlocks.textContent = "Sök först";
-        btnShowAllBlocks.title = "Återgå till sök-läge";
-      }
-      renderBlockList(true);
-    }
-    if(btnQuickDraft) btnQuickDraft.addEventListener("click", ()=>{ setMsg("", ""); applyQuickDraft(); });
-    if(btnQuickNoKey) btnQuickNoKey.addEventListener("click", ()=>{ setMsg("", ""); applyQuickNoKey(); });
-    if(btnQuickUnverified) btnQuickUnverified.addEventListener("click", ()=>{ setMsg("", ""); applyQuickUnverified(); });
-
     // focused mode
-    function setFocusMode(on){
-      if(btnFocus){
-        btnFocus.setAttribute("aria-pressed", String(!!on));
-        btnFocus.textContent = on ? "Avsluta fokus" : "Fokuserat läge";
-      }
-      if(sideCard) sideCard.style.display = on ? "none" : "";
-      if(mainGrid){
-        if(on) mainGrid.classList.add("focused");
-        else mainGrid.classList.remove("focused");
-      }
-    }
-
-    if(btnFocus) btnFocus.addEventListener("click", ()=>{
+    btnFocus.addEventListener("click", ()=>{
       const on = btnFocus.getAttribute("aria-pressed") === "true";
-      setFocusMode(!on);
+      btnFocus.setAttribute("aria-pressed", String(!on));
+      btnFocus.textContent = !on ? "Avsluta fokus" : "Fokuserat läge";
+      if(sideCard) sideCard.style.display = on ? "" : "none";
     });
 
-    // export collapse
-    if(btnToggleExport) btnToggleExport.addEventListener("click", ()=>{
+    // export collapse (FIX P0: toggla nästa state, inte föregående)
+    btnToggleExport.addEventListener("click", ()=>{
       const isOpen = btnToggleExport.getAttribute("aria-expanded") === "true";
-      const next = !isOpen;
-      btnToggleExport.setAttribute("aria-expanded", String(next));
-      btnToggleExport.textContent = next ? "Dölj" : "Visa";
-      if(exportBody) exportBody.style.display = next ? "block" : "none";
+      const nextOpen = !isOpen;
+      btnToggleExport.setAttribute("aria-expanded", String(nextOpen));
+      btnToggleExport.textContent = nextOpen ? "Dölj" : "Visa";
+      exportBody.style.display = nextOpen ? "block" : "none";
     });
 
-    // info toggle
-    if(btnToggleInfo) btnToggleInfo.addEventListener("click", ()=>{
+    // info toggle (döljer/visar InfoBox – lugn start)
+    btnToggleInfo.addEventListener("click", ()=>{
       const showing = btnToggleInfo.dataset.on === "1";
       btnToggleInfo.dataset.on = showing ? "0" : "1";
       btnToggleInfo.textContent = showing ? "Visa info" : "Dölj info";
@@ -2962,150 +2645,134 @@
 
     // trainings filters
     const trainDeb = debounce(()=>{ renderTrainingHits(); }, 220);
-    if(qTrainModule) qTrainModule.addEventListener("change", ()=>{ renderTrainingHits(); });
-    if(qTrainArea) qTrainArea.addEventListener("input", trainDeb);
-    if(qTrainFree) qTrainFree.addEventListener("input", trainDeb);
+    qTrainModule.addEventListener("change", ()=>{ renderTrainingHits(); });
+    qTrainArea.addEventListener("input", trainDeb);
+    qTrainFree.addEventListener("input", trainDeb);
 
-    if(btnReloadTrainings) btnReloadTrainings.addEventListener("click", ()=>{
+    btnReloadTrainings.addEventListener("click", ()=>{
       setMsg("", "");
       safeInitTrainings(true);
     });
 
-    if(btnClearExport) btnClearExport.addEventListener("click", ()=>{
-      setMsg("", "");
-      if(qTrainModule) qTrainModule.value = "";
-      if(qTrainArea) qTrainArea.value = "";
-      if(qTrainFree) qTrainFree.value = "";
-      STATE.selectedTrainingIndex = -1;
-      if(trainPreviewDetail){ trainPreviewDetail.style.display = "none"; clear(trainPreviewDetail); }
-      renderTrainingHits();
-      setExportUiState();
-    });
-
-    if(btnExportTraining) btnExportTraining.addEventListener("click", ()=>{
+    btnExportTraining.addEventListener("click", ()=>{
       setMsg("", "");
       exportSelectedTraining();
     });
 
     // logout
-    if(navLogout) navLogout.addEventListener("click", (e)=>{
+    navLogout.addEventListener("click", (e)=>{
       e.preventDefault();
       if(confirm("Logga ut?")){
         try{ HRApp.logout(); }catch{ location.href = "../index.html"; }
       }
     });
 
-    // keyboard shortcuts
-    document.addEventListener("keydown", (e)=>{
-      const key = String(e.key || "").toLowerCase();
-      const ctrl = e.ctrlKey || e.metaKey;
+    // ---------- init ----------
+    function renderEmptySystemHint(){
+      clear(blockList);
+      const wrap = document.createElement("div");
+      wrap.className = "muted2";
+      wrap.textContent = "Sök för att visa block. (Inga block hittade ännu.)";
+      blockList.appendChild(wrap);
+      hideEditor();
+    }
 
-      if(key === "escape"){
-        if(btnFocus && btnFocus.getAttribute("aria-pressed") === "true"){
-          setFocusMode(false);
-        }
-        return;
-      }
-
-      if(ctrl && key === "s"){
-        e.preventDefault();
-        if(btnSave && !btnSave.disabled) btnSave.click();
-        return;
-      }
-
-      if(ctrl && key === "p"){
-        // print selected block (kontrollrum)
-        e.preventDefault();
-        if(btnPrint && !btnPrint.disabled) btnPrint.click();
-        return;
-      }
-    });
-
-    // ---------- init (fail-closed) ----------
     function safeInitBlocks(){
       const st = loadBlocksState();
       if(st.corrupt){
-        STATE.lockReasons = [
-          `Låst för säkerhet: ${BLOCKS_KEY} verkar vara trasig (JSON).`,
-          "Åtgärd: rensa/återskapa block-banken innan du redigerar."
-        ];
+        STATE.lockReasons = [`Låst för säkerhet: ${BLOCKS_KEY} är trasig.`];
         STATE.all = [];
+        STATE.visible = [];
         applyLockFromState();
-        renderBlockList(true);
-        hideEditor();
-        setMsg("err","Block-bank är korrupt. Sidan är låst (fail-closed).");
+        renderEmptySystemHint();
+        setMsg("err", `Låst för säkerhet: ${BLOCKS_KEY} är trasig.`);
         return;
       }
 
       STATE.lockReasons = [];
       applyLockFromState();
 
-      const blocks = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
-      STATE.all = blocks;
+      STATE.all = Array.isArray(st.blocks) ? st.blocks.map(normalizeBlock).filter(b=>b.blockId) : [];
 
+      if(STATE.all.length === 0){
+        renderEmptySystemHint();
+        return;
+      }
+
+      // AO-UX-COLLAPSE-SEARCHFIRST-01: ingen auto-selektion vid init
       renderBlockList(true);
       hideEditor();
     }
 
-    function safeInitTrainings(force){
-      // force används endast för att “uppdatera” listan från storage igen
+    function safeInitTrainings(showToast){
       const st = loadTrainingsState();
+      STATE.trainingsOk = !!st.ok;
       STATE.trainingsCorrupt = !!st.corrupt;
       STATE.trainingsMissing = !!st.missing;
       STATE.trainings = Array.isArray(st.trainings) ? st.trainings : [];
+      STATE.selectedTrainingIndex = -1;
 
-      if(force){
-        STATE.selectedTrainingIndex = -1;
-        if(trainPreviewDetail){ trainPreviewDetail.style.display = "none"; clear(trainPreviewDetail); }
+      if(STATE.trainingsCorrupt){
+        if(showToast) setMsg("warn", `Utbildningar låsta: ${TRAININGS_KEY} är trasig.`);
+        setExportUiState();
+        renderTrainingHits();
+        return;
       }
 
       fillDatalists();
       renderTrainingHits();
       setExportUiState();
+      if(showToast) setMsg("ok", "Utbildningar uppdaterade.");
     }
 
-    function init(){
+    function bootstrap(){
+      setMsg("", "");
       setWhoPill();
       setModePill();
-      setSelectionPill();
-      updateStatePill();
-      setVerifyPill();
 
-      // default UI-state
+      // AO-UX-COLLAPSE-SEARCHFIRST-01: lugn start
       if(introBox) introBox.style.display = "none";
-      if(btnToggleInfo){ btnToggleInfo.dataset.on = "0"; btnToggleInfo.textContent = "Visa info"; }
-      if(exportBody) exportBody.style.display = "none";
-      if(btnToggleExport){ btnToggleExport.setAttribute("aria-expanded","false"); btnToggleExport.textContent = "Visa"; }
+      btnToggleInfo.dataset.on = "0";
+      btnToggleInfo.textContent = "Visa info";
 
-      // if auth missing/corrupt -> fail-closed
-      if(!auth || auth.ok === false){
-        STATE.lockReasons = ["Låst för säkerhet: saknar giltig inloggning (auth)."];
-        applyLockFromState();
-        setMsg("err","Du är inte inloggad (fail-closed).");
+      // Export stängd vid start (markup är redan stängd, men vi säkrar här också)
+      btnToggleExport.setAttribute("aria-expanded","false");
+      btnToggleExport.textContent = "Visa";
+      if(exportBody) exportBody.style.display = "none";
+
+      if(btnShowAllBlocks){
+        btnShowAllBlocks.setAttribute("aria-pressed","false");
+        btnShowAllBlocks.textContent = "Visa alla";
+        btnShowAllBlocks.title = "Visa hela listan utan sök";
+      }
+      STATE.showAllBlocks = false;
+
+      if(isSystemAdmin){
+        setMsg("warn", "Read-only (Systemansvarig): Ändringar/verifiering/publicering är låsta. Utskrift är tillåten.");
       }
 
       safeInitBlocks();
       safeInitTrainings(false);
 
-      // hint text
-      if(leftHint && !hasDiscoveryActive()){
-        leftHint.textContent = "Sök, snabbfilter – eller exportera.";
+      updateStatePill();
+      setSelectionPill();
+      setTopbarEditing();
+      setVerifyPill();
+      updateActionEnablement();
+    }
+
+    document.addEventListener("DOMContentLoaded", ()=>{
+      try{ bootstrap(); }
+      catch(e){
+        console.error(e);
+        setMsg("err", "Init-fel: kunde inte starta vyn säkert.");
+        renderEmptySystemHint();
       }
-    }
+    });
 
-    // start
-    try{
-      init();
-    }catch(e){
-      console.error(e);
-      STATE.lockReasons = ["Låst för säkerhet: init kraschade."];
-      applyLockFromState();
-      setMsg("err","Sidan kunde inte initieras (fail-closed).");
-      renderBlockList(true);
-      hideEditor();
-    }
-
+    window.__PKG_BLOCK__ = { STATE, BLOCKS_KEY, TRAININGS_KEY };
   })();
   </script>
+
 </body>
 </html>
