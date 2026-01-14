@@ -1,9 +1,7 @@
 /* ============================================================
-AO-002 v1.7 (PATCH) + AO-AUTH-PIN-V1 (TEST PATCH) + AO-WORKER-CONFIG-BANNER-01 (PATCH)
-FILE: UI/UI-04-CONFIG.js
+AO-002 v1.6 (PATCH) + AO-AUTH-PIN-V1 (TEST PATCH) | FILE: UI/UI-04-CONFIG.js
 Projekt: HR-System
 Syfte: Central config för RBAC + route-tillgång + default routing + AUTH-policy (PIN-test)
-       + Runtime Worker-config ("anslagstavla") för klient-SDK (UI/UI-04-WORKER-SDK.js)
 Nivå: UI-only (GitHub Pages) | localStorage-first
 
 Policy (LÅST):
@@ -13,10 +11,6 @@ Policy (LÅST):
 - Public route ska vara explicit (endast allowlist)
 - Authed roller får inte ha /UI/ som route-prefix
 - AUTH PIN är TEST-läge (inte “riktig” säkerhet utan backend)
-- WORKER-config är runtime-only:
-  - Ingen lagring av token i localStorage/sessionStorage
-  - Fail-closed: om baseUrl saknas => SDK ska inte funka (sidan kan fortfarande fungera utan AI)
-  - SDK använder endast /v1/...
 
 PATCH v1.5 (STABILITET):
 - MANAGER är isolerad till /manager/ (tar bort /admin/ för att undvika rollblandning)
@@ -26,9 +20,9 @@ AO-AUTH-PIN-V1 (TEST):
 - Förbereder PIN-login utan klartext-PIN i kod (PBKDF2-hash + salt per roll)
 - Session-policy (TTL/lockout) definieras här och används av core/login
 
-AO-WORKER-CONFIG-BANNER-01 (PATCH):
-- Lägger till HR_CONFIG.WORKER samt window.__HR_WORKER_BASE_URL + __HR_WORKER_REQUIRE_AUTH
-- Default: baseUrl="" (fail-closed)
+PATCH v1.6 (WORKER RUNTIME BANNER):
+- Lägger till WORKER runtime-konfig (ingen lagring)
+- Speglar till globals: window.__HR_WORKER_BASE_URL / window.__HR_WORKER_REQUIRE_AUTH
 ============================================================ */
 
 (function () {
@@ -131,25 +125,15 @@ AO-WORKER-CONFIG-BANNER-01 (PATCH):
   });
 
   // -------------------------
-  // WORKER (AO-WORKER-CONFIG-BANNER-01) – runtime-only
+  // WORKER (AO-UI-WORKER-CONFIG-BANNER-01) – runtime-only
   // -------------------------
-  // Detta är en “anslagstavla” som UI-sidor kan läsa för att initiera HRWorkerSDK.
-  // Default är fail-closed: baseUrl tom => ingen AI.
-  //
-  // baseUrl ska vara t.ex.:
-  // - "https://din-worker.workers.dev"  (SDK lägger på /v1)
-  // - "https://din-worker.workers.dev/v1" (SDK behåller)
-  //
-  // OBS: Token får inte lagras i webbläsaren. Om requireAuth=true måste token hämtas
-  // i runtime (men i våra nuvarande AO skickar vi tom token => servern får svara 401).
+  // Skolversion: "telefonnumret på väggen".
+  // LÅST: Ingen lagring här. Detta är defaultvärden som kan “skrivas över” i runtime
+  // av t.ex. en SYSTEM_ADMIN-banner eller annan init (utan storage).
+  // Fail-closed: tom BASE_URL betyder att UI-sidor måste stoppa worker-anrop.
   const WORKER = Object.freeze({
-    // Fail-closed default: tom sträng
-    // Sätt detta i drift via en tydlig patch/commit när du vet din Worker URL.
-    BASE_URL: "",
-
-    // Om Worker kräver auth-header (Bearer): sätt true.
-    // (Nu: false som default)
-    REQUIRE_AUTH: false,
+    BASE_URL: "",         // ex: "https://xxxx.workers.dev" (utan /v1 – SDK fixar /v1)
+    REQUIRE_AUTH: false,  // om true: SDK skickar Authorization om getToken() ger token
   });
 
   // -------------------------
@@ -210,9 +194,6 @@ AO-WORKER-CONFIG-BANNER-01 (PATCH):
   // -------------------------
   const DEBUG = false;
 
-  // -------------------------
-  // Export HR_CONFIG (LÅST)
-  // -------------------------
   window.HR_CONFIG = Object.freeze({
     DEBUG,
     BASE_PATH,
@@ -222,7 +203,7 @@ AO-WORKER-CONFIG-BANNER-01 (PATCH):
     ROUTES_BY_ROLE,
     PERMISSIONS_BY_ROLE,
 
-    // AO-WORKER-CONFIG-BANNER-01
+    // AO-UI-WORKER-CONFIG-BANNER-01 (runtime-only defaults)
     WORKER,
 
     // AO-AUTH-PIN-V1
@@ -230,18 +211,26 @@ AO-WORKER-CONFIG-BANNER-01 (PATCH):
   });
 
   // -------------------------
-  // Runtime "anslagstavla" för sidor/SDK (LÅST)
+  // WORKER runtime globals (NO STORAGE)
   // -------------------------
-  // Dessa kan läsas av admin/trainings.html osv utan att importera HR_CONFIG direkt.
-  // Fail-closed: BASE_URL kan vara tom.
+  // Skolversion: "telefonnumret på väggen" som alla klassrum kan läsa.
+  // OBS: Dessa kan sättas om i runtime av en banner (utan storage).
+  // Fail-closed: tom URL => UI ska visa fel och inte skicka requests.
   try {
-    if (typeof window.__HR_WORKER_BASE_URL === "undefined") {
+    if (typeof window.__HR_WORKER_BASE_URL !== "string" || window.__HR_WORKER_BASE_URL === "") {
       window.__HR_WORKER_BASE_URL = WORKER.BASE_URL;
     }
-    if (typeof window.__HR_WORKER_REQUIRE_AUTH === "undefined") {
-      window.__HR_WORKER_REQUIRE_AUTH = WORKER.REQUIRE_AUTH === true;
+    if (typeof window.__HR_WORKER_REQUIRE_AUTH !== "boolean") {
+      window.__HR_WORKER_REQUIRE_AUTH = (WORKER.REQUIRE_AUTH === true);
     }
   } catch (_) {
     // fail-closed: gör inget
   }
+
+  /* ============================================================
+     ÄNDRINGSLOGG (≤8)
+     - ADD: WORKER config (runtime-only, ingen lagring)
+     - ADD: HR_CONFIG.WORKER export
+     - ADD: window.__HR_WORKER_BASE_URL + window.__HR_WORKER_REQUIRE_AUTH (fail-closed)
+  ============================================================ */
 })();
