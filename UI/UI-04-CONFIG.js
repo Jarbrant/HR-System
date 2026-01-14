@@ -1,7 +1,9 @@
 /* ============================================================
-AO-002 v1.6 (PATCH) + AO-AUTH-PIN-V1 (TEST PATCH) | FILE: UI/UI-04-CONFIG.js
+AO-002 v1.7 (PATCH) + AO-AUTH-PIN-V1 (TEST PATCH) + AO-WORKER-CONFIG-BANNER-01 (PATCH)
+FILE: UI/UI-04-CONFIG.js
 Projekt: HR-System
 Syfte: Central config för RBAC + route-tillgång + default routing + AUTH-policy (PIN-test)
+       + Runtime Worker-config ("anslagstavla") för klient-SDK (UI/UI-04-WORKER-SDK.js)
 Nivå: UI-only (GitHub Pages) | localStorage-first
 
 Policy (LÅST):
@@ -11,6 +13,10 @@ Policy (LÅST):
 - Public route ska vara explicit (endast allowlist)
 - Authed roller får inte ha /UI/ som route-prefix
 - AUTH PIN är TEST-läge (inte “riktig” säkerhet utan backend)
+- WORKER-config är runtime-only:
+  - Ingen lagring av token i localStorage/sessionStorage
+  - Fail-closed: om baseUrl saknas => SDK ska inte funka (sidan kan fortfarande fungera utan AI)
+  - SDK använder endast /v1/...
 
 PATCH v1.5 (STABILITET):
 - MANAGER är isolerad till /manager/ (tar bort /admin/ för att undvika rollblandning)
@@ -19,6 +25,10 @@ PATCH v1.5 (STABILITET):
 AO-AUTH-PIN-V1 (TEST):
 - Förbereder PIN-login utan klartext-PIN i kod (PBKDF2-hash + salt per roll)
 - Session-policy (TTL/lockout) definieras här och används av core/login
+
+AO-WORKER-CONFIG-BANNER-01 (PATCH):
+- Lägger till HR_CONFIG.WORKER samt window.__HR_WORKER_BASE_URL + __HR_WORKER_REQUIRE_AUTH
+- Default: baseUrl="" (fail-closed)
 ============================================================ */
 
 (function () {
@@ -121,6 +131,28 @@ AO-AUTH-PIN-V1 (TEST):
   });
 
   // -------------------------
+  // WORKER (AO-WORKER-CONFIG-BANNER-01) – runtime-only
+  // -------------------------
+  // Detta är en “anslagstavla” som UI-sidor kan läsa för att initiera HRWorkerSDK.
+  // Default är fail-closed: baseUrl tom => ingen AI.
+  //
+  // baseUrl ska vara t.ex.:
+  // - "https://din-worker.workers.dev"  (SDK lägger på /v1)
+  // - "https://din-worker.workers.dev/v1" (SDK behåller)
+  //
+  // OBS: Token får inte lagras i webbläsaren. Om requireAuth=true måste token hämtas
+  // i runtime (men i våra nuvarande AO skickar vi tom token => servern får svara 401).
+  const WORKER = Object.freeze({
+    // Fail-closed default: tom sträng
+    // Sätt detta i drift via en tydlig patch/commit när du vet din Worker URL.
+    BASE_URL: "",
+
+    // Om Worker kräver auth-header (Bearer): sätt true.
+    // (Nu: false som default)
+    REQUIRE_AUTH: false,
+  });
+
+  // -------------------------
   // AUTH (AO-AUTH-PIN-V1) – TEST-läge (UI-only)
   // -------------------------
   // Kort och rakt: detta är INTE “riktig” auth utan backend.
@@ -178,6 +210,9 @@ AO-AUTH-PIN-V1 (TEST):
   // -------------------------
   const DEBUG = false;
 
+  // -------------------------
+  // Export HR_CONFIG (LÅST)
+  // -------------------------
   window.HR_CONFIG = Object.freeze({
     DEBUG,
     BASE_PATH,
@@ -187,7 +222,26 @@ AO-AUTH-PIN-V1 (TEST):
     ROUTES_BY_ROLE,
     PERMISSIONS_BY_ROLE,
 
+    // AO-WORKER-CONFIG-BANNER-01
+    WORKER,
+
     // AO-AUTH-PIN-V1
     AUTH,
   });
+
+  // -------------------------
+  // Runtime "anslagstavla" för sidor/SDK (LÅST)
+  // -------------------------
+  // Dessa kan läsas av admin/trainings.html osv utan att importera HR_CONFIG direkt.
+  // Fail-closed: BASE_URL kan vara tom.
+  try {
+    if (typeof window.__HR_WORKER_BASE_URL === "undefined") {
+      window.__HR_WORKER_BASE_URL = WORKER.BASE_URL;
+    }
+    if (typeof window.__HR_WORKER_REQUIRE_AUTH === "undefined") {
+      window.__HR_WORKER_REQUIRE_AUTH = WORKER.REQUIRE_AUTH === true;
+    }
+  } catch (_) {
+    // fail-closed: gör inget
+  }
 })();
