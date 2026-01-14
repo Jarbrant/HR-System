@@ -10,38 +10,6 @@
   Projekt: HR-System
   Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Redigera + Publicera blocks (blockId) – UI-only
 
-  AO 1–17 (koppling per BLOCK) – IMPLEMENTERAT I DENNA FIL:
-  - AO-01..AO-17 enligt PRC-lista (förklarande intro, typ-färger, kontext i topbar,
-    tydliga status/felorsaker, filter + ikoner, editor-sektioner, null-safe helpers,
-    auth/readonly, validering, trainings preview counts, STATE-shape, selection,
-    templates + live preview, save/publish summary, export auto-select, safe bootstrap).
-
-  NYTT i denna patch (KONTROLLRUM / VERIFIERING / UTSKRIFT):
-  - Verifieringssteg: “Verifiera” (utan att ändra datamodell) använder befintliga fält:
-    verifiedAt + verifiedBy på blocket. (Ingen ny storage-key, ingen ny schema-nyckel.)
-  - Filter: “Ej verifierade” (visar block där verifiedAt saknas/0)
-  - Utskrift: “Skriv ut” (print) för vald block – skriver ut dokument + frågor + uppgifter i en säker print-vy.
-  - Design: tar bort hover-brightness (följer “hover = endast skugga/border”)
-
-  AO-UX-COLLAPSE-SEARCHFIRST-01 (PROD) – “Sök först – visa sen”:
-  - Blocklista visar starttext vid init (ingen lång lista direkt)
-  - Export-ruta stängd vid init
-  - InfoBox dold vid init (knapp visar/döljer)
-  - Ingen auto-selektion av första blocket
-  - “Visa alla” runtime-toggle (ingen lagring)
-
-  AO-UX-LEFT-MODULE-GROUP-01 (PROD) – “Sök först → visa MODUL-grupper”:
-  - Vid sök/filter (utan “Visa alla”): vänsterlistan visar 1 rad per modul (samlingsblock)
-  - Klick på modul: visar block i modulen (i vänsterblocket) + “Tillbaka”
-  - Töm sök + inga filter: tillbaka till “Sök för att visa block”
-  - Ingen lagring: endast runtime-state
-
-  EXPORT-STEGET:
-  - Import/Export-steg: “Hämta från Utbildningar (AO-057_TRAININGS_V1)” → exportera som block till block-banken (AO-0XX_BLOCKS_V1)
-  - Fail-closed: export blockas om trainings-data är korrupt; SYSTEM_ADMIN = read-only
-  - Back-compat: stöder flera shapes i trainings (array/wrapper, olika fältnamn för block/items/content/rawText osv.)
-  - Ingen ny storage-key: Läser AO-057_TRAININGS_V1, skriver endast AO-0XX_BLOCKS_V1
-
   POLICY (LÅST):
   - UI-only • Fail-closed
   - sessionStorage först (auth) • fallback localStorage via CORE (HRApp)
@@ -49,13 +17,25 @@
   - Inga nya storage-keys (endast AO-0XX_BLOCKS_V1 skrivs här; AO-057_TRAININGS_V1 läses)
   - SYSTEM_ADMIN = steward-läge (read-only)
 
-  ÄNDRINGSLOGG (PATCH vNext):
-  - Fix (P0): debounce har egen timer per instans (block-sök och trainings-sök stör inte varandra)
-  - Fix (P0): Fokusläge ger 1-kolumn (grid2.focused) så editorn blir fullbredd
-  - Fix (P1): Modulvy robust: leftModuleKey+leftModuleLabel (matchar även vid case/whitespace)
-  - UX (P1): Ingen auto-öppning av första item vid blockval (du väljer item själv)
-  - QoL (P2): Ctrl/Cmd+S (spara), Ctrl/Cmd+P (print), Esc (avsluta fokus)
-  - Robusthet (P2): extra guards kring event-bindning vid saknade element
+  Keys (LÅSTA):
+  - BLOCKS_KEY:   AO-0XX_BLOCKS_V1 (read/write)  [wrapper: {blocks:[]}]
+  - TRAININGS_KEY: AO-057_TRAININGS_V1 (read-only)
+
+  NYTT i denna patch (UX-FÖRTYDLIGANDE / FÖRENKLING):
+  - “Start här”-hjälp i InfoBox: 3 tydliga steg (Sök → Välj → Redigera/Verifiera/Print)
+  - Rensa-knappar:
+    - “Rensa” i block-sök (återgår till Sök först-läge, nollställer filter)
+    - “Rensa” i export-sök (nollställer modul/område/titel + vald utbildning)
+  - Snabbknappar (runtime, ingen lagring): “Endast utkast”, “Saknar facit”, “Ej verifierade”
+  - Tydligare tomlägen/placeholder-text: guidar användaren vad som krävs för nästa steg
+
+  ÄNDRINGSLOGG (≤8 rader):
+  - UX: 3-stegs “Start här” + tydligare tomlägen
+  - UX: Rensa block-sök/filter → tillbaka till “Sök först”
+  - UX: Rensa export-sök/val → snabb omstart av exportflöde
+  - UX: Snabbfilter-knappar (runtime) för vanligaste vyerna
+  - Robusthet: säkrare init (fail-closed) + extra guards vid saknade element
+  - QoL: Ctrl/Cmd+S (spara), Ctrl/Cmd+P (print), Esc (avsluta fokus) — kvar
   ============================================================ -->
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
@@ -286,6 +266,15 @@
     }
     .verifyPill.ok{ border-color: rgba(16,185,129,.35); background: rgba(209,250,229,.55); }
     .verifyPill.warn{ border-color: rgba(245,158,11,.35); background: rgba(254,243,199,.7); }
+
+    /* UX: små knapp-rader i vänster kort (snabbfilter) */
+    .miniRow{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      align-items:center;
+      margin-top:8px;
+    }
   </style>
 </head>
 
@@ -344,18 +333,19 @@
 
     <!-- AO-01: tydlig introtext (dold vid init enligt “Sök först”) -->
     <div class="infoBox" id="introBox" style="display:none;">
-      <strong>Det här bygger du här:</strong>
-      <div class="tiny" style="margin-top:6px;">
-        Denna sida redigerar <strong>block</strong> som kan innehålla <strong>dokument</strong>, <strong>frågor</strong> och <strong>uppgifter</strong>.
-      </div>
+      <strong>Start här (3 steg):</strong>
       <ul class="tiny">
-        <li>📄 Document (info)</li>
-        <li>❓ Question (fråga + facit)</li>
-        <li>✅ Task (uppgift)</li>
-        <li>Mixed = flera typer i samma block</li>
+        <li><strong>1) Sök</strong> efter block (vänster) – eller exportera från utbildningar.</li>
+        <li><strong>2) Välj</strong> ett block – då laddas editor (höger).</li>
+        <li><strong>3) Redigera</strong> items → <strong>Spara</strong> → (valfritt) <strong>Verifiera</strong> eller <strong>Publicera</strong> → <strong>Skriv ut</strong> vid behov.</li>
       </ul>
       <div class="tiny" style="margin-top:8px;">
-        <strong>Kontrollrum:</strong> En admin kan skapa innehåll i <span class="mono">admin/trainings.html</span> → här kan en annan admin <strong>verifiera</strong> och <strong>skriva ut</strong>.
+        Block kan innehålla <strong>dokument</strong>, <strong>frågor</strong> och <strong>uppgifter</strong>:
+        📄 Dokument • ❓ Fråga (facit krävs) • ✅ Uppgift
+      </div>
+      <div class="tiny" style="margin-top:8px;">
+        <strong>Kontrollrum:</strong> En admin kan skapa innehåll i <span class="mono">admin/trainings.html</span> →
+        här kan en annan admin <strong>verifiera</strong> och <strong>skriva ut</strong>.
       </div>
     </div>
 
@@ -376,12 +366,14 @@
           </div>
 
           <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px;">
-            <div style="display:flex; gap:10px; align-items:flex-end;">
-              <label class="tiny" style="margin:0; font-weight:900; flex:1;">
+            <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+              <label class="tiny" style="margin:0; font-weight:900; flex:1; min-width:220px;">
                 Sök block
                 <input id="qBlocks" type="text" placeholder="Rubrik, modul, område…" autocomplete="off" />
               </label>
+
               <button class="miniBtn" id="btnShowAllBlocks" type="button" aria-pressed="false" title="Visa hela listan utan sök">Visa alla</button>
+              <button class="miniBtn" id="btnClearBlocks" type="button" title="Rensa sök och filter (tillbaka till Sök först)">Rensa</button>
             </div>
 
             <label class="tiny" style="margin:0; font-weight:900;">
@@ -399,6 +391,17 @@
               <label><input type="checkbox" id="fHasD"> Har dokument</label>
               <label><input type="checkbox" id="fNoKey"> Saknar facit</label>
               <label><input type="checkbox" id="fUnverified"> Ej verifierade</label>
+            </div>
+
+            <!-- UX: snabbfilter-knappar (runtime) -->
+            <div class="miniRow" aria-label="Snabbfilter">
+              <button class="miniBtn" id="btnQuickDraft" type="button" title="Sätt Visa=Utkast">Endast utkast</button>
+              <button class="miniBtn" id="btnQuickNoKey" type="button" title="Sätt filter Saknar facit">Saknar facit</button>
+              <button class="miniBtn" id="btnQuickUnverified" type="button" title="Sätt filter Ej verifierade">Ej verifierade</button>
+            </div>
+
+            <div class="tiny muted2" id="leftHint" style="margin-top:2px;">
+              Sök eller använd snabbfilter för att visa block.
             </div>
           </div>
         </div>
@@ -444,6 +447,11 @@
               </div>
             </div>
 
+            <div class="miniRow" style="justify-content:space-between;">
+              <button class="miniBtn" id="btnClearExport" type="button" title="Rensa export-sök och vald utbildning">Rensa</button>
+              <button class="miniBtn" id="btnReloadTrainings" type="button">Uppdatera</button>
+            </div>
+
             <div class="exportList" id="trainPreview" aria-label="Träffar" style="margin-top:10px;">
               <div class="muted2">Laddar utbildningar…</div>
             </div>
@@ -452,7 +460,6 @@
 
             <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
               <button class="miniBtn" id="btnExportTraining" type="button" disabled>Exportera vald utbildning</button>
-              <button class="miniBtn" id="btnReloadTrainings" type="button">Uppdatera</button>
             </div>
 
             <div class="softNote" id="trainExportHint" style="margin-top:10px;">
@@ -483,8 +490,12 @@
             </div>
           </div>
 
-          <div class="tiny" id="panelHint" aria-live="polite" style="margin-top:6px;">Välj ett block i listan.</div>
-          <div class="tiny muted2" id="editorEmptyHint" style="margin-top:8px;">Tips: Välj ett block i vänsterlistan för att se och redigera innehållet här.</div>
+          <div class="tiny" id="panelHint" aria-live="polite" style="margin-top:6px;">
+            Välj ett block i vänsterlistan.
+          </div>
+          <div class="tiny muted2" id="editorEmptyHint" style="margin-top:8px;">
+            Tips: Sök och välj ett block (vänster). Då kan du redigera items här.
+          </div>
 
           <div id="editorWrap" style="margin-top:10px; display:none;">
             <div aria-label="Block-metadata">
@@ -603,7 +614,6 @@
                 </label>
               </div>
             </div>
-
           </div>
 
           <div class="tiny" style="margin-top:12px;">
@@ -647,6 +657,12 @@
     const countBlocks = document.getElementById("countBlocks");
     const qBlocks = document.getElementById("qBlocks");
     const btnShowAllBlocks = document.getElementById("btnShowAllBlocks");
+    const btnClearBlocks = document.getElementById("btnClearBlocks");
+
+    const btnQuickDraft = document.getElementById("btnQuickDraft");
+    const btnQuickNoKey = document.getElementById("btnQuickNoKey");
+    const btnQuickUnverified = document.getElementById("btnQuickUnverified");
+    const leftHint = document.getElementById("leftHint");
 
     const filterStatus = document.getElementById("filterStatus");
     const fHasQ = document.getElementById("fHasQ");
@@ -712,6 +728,7 @@
     const trainPreviewDetail = document.getElementById("trainPreviewDetail");
     const btnExportTraining = document.getElementById("btnExportTraining");
     const btnReloadTrainings = document.getElementById("btnReloadTrainings");
+    const btnClearExport = document.getElementById("btnClearExport");
     const trainExportHint = document.getElementById("trainExportHint");
 
     const navLogout = document.getElementById("navLogout");
@@ -972,7 +989,7 @@
       return { ok:true, corrupt:false, missing:false, trainings };
     }
 
-    // ---------- STATE (AO-12) ----------
+    // ---------- STATE ----------
     const STATE = {
       locked: false,
       lockReasons: [],
@@ -982,7 +999,7 @@
 
       selectedBlock: "",
       selectedItem: null,
-      selectedItemType: "",   // AO-12: explicit
+      selectedItemType: "",
       edit: null,
 
       dirtyBlock: false,
@@ -994,14 +1011,14 @@
       selectedTrainingIndex: -1,
       trainingVisibleIndexes: [],
 
-      // AO-UX-COLLAPSE-SEARCHFIRST-01: runtime-flag (ingen lagring)
+      // runtime (ingen lagring)
       showAllBlocks: false,
 
-      // AO-UX-LEFT-MODULE-GROUP-01: runtime (ingen lagring)
+      // runtime (ingen lagring)
       leftModuleKey: "",
       leftModuleLabel: "",
 
-      // AO-05 optimization: cheap render cache
+      // cheap cache
       _lastBlockRenderKey: ""
     };
 
@@ -1098,7 +1115,7 @@
         if(isVerified(b)){
           elVerifiedHint.textContent = `Verifierad av ${String(b.verifiedBy||"—")} • ${new Date(Number(b.verifiedAt||0)).toLocaleString("sv-SE")}`;
         }else{
-          elVerifiedHint.textContent = "Ej verifierad ännu. (Använd knappen Verifiera när du har kontrollerat facit och innehåll.)";
+          elVerifiedHint.textContent = "Ej verifierad ännu. (Använd Verifiera när du har kontrollerat facit och innehåll.)";
         }
       }
     }
@@ -1128,7 +1145,7 @@
     function hideEditor(){
       if(editorWrap) editorWrap.style.display = "none";
       if(editorEmptyHint) editorEmptyHint.style.display = "block";
-      if(panelHint) panelHint.textContent = "Välj ett block i listan.";
+      if(panelHint) panelHint.textContent = "Välj ett block i vänsterlistan.";
       if(blockTag) blockTag.textContent = "—";
       if(statusTag) statusTag.textContent = "—";
       if(statusInp) statusInp.value = "";
@@ -1148,7 +1165,6 @@
       STATE.selectedItemType = "";
       setTopbarEditing();
       hideItemEditor();
-
       setVerifyPill();
     }
 
@@ -1200,7 +1216,7 @@
           : (STATE.dirtyBlock ? "Spara ändringar" : "Inga ändringar att spara"));
       }
 
-      // publish rules (AO-04/09/10)
+      // publish rules
       if(btnPublish){
         if(!canWrite || !hasBlock){
           btnPublish.disabled = true;
@@ -1215,7 +1231,7 @@
         }
       }
 
-      // verify rules: samma som publish (du verifierar att standarden håller)
+      // verify rules
       if(btnVerify){
         if(!canWrite || !hasBlock){
           btnVerify.disabled = true;
@@ -1241,7 +1257,7 @@
       }
     }
 
-    // ---------- selection (AO-13) ----------
+    // ---------- selection ----------
     function selectBlockByObject(block){
       if(STATE.dirtyBlock){
         const ok = confirm("Du har osparade ändringar. Byta block och kasta ändringar?");
@@ -1266,7 +1282,7 @@
       STATE.edit = normalizeBlock(block);
       STATE.dirtyBlock = false;
 
-      // PATCH (P1): Ingen auto-selektion av första item – du väljer item själv.
+      // Ingen auto-selektion av första item
       STATE.selectedItem = null;
       STATE.selectedItemType = "";
 
@@ -1274,13 +1290,13 @@
       showEditor();
       hideItemEditor();
 
-      try{ editorPanel.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
+      try{ editorPanel && editorPanel.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
       setMsg("", "");
       setTopbarEditing();
       setVerifyPill();
     }
 
-    // ---------- block list (AO-05 + opt + SEARCHFIRST + MODULE GROUP) ----------
+    // ---------- block list ----------
     function hasDiscoveryActive(){
       const q = String(qBlocks?.value || "").trim();
       const f = String(filterStatus?.value || "all");
@@ -1300,9 +1316,13 @@
       t.className = "tiny muted2";
       t.style.marginTop = "6px";
       t.textContent = nAll
-        ? "Tips: Du kan också trycka “Visa alla”."
+        ? "Tips: Du kan också trycka “Visa alla”, eller använda snabbfilter."
         : "Tips: Exportera från utbildningar för att skapa ett block.";
       blockList.appendChild(t);
+
+      if(leftHint){
+        leftHint.textContent = "Sök, använd snabbfilter – eller exportera.";
+      }
     }
 
     function computeVisible(){
@@ -1329,13 +1349,20 @@
           if(!hay.includes(q)) continue;
         }
 
-        // store comp for faster render
         b.__comp = comp;
         out.push(b);
       }
 
       out.sort((a,b) => Number(b.updatedAt||0) - Number(a.updatedAt||0));
       STATE.visible = out;
+
+      if(leftHint){
+        if(!hasDiscoveryActive()){
+          leftHint.textContent = "Sök, snabbfilter – eller exportera.";
+        }else{
+          leftHint.textContent = "Visar resultat baserat på sök/filter.";
+        }
+      }
     }
 
     function buildRenderKey(extra){
@@ -1359,13 +1386,11 @@
       const s = String(m || "").trim();
       return s || "Okänd modul";
     }
-
     function safeModuleKey(m){
       return safeModuleLabel(m).toLowerCase();
     }
 
     function renderModuleGroups(){
-      // group on STATE.visible
       const list = Array.isArray(STATE.visible) ? STATE.visible : [];
       const groups = new Map();
 
@@ -1519,7 +1544,6 @@
         const comp = b.__comp || blockComposition(b);
         meta.textContent = `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"} • ${comp.q+comp.t+comp.d} item(s)`;
 
-        // AO-05: icons per type
         const ico = document.createElement("div");
         ico.className = "icoRow";
         const pQ = document.createElement("span"); pQ.className = "icoPill"; pQ.textContent = `❓ ${comp.q}`;
@@ -1538,14 +1562,12 @@
         pill.textContent = blockStatusLabel(st);
         right.appendChild(pill);
 
-        // Verifieringsindikator
         const v = document.createElement("span");
         v.className = isVerified(b) ? "verifyPill ok" : "verifyPill warn";
         v.style.marginTop = "6px";
         v.textContent = isVerified(b) ? "Verifierad" : "Ej verifierad";
         right.appendChild(v);
 
-        // AO-04: highlight missing facit quickly
         if(comp.miss > 0){
           const miss = document.createElement("span");
           miss.className = "qaPill bad";
@@ -1571,7 +1593,7 @@
     function renderBlockList(forceFull){
       const nAll = Array.isArray(STATE.all) ? STATE.all.length : 0;
 
-      // AO-UX-COLLAPSE-SEARCHFIRST-01: “Sök först – visa sen”
+      // “Sök först – visa sen”
       if(!hasDiscoveryActive()){
         STATE.visible = [];
         STATE._lastBlockRenderKey = "SEARCHFIRST";
@@ -1584,9 +1606,6 @@
 
       const inShowAll = !!STATE.showAllBlocks;
 
-      // AO-UX-LEFT-MODULE-GROUP-01:
-      // - Om “Visa alla” = alltid blocklista
-      // - Annars: modulgrupper, och vid klick: block i modulen
       const mode =
         inShowAll ? "ALLBLOCKS" :
         (STATE.leftModuleKey ? ("MODBLOCKS:" + STATE.leftModuleKey) : "MODULEGROUPS");
@@ -1594,11 +1613,9 @@
       const key = buildRenderKey(mode);
       const needsFull = !!forceFull || key !== STATE._lastBlockRenderKey;
 
-      // count text
       const nVisBlocks = Array.isArray(STATE.visible) ? STATE.visible.length : 0;
 
       if(!needsFull){
-        // cheap active update only (gäller endast när vi faktiskt visar blockrader)
         if(mode.startsWith("ALLBLOCKS") || mode.startsWith("MODBLOCKS")){
           const rows = blockList.querySelectorAll(".rowItem");
           rows.forEach(r=>{
@@ -1613,21 +1630,18 @@
       STATE._lastBlockRenderKey = key;
       clear(blockList);
 
-      // VIEW: ALL BLOCKS
       if(inShowAll){
         if(countBlocks) countBlocks.textContent = `${nVisBlocks} / ${nAll}`;
         renderBlockRows(STATE.visible);
         return;
       }
 
-      // VIEW: MODULE GROUPS
       if(!STATE.leftModuleKey){
         const g = renderModuleGroups();
         if(countBlocks) countBlocks.textContent = `${g.groupsCount} moduler • ${nVisBlocks} / ${nAll} block`;
         return;
       }
 
-      // VIEW: BLOCKS IN MODULE
       const wantedKey = String(STATE.leftModuleKey || "").trim().toLowerCase();
       const filtered = (STATE.visible || []).filter(b => safeModuleKey(b.module) === wantedKey);
 
@@ -1639,7 +1653,6 @@
         return;
       }
 
-      // Render module header/back row + block rows
       renderBackRow();
 
       const head = document.createElement("div");
@@ -1652,7 +1665,7 @@
       renderBlockRows(filtered);
     }
 
-    // ---------- item editor (AO-14) ----------
+    // ---------- item editor ----------
     function hideItemEditor(){
       if(itemEditor) itemEditor.style.display = "none";
       if(itemKindInp) itemKindInp.value = "";
@@ -1733,7 +1746,7 @@
       if(items.length === 0){
         const d = document.createElement("div");
         d.className = "muted2";
-        d.textContent = "Inga items ännu.";
+        d.textContent = "Inga items ännu. Lägg till med “+ Lägg till” eller en mini-mall.";
         itemRows.appendChild(d);
         hideItemEditor();
         return;
@@ -1783,6 +1796,7 @@
           showItemEditorById();
           renderItems();
           setTopbarEditing();
+          try{ itemEditor && itemEditor.scrollIntoView({ behavior:"smooth", block:"start" }); }catch{}
         }
         row.addEventListener("click", choose);
         row.addEventListener("keydown", (e)=>{
@@ -1931,7 +1945,7 @@
       updateActionEnablement();
     }
 
-    // ---------- validation (AO-09/10) ----------
+    // ---------- validation ----------
     function validateForPublish(block){
       const b = block && typeof block === "object" ? block : null;
       const reasons = [];
@@ -1954,7 +1968,6 @@
     }
 
     function validateForVerify(block){
-      // Samma regel som publish: verifiering = “håller standard”
       return validateForPublish(block);
     }
 
@@ -2069,7 +2082,6 @@
 
       const now = Date.now();
       STATE.edit.status = "published";
-      // Publicering räknas som verifiering också (kontrollrum)
       STATE.edit.verifiedAt = now;
       STATE.edit.verifiedBy = String(empNo || "");
       STATE.edit.updatedAt = now;
@@ -2336,7 +2348,7 @@
       markDirty();
     }
 
-    // ---------- trainings helpers (AO-11) ----------
+    // ---------- trainings helpers ----------
     function trainingTitle(t){
       const o = t && typeof t === "object" ? t : {};
       return String(o.title || o.name || o.trainingTitle || "—").trim() || "—";
@@ -2550,7 +2562,7 @@
               ? "Inga utbildningar hittades ännu."
               : (selOk
                   ? "Vald utbildning: klicka på Exportera."
-                  : "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)."));
+                  : "Välj en utbildning i listan. Export skapar 1 nytt block (utkast)."));
       }
     }
 
@@ -2675,14 +2687,15 @@
 
       STATE.all = all;
 
-      if(filterStatus && filterStatus.value !== "all") filterStatus.value = "all";
-      if(qBlocks && qBlocks.value.trim()) qBlocks.value = "";
+      // nollställ filter
+      if(filterStatus) filterStatus.value = "all";
+      if(qBlocks) qBlocks.value = "";
       if(fHasQ) fHasQ.checked = false;
       if(fHasD) fHasD.checked = false;
       if(fNoKey) fNoKey.checked = false;
       if(fUnverified) fUnverified.checked = false;
 
-      // Återgå till “Sök först”
+      // tillbaka till “Sök först”
       STATE.showAllBlocks = false;
       STATE.leftModuleKey = "";
       STATE.leftModuleLabel = "";
@@ -2814,7 +2827,6 @@
       try{ titleInp && titleInp.focus(); }catch{}
     });
 
-    // filters
     function debounce(fn, ms){
       let t = null;
       return function(){
@@ -2832,7 +2844,7 @@
     if(fNoKey) fNoKey.addEventListener("change", ()=>renderBlockList(true));
     if(fUnverified) fUnverified.addEventListener("change", ()=>renderBlockList(true));
 
-    // AO-UX-COLLAPSE-SEARCHFIRST-01: “Visa alla” toggle (runtime)
+    // “Visa alla” toggle (runtime)
     if(btnShowAllBlocks){
       btnShowAllBlocks.addEventListener("click", ()=>{
         const on = btnShowAllBlocks.getAttribute("aria-pressed") === "true";
@@ -2848,6 +2860,69 @@
         renderBlockList(true);
       });
     }
+
+    // UX: Rensa block-sök/filter → tillbaka till Sök först (ingen lagring)
+    function clearBlockDiscovery(){
+      if(qBlocks) qBlocks.value = "";
+      if(filterStatus) filterStatus.value = "all";
+      if(fHasQ) fHasQ.checked = false;
+      if(fHasD) fHasD.checked = false;
+      if(fNoKey) fNoKey.checked = false;
+      if(fUnverified) fUnverified.checked = false;
+
+      STATE.showAllBlocks = false;
+      STATE.leftModuleKey = "";
+      STATE.leftModuleLabel = "";
+      if(btnShowAllBlocks){
+        btnShowAllBlocks.setAttribute("aria-pressed","false");
+        btnShowAllBlocks.textContent = "Visa alla";
+        btnShowAllBlocks.title = "Visa hela listan utan sök";
+      }
+      renderBlockList(true);
+    }
+    if(btnClearBlocks) btnClearBlocks.addEventListener("click", ()=>{
+      setMsg("", "");
+      clearBlockDiscovery();
+    });
+
+    // UX: snabbfilter-knappar (runtime)
+    function applyQuickDraft(){
+      if(filterStatus) filterStatus.value = "draft";
+      if(fNoKey) fNoKey.checked = false;
+      if(fUnverified) fUnverified.checked = false;
+      STATE.showAllBlocks = true;
+      if(btnShowAllBlocks){
+        btnShowAllBlocks.setAttribute("aria-pressed","true");
+        btnShowAllBlocks.textContent = "Sök först";
+        btnShowAllBlocks.title = "Återgå till sök-läge";
+      }
+      renderBlockList(true);
+    }
+    function applyQuickNoKey(){
+      if(filterStatus) filterStatus.value = "all";
+      if(fNoKey) fNoKey.checked = true;
+      STATE.showAllBlocks = true;
+      if(btnShowAllBlocks){
+        btnShowAllBlocks.setAttribute("aria-pressed","true");
+        btnShowAllBlocks.textContent = "Sök först";
+        btnShowAllBlocks.title = "Återgå till sök-läge";
+      }
+      renderBlockList(true);
+    }
+    function applyQuickUnverified(){
+      if(filterStatus) filterStatus.value = "all";
+      if(fUnverified) fUnverified.checked = true;
+      STATE.showAllBlocks = true;
+      if(btnShowAllBlocks){
+        btnShowAllBlocks.setAttribute("aria-pressed","true");
+        btnShowAllBlocks.textContent = "Sök först";
+        btnShowAllBlocks.title = "Återgå till sök-läge";
+      }
+      renderBlockList(true);
+    }
+    if(btnQuickDraft) btnQuickDraft.addEventListener("click", ()=>{ setMsg("", ""); applyQuickDraft(); });
+    if(btnQuickNoKey) btnQuickNoKey.addEventListener("click", ()=>{ setMsg("", ""); applyQuickNoKey(); });
+    if(btnQuickUnverified) btnQuickUnverified.addEventListener("click", ()=>{ setMsg("", ""); applyQuickUnverified(); });
 
     // focused mode
     function setFocusMode(on){
@@ -2867,7 +2942,7 @@
       setFocusMode(!on);
     });
 
-    // export collapse (FIX: korrekt visa/dölj)
+    // export collapse
     if(btnToggleExport) btnToggleExport.addEventListener("click", ()=>{
       const isOpen = btnToggleExport.getAttribute("aria-expanded") === "true";
       const next = !isOpen;
@@ -2876,7 +2951,7 @@
       if(exportBody) exportBody.style.display = next ? "block" : "none";
     });
 
-    // info toggle (döljer/visar InfoBox – lugn start)
+    // info toggle
     if(btnToggleInfo) btnToggleInfo.addEventListener("click", ()=>{
       const showing = btnToggleInfo.dataset.on === "1";
       btnToggleInfo.dataset.on = showing ? "0" : "1";
@@ -2896,6 +2971,17 @@
       safeInitTrainings(true);
     });
 
+    if(btnClearExport) btnClearExport.addEventListener("click", ()=>{
+      setMsg("", "");
+      if(qTrainModule) qTrainModule.value = "";
+      if(qTrainArea) qTrainArea.value = "";
+      if(qTrainFree) qTrainFree.value = "";
+      STATE.selectedTrainingIndex = -1;
+      if(trainPreviewDetail){ trainPreviewDetail.style.display = "none"; clear(trainPreviewDetail); }
+      renderTrainingHits();
+      setExportUiState();
+    });
+
     if(btnExportTraining) btnExportTraining.addEventListener("click", ()=>{
       setMsg("", "");
       exportSelectedTraining();
@@ -2909,7 +2995,7 @@
       }
     });
 
-    // keyboard shortcuts (P2)
+    // keyboard shortcuts
     document.addEventListener("keydown", (e)=>{
       const key = String(e.key || "").toLowerCase();
       const ctrl = e.ctrlKey || e.metaKey;
@@ -2921,137 +3007,105 @@
         return;
       }
 
-      if(!ctrl) return;
-
-      if(key === "s"){
+      if(ctrl && key === "s"){
         e.preventDefault();
         if(btnSave && !btnSave.disabled) btnSave.click();
         return;
       }
-      if(key === "p"){
-        // låt print funka även i steward (om block valt)
-        if(btnPrint && !btnPrint.disabled){
-          e.preventDefault();
-          btnPrint.click();
-        }
+
+      if(ctrl && key === "p"){
+        // print selected block (kontrollrum)
+        e.preventDefault();
+        if(btnPrint && !btnPrint.disabled) btnPrint.click();
+        return;
       }
     });
 
-    // ---------- init ----------
-    function renderEmptySystemHint(){
-      clear(blockList);
-      const wrap = document.createElement("div");
-      wrap.className = "muted2";
-      wrap.textContent = "Sök för att visa block. (Inga block hittade ännu.)";
-      blockList.appendChild(wrap);
-      hideEditor();
-    }
-
+    // ---------- init (fail-closed) ----------
     function safeInitBlocks(){
       const st = loadBlocksState();
       if(st.corrupt){
-        STATE.lockReasons = [`Låst för säkerhet: ${BLOCKS_KEY} är trasig.`];
+        STATE.lockReasons = [
+          `Låst för säkerhet: ${BLOCKS_KEY} verkar vara trasig (JSON).`,
+          "Åtgärd: rensa/återskapa block-banken innan du redigerar."
+        ];
         STATE.all = [];
-        STATE.visible = [];
         applyLockFromState();
-        renderEmptySystemHint();
-        setMsg("err", `Låst för säkerhet: ${BLOCKS_KEY} är trasig.`);
+        renderBlockList(true);
+        hideEditor();
+        setMsg("err","Block-bank är korrupt. Sidan är låst (fail-closed).");
         return;
       }
 
       STATE.lockReasons = [];
       applyLockFromState();
 
-      STATE.all = Array.isArray(st.blocks) ? st.blocks.map(normalizeBlock).filter(b=>b.blockId) : [];
+      const blocks = (Array.isArray(st.blocks) ? st.blocks : []).map(normalizeBlock);
+      STATE.all = blocks;
 
-      if(STATE.all.length === 0){
-        renderEmptySystemHint();
-        return;
-      }
-
-      // ingen auto-selektion vid init
       renderBlockList(true);
       hideEditor();
     }
 
-    function safeInitTrainings(showToast){
+    function safeInitTrainings(force){
+      // force används endast för att “uppdatera” listan från storage igen
       const st = loadTrainingsState();
-      STATE.trainingsOk = !!st.ok;
       STATE.trainingsCorrupt = !!st.corrupt;
       STATE.trainingsMissing = !!st.missing;
       STATE.trainings = Array.isArray(st.trainings) ? st.trainings : [];
-      STATE.selectedTrainingIndex = -1;
 
-      if(STATE.trainingsCorrupt){
-        if(showToast) setMsg("warn", `Utbildningar låsta: ${TRAININGS_KEY} är trasig.`);
-        setExportUiState();
-        renderTrainingHits();
-        return;
+      if(force){
+        STATE.selectedTrainingIndex = -1;
+        if(trainPreviewDetail){ trainPreviewDetail.style.display = "none"; clear(trainPreviewDetail); }
       }
 
       fillDatalists();
       renderTrainingHits();
       setExportUiState();
-      if(showToast) setMsg("ok", "Utbildningar uppdaterade.");
     }
 
-    function bootstrap(){
-      setMsg("", "");
+    function init(){
       setWhoPill();
       setModePill();
+      setSelectionPill();
+      updateStatePill();
+      setVerifyPill();
 
-      // lugn start
+      // default UI-state
       if(introBox) introBox.style.display = "none";
-      if(btnToggleInfo){
-        btnToggleInfo.dataset.on = "0";
-        btnToggleInfo.textContent = "Visa info";
-      }
-
-      // Export stängd vid start
-      if(btnToggleExport){
-        btnToggleExport.setAttribute("aria-expanded","false");
-        btnToggleExport.textContent = "Visa";
-      }
+      if(btnToggleInfo){ btnToggleInfo.dataset.on = "0"; btnToggleInfo.textContent = "Visa info"; }
       if(exportBody) exportBody.style.display = "none";
+      if(btnToggleExport){ btnToggleExport.setAttribute("aria-expanded","false"); btnToggleExport.textContent = "Visa"; }
 
-      if(btnShowAllBlocks){
-        btnShowAllBlocks.setAttribute("aria-pressed","false");
-        btnShowAllBlocks.textContent = "Visa alla";
-        btnShowAllBlocks.title = "Visa hela listan utan sök";
-      }
-      STATE.showAllBlocks = false;
-      STATE.leftModuleKey = "";
-      STATE.leftModuleLabel = "";
-
-      // fokusläge alltid av vid start
-      setFocusMode(false);
-
-      if(isSystemAdmin){
-        setMsg("warn", "Read-only (Systemansvarig): Ändringar/verifiering/publicering är låsta. Utskrift är tillåten.");
+      // if auth missing/corrupt -> fail-closed
+      if(!auth || auth.ok === false){
+        STATE.lockReasons = ["Låst för säkerhet: saknar giltig inloggning (auth)."];
+        applyLockFromState();
+        setMsg("err","Du är inte inloggad (fail-closed).");
       }
 
       safeInitBlocks();
       safeInitTrainings(false);
 
-      updateStatePill();
-      setSelectionPill();
-      setTopbarEditing();
-      setVerifyPill();
-      updateActionEnablement();
+      // hint text
+      if(leftHint && !hasDiscoveryActive()){
+        leftHint.textContent = "Sök, snabbfilter – eller exportera.";
+      }
     }
 
-    document.addEventListener("DOMContentLoaded", ()=>{
-      try{ bootstrap(); }
-      catch(e){
-        console.error(e);
-        setMsg("err", "Init-fel: kunde inte starta vyn säkert.");
-        renderEmptySystemHint();
-      }
-    });
+    // start
+    try{
+      init();
+    }catch(e){
+      console.error(e);
+      STATE.lockReasons = ["Låst för säkerhet: init kraschade."];
+      applyLockFromState();
+      setMsg("err","Sidan kunde inte initieras (fail-closed).");
+      renderBlockList(true);
+      hideEditor();
+    }
 
-    window.__PKG_BLOCK__ = { STATE, BLOCKS_KEY, TRAININGS_KEY };
   })();
   </script>
-
 </body>
 </html>
