@@ -23,6 +23,13 @@
   - Utskrift: “Skriv ut” (print) för vald block – skriver ut dokument + frågor + uppgifter i en säker print-vy.
   - Design: tar bort hover-brightness (följer “hover = endast skugga/border”)
 
+  AO-UX-COLLAPSE-SEARCHFIRST-01 (PROD) – “Sök först – visa sen”:
+  - Blocklista visar starttext vid init (ingen lång lista direkt)
+  - Export-ruta stängd vid init
+  - InfoBox dold vid init (knapp visar/döljer)
+  - Ingen auto-selektion av första blocket
+  - “Visa alla” runtime-toggle (ingen lagring)
+
   EXPORT-STEGET:
   - Import/Export-steg: “Hämta från Utbildningar (AO-057_TRAININGS_V1)” → exportera som block till block-banken (AO-0XX_BLOCKS_V1)
   - Fail-closed: export blockas om trainings-data är korrupt; SYSTEM_ADMIN = read-only
@@ -62,6 +69,18 @@
     }
 
     .muted2{ color: var(--muted); font-size:.92rem; line-height:1.35; }
+
+    /* AO-UX-COLLAPSE-SEARCHFIRST-01:
+       Säkerställ två tydliga ytor (vänster/höger) på breda skärmar. */
+    .grid2{
+      display:grid;
+      grid-template-columns: 420px 1fr;
+      gap:12px;
+      align-items:start;
+    }
+    @media (max-width: 980px){
+      .grid2{ grid-template-columns: 1fr; }
+    }
 
     /* AO-05 icons helpers */
     .ico{ display:inline-flex; align-items:center; gap:6px; }
@@ -306,8 +325,8 @@
       <div id="lockBox" class="lockbox" style="display:none;"></div>
     </div>
 
-    <!-- AO-01: tydlig introtext (ingen ny logik, bara tydlighet) -->
-    <div class="infoBox" id="introBox" style="display:block;">
+    <!-- AO-01: tydlig introtext (dold vid init enligt “Sök först”) -->
+    <div class="infoBox" id="introBox" style="display:none;">
       <strong>Det här bygger du här:</strong>
       <div class="tiny" style="margin-top:6px;">
         Denna sida redigerar <strong>block</strong> som kan innehålla <strong>dokument</strong>, <strong>frågor</strong> och <strong>uppgifter</strong>.
@@ -340,10 +359,13 @@
           </div>
 
           <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px;">
-            <label class="tiny" style="margin:0; font-weight:900;">
-              Sök block
-              <input id="qBlocks" type="text" placeholder="Rubrik, modul, område…" autocomplete="off" />
-            </label>
+            <div style="display:flex; gap:10px; align-items:flex-end;">
+              <label class="tiny" style="margin:0; font-weight:900; flex:1;">
+                Sök block
+                <input id="qBlocks" type="text" placeholder="Rubrik, modul, område…" autocomplete="off" />
+              </label>
+              <button class="miniBtn" id="btnShowAllBlocks" type="button" aria-pressed="false" title="Visa hela listan utan sök">Visa alla</button>
+            </div>
 
             <label class="tiny" style="margin:0; font-weight:900;">
               Visa
@@ -371,10 +393,10 @@
               <div class="exportTitle" style="font-weight:950;">Hämta från utbildningar</div>
               <div class="tiny">Skapar ett nytt utkast i block-banken som du kan granska här.</div>
             </div>
-            <button class="miniBtn" id="btnToggleExport" type="button" aria-expanded="true">Dölj</button>
+            <button class="miniBtn" id="btnToggleExport" type="button" aria-expanded="false">Visa</button>
           </div>
 
-          <div id="exportBody">
+          <div id="exportBody" style="display:none;">
             <div class="exportMeta" style="margin-top:6px;">
               Källa: <span class="mono">AO-057_TRAININGS_V1</span> (läsa) → Mål: <span class="mono">AO-0XX_BLOCKS_V1</span> (spara).
             </div>
@@ -594,6 +616,8 @@
     const elVerifiedHint = document.getElementById("verifiedHint");
 
     const btnToggleInfo = document.getElementById("btnToggleInfo");
+    const introBox = document.getElementById("introBox");
+
     const btnToggleExport = document.getElementById("btnToggleExport");
     const exportBody = document.getElementById("exportBody");
 
@@ -605,6 +629,8 @@
 
     const countBlocks = document.getElementById("countBlocks");
     const qBlocks = document.getElementById("qBlocks");
+    const btnShowAllBlocks = document.getElementById("btnShowAllBlocks");
+
     const filterStatus = document.getElementById("filterStatus");
     const fHasQ = document.getElementById("fHasQ");
     const fHasD = document.getElementById("fHasD");
@@ -947,6 +973,9 @@
       selectedTrainingIndex: -1,
       trainingVisibleIndexes: [],
 
+      // AO-UX-COLLAPSE-SEARCHFIRST-01: runtime-flag (ingen lagring)
+      showAllBlocks: false,
+
       // AO-05 optimization: cheap render cache
       _lastBlockRenderKey: ""
     };
@@ -1217,7 +1246,31 @@
       setVerifyPill();
     }
 
-    // ---------- block list (AO-05 + opt) ----------
+    // ---------- block list (AO-05 + opt + SEARCHFIRST) ----------
+    function hasDiscoveryActive(){
+      const q = String(qBlocks?.value || "").trim();
+      const f = String(filterStatus?.value || "all");
+      const anyChecks = !!(fHasQ?.checked || fHasD?.checked || fNoKey?.checked || fUnverified?.checked);
+      return !!STATE.showAllBlocks || !!q || (f !== "all") || anyChecks;
+    }
+
+    function renderSearchFirstPlaceholder(nAll){
+      clear(blockList);
+
+      const h = document.createElement("div");
+      h.className = "muted2";
+      h.textContent = "Sök för att visa block.";
+      blockList.appendChild(h);
+
+      const t = document.createElement("div");
+      t.className = "tiny muted2";
+      t.style.marginTop = "6px";
+      t.textContent = nAll
+        ? "Tips: Du kan också trycka “Visa alla”."
+        : "Tips: Exportera från utbildningar för att skapa ett block.";
+      blockList.appendChild(t);
+    }
+
     function computeVisible(){
       const q = String(qBlocks?.value || "").trim().toLowerCase();
       const f = String(filterStatus?.value || "all");
@@ -1257,6 +1310,7 @@
       const f = [
         String(filterStatus?.value||""),
         String(qBlocks?.value||""),
+        (STATE.showAllBlocks ? "SHOWALL" : ""),
         fHasQ?.checked ? "q" : "",
         fHasD?.checked ? "d" : "",
         fNoKey?.checked ? "m" : "",
@@ -1266,8 +1320,18 @@
     }
 
     function renderBlockList(forceFull){
-      const key = buildRenderKey();
       const nAll = Array.isArray(STATE.all) ? STATE.all.length : 0;
+
+      // AO-UX-COLLAPSE-SEARCHFIRST-01: “Sök först – visa sen”
+      if(!hasDiscoveryActive()){
+        STATE.visible = [];
+        STATE._lastBlockRenderKey = "SEARCHFIRST";
+        countBlocks.textContent = `0 / ${nAll}`;
+        renderSearchFirstPlaceholder(nAll);
+        return;
+      }
+
+      const key = buildRenderKey();
       const nVis = Array.isArray(STATE.visible) ? STATE.visible.length : 0;
       countBlocks.textContent = `${nVis} / ${nAll}`;
 
@@ -2384,6 +2448,14 @@
       if(fNoKey) fNoKey.checked = false;
       if(fUnverified) fUnverified.checked = false;
 
+      // Återgå till “Sök först” efter export (listan syns via valt block ändå när man söker/visar alla)
+      STATE.showAllBlocks = false;
+      if(btnShowAllBlocks){
+        btnShowAllBlocks.setAttribute("aria-pressed","false");
+        btnShowAllBlocks.textContent = "Visa alla";
+        btnShowAllBlocks.title = "Visa hela listan utan sök";
+      }
+
       renderBlockList(true);
 
       try{ selectBlockByObject(newBlock); }catch{}
@@ -2524,6 +2596,19 @@
     fNoKey.addEventListener("change", ()=>renderBlockList(true));
     fUnverified.addEventListener("change", ()=>renderBlockList(true));
 
+    // AO-UX-COLLAPSE-SEARCHFIRST-01: “Visa alla” toggle (runtime)
+    if(btnShowAllBlocks){
+      btnShowAllBlocks.addEventListener("click", ()=>{
+        const on = btnShowAllBlocks.getAttribute("aria-pressed") === "true";
+        const next = !on;
+        btnShowAllBlocks.setAttribute("aria-pressed", String(next));
+        btnShowAllBlocks.textContent = next ? "Sök först" : "Visa alla";
+        btnShowAllBlocks.title = next ? "Återgå till sök-läge" : "Visa hela listan utan sök";
+        STATE.showAllBlocks = next;
+        renderBlockList(true);
+      });
+    }
+
     // focused mode
     btnFocus.addEventListener("click", ()=>{
       const on = btnFocus.getAttribute("aria-pressed") === "true";
@@ -2537,19 +2622,16 @@
       const open = btnToggleExport.getAttribute("aria-expanded") !== "false";
       btnToggleExport.setAttribute("aria-expanded", String(!open));
       btnToggleExport.textContent = open ? "Visa" : "Dölj";
-      exportBody.style.display = open ? "none" : "block";
+      exportBody.style.display = open ? "block" : "none";
     });
 
-    // info toggle
+    // info toggle (döljer/visar InfoBox – lugn start)
     btnToggleInfo.addEventListener("click", ()=>{
       const showing = btnToggleInfo.dataset.on === "1";
       btnToggleInfo.dataset.on = showing ? "0" : "1";
       btnToggleInfo.textContent = showing ? "Visa info" : "Dölj info";
-      if(!showing){
-        setMsg("ok", `Key: ${BLOCKS_KEY} (rw) • Trainings: ${TRAININGS_KEY} (read) • Roll: ${role || "—"}`);
-      }else{
-        setMsg("", "");
-      }
+      if(introBox) introBox.style.display = showing ? "none" : "block";
+      setMsg("", "");
     });
 
     // trainings filters
@@ -2581,7 +2663,7 @@
       clear(blockList);
       const wrap = document.createElement("div");
       wrap.className = "muted2";
-      wrap.textContent = "Tomt läge: Exportera från utbildning, eller skapa block i bank.";
+      wrap.textContent = "Sök för att visa block. (Inga block hittade ännu.)";
       blockList.appendChild(wrap);
       hideEditor();
     }
@@ -2608,16 +2690,9 @@
         return;
       }
 
+      // AO-UX-COLLAPSE-SEARCHFIRST-01: ingen auto-selektion vid init
       renderBlockList(true);
-
-      try{
-        computeVisible();
-        const first = Array.isArray(STATE.visible) ? STATE.visible[0] : null;
-        if(first) selectBlockByObject(first);
-        else renderEmptySystemHint();
-      }catch{
-        renderEmptySystemHint();
-      }
+      hideEditor();
     }
 
     function safeInitTrainings(showToast){
@@ -2645,6 +2720,23 @@
       setMsg("", "");
       setWhoPill();
       setModePill();
+
+      // AO-UX-COLLAPSE-SEARCHFIRST-01: lugn start
+      if(introBox) introBox.style.display = "none";
+      btnToggleInfo.dataset.on = "0";
+      btnToggleInfo.textContent = "Visa info";
+
+      // Export stängd vid start (markup är redan stängd, men vi säkrar här också)
+      btnToggleExport.setAttribute("aria-expanded","false");
+      btnToggleExport.textContent = "Visa";
+      if(exportBody) exportBody.style.display = "none";
+
+      if(btnShowAllBlocks){
+        btnShowAllBlocks.setAttribute("aria-pressed","false");
+        btnShowAllBlocks.textContent = "Visa alla";
+        btnShowAllBlocks.title = "Visa hela listan utan sök";
+      }
+      STATE.showAllBlocks = false;
 
       if(isSystemAdmin){
         setMsg("warn", "Read-only (Systemansvarig): Ändringar/verifiering/publicering är låsta. Utskrift är tillåten.");
