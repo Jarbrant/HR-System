@@ -1381,13 +1381,45 @@ POLICY (LÅST):
     if (!("feedbackEnabled" in b.meta)) b.meta.feedbackEnabled = false;
   }
 
-  function normalizeBlock(raw){
+    function normalizeBlock(raw){
     const b = (raw && typeof raw === "object") ? raw : {};
+
+    const kind = normalizeKind(b.kind || b.type || b.blockType);
+    const title = safeStr(b.title);
+
+    // --- tolerant mapping från worker-format -> items[] ---
+    // info/document: text
+    // task: instruction + deliverable
+    // question: question + answerKey
+    let items = asArray(b.items);
+
+    if (!Array.isArray(items) || items.length === 0){
+      if (kind === "info" || kind === "document"){
+        const text = safeStr(b.text || b.content || "");
+        items = [{ text }];
+      } else if (kind === "task"){
+        const instruction = safeStr(b.instruction || b.task || "");
+        const deliverable = safeStr(b.deliverable || b.expected || "");
+        items = [{ instruction, deliverable }];
+      } else if (kind === "question"){
+        const q = safeStr(b.question || b.q || "");
+        const a = safeStr(b.answerKey || b.answer || b.a || "");
+        items = [{ q, a }];
+      } else if (kind === "both"){
+        // båda: håll enkel struktur (kan förbättras senare)
+        const instruction = safeStr(b.instruction || "");
+        const deliverable = safeStr(b.deliverable || "");
+        const q = safeStr(b.question || b.q || "");
+        const a = safeStr(b.answerKey || b.answer || b.a || "");
+        items = [{ instruction, deliverable, q, a }];
+      }
+    }
+
     const out = {
       id: trimStr(b.id),
-      kind: normalizeKind(b.kind || b.type || b.blockType),
-      title: safeStr(b.title),
-      items: asArray(b.items),
+      kind,
+      title,
+      items,
       meta: (b.meta && typeof b.meta === "object") ? b.meta : {}
     };
 
@@ -1396,6 +1428,16 @@ POLICY (LÅST):
     if (!out.id){
       out.id = mkId("b", out.kind + "|" + trimStr(out.title));
     }
+
+    // säkerställ item-form per kind (fail-soft)
+    if (!Array.isArray(out.items)) out.items = [];
+    if (out.items.length === 0){
+      if (out.kind === "info" || out.kind === "document") out.items = [{ text:"" }];
+      else if (out.kind === "task") out.items = [{ instruction:"", deliverable:"" }];
+      else if (out.kind === "question") out.items = [{ q:"", a:"" }];
+      else if (out.kind === "both") out.items = [{ instruction:"", deliverable:"", q:"", a:"" }];
+    }
+
     return out;
   }
 
@@ -1813,9 +1855,103 @@ POLICY (LÅST):
         }catch(_){}
       });
 
-      card.appendChild(head);
+            card.appendChild(head);
       card.appendChild(titleLabel);
       card.appendChild(inp);
+
+      // ---------- Content editor per blocktyp ----------
+      function ensureItem0(){
+        if (!b.items || !Array.isArray(b.items)) b.items = [];
+        if (!b.items[0] || typeof b.items[0] !== "object") b.items[0] = {};
+        return b.items[0];
+      }
+
+      const item0 = ensureItem0();
+      const k = normalizeKind(b.kind);
+
+      function addTextarea(labelText, getVal, setVal, placeholder){
+        const lab = document.createElement("div");
+        lab.className = "label";
+        lab.style.marginTop = "10px";
+        lab.textContent = labelText;
+
+        const ta = document.createElement("textarea");
+        ta.className = "textarea";
+        ta.style.minHeight = "88px";
+        ta.placeholder = placeholder || "";
+        ta.value = safeStr(getVal());
+
+        ta.addEventListener("input", ()=>{
+          try{
+            if (window.STATE._rendering) return;
+            setVal(ta.value);
+            window.setDirty(true);
+          }catch(_){}
+        });
+
+        card.appendChild(lab);
+        card.appendChild(ta);
+      }
+
+      if (k === "info" || k === "document"){
+        addTextarea(
+          (k === "document") ? "Dokumenttext" : "Text",
+          ()=> safeStr(item0.text || ""),
+          (v)=>{ item0.text = safeStr(v); },
+          "Skriv innehåll…"
+        );
+      } else if (k === "task"){
+        addTextarea(
+          "Instruktion",
+          ()=> safeStr(item0.instruction || ""),
+          (v)=>{ item0.instruction = safeStr(v); },
+          "Vad ska eleven göra?"
+        );
+        addTextarea(
+          "Leverabel",
+          ()=> safeStr(item0.deliverable || ""),
+          (v)=>{ item0.deliverable = safeStr(v); },
+          "Vad ska lämnas in?"
+        );
+      } else if (k === "question"){
+        addTextarea(
+          "Fråga",
+          ()=> safeStr(item0.q || ""),
+          (v)=>{ item0.q = safeStr(v); },
+          "Skriv frågan…"
+        );
+        addTextarea(
+          "Facit / svar",
+          ()=> safeStr(item0.a || ""),
+          (v)=>{ item0.a = safeStr(v); },
+          "Skriv facit…"
+        );
+      } else if (k === "both"){
+        addTextarea(
+          "Instruktion",
+          ()=> safeStr(item0.instruction || ""),
+          (v)=>{ item0.instruction = safeStr(v); },
+          "Vad ska eleven göra?"
+        );
+        addTextarea(
+          "Leverabel",
+          ()=> safeStr(item0.deliverable || ""),
+          (v)=>{ item0.deliverable = safeStr(v); },
+          "Vad ska lämnas in?"
+        );
+        addTextarea(
+          "Fråga",
+          ()=> safeStr(item0.q || ""),
+          (v)=>{ item0.q = safeStr(v); },
+          "Skriv frågan…"
+        );
+        addTextarea(
+          "Facit / svar",
+          ()=> safeStr(item0.a || ""),
+          (v)=>{ item0.a = safeStr(v); },
+          "Skriv facit…"
+        );
+      }
 
       host.appendChild(card);
     });
@@ -2255,12 +2391,18 @@ POLICY (LÅST):
       const count = (typeof p.count === "number" && isFinite(p.count)) ? p.count : 1;
       const language = "sv";
 
-      const r = await window.HRWorkerSDK.aiGenerate({
+     const r = await window.HRWorkerSDK.aiGenerate({
         mode: sdkMode,
         count: count,
         context: contextText,
-        language: language
+        language: language,
+
+        // Optional (bakåtkompat): om SDK/worker ignorerar dessa händer inget.
+        format: (sdkMode === "document") ? "document" : "training-blocks",
+        subject: "generic",
+        difficultyHint: ($("aiDifficulty") ? $("aiDifficulty").value : "auto")
       });
+
 
       if (!(r && r.ok === true)){
         const msg = formatSdkErrorForUI(r);
