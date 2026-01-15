@@ -24,7 +24,7 @@ PATCH v1.6 (WORKER RUNTIME BANNER):
 - Lägger till WORKER runtime-konfig (ingen lagring)
 - Speglar till globals: window.__HR_WORKER_BASE_URL / window.__HR_WORKER_REQUIRE_AUTH
 ============================================================ */
-window.__HR_WORKER_BASE_URL = "hrsystem.andersmenyit.workers.dev";
+window.__HR_WORKER_BASE_URL = "https://hrsystem.andersmenyit.workers.dev";
 window.__HR_WORKER_REQUIRE_AUTH = false;
 (function () {
   "use strict";
