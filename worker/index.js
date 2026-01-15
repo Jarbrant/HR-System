@@ -35,17 +35,17 @@
  * Om någon av dessa saknas i repo får du "Could not resolve" vid deploy.
  */
 import INDEX from "./ai-rules/index.json";
-import GLOBAL from "./ai-rules/global.json";
+import GLOBAL from "./ai-rules/v1/global.json";
 
-import SWEDISH from "./ai-rules/subjects/swedish.json";
-import MATH from "./ai-rules/subjects/math.json";
+import SWEDISH from "./ai-rules/v1/subjects/swedish.json";
+import MATH from "./ai-rules/v1/subjects/math.json";
 
-import QUESTION from "./ai-rules/formats/question.json";
-import TASK from "./ai-rules/formats/task.json";
-import TRAINING_BLOCKS from "./ai-rules/formats/training-blocks.json";
+import QUESTION from "./ai-rules/v1/formats/question.json";
+import TASK from "./ai-rules/v1/formats/task.json";
+import TRAINING_BLOCKS from "./ai-rules/v1/formats/training-blocks.json";
 
 // Valfri: om du har denna fil, behåll importen. Om du INTE har den: kommentera bort raden.
-import DOCUMENT from "./ai-rules/formats/document.json";
+import DOCUMENT from "./ai-rules/v1/formats/document.json";
 
 const MAX_BODY_BYTES = 64 * 1024;
 const VERSION = "1.3";
