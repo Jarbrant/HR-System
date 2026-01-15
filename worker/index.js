@@ -1,13 +1,12 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-PUBLIC-TOKEN-CORS-01 (PROD v1.2)
+// PRC-BYGGORDER — AO-WORKER-PUBLIC-TOKEN-CORS-01 (PROD v1.3)
 // FIL: worker/index.js
 // Mål: Publik API-worker med Bearer-token + strikt CORS (env-styrt)
 //
-// NYTT i v1.2 (RULESETS + FORMATS, bakåtkompat):
-// - Stöd för body.format (training-blocks|question|task|document) + body.subject (swedish|math|generic)
-// - Stöd för body.difficultyHint (auto|1..5)
-// - Genererar block med typanpassade fält: info.text, task.instruction+deliverable, question.question+answerKey
-// - Läsning av rulesets via bundlade JSON-importer (worker/rulesets/**)
+// NYTT i v1.3 (AI-RULES PATH FIX + bättre tolerans):
+// - Byter från ./rulesets/** till ./ai-rules/** (ny mappstruktur)
+// - GET /v1/version (för att du enkelt ska se exakt deployad version)
+// - Tolerant mode: accepterar "ai training"/"ai_training"/"trainings" => "training"
 // - Fortfarande stateless, fail-closed, JSON-only, max 64KB, logga aldrig payload
 //
 // POLICY (LÅST):
@@ -24,6 +23,7 @@
 //
 // Endpoints (MUST) — versionerade:
 // - GET  /v1/health
+// - GET  /v1/version
 // - POST /v1/ai/generate
 // - POST /v1/ai/training (alias)
 // - POST /v1/ai/document (alias)
@@ -31,18 +31,24 @@
 // ============================================================
 
 /**
- * OBS: JSON-importer kräver att din Worker build/bundler stödjer det.
- * Wrangler v3+ med modules brukar göra det.
+ * OBS: JSON-importer kräver Wrangler "modules" (vilket du kör).
+ * Om någon av dessa saknas i repo får du "Could not resolve" vid deploy.
  */
-import INDEX from "./rulesets/index.json";
-import GLOBAL from "./rulesets/global.json";
-import SWEDISH from "./rulesets/swedish.json";
-import MATH from "./rulesets/math.json";
-import QUESTION from "./rulesets/question.json";
-import TASK from "./rulesets/task.json";
-import TRAINING_BLOCKS from "./rulesets/training-blocks.json";
+import INDEX from "./ai-rules/index.json";
+import GLOBAL from "./ai-rules/global.json";
+
+import SWEDISH from "./ai-rules/subjects/swedish.json";
+import MATH from "./ai-rules/subjects/math.json";
+
+import QUESTION from "./ai-rules/formats/question.json";
+import TASK from "./ai-rules/formats/task.json";
+import TRAINING_BLOCKS from "./ai-rules/formats/training-blocks.json";
+
+// Valfri: om du har denna fil, behåll importen. Om du INTE har den: kommentera bort raden.
+import DOCUMENT from "./ai-rules/formats/document.json";
 
 const MAX_BODY_BYTES = 64 * 1024;
+const VERSION = "1.3";
 
 export default {
   async fetch(request, env) {
@@ -76,7 +82,8 @@ export default {
 
     const path = url.pathname || "/";
 
-    // Health: tillåt utan Origin, men om Origin finns måste matcha
+    // ---------- GET /v1/health ----------
+    // Tillåt utan Origin, men om Origin finns måste matcha
     if (request.method === "GET" && path === "/v1/health") {
       if (origin && origin !== allowedOrigin) {
         return errorJSON(403, requestId, "CORS_FORBIDDEN", "Origin är inte tillåten", corsHeaders, true);
@@ -88,17 +95,40 @@ export default {
           requestId,
           data: {
             service: "hr-worker",
-            version: "1.2",
+            version: VERSION,
             v: "v1",
-            rulesets: { ok: true }
+            rulesets: { ok: true, base: "ai-rules" }
           }
         },
         corsHeaders
       );
     }
 
-    // Endast POST för AI
+    // ---------- GET /v1/version ----------
+    // Bra för att verifiera att du kör senaste deployen.
+    if (request.method === "GET" && path === "/v1/version") {
+      if (origin && origin !== allowedOrigin) {
+        return errorJSON(403, requestId, "CORS_FORBIDDEN", "Origin är inte tillåten", corsHeaders, true);
+      }
+      return okJSON(
+        200,
+        {
+          ok: true,
+          requestId,
+          data: {
+            service: "hr-worker",
+            version: VERSION,
+            build: "wrangler",
+            rulesBase: "worker/ai-rules"
+          }
+        },
+        corsHeaders
+      );
+    }
+
+    // ---------- Endast POST för AI ----------
     if (request.method !== "POST") {
+      // Obs: här är det OK att /v1/version & /v1/health är GET (hanteras ovan)
       return errorJSON(405, requestId, "METHOD_NOT_ALLOWED", "Endast POST tillåtet för AI-endpoints", corsHeaders, true);
     }
 
@@ -166,7 +196,9 @@ export default {
     }
 
     // ---------- BACKWARD TOLERANT INPUT ----------
-    const mode = safeStr(body.mode || body.type).trim();               // mode | type
+    const modeRaw = safeStr(body.mode || body.type).trim();            // mode | type
+    const mode = normalizeMode(modeRaw);
+
     const countRaw = body.count ?? body.n;                             // count | n
     const context = safeStr(body.context || body.prompt).trim();       // context | prompt
     const language = safeStr(body.language || "sv").trim();            // sv|en (default sv)
@@ -190,11 +222,11 @@ export default {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "language måste vara sv eller en", corsHeaders, true);
     }
 
-    if (context.length > 2000) {
-      return errorJSON(400, requestId, "VALIDATION_ERROR", "context max 2000 tecken", corsHeaders, true);
+    if (context.length > 4000) {
+      return errorJSON(400, requestId, "VALIDATION_ERROR", "context max 4000 tecken", corsHeaders, true);
     }
 
-    // ---------- AI (v1.2: ruleset-driven mock/generator) ----------
+    // ---------- AI (ruleset-driven generator / mock) ----------
     let data;
     try {
       data = buildRulesetDrivenMock({
@@ -213,7 +245,7 @@ export default {
       return errorJSON(502, requestId, "UPSTREAM_ERROR", "AI-tjänsten svarade inte", corsHeaders, false);
     }
 
-    return okJSON(200, { ok: true, requestId, data }, corsHeaders);
+    return okJSON(200, { ok: true, requestId, data, blocks: data.blocks, mode }, corsHeaders);
   }
 };
 
@@ -269,13 +301,6 @@ function makeRequestId() {
   }
 }
 
-function clampInt(n, min, max) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return min;
-  const i = Math.floor(x);
-  return Math.max(min, Math.min(max, i));
-}
-
 function pickDifficulty(difficultyHint, seedN) {
   const s = safeStr(difficultyHint).toLowerCase().trim();
   if (s === "auto" || s === "") return 1 + (seedN % 5);
@@ -293,8 +318,22 @@ function hash32(str) {
   return h >>> 0;
 }
 
+// ------------------------------------------------------------
+// MODE NORMALIZER (fixar "ai training" etc)
+// ------------------------------------------------------------
+function normalizeMode(modeRaw) {
+  const s = safeStr(modeRaw).toLowerCase().trim();
+  if (!s) return "";
+  if (s === "training" || s === "document") return s;
+
+  // tolerans: vanliga UI-varianter
+  if (s.includes("train")) return "training";     // "ai training", "trainings", "training-mode"
+  if (s.includes("doc")) return "document";       // "ai document", "docs"
+  return s; // faller igenom till valideringen
+}
+
 // ============================================================
-// RULESET-DRIVEN GENERATOR (v1.2)
+// RULESET-DRIVEN GENERATOR
 // ============================================================
 
 function normalizeSubject(subject) {
@@ -310,22 +349,22 @@ function normalizeFormat(format, mode) {
   if (f === "task" || f === "tasks") return "task";
   if (f === "document") return "document";
   if (f === "training-blocks" || f === "training" || f === "blocks") return "training-blocks";
-  // Default: training uses training-blocks, document uses document
   return (mode === "document") ? "document" : "training-blocks";
 }
 
 function getRulesetBundle(subject) {
   const s = normalizeSubject(subject);
-  const subj = (s === "math") ? MATH : (s === "swedish") ? SWEDISH : null;
+  const subj = (s === "math") ? (MATH || {}) : (s === "swedish") ? (SWEDISH || {}) : {};
 
   return {
     index: INDEX || {},
     global: GLOBAL || {},
-    subject: subj || {},
+    subject: subj,
     formats: {
-      "question": QUESTION || {},
-      "task": TASK || {},
-      "training-blocks": TRAINING_BLOCKS || {}
+      question: QUESTION || {},
+      task: TASK || {},
+      "training-blocks": TRAINING_BLOCKS || {},
+      document: (typeof DOCUMENT !== "undefined" && DOCUMENT) ? DOCUMENT : {}
     }
   };
 }
@@ -336,6 +375,7 @@ function buildRulesetDrivenMock({ mode, count, language, context, requestId, aiE
   const fmt = normalizeFormat(format, mode);
   const subj = normalizeSubject(subject);
 
+  // Laddat (även om vi just nu inte “styr” allt via dessa JSON – de finns för vidareutbyggnad)
   const bundle = getRulesetBundle(subj);
 
   const title =
@@ -355,7 +395,6 @@ function buildRulesetDrivenMock({ mode, count, language, context, requestId, aiE
         : ["Understand basics", "Apply correctly", "Reflect on why"])
       : [];
 
-  // Generator: välj blocktyper per format
   const blocks = [];
   for (let i = 0; i < count; i++) {
     const n = (seed + i * 2654435761) >>> 0;
@@ -385,7 +424,7 @@ function buildRulesetDrivenMock({ mode, count, language, context, requestId, aiE
   return { title, description, goals, blocks };
 }
 
-function genInfoBlock({ i, language, context, subj, diff, mins, n }) {
+function genInfoBlock({ i, language, context, subj, diff, mins }) {
   const topicSv =
     subj === "math" ? "Matematik" :
     subj === "swedish" ? "Svenska" :
@@ -405,15 +444,15 @@ function genInfoBlock({ i, language, context, subj, diff, mins, n }) {
   };
 }
 
-function genTaskBlock({ i, language, context, subj, diff, mins, n }) {
+function genTaskBlock({ i, language, context, subj, diff, mins }) {
   const title = language === "sv" ? `Uppgift ${i + 1}` : `Task ${i + 1}`;
   const instruction =
     language === "sv"
       ? (subj === "math"
-          ? "Räkna ut och visa dina steg. Svara tydligt."
-          : subj === "swedish"
-            ? "Skriv en kort text och motivera dina val."
-            : "Utför uppgiften och beskriv hur du tänkte.")
+        ? "Räkna ut och visa dina steg. Svara tydligt."
+        : subj === "swedish"
+          ? "Skriv en kort text och motivera dina val."
+          : "Utför uppgiften och beskriv hur du tänkte.")
       : "Complete the task and explain your reasoning.";
 
   const deliverable =
@@ -435,25 +474,25 @@ function genTaskBlock({ i, language, context, subj, diff, mins, n }) {
   };
 }
 
-function genQuestionBlock({ i, language, context, subj, diff, mins, n }) {
+function genQuestionBlock({ i, language, context, subj, diff, mins }) {
   const title = language === "sv" ? `Fråga ${i + 1}` : `Question ${i + 1}`;
 
   const question =
     language === "sv"
       ? (subj === "math"
-          ? "Vad blir 7 + 5? (Svara med ett tal.)"
-          : subj === "swedish"
-            ? "Vilket ord är ett verb i meningen: 'Hon springer snabbt'?"
-            : "Vad är den viktigaste poängen i teorin du nyss läste?")
+        ? "Vad blir 7 + 5? (Svara med ett tal.)"
+        : subj === "swedish"
+          ? "Vilket ord är ett verb i meningen: 'Hon springer snabbt'?"
+          : "Vad är den viktigaste poängen i teorin du nyss läste?")
       : "What is the key point?";
 
   const answerKey =
     language === "sv"
       ? (subj === "math"
-          ? "12"
-          : subj === "swedish"
-            ? "springer"
-            : "En korrekt sammanfattning av huvudpoängen.")
+        ? "12"
+        : subj === "swedish"
+          ? "springer"
+          : "En korrekt sammanfattning av huvudpoängen.")
       : "A correct summary of the main point.";
 
   const ctxLine =
