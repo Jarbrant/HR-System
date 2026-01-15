@@ -43,7 +43,7 @@ PATCH v1.6 (WORKER RUNTIME BANNER):
     MANAGER: "MANAGER",
     EMPLOYEE: "EMPLOYEE",
   });
-
+  window.__HR_WORKER_BASE_URL = "https://hr-worker-abc123.workers.dev";
   // -------------------------
   // Public routes (explicit allowlist)
   // -------------------------
