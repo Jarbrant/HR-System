@@ -1,7 +1,14 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-PUBLIC-TOKEN-CORS-01 (PROD v1.1)
+// PRC-BYGGORDER — AO-WORKER-PUBLIC-TOKEN-CORS-01 (PROD v1.2)
 // FIL: worker/index.js
 // Mål: Publik API-worker med Bearer-token + strikt CORS (env-styrt)
+//
+// NYTT i v1.2 (RULESETS + FORMATS, bakåtkompat):
+// - Stöd för body.format (training-blocks|question|task|document) + body.subject (swedish|math|generic)
+// - Stöd för body.difficultyHint (auto|1..5)
+// - Genererar block med typanpassade fält: info.text, task.instruction+deliverable, question.question+answerKey
+// - Läsning av rulesets via bundlade JSON-importer (worker/rulesets/**)
+// - Fortfarande stateless, fail-closed, JSON-only, max 64KB, logga aldrig payload
 //
 // POLICY (LÅST):
 // - Stateless (ingen lagring)
@@ -23,10 +30,22 @@
 // - OPTIONS * (CORS preflight)
 // ============================================================
 
+/**
+ * OBS: JSON-importer kräver att din Worker build/bundler stödjer det.
+ * Wrangler v3+ med modules brukar göra det.
+ */
+import INDEX from "./rulesets/index.json";
+import GLOBAL from "./rulesets/global.json";
+import SWEDISH from "./rulesets/swedish.json";
+import MATH from "./rulesets/math.json";
+import QUESTION from "./rulesets/question.json";
+import TASK from "./rulesets/task.json";
+import TRAINING_BLOCKS from "./rulesets/training-blocks.json";
+
 const MAX_BODY_BYTES = 64 * 1024;
 
 export default {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const requestId = makeRequestId();
     const url = new URL(request.url);
 
@@ -55,7 +74,6 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders });
     }
 
-    // ---------- ROUTES (v1 only) ----------
     const path = url.pathname || "/";
 
     // Health: tillåt utan Origin, men om Origin finns måste matcha
@@ -65,7 +83,16 @@ export default {
       }
       return okJSON(
         200,
-        { ok: true, requestId, data: { service: "hr-worker", version: "1.1", v: "v1" } },
+        {
+          ok: true,
+          requestId,
+          data: {
+            service: "hr-worker",
+            version: "1.2",
+            v: "v1",
+            rulesets: { ok: true }
+          }
+        },
         corsHeaders
       );
     }
@@ -144,6 +171,11 @@ export default {
     const context = safeStr(body.context || body.prompt).trim();       // context | prompt
     const language = safeStr(body.language || "sv").trim();            // sv|en (default sv)
 
+    // NYTT (optional)
+    const format = safeStr(body.format || "").trim();                  // training-blocks|question|task|document
+    const subject = safeStr(body.subject || "").trim();                // swedish|math|generic
+    const difficultyHint = body.difficultyHint ?? body.difficulty;     // auto|1..5
+
     // ---------- VALIDATION ----------
     if (mode !== "training" && mode !== "document") {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "mode måste vara training eller document", corsHeaders, true);
@@ -162,10 +194,20 @@ export default {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "context max 2000 tecken", corsHeaders, true);
     }
 
-    // ---------- AI (v1: deterministic mock) ----------
+    // ---------- AI (v1.2: ruleset-driven mock/generator) ----------
     let data;
     try {
-      data = buildDeterministicMock({ mode, count, language, context, requestId, aiEnabled });
+      data = buildRulesetDrivenMock({
+        mode,
+        count,
+        language,
+        context,
+        requestId,
+        aiEnabled,
+        format,
+        subject,
+        difficultyHint
+      });
     } catch {
       console.error("ERR", requestId, "UPSTREAM_ERROR");
       return errorJSON(502, requestId, "UPSTREAM_ERROR", "AI-tjänsten svarade inte", corsHeaders, false);
@@ -227,46 +269,19 @@ function makeRequestId() {
   }
 }
 
-// ============================================================
-// Deterministic Mock AI (v1)
-// ============================================================
+function clampInt(n, min, max) {
+  const x = Number(n);
+  if (!Number.isFinite(x)) return min;
+  const i = Math.floor(x);
+  return Math.max(min, Math.min(max, i));
+}
 
-function buildDeterministicMock({ mode, count, language, context, requestId, aiEnabled }) {
-  const seed = hash32(`${requestId}|${mode}|${count}|${language}|${context.slice(0, 64)}`);
-
-  const title =
-    mode === "training"
-      ? (language === "sv" ? "Ny utbildning" : "New training")
-      : (language === "sv" ? "Nytt dokument" : "New document");
-
-  const description =
-    language === "sv"
-      ? "Deterministiskt mock-svar (v1)."
-      : "Deterministic mock response (v1).";
-
-  const goals =
-    mode === "training"
-      ? (language === "sv"
-          ? ["Förstå grunderna", "Utföra korrekt", "Följa rutiner"]
-          : ["Understand basics", "Execute correctly", "Follow routines"])
-      : [];
-
-  const blocks = [];
-  for (let i = 0; i < count; i++) {
-    const n = (seed + i * 2654435761) >>> 0;
-    const diff = 1 + (n % 5);
-    const mins = 3 + (n % 8);
-    const tag = mode === "training" ? "training" : "document";
-
-    blocks.push({
-      type: "info",
-      title: language === "sv" ? `Block ${i + 1}` : `Block ${i + 1}`,
-      text: language === "sv" ? "Exempeltext (mock)." : "Example text (mock).",
-      meta: { difficulty: diff, mins, tags: [tag] }
-    });
-  }
-
-  return { title, description, goals, blocks };
+function pickDifficulty(difficultyHint, seedN) {
+  const s = safeStr(difficultyHint).toLowerCase().trim();
+  if (s === "auto" || s === "") return 1 + (seedN % 5);
+  const n = Number(difficultyHint);
+  if (Number.isInteger(n) && n >= 1 && n <= 5) return n;
+  return 1 + (seedN % 5);
 }
 
 function hash32(str) {
@@ -276,4 +291,181 @@ function hash32(str) {
     h = Math.imul(h, 16777619);
   }
   return h >>> 0;
+}
+
+// ============================================================
+// RULESET-DRIVEN GENERATOR (v1.2)
+// ============================================================
+
+function normalizeSubject(subject) {
+  const s = safeStr(subject).toLowerCase().trim();
+  if (s === "swedish" || s === "svenska") return "swedish";
+  if (s === "math" || s === "matte") return "math";
+  return "generic";
+}
+
+function normalizeFormat(format, mode) {
+  const f = safeStr(format).toLowerCase().trim();
+  if (f === "question" || f === "questions") return "question";
+  if (f === "task" || f === "tasks") return "task";
+  if (f === "document") return "document";
+  if (f === "training-blocks" || f === "training" || f === "blocks") return "training-blocks";
+  // Default: training uses training-blocks, document uses document
+  return (mode === "document") ? "document" : "training-blocks";
+}
+
+function getRulesetBundle(subject) {
+  const s = normalizeSubject(subject);
+  const subj = (s === "math") ? MATH : (s === "swedish") ? SWEDISH : null;
+
+  return {
+    index: INDEX || {},
+    global: GLOBAL || {},
+    subject: subj || {},
+    formats: {
+      "question": QUESTION || {},
+      "task": TASK || {},
+      "training-blocks": TRAINING_BLOCKS || {}
+    }
+  };
+}
+
+function buildRulesetDrivenMock({ mode, count, language, context, requestId, aiEnabled, format, subject, difficultyHint }) {
+  const seed = hash32(`${requestId}|${mode}|${count}|${language}|${context.slice(0, 96)}|${format}|${subject}|${safeStr(difficultyHint)}`);
+
+  const fmt = normalizeFormat(format, mode);
+  const subj = normalizeSubject(subject);
+
+  const bundle = getRulesetBundle(subj);
+
+  const title =
+    mode === "training"
+      ? (language === "sv" ? "Ny utbildning" : "New training")
+      : (language === "sv" ? "Nytt dokument" : "New document");
+
+  const description =
+    language === "sv"
+      ? (aiEnabled ? "Regelstyrt genererat innehåll." : "AI avstängd (mock).")
+      : (aiEnabled ? "Ruleset-driven generated content." : "AI disabled (mock).");
+
+  const goals =
+    mode === "training"
+      ? (language === "sv"
+        ? ["Förstå grunderna", "Tillämpa korrekt", "Reflektera över varför"]
+        : ["Understand basics", "Apply correctly", "Reflect on why"])
+      : [];
+
+  // Generator: välj blocktyper per format
+  const blocks = [];
+  for (let i = 0; i < count; i++) {
+    const n = (seed + i * 2654435761) >>> 0;
+    const diff = pickDifficulty(difficultyHint, n);
+    const mins = 3 + (n % 8);
+
+    if (fmt === "question") {
+      blocks.push(genQuestionBlock({ i, language, context, subj, diff, mins, n, bundle }));
+      continue;
+    }
+    if (fmt === "task") {
+      blocks.push(genTaskBlock({ i, language, context, subj, diff, mins, n, bundle }));
+      continue;
+    }
+    if (fmt === "document" || mode === "document") {
+      blocks.push(genInfoBlock({ i, language, context, subj, diff, mins, n, bundle, docMode: true }));
+      continue;
+    }
+
+    // training-blocks: varva info/task/question
+    const pick = n % 3;
+    if (pick === 0) blocks.push(genInfoBlock({ i, language, context, subj, diff, mins, n, bundle, docMode: false }));
+    else if (pick === 1) blocks.push(genTaskBlock({ i, language, context, subj, diff, mins, n, bundle }));
+    else blocks.push(genQuestionBlock({ i, language, context, subj, diff, mins, n, bundle }));
+  }
+
+  return { title, description, goals, blocks };
+}
+
+function genInfoBlock({ i, language, context, subj, diff, mins, n }) {
+  const topicSv =
+    subj === "math" ? "Matematik" :
+    subj === "swedish" ? "Svenska" :
+    "Kunskap";
+
+  const title = language === "sv" ? `Teori ${i + 1}: ${topicSv}` : `Theory ${i + 1}`;
+  const text =
+    language === "sv"
+      ? `Kort teori kopplad till ämnet (${topicSv}).\n\nUtgå från detta sammanhang:\n${context || "—"}`
+      : `Short theory.\n\nContext:\n${context || "—"}`;
+
+  return {
+    type: "info",
+    title,
+    text,
+    meta: { difficulty: diff, mins, tags: ["info", subj] }
+  };
+}
+
+function genTaskBlock({ i, language, context, subj, diff, mins, n }) {
+  const title = language === "sv" ? `Uppgift ${i + 1}` : `Task ${i + 1}`;
+  const instruction =
+    language === "sv"
+      ? (subj === "math"
+          ? "Räkna ut och visa dina steg. Svara tydligt."
+          : subj === "swedish"
+            ? "Skriv en kort text och motivera dina val."
+            : "Utför uppgiften och beskriv hur du tänkte.")
+      : "Complete the task and explain your reasoning.";
+
+  const deliverable =
+    language === "sv"
+      ? "Lämna in: (1) ditt svar, (2) en kort motivering, (3) ev. mellanled."
+      : "Submit: (1) your answer, (2) brief reasoning, (3) intermediate steps if any.";
+
+  const hint =
+    language === "sv"
+      ? `Utgå från detta sammanhang:\n${context || "—"}`
+      : `Context:\n${context || "—"}`;
+
+  return {
+    type: "task",
+    title,
+    instruction: `${instruction}\n\n${hint}`,
+    deliverable,
+    meta: { difficulty: diff, mins, tags: ["task", subj] }
+  };
+}
+
+function genQuestionBlock({ i, language, context, subj, diff, mins, n }) {
+  const title = language === "sv" ? `Fråga ${i + 1}` : `Question ${i + 1}`;
+
+  const question =
+    language === "sv"
+      ? (subj === "math"
+          ? "Vad blir 7 + 5? (Svara med ett tal.)"
+          : subj === "swedish"
+            ? "Vilket ord är ett verb i meningen: 'Hon springer snabbt'?"
+            : "Vad är den viktigaste poängen i teorin du nyss läste?")
+      : "What is the key point?";
+
+  const answerKey =
+    language === "sv"
+      ? (subj === "math"
+          ? "12"
+          : subj === "swedish"
+            ? "springer"
+            : "En korrekt sammanfattning av huvudpoängen.")
+      : "A correct summary of the main point.";
+
+  const ctxLine =
+    language === "sv"
+      ? `\n\n(Använd detta sammanhang om relevant: ${context || "—"})`
+      : `\n\n(Context: ${context || "—"})`;
+
+  return {
+    type: "question",
+    title,
+    question: question + ctxLine,
+    answerKey,
+    meta: { difficulty: diff, mins, tags: ["question", subj] }
+  };
 }
