@@ -1,114 +1,156 @@
 {
-  "id": "format-question-v1.1",
-  "format": "question",
-  "description": "Formatregler för frågeblock i HR-Systemets utbildningsplattform. Säkerställer att AI genererar frågor som kan renderas och rättas konsekvent. v1.1: striktare facitkontrakt, anti-generic, batch-dedupe, och hårdare answerKey-regler.",
+  // ============================================================
+  // FORMAT: QUESTION
+  // VERSION: v1.3
+  // PLATS: /ai-rules/v1/formats/format-question.json
+  //
+  // Syfte:
+  // - Definierar exakt vilka provfrågor AI får generera
+  // - Säkerställer rättningsbarhet, pedagogik och anti-flum
+  // - Låser metodkrav för matematik (numeric + mcq_single + math)
+  // ============================================================
 
+  "id": "format-question-v1.3",
+  "format": "question",
+  "description": "Strikt format för provfrågor i HR-Systemet. v1.3: metodkrav för numeric + MCQ(math), stegvis facit, anti-generic guards.",
+
+  // ------------------------------------------------------------
+  // BLOCK-KONTRAKT
+  // Detta är själva frågeblocket som UI renderar
+  // ------------------------------------------------------------
   "blockContract": {
     "typeValue": "question",
+
+    // Dessa fält MÅSTE alltid finnas
     "requiredFields": ["type", "title", "question", "answerKey"],
-    "optionalFields": ["text", "choices", "hints", "explanation", "rubric", "meta"],
+
+    // Dessa fält FÅR förekomma
+    "optionalFields": [
+      "text",
+      "choices",
+      "hints",
+      "explanation",
+      "workedSteps",
+      "rubric",
+      "figureRef",
+      "meta"
+    ],
+
     "fieldRules": {
       "type": { "mustEqual": "question" },
+
+      // Titel ska vara kort och informativ
       "title": { "minChars": 4, "maxChars": 80 },
+
+      // Själva frågan – måste vara entydig
       "question": { "minChars": 20, "maxChars": 500 },
+
+      // Extra kontext (valfritt)
       "text": { "maxChars": 900 },
+
+      // För MCQ
       "choices": { "maxItems": 5 },
+
+      // Pedagogiska hints (ska användas sparsamt)
       "hints": { "maxItems": 3, "itemMaxChars": 160 },
-      "explanation": { "minChars": 10, "maxChars": 600, "maxSentences": 6 },
+
+      // Förklaring / metod (krävs i vissa fall, se numericRules)
+      "explanation": {
+        "minChars": 10,
+        "maxChars": 600,
+        "maxSentences": 6
+      },
+
+      // Steg-för-steg-facit (maskinläsbart)
+      "workedSteps": {
+        "maxItems": 6,
+        "itemMaxChars": 160
+      },
+
+      // Bildstöd – ENDAST intern referens
+      "figureRef": {
+        "maxChars": 80,
+        "pattern": "^[a-z0-9_\\-\\.]{3,80}$"
+      },
+
       "meta": { "mustFollow": "metaRules.shape" }
     },
-    "additionalProperties": false,
-    "notes": [
-      "Workern ska validera att blocket innehåller exakt de tillåtna fälten (additionalProperties=false).",
-      "För kind=mcq_single krävs choices (3–5) samt correctChoiceId som finns i choices[].id."
-    ]
+
+    // 🔒 Mycket viktigt: inga okända fält
+    "additionalProperties": false
   },
 
+  // ------------------------------------------------------------
+  // AI-OUTPUT-KONTRAKT
+  // Det AI + worker MÅSTE returnera till UI
+  // ------------------------------------------------------------
   "aiOutputContract": {
-    "description": "Kontrakt för vad AI/Workern ska leverera tillbaka till UI för ett enskilt block.",
     "requiredFields": ["version", "kind", "block", "quality"],
+
     "fieldRules": {
-      "version": { "mustEqual": "format-question-v1.1" },
-      "kind": { "mustBeOneOf": ["mcq_single", "true_false", "short_answer", "numeric"] },
+      "version": { "mustEqual": "format-question-v1.3" },
+
+      // Frågetyp (pedagogisk)
+      "kind": {
+        "mustBeOneOf": ["mcq_single", "true_false", "short_answer", "numeric"]
+      },
+
       "block": { "mustFollow": "blockContract" },
+
+      // Maskinbar kvalitetskontroll (fail-closed)
       "quality": {
-        "requiredFields": ["isUnambiguous", "isGradable", "noMetaText", "antiGenericOk"],
+        "requiredFields": [
+          "isUnambiguous",
+          "isGradable",
+          "noMetaText",
+          "antiGenericOk"
+        ],
         "fieldRules": {
-          "isUnambiguous": { "type": "boolean", "mustEqual": true },
-          "isGradable": { "type": "boolean", "mustEqual": true },
-          "noMetaText": { "type": "boolean", "mustEqual": true },
-          "antiGenericOk": { "type": "boolean", "mustEqual": true }
+          "isUnambiguous": { "mustEqual": true },
+          "isGradable": { "mustEqual": true },
+          "noMetaText": { "mustEqual": true },
+          "antiGenericOk": { "mustEqual": true }
         },
         "additionalProperties": false
       }
     },
-    "additionalProperties": false,
-    "notes": [
-      "AI får inte returnera extra toppnivåfält utöver version/kind/block/quality.",
-      "Workern ska fail-closed om quality-kraven inte uppfylls."
-    ]
+
+    "additionalProperties": false
   },
 
-  "batchRules": {
-    "description": "Regler som gäller när flera block genereras i samma request (för att stoppa upprepning och standardtext).",
-    "dedupe": {
-      "required": true,
-      "uniqueFieldsWithinBatch": ["block.title", "block.question", "block.explanation"],
-      "minDistinctRatio": 1.0,
-      "notes": [
-        "Inga två block i samma batch får ha identiska title/question/explanation.",
-        "Om duplicat upptäcks ska workern regenerera de duplicerade blocken."
-      ]
-    }
-  },
-
+  // ------------------------------------------------------------
+  // FRÅGETYPER
+  // ------------------------------------------------------------
   "questionKinds": {
     "allowed": ["mcq_single", "true_false", "short_answer", "numeric"],
-    "default": "mcq_single",
-    "notes": [
-      "mcq_single: flervalsfråga med ett korrekt alternativ",
-      "true_false: sant/falskt",
-      "short_answer: kort fritext (1–2 meningar) med bedömningsnyckel (rubric)",
-      "numeric: numeriskt svar med tolerans och enhet (om relevant)"
-    ]
+    "default": "mcq_single"
   },
 
+  // ------------------------------------------------------------
+  // FACIT / ANSWERKEY
+  // ------------------------------------------------------------
   "answerKeyContract": {
     "strictByKind": true,
+
     "requiredFieldsByKind": {
       "mcq_single": ["kind", "correctChoiceId"],
       "true_false": ["kind", "correctBoolean"],
       "short_answer": ["kind", "rubric"],
       "numeric": ["kind", "correctNumber"]
     },
-    "commonOptionalFields": [
-      "acceptedAnswers",
-      "caseSensitive",
-      "tolerance",
-      "unit",
-      "rounding",
-      "notes"
-    ],
-    "rules": {
-      "kind": { "mustBeOneOf": ["mcq_single", "true_false", "short_answer", "numeric"] },
-      "acceptedAnswers": { "maxItems": 6, "itemMaxChars": 80 },
-      "caseSensitive": { "default": false },
-      "tolerance": { "numericOnly": true, "default": 0 },
-      "unit": { "maxChars": 12 },
-      "rounding": { "allowed": ["none", "int", "1dp", "2dp"], "default": "none" }
-    },
+
+    // Förbjud fel fält per kind
     "forbiddenFieldsByKind": {
       "mcq_single": ["correctBoolean", "correctNumber"],
-      "true_false": ["correctChoiceId", "correctNumber", "acceptedAnswers", "tolerance", "unit", "rounding"],
-      "short_answer": ["correctChoiceId", "correctBoolean", "correctNumber", "tolerance", "unit", "rounding"],
+      "true_false": ["correctChoiceId", "correctNumber"],
+      "short_answer": ["correctChoiceId", "correctBoolean", "correctNumber"],
       "numeric": ["correctChoiceId", "correctBoolean", "rubric"]
-    },
-    "notes": [
-      "strictByKind=true innebär: endast fälten som hör till kind får användas (förutom commonOptionalFields där det är logiskt).",
-      "Workern ska fail-closed om answerKey innehåller förbjudna fält för kind."
-    ]
+    }
   },
 
+  // ------------------------------------------------------------
+  // MCQ-REGLER
+  // ------------------------------------------------------------
   "mcqRules": {
     "choices": {
       "required": true,
@@ -117,65 +159,52 @@
       "choiceShape": {
         "requiredFields": ["id", "label"],
         "idPattern": "^[A-E]$",
-        "labelMinChars": 1,
         "labelMaxChars": 140
+      }
+    },
+
+    // 🔒 NYTT LÅS (v1.3):
+    // MCQ + math ⇒ explanation krävs
+    "mathMethodRequirement": {
+      "when": {
+        "meta.tagsContains": "math"
       },
-      "quality": [
-        "alternativen ska vara tydligt olika",
-        "exakt ett alternativ ska vara korrekt",
-        "undvik 'alla ovan' och 'ingen av ovan'",
-        "undvik nästan-identiska formuleringar"
-      ]
-    },
-    "answerKey": {
-      "mustExistInChoices": true,
+      "then": {
+        "explanationRequired": true,
+        "workedStepsRecommended": true
+      },
       "notes": [
-        "correctChoiceId måste matcha exakt ett choices[].id i samma block."
+        "Förhindrar gissningsprov i matematik.",
+        "Samma pedagogiska krav som numeric."
       ]
     }
   },
 
-  "trueFalseRules": {
-    "choices": {
-      "required": false,
-      "implicit": ["Sant", "Falskt"]
-    }
-  },
-
-  "shortAnswerRules": {
-    "freeTextLimits": {
-      "maxAnswerChars": 350,
-      "recommendedAnswerChars": [40, 220]
-    },
-    "rubric": {
-      "required": true,
-      "minCriteria": 3,
-      "maxCriteria": 5,
-      "criterionMaxChars": 140,
-      "style": [
-        "kriterier ska vara konkreta och mätbara",
-        "fokus på begriplighet, korrekthet och ton",
-        "undvik subjektiva omdömen"
-      ]
-    }
-  },
-
+  // ------------------------------------------------------------
+  // NUMERIC-REGLER (MATTE)
+  // ------------------------------------------------------------
   "numericRules": {
     "correctNumber": { "required": true },
-    "tolerance": {
-      "default": 0,
+
+    // 🔒 ALLTID krav på metod
+    "explanationRequired": true,
+
+    // Stegvis lösning rekommenderas starkt
+    "workedStepsRecommended": true,
+
+    "explanationStyle": {
+      "mode": "stepwise_short",
       "notes": [
-        "Använd tolerance när avrundning eller små avvikelser är rimliga (t.ex. 0.01)."
+        "1–6 korta steg",
+        "beskriver metod, inte resonemang i text"
       ]
-    },
-    "unit": {
-      "optional": true,
-      "examples": ["kr", "min", "h", "st", "%"]
     }
   },
 
+  // ------------------------------------------------------------
+  // META
+  // ------------------------------------------------------------
   "metaRules": {
-    "required": false,
     "shape": {
       "difficulty": { "min": 1, "max": 4, "default": 2 },
       "mins": { "min": 1, "max": 20, "default": 5 },
@@ -183,159 +212,30 @@
     }
   },
 
-  "difficultyDefinition": {
-    "scale": [1, 2, 3, 4],
-    "rules": [
-      { "level": 1, "meaning": "Grundnivå: direkt fakta/enkelt begrepp. 1 steg." },
-      { "level": 2, "meaning": "Enkel tillämpning: 1–2 steg, inga dolda antaganden." },
-      { "level": 3, "meaning": "Tillämpning/resonemang: 2–3 steg, kräver tydlig metod." },
-      { "level": 4, "meaning": "Avancerat: flera steg eller kombinerade begrepp, men fortfarande entydigt." }
-    ],
-    "notes": [
-      "Svårighetsnivå får inte användas för trickfrågor. Allt ska vara entydigt."
-    ]
-  },
-
+  // ------------------------------------------------------------
+  // SPRÅK & TON
+  // ------------------------------------------------------------
   "languageToneRules": {
     "must": [
-      "Skriv som en provfråga: kort, sakligt, tydligt.",
-      "Svara utan meta-text. Ingen pratighet.",
-      "Om avrundning krävs: ange det i frågan."
+      "Kort, sakligt provspråk",
+      "Ingen meta-text",
+      "Ingen pratighet"
     ],
     "avoidPhrases": [
       "som AI",
       "här är",
-      "jag kan inte",
       "det beror på",
       "generellt sett",
-      "i de flesta fall",
-      "tänk på att",
       "tips:"
-    ],
-    "notes": [
-      "Workern bör kontrollera avoidPhrases i title/question/explanation och regenerera vid träff (antiGenericOk=false)."
     ]
   },
 
-  "generationGuidance": {
-    "must": [
-      "Frågan ska vara entydig och kunna besvaras utan externa källor.",
-      "Svar ska vara rättningsbart enligt answerKey.",
-      "Språk ska följa languageToneRules (kort, pedagogiskt, sakligt).",
-      "Ingen återanvändning av identisk text inom samma batch (batchRules.dedupe)."
-    ],
-    "avoid": [
-      "trickfrågor",
-      "flera korrekta svar",
-      "otydliga antaganden",
-      "överdrivet långa texter",
-      "meta-förklaringar om processen"
-    ],
-    "feedback": [
-      "Använd explanation för kort metod/varför-svar (max 3–6 meningar).",
-      "Använd hints bara om det finns ett realistiskt vanligt misstag att förebygga."
-    ]
-  },
-
-  "examples": {
-    "mcq_single": {
-      "version": "format-question-v1.1",
-      "kind": "mcq_single",
-      "block": {
-        "type": "question",
-        "title": "Procent – tidsbesparing",
-        "question": "En leverans tar 45 minuter. Om den blir 20% snabbare, hur lång tid tar den då? (avrunda till hela minuter)",
-        "choices": [
-          { "id": "A", "label": "36 minuter" },
-          { "id": "B", "label": "25 minuter" },
-          { "id": "C", "label": "54 minuter" }
-        ],
-        "answerKey": {
-          "kind": "mcq_single",
-          "correctChoiceId": "A",
-          "notes": "20% snabbare = 80% av tiden: 45 * 0.8 = 36."
-        },
-        "hints": ["20% snabbare betyder att tiden minskar med 20%."],
-        "explanation": "20% snabbare innebär att tiden blir 80% av 45 minuter. 45 * 0,8 = 36 minuter.",
-        "meta": { "difficulty": 2, "mins": 5, "tags": ["math", "percent"] }
-      },
-      "quality": { "isUnambiguous": true, "isGradable": true, "noMetaText": true, "antiGenericOk": true }
-    },
-    "true_false": {
-      "version": "format-question-v1.1",
-      "kind": "true_false",
-      "block": {
-        "type": "question",
-        "title": "Instruktion – ordning",
-        "question": "I en instruktion med flera steg är det tydligare att skriva stegen i punktlista än i ett långt stycke.",
-        "answerKey": {
-          "kind": "true_false",
-          "correctBoolean": true
-        },
-        "explanation": "Punktlistor gör ordningen tydlig och minskar risken för missförstånd.",
-        "meta": { "difficulty": 1, "mins": 3, "tags": ["swedish", "clarity"] }
-      },
-      "quality": { "isUnambiguous": true, "isGradable": true, "noMetaText": true, "antiGenericOk": true }
-    },
-    "short_answer": {
-      "version": "format-question-v1.1",
-      "kind": "short_answer",
-      "block": {
-        "type": "question",
-        "title": "Skriv tydligare",
-        "question": "Skriv om meningen så att den blir tydligare och professionell: \"Gör det där sen när du hinner.\" (max 2 meningar)",
-        "answerKey": {
-          "kind": "short_answer",
-          "rubric": [
-            "Anger tydligt vad som ska göras",
-            "Anger tidpunkt eller prioritet (t.ex. idag, senast imorgon)",
-            "Har professionell och hjälpsam ton"
-          ],
-          "acceptedAnswers": [
-            "Kan du göra detta senast imorgon kl 15? Tack!",
-            "Gör detta idag före kl 16 och återkoppla när det är klart."
-          ],
-          "caseSensitive": false
-        },
-        "explanation": "En tydlig instruktion anger vad som ska göras, när det ska vara klart och har en neutral ton.",
-        "meta": { "difficulty": 3, "mins": 6, "tags": ["swedish", "rewrite"] }
-      },
-      "quality": { "isUnambiguous": true, "isGradable": true, "noMetaText": true, "antiGenericOk": true }
-    },
-    "numeric": {
-      "version": "format-question-v1.1",
-      "kind": "numeric",
-      "block": {
-        "type": "question",
-        "title": "Enheter – minuter till timmar",
-        "question": "Ett pass är 150 minuter. Hur många timmar är det? (svara med 2 decimaler)",
-        "answerKey": {
-          "kind": "numeric",
-          "correctNumber": 2.5,
-          "tolerance": 0.01,
-          "unit": "h",
-          "rounding": "2dp"
-        },
-        "hints": ["Dela minuter med 60 för att få timmar."],
-        "explanation": "150 / 60 = 2,50 timmar.",
-        "meta": { "difficulty": 2, "mins": 4, "tags": ["math", "units"] }
-      },
-      "quality": { "isUnambiguous": true, "isGradable": true, "noMetaText": true, "antiGenericOk": true }
-    }
-  },
-
-  "notes": [
-    "Workern ska säkerställa att output är ren JSON och följer aiOutputContract + blockContract.",
-    "Dedupe-reglerna gäller per batch och ska trigga regenerering vid duplicat.",
-    "Ämnesregler (math/swedish) styr innehåll och svårighetsgrad; formatregler styr struktur och rättningsbarhet.",
-    "Om UI saknar stöd för vissa questionKinds kan de begränsas i manifest (index.json) senare."
-  ],
-
+  // ------------------------------------------------------------
+  // ÄNDRINGSLOGG
+  // ------------------------------------------------------------
   "changeLog": [
-    "v1.1: Added aiOutputContract wrapper (version/kind/block/quality) to prevent meta & enforce validation.",
-    "v1.1: Added batchRules.dedupe to prevent repeated standard text within a batch.",
-    "v1.1: Added strictByKind + forbiddenFieldsByKind for answerKey, plus mustExistInChoices for mcq_single.",
-    "v1.1: Added languageToneRules with avoidPhrases for anti-generic output.",
-    "v1.1: Added difficultyDefinition to make difficulty 1–4 meaningful."
+    "v1.3: Låst metodkrav för mcq_single när meta.tags innehåller 'math'.",
+    "v1.3: Numeric kräver alltid explanation (stegvis metod).",
+    "v1.3: Inline-kommentarer för tydlighet."
   ]
 }
