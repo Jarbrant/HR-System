@@ -1,5 +1,5 @@
 /* ============================================================
-AO-002 v1.6 (PATCH) + AO-AUTH-PIN-V1 (TEST PATCH) | FILE: UI/UI-04-CONFIG.js
+AO-002 v1.7 (PATCH) + AO-AUTH-PIN-V1 (TEST PATCH) | FILE: UI/UI-04-CONFIG.js
 Projekt: HR-System
 Syfte: Central config för RBAC + route-tillgång + default routing + AUTH-policy (PIN-test)
 Nivå: UI-only (GitHub Pages) | localStorage-first
@@ -23,17 +23,47 @@ AO-AUTH-PIN-V1 (TEST):
 PATCH v1.6 (WORKER RUNTIME BANNER):
 - Lägger till WORKER runtime-konfig (ingen lagring)
 - Speglar till globals: window.__HR_WORKER_BASE_URL / window.__HR_WORKER_REQUIRE_AUTH
+
+PATCH v1.7 (DEPLOY/DIAG HARDENING):
+- Auto-detekterar BASE_PATH ("/HR-System" eller "") baserat på location.pathname
+- Tydlig konsolrad när filen laddas (för att bevisa att den deployats/laddats)
+- Fail-safe init av worker-globals (ingen lagring)
 ============================================================ */
-window.__HR_WORKER_BASE_URL = "https://hrsystem.andersmenyit.workers.dev";
-window.__HR_WORKER_REQUIRE_AUTH = false;
 (function () {
   "use strict";
+
+  // -------------------------
+  // DIAG (no storage)
+  // -------------------------
+  const DIAG = Object.freeze({
+    enabled: true, // safe: endast console.*; ingen lagring
+    tag: "UI-04-CONFIG",
+    version: "v1.7",
+  });
+
+  function diagInfo(msg) {
+    try {
+      if (DIAG.enabled && typeof console !== "undefined" && console && typeof console.info === "function") {
+        console.info(`[${DIAG.tag} ${DIAG.version}] ${msg}`);
+      }
+    } catch (_) {
+      // ignore
+    }
+  }
 
   // -------------------------
   // Base-path (GitHub Pages)
   // -------------------------
   // Repo: Jarbrant/HR-System => public path: /HR-System
-  const BASE_PATH = "/HR-System";
+  // Auto: om pathname börjar med "/HR-System/" => BASE_PATH="/HR-System" annars ""
+  const BASE_PATH = (function detectBasePath() {
+    try {
+      const p = String((window.location && window.location.pathname) || "");
+      return p.startsWith("/HR-System/") ? "/HR-System" : "";
+    } catch (_) {
+      return "/HR-System"; // konservativt default
+    }
+  })();
 
   // -------------------------
   // Roles (LÅST)
@@ -44,7 +74,7 @@ window.__HR_WORKER_REQUIRE_AUTH = false;
     MANAGER: "MANAGER",
     EMPLOYEE: "EMPLOYEE",
   });
-  
+
   // -------------------------
   // Public routes (explicit allowlist)
   // -------------------------
@@ -113,7 +143,6 @@ window.__HR_WORKER_REQUIRE_AUTH = false;
       "ADMIN_VIEW_REPORTS",
     ]),
     [ROLES.MANAGER]: Object.freeze([
-      // Manager-översikt (egen yta)
       "MANAGER_VIEW_OVERVIEW",
     ]),
     [ROLES.EMPLOYEE]: Object.freeze([
@@ -126,11 +155,9 @@ window.__HR_WORKER_REQUIRE_AUTH = false;
   });
 
   // -------------------------
-  // WORKER (AO-UI-WORKER-CONFIG-BANNER-01) – runtime-only
+  // WORKER – runtime-only
   // -------------------------
-  // Skolversion: "telefonnumret på väggen".
-  // LÅST: Ingen lagring här. Detta är defaultvärden som kan “skrivas över” i runtime
-  // av t.ex. en SYSTEM_ADMIN-banner eller annan init (utan storage).
+  // LÅST: Ingen lagring här. Defaultvärden kan “skrivas över” i runtime.
   // Fail-closed: tom BASE_URL betyder att UI-sidor måste stoppa worker-anrop.
   const WORKER = Object.freeze({
     BASE_URL: "",         // ex: "https://xxxx.workers.dev" (utan /v1 – SDK fixar /v1)
@@ -140,12 +167,9 @@ window.__HR_WORKER_REQUIRE_AUTH = false;
   // -------------------------
   // AUTH (AO-AUTH-PIN-V1) – TEST-läge (UI-only)
   // -------------------------
-  // Kort och rakt: detta är INTE “riktig” auth utan backend.
-  // Men: vi undviker klartext-PIN i kod genom PBKDF2-hash.
   const AUTH = Object.freeze({
-    MODE: "PIN_TEST", // framtid: "EMAIL_OTP" / "MAGIC_LINK" / "SSO"
+    MODE: "PIN_TEST",
 
-    // PBKDF2-parametrar (måste matcha implementationen i core/login)
     PBKDF2: Object.freeze({
       algo: "PBKDF2",
       hash: "SHA-256",
@@ -153,9 +177,6 @@ window.__HR_WORKER_REQUIRE_AUTH = false;
       dkLenBytes: 32,
     }),
 
-    // Roll -> { salt, hashHex }
-    // Hasharna är beräknade för PIN: 9000/3001/2001/1234 per roll.
-    // (FUTURE) När ni går skarp: byt till riktig identitet + verifiering (backend).
     PIN_HASHES_BY_ROLE: Object.freeze({
       [ROLES.SYSTEM_ADMIN]: Object.freeze({
         salt: "HR-System|AO-AUTH-PIN-V1|SYSTEM_ADMIN|v1",
@@ -175,18 +196,12 @@ window.__HR_WORKER_REQUIRE_AUTH = false;
       }),
     }),
 
-    // Session-policy (UI-only)
     SESSION: Object.freeze({
-      // TTL: 8h (FUTURE: kortare + refresh-token i backend)
       ttlMs: 8 * 60 * 60 * 1000,
-
-      // Enkelt skydd mot “spam” i UI-only
       maxFailedAttempts: 8,
       lockoutMs: 60 * 1000,
     }),
 
-    // Test-default scopeId (du gav denna). Används bara om login/AO tillåter default.
-    // Fail-closed ska fortfarande gälla om systemet kräver explicit assignment.
     TEST_DEFAULT_SCOPE_ID: "org_34eeebca45ba98_19b7e607383",
   });
 
@@ -195,6 +210,7 @@ window.__HR_WORKER_REQUIRE_AUTH = false;
   // -------------------------
   const DEBUG = false;
 
+  // Export config (no storage)
   window.HR_CONFIG = Object.freeze({
     DEBUG,
     BASE_PATH,
@@ -203,21 +219,16 @@ window.__HR_WORKER_REQUIRE_AUTH = false;
     DEFAULT_ROUTE_BY_ROLE,
     ROUTES_BY_ROLE,
     PERMISSIONS_BY_ROLE,
-
-    // AO-UI-WORKER-CONFIG-BANNER-01 (runtime-only defaults)
     WORKER,
-
-    // AO-AUTH-PIN-V1
     AUTH,
   });
 
   // -------------------------
   // WORKER runtime globals (NO STORAGE)
   // -------------------------
-  // Skolversion: "telefonnumret på väggen" som alla klassrum kan läsa.
-  // OBS: Dessa kan sättas om i runtime av en banner (utan storage).
   // Fail-closed: tom URL => UI ska visa fel och inte skicka requests.
   try {
+    // Respektera redan satta värden (t.ex. från en banner/init)
     if (typeof window.__HR_WORKER_BASE_URL !== "string" || window.__HR_WORKER_BASE_URL === "") {
       window.__HR_WORKER_BASE_URL = WORKER.BASE_URL;
     }
@@ -228,10 +239,15 @@ window.__HR_WORKER_REQUIRE_AUTH = false;
     // fail-closed: gör inget
   }
 
+  // -------------------------
+  // DIAG (bevisa att filen laddas)
+  // -------------------------
+  diagInfo(`Loaded. BASE_PATH="${BASE_PATH}" workerBase="${String(window.__HR_WORKER_BASE_URL || "")}"`);
+
   /* ============================================================
      ÄNDRINGSLOGG (≤8)
-     - ADD: WORKER config (runtime-only, ingen lagring)
-     - ADD: HR_CONFIG.WORKER export
-     - ADD: window.__HR_WORKER_BASE_URL + window.__HR_WORKER_REQUIRE_AUTH (fail-closed)
+     - ADD: v1.7 diag log (bevisar att filen laddas i prod)
+     - ADD: auto BASE_PATH detect ("/HR-System" vs "")
+     - KEEP: RBAC/AUTH/WORKER policies oförändrade
   ============================================================ */
 })();
