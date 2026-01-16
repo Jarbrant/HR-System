@@ -1,13 +1,13 @@
 <!-- ============================================================
-AO-TRAININGS-AI-PROMPT-CONTRACT-01 (PROD AUTOPATCH v2.5.0) | FIL-ID: admin/trainings.html
+AO-TRAININGS-AI-PROMPT-CONTRACT-01 (PROD AUTOPATCH v2.5.1) | FIL-ID: admin/trainings.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN – Skapa/Redigera utbildningar + AI-stöd (provfrågor + facit) med tydligt prompt-kontrakt
 
-PATCH (v2.5.0) – PROMPT-CONTRACT + QUALITY GUARDS:
-- ADD: Module Blueprint (const) för modulmål + område/nivå 1–5 + frågemix.
-- PATCH: buildSDKContextString() -> styrd prompt med MODULE_ID, LEVEL_PROFILE, ANSWERKEY_SPEC, VARIATION_SPEC.
-- ADD: Fail-closed quality-guards för provfrågor: filtrerar dubletter + frågor utan facit.
-- ADD: Compatibility bridge: stöd för strukturerat facit (answer_key/worked_solution) mappas till UI-fälten.
+PATCH (v2.5.1) – STEG 1–5 + AUTO TITEL/MÅL (600-varianten):
+- ADD: Steg 1–5 (UI) för utbildningen (ingen ny datamodell / ingen ny storage-key).
+- ADD: Auto-fyll Titel + Mål när fält är tomma (modul+område+steg+nivå).
+- PATCH: buildSDKContextString() + aiGenerate difficultyHint -> använder STEG om aiDifficulty=auto.
+- KEEP: Fail-closed, XSS-safe, UI-only, inga nya storage-keys.
 
 POLICY (LÅST):
 - UI-only • Fail-closed • localStorage-first (data), sessionStorage först (auth) • fallback localStorage
@@ -581,6 +581,19 @@ POLICY (LÅST):
             </div>
           </div>
 
+          <!-- ADD v2.5.1: Steg 1–5 (ingen ny datamodell / ingen ny storage-key) -->
+          <div style="margin-top:10px;">
+            <label class="label" for="levelStep">Steg (1–5) – utbildningens nivå</label>
+            <select class="select" id="levelStep" style="max-width:260px;">
+              <option value="1" selected>Steg 1</option>
+              <option value="2">Steg 2</option>
+              <option value="3">Steg 3</option>
+              <option value="4">Steg 4</option>
+              <option value="5">Steg 5</option>
+            </select>
+            <div class="muted2 tiny" id="stepHint" style="margin-top:6px;"></div>
+          </div>
+
           <div class="inlineHelp">
             <strong>SWOT:</strong> endast klassificering på givna scenarier (inte fri analys).
           </div>
@@ -596,6 +609,7 @@ POLICY (LÅST):
             <div>
               <label class="label" for="title">Titel</label>
               <input class="input" id="title" placeholder="Skriv en tydlig titel" autocomplete="off" data-watch-dirty="true" />
+              <div class="muted2 tiny" id="titleAutoHint" style="margin-top:6px;"></div>
             </div>
 
             <div>
@@ -622,6 +636,7 @@ POLICY (LÅST):
           </div>
 
           <textarea class="textarea" id="goals" placeholder="- Förstå grunderna…&#10;- Kunna tillämpa…" style="margin-top:8px;"></textarea>
+          <div class="muted2 tiny" id="goalsAutoHint" style="margin-top:6px;"></div>
         </section>
 
         <!-- =========================
@@ -673,6 +688,7 @@ POLICY (LÅST):
                 <option value="4">4</option>
                 <option value="5">5</option>
               </select>
+              <div class="muted2 tiny" id="aiDiffHint" style="margin-top:6px;"></div>
             </div>
           </div>
 
@@ -1195,6 +1211,141 @@ POLICY (LÅST):
       window.STATE.subjectId = sid;
     }
 
+    // ============================================================
+    // v2.5.1: STEG 1–5 + AUTO TITEL/MÅL (utan ny datamodell)
+    // - Steg lagras inte separat: används i titel/mål + AI-context.
+    // ============================================================
+
+    function getSelectedStep(){
+      const el = $("levelStep");
+      const v = el ? trimStr(el.value) : "";
+      return (["1","2","3","4","5"].includes(v)) ? v : "1";
+    }
+
+    function parseStepFromTitle(title){
+      const t = trimStr(title);
+      if (!t) return "";
+      const m = t.match(/\bSteg\s*([1-5])\b/i);
+      return (m && m[1]) ? String(m[1]) : "";
+    }
+
+    function setStepHintText(){
+      const step = getSelectedStep();
+      const el = $("stepHint");
+      if (!el) return;
+      const def = LEVEL_1_5_DEFS[step] ? LEVEL_1_5_DEFS[step] : "";
+      el.textContent = def ? def : "";
+    }
+
+    function formatAutoTitle(modLabel, areaLabel, step){
+      const m = trimStr(modLabel);
+      const a = trimStr(areaLabel);
+      const s = (["1","2","3","4","5"].includes(String(step))) ? String(step) : "1";
+      if (!m && !a) return "Steg " + s;
+      if (m && !a) return m + " – Steg " + s;
+      if (!m && a) return a + " – Steg " + s;
+      return m + " – " + a + " – Steg " + s;
+    }
+
+    function buildAutoGoals(modId, areaLabel, goalsLevel, step){
+      const lvl = ["intro","normal","advanced"].includes(trimStr(goalsLevel)) ? trimStr(goalsLevel) : "normal";
+      const s = (["1","2","3","4","5"].includes(String(step))) ? String(step) : "1";
+
+      const fixed = getFixedGoalsText(modId, areaLabel);
+      const levelDef = LEVEL_1_5_DEFS[s] ? LEVEL_1_5_DEFS[s] : "";
+      const areaHint = getAreaLevelHint(modId, areaLabel, s);
+
+      const lines = [];
+      if (trimStr(fixed)){
+        // kortare vid intro
+        const parts = fixed.split("\n").slice(0, (lvl === "intro") ? 4 : (lvl === "normal") ? 8 : 12);
+        lines.push(parts.join("\n").trim());
+      } else {
+        // fallback om blueprint saknas
+        lines.push("- Förstå grunderna inom området.");
+        lines.push("- Kunna tillämpa i enkla exempel.");
+      }
+
+      lines.push("");
+      lines.push("Steg " + s + " (fokus):");
+      if (trimStr(areaHint)) lines.push("- " + areaHint);
+      else if (trimStr(levelDef)) lines.push("- " + levelDef);
+
+      if (lvl === "advanced"){
+        lines.push("- Kunna motivera val och beskriva risk/konsekvens (där det passar).");
+      }
+
+      return lines.join("\n").trim();
+    }
+
+    function applyAutoTitleAndGoalsIfEmpty(reasonTag){
+      try{
+        const t = window.STATE.edit;
+        if (!t) return;
+
+        const modLabel = safeStr(t.mod || "");
+        const areaLabel = safeStr(t.area || "");
+        const modId = getModuleIdByLabel(modLabel);
+        const step = getSelectedStep();
+        const lvl = safeStr(t.goalsLevel || "normal");
+
+        // GUARD: kräver modul för meningsfull auto-title
+        if (!trimStr(modLabel)) return;
+
+        let changed = false;
+
+        // Auto-title: endast när tom
+        if (!trimStr(t.title)){
+          t.title = formatAutoTitle(modLabel, areaLabel, step);
+          const el = $("title");
+          if (el){
+            window.STATE._rendering = true;
+            el.value = t.title;
+            window.STATE._rendering = false;
+          }
+          changed = true;
+        }
+
+        // Auto-goals: endast när tom
+        if (!trimStr(t.goals)){
+          const autoGoals = buildAutoGoals(modId, areaLabel, lvl, step);
+          t.goals = autoGoals;
+          const elg = $("goals");
+          if (elg){
+            window.STATE._rendering = true;
+            elg.value = t.goals;
+            window.STATE._rendering = false;
+          }
+          changed = true;
+        }
+
+        // Hints (UI-only)
+        const th = $("titleAutoHint");
+        if (th){
+          const msg = "Auto: titel = \"" + formatAutoTitle(modLabel, areaLabel, step) + "\" (endast om titel är tom).";
+          th.textContent = msg;
+        }
+        const gh = $("goalsAutoHint");
+        if (gh){
+          gh.textContent = "Auto: mål fylls från modul/område/steg/nivå (endast om mål är tomt).";
+        }
+
+        if (changed){
+          // ändring pga användarval av modul/område/steg -> markera dirty
+          window.setDirty(true);
+          // listan kan behöva uppdateras (titel)
+          applyFilters();
+          window.renderList();
+          window.renderEditor();
+          window.renderDebug();
+          window.syncButtons();
+        }
+
+        // hint om varför (debug)
+        void(reasonTag);
+      }catch(_){}
+    }
+
     function setAIModePill(){
       const mode = $("aiMode") ? $("aiMode").value : "";
       const content = $("aiContent") ? $("aiContent").value : "blocks";
@@ -1488,6 +1639,7 @@ POLICY (LÅST):
           dirty: window.STATE.dirty,
           subjectId: window.STATE.subjectId,
           filters: window.STATE.filters,
+          step: getSelectedStep(),
           edit: window.STATE.edit
         };
         pre.textContent = JSON.stringify(payload, null, 2);
@@ -1551,6 +1703,10 @@ POLICY (LÅST):
         if (trimStr(t.mod)) meta.appendChild(mkChip(t.mod));
         if (trimStr(t.area)) meta.appendChild(mkChip(t.area));
 
+        // v2.5.1: Visa steg om det finns i titel (ingen datamodell)
+        const st = parseStepFromTitle(t.title);
+        if (st) meta.appendChild(mkChip("Steg " + st));
+
         const probs = trainingProblems(t);
         meta.appendChild(mkChip(probs.length > 0 ? ("Problem: " + probs.length) : "OK"));
 
@@ -1588,7 +1744,7 @@ POLICY (LÅST):
       if (ctx) ctx.textContent = t ? ("Redigerar: " + (trimStr(t.title) ? t.title : "Ny utbildning")) : "Redigerar: —";
 
       const lock = !t;
-      ["mod","area","title","desc","goalsLevel","goals","aiMode","aiContent","aiCount","aiDifficulty","aiQuestionType","aiFeedbackEnabled"]
+      ["mod","area","levelStep","title","desc","goalsLevel","goals","aiMode","aiContent","aiCount","aiDifficulty","aiQuestionType","aiFeedbackEnabled"]
         .forEach(id => { const el = $(id); if (el) el.disabled = lock; });
 
       window.STATE._rendering = true;
@@ -1599,12 +1755,42 @@ POLICY (LÅST):
         if ($("desc")) $("desc").value = t ? safeStr(t.desc) : "";
         if ($("goalsLevel")) $("goalsLevel").value = t ? safeStr(t.goalsLevel || "normal") : "normal";
         if ($("goals")) $("goals").value = t ? safeStr(t.goals) : "";
+
+        // v2.5.1: Steg – sätt från titel om möjligt, annars default 1
+        const stepEl = $("levelStep");
+        if (stepEl){
+          const fromTitle = t ? parseStepFromTitle(t.title) : "";
+          stepEl.value = (fromTitle && ["1","2","3","4","5"].includes(fromTitle)) ? fromTitle : "1";
+        }
       }catch(_){}
       window.STATE._rendering = false;
 
       refreshModuleLists();
       updateSubjectCallout();
       setAIModePill();
+      setStepHintText();
+
+      // UI-hints för auto-fyll
+      const th = $("titleAutoHint");
+      if (th){
+        const modLabel = t ? safeStr(t.mod || "") : "";
+        const areaLabel = t ? safeStr(t.area || "") : "";
+        const step = getSelectedStep();
+        if (trimStr(modLabel)){
+          th.textContent = "Auto: titel blir \"" + formatAutoTitle(modLabel, areaLabel, step) + "\" när titel är tom.";
+        } else {
+          th.textContent = "";
+        }
+      }
+      const gh = $("goalsAutoHint");
+      if (gh){
+        gh.textContent = "Auto: mål fylls när mål är tomt (modul/område/steg/nivå).";
+      }
+      const ad = $("aiDiffHint");
+      if (ad){
+        ad.textContent = "Tips: om AI-svårighet = Auto använder AI din Steg-nivå.";
+      }
+
       window.syncButtons();
     };
 
@@ -1916,6 +2102,7 @@ POLICY (LÅST):
 
         refreshModuleLists();
         updateSubjectCallout();
+        setStepHintText();
 
         loadAllFromStorage();
 
@@ -1952,6 +2139,14 @@ POLICY (LÅST):
       window.STATE.selectedId = t.id;
       window.STATE.edit = t;
 
+      // v2.5.1: default steg = 1 (UI-only)
+      if ($("levelStep")){
+        window.STATE._rendering = true;
+        $("levelStep").value = "1";
+        window.STATE._rendering = false;
+      }
+      setStepHintText();
+
       applyFilters();
       window.setDirty(true);
       refreshUI();
@@ -1963,6 +2158,15 @@ POLICY (LÅST):
 
       window.STATE.selectedId = t.id;
       window.STATE.edit = t;
+
+      // v2.5.1: sync steg från titel (om finns)
+      const st = parseStepFromTitle(t.title);
+      if ($("levelStep")){
+        window.STATE._rendering = true;
+        $("levelStep").value = (st && ["1","2","3","4","5"].includes(st)) ? st : "1";
+        window.STATE._rendering = false;
+      }
+      setStepHintText();
 
       window.setDirty(false);
       refreshUI();
@@ -1985,6 +2189,16 @@ POLICY (LÅST):
       }
 
       window.STATE.edit = findTrainingById(id);
+
+      // sync steg från titel
+      const st = window.STATE.edit ? parseStepFromTitle(window.STATE.edit.title) : "";
+      if ($("levelStep")){
+        window.STATE._rendering = true;
+        $("levelStep").value = (st && ["1","2","3","4","5"].includes(st)) ? st : "1";
+        window.STATE._rendering = false;
+      }
+      setStepHintText();
+
       window.setDirty(false);
       applyFilters();
       refreshUI();
@@ -2113,21 +2327,29 @@ POLICY (LÅST):
       }
     }
 
+    function resolveDifficultyForAI(){
+      const aiDiff = $("aiDifficulty") ? $("aiDifficulty").value : "auto";
+      if (aiDiff && aiDiff !== "auto") return safeStr(aiDiff);
+      // v2.5.1: om AI=auto -> använd utbildningens Steg
+      return getSelectedStep();
+    }
+
     function buildSDKContextString(){
       const t = window.STATE.edit || {};
       const modeUi = $("aiMode") ? $("aiMode").value : "training";
       const content = $("aiContent") ? $("aiContent").value : "blocks";
-      const diff = $("aiDifficulty") ? $("aiDifficulty").value : "auto";
+      const diffResolved = resolveDifficultyForAI(); // v2.5.1
       const fb = $("aiFeedbackEnabled") ? !!$("aiFeedbackEnabled").checked : false;
       const qType = $("aiQuestionType") ? $("aiQuestionType").value : "auto";
 
+      const step = getSelectedStep(); // v2.5.1
       const modLabel = safeStr(t.mod || "");
       const areaLabel = safeStr(t.area || "");
       const subjectId = calcSubjectId(modLabel, areaLabel);
       const moduleId = getModuleIdByLabel(modLabel);
 
       const fixedGoals = getFixedGoalsText(moduleId, areaLabel);
-      const levelHint = (diff !== "auto") ? getAreaLevelHint(moduleId, areaLabel, diff) : "";
+      const levelHint = getAreaLevelHint(moduleId, areaLabel, diffResolved);
       const tagHints = getTagHints(moduleId, areaLabel);
       const mix = getMixSpec(moduleId, qType);
 
@@ -2138,7 +2360,11 @@ POLICY (LÅST):
       lines.push("MODULE_ID: " + (moduleId || "unknown"));
       lines.push("MODUL: " + modLabel);
       lines.push("OMRADE: " + areaLabel);
-      lines.push("SVARIGHET_1_5: " + safeStr(diff || "auto"));
+
+      // v2.5.1: tydlig separation
+      lines.push("STEG_1_5: " + step);
+      lines.push("SVARIGHET_1_5: " + diffResolved);
+
       lines.push("FEEDBACK: " + (fb ? "ja" : "nej"));
       lines.push("TITEL: " + safeStr(t.title || ""));
       lines.push("BESKRIVNING: " + safeStr(t.desc || ""));
@@ -2146,7 +2372,6 @@ POLICY (LÅST):
       // Mål: både fasta (om finns) och manuella (från textarea).
       if (trimStr(fixedGoals)){
         lines.push("MAL_FASTA:");
-        // håll kort
         lines.push(fixedGoals.slice(0, 600));
       }
       const manualGoals = safeStr(t.goals || "");
@@ -2157,15 +2382,14 @@ POLICY (LÅST):
         lines.push("MAL_MANUELL: (tom) – använd MAL_FASTA som primär.");
       }
 
-      // Nivådefinition (stabil) + ev. områdeshint för vald nivå
-      if (diff !== "auto" && LEVEL_1_5_DEFS[String(diff)]){
-        lines.push("NIVA_DEF: " + LEVEL_1_5_DEFS[String(diff)]);
+      // Nivådefinition (stabil) + ev. områdeshint
+      if (LEVEL_1_5_DEFS[String(diffResolved)]){
+        lines.push("NIVA_DEF: " + LEVEL_1_5_DEFS[String(diffResolved)]);
         if (trimStr(levelHint)) lines.push("NIVA_OMRADE_HINT: " + levelHint);
       } else {
         lines.push("NIVA_DEF: " + "Använd nivå 1–5: 1=enkelt val, 3=två steg, 5=tillämpning i scenario.");
       }
 
-      // Taggar (hjälper variation)
       if (tagHints.length){
         lines.push("TAGGAR_HINT: " + tagHints.join(", "));
       }
@@ -2189,9 +2413,8 @@ POLICY (LÅST):
         lines.push("OUTPUT: blandade utbildningsblock (info/task/question/document) där det passar.");
       }
 
-      // Storleksguard
       let out = lines.join("\n").trim();
-      if (out.length > 2000) out = out.slice(0, 2000);
+      if (out.length > 2200) out = out.slice(0, 2200);
       return out;
     }
 
@@ -2256,6 +2479,9 @@ POLICY (LÅST):
           return;
         }
 
+        // v2.5.1: om titel/mål är tomma -> fyll innan AI (ger bättre prompt)
+        applyAutoTitleAndGoalsIfEmpty("pre-ai");
+
         const hint = $("aiHint");
         const content = $("aiContent") ? $("aiContent").value : "blocks";
         if (hint) hint.textContent = "Genererar…";
@@ -2270,6 +2496,7 @@ POLICY (LÅST):
         const contextText = buildSDKContextString();
 
         const sdkMode = (mode === "document") ? "document" : "training";
+        const diffResolved = resolveDifficultyForAI();
 
         const r = await window.HRWorkerSDK.aiGenerate({
           mode: sdkMode,
@@ -2278,7 +2505,7 @@ POLICY (LÅST):
           language: "sv",
           format: (content === "questions") ? "question" : "training-blocks",
           subject: window.STATE.subjectId || "generic",
-          difficultyHint: ($("aiDifficulty") ? $("aiDifficulty").value : "auto")
+          difficultyHint: diffResolved
         });
 
         if (!(r && r.ok === true)){
@@ -2304,7 +2531,7 @@ POLICY (LÅST):
           nb.kind = normalizeKind(nb.kind);
 
           ensureBlockMeta(nb);
-          nb.meta.difficulty = $("aiDifficulty") ? $("aiDifficulty").value : "";
+          nb.meta.difficulty = diffResolved;
           nb.meta.feedbackEnabled = $("aiFeedbackEnabled") ? !!$("aiFeedbackEnabled").checked : false;
 
           // tags hints (om worker inte sätter tags)
@@ -2416,6 +2643,14 @@ POLICY (LÅST):
         if ($("mod")) $("mod").value = "";
         if ($("area")) $("area").value = "";
         updateSubjectCallout();
+
+        if ($("levelStep")){
+          window.STATE._rendering = true;
+          $("levelStep").value = "1";
+          window.STATE._rendering = false;
+        }
+        setStepHintText();
+
         if (window.STATE.edit){
           window.STATE.edit.mod = "";
           window.STATE.edit.area = "";
@@ -2447,9 +2682,20 @@ POLICY (LÅST):
               }
             }
             updateSubjectCallout();
+
+            // v2.5.1: auto-fyll titel/mål om tomt
+            applyAutoTitleAndGoalsIfEmpty("mod-change");
           }
           if (id === "area"){
             updateSubjectCallout();
+
+            // v2.5.1: auto-fyll mål om tomt (och titel om den är tom)
+            applyAutoTitleAndGoalsIfEmpty("area-change");
+          }
+
+          if (id === "goalsLevel"){
+            // v2.5.1: mål kan auto-fyllas om tomt
+            applyAutoTitleAndGoalsIfEmpty("goalsLevel-change");
           }
 
           if (id === "title"){
@@ -2466,6 +2712,17 @@ POLICY (LÅST):
       bindField("desc", "desc");
       bindField("goalsLevel", "goalsLevel");
       bindField("goals", "goals");
+
+      // v2.5.1: Steg 1–5 (UI-only) -> påverkar auto-titel/mål + AI-context
+      if ($("levelStep")){
+        $("levelStep").addEventListener("change", ()=>{
+          if (window.STATE._rendering) return;
+          setStepHintText();
+          // Auto-uppdatera bara om titel/mål är tomt (manuellt vinner)
+          applyAutoTitleAndGoalsIfEmpty("step-change");
+          window.renderDebug();
+        });
+      }
 
       ["aiMode","aiContent"].forEach(id=>{
         const el = $(id);
@@ -2509,12 +2766,11 @@ POLICY (LÅST):
     });
 
     /* ============================================================
-       ÄNDRINGSLOGG (≤8) — v2.5.0
-       - ADD: Module Blueprint (const) modulmål + område/nivå 1–5 + frågemix.
-       - PATCH: buildSDKContextString -> prompt-kontrakt med MODULE_ID, nivåprofil, mål, mix.
-       - ADD: Kvalitetsguard för provfrågor: filtrerar dubletter + saknar facit (fail-closed).
-       - ADD: Bridge för strukturerat facit (answer_key/worked_solution) till legacy UI-fält.
-       - KEEP: Inga nya keys/datamodell. UI/UX oförändrat (endast styrtext + guards).
+       ÄNDRINGSLOGG (≤8) — v2.5.1
+       - ADD: Steg 1–5 (UI) för utbildning; ingen ny datamodell/storage-key.
+       - ADD: Auto-fyll titel + mål när fält är tomma (modul/område/steg/nivå).
+       - PATCH: AI difficultyHint + context -> använder Steg när aiDifficulty=auto.
+       - KEEP: Fail-closed, XSS-safe, inga nya keys/datamodell, UI/UX i övrigt oförändrat.
     ============================================================ */
   })();
   </script>
