@@ -3,11 +3,11 @@ AO-TRAININGS-AI-PROMPT-CONTRACT-01 (PROD AUTOPATCH v2.5.2) | FIL-ID: admin/train
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN – Skapa/Redigera utbildningar + AI-stöd (provfrågor + facit) med tydligt prompt-kontrakt
 
-PATCH (v2.5.2) – HOTFIX + COPY:
-- FIX (P0): Rättar JS-syntaxfel i renderList() som stoppade all logik (påverkade bl.a. “Skapa ny”).
-- COPY: Tar bort ordet “eleven” i prompt-nivådefinitioner (mindre brus i AI-copy).
-- COPY: UI-placeholder “Vad ska eleven göra?” → “Vad ska deltagaren göra?”.
-- UX (minimal): Tooltip på “Visa bara problem” för att förklara vad checkboxen gör.
+PATCH (v2.5.2) – STABILITET + FLOW:
+- P0 FIX: JS-krasch i vänsterlist-render (felskriven rad) som blockerade spara/öppna.
+- PATCH: Vänsterlistan är tom tills sök eller "Visa alla" (renare, snabbare).
+- PATCH: Auto-fyll Titel + Mål (om tomt) när Modul/Område väljs (MAL_FASTA).
+- ADD: "Rensa alla utbildningar" (tömmer AO-057_TRAININGS_V1) för att ta bort gamla trasiga poster.
 
 POLICY (LÅST):
 - UI-only • Fail-closed • localStorage-first (data), sessionStorage först (auth) • fallback localStorage
@@ -49,26 +49,22 @@ POLICY (LÅST):
        - Inga :root bas-tokens här (UI-02 är master)
     ============================================================ */
 
-    /* Endast semantik-tokens som är unika för denna sida */
     .trainingsPage{
       --ok:#16a34a;
       --warn:#d97706;
       --bad:#dc2626;
 
-      /* Block-semantik */
       --blockDocument:#9ca3af;
       --blockTask:#22c55e;
       --blockQuestion:#0ea5e9;
       --blockBothA: var(--blockTask);
       --blockBothB: var(--blockQuestion);
 
-      /* Legacy tokens (behålls) */
       --blockInfo:#0ea5e9;
       --blockQuiz:#f59e0b;
       --blockDoc:#a855f7;
       --blockPersona:#f43f5e;
 
-      /* Fokus – om UI-02 redan har focus tokens kan dessa tas bort senare */
       --focusRing: rgba(11,95,255,.22);
       --focusRing2: rgba(11,95,255,.10);
     }
@@ -531,7 +527,7 @@ POLICY (LÅST):
         </div>
 
         <div class="toggleRow">
-          <label title="Filtrerar listan och blocklistan till sådant som saknar titel, saknar facit (för frågor) eller är publicerat utan block.">
+          <label>
             <input id="onlyProblems" type="checkbox" />
             <span>Visa bara problem</span>
           </label>
@@ -539,7 +535,10 @@ POLICY (LÅST):
 
         <div class="hintBar">
           <div class="muted2">Publicering kräver minst 1 block.</div>
-          <button id="btnNew" class="btn" type="button">Skapa ny</button>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button id="btnNew" class="btn" type="button">Skapa ny</button>
+            <button id="btnWipeAll" class="miniBtn danger" type="button" title="Tömmer AO-057_TRAININGS_V1 (tar bort gamla trasiga utbildningar)">Rensa alla utbildningar</button>
+          </div>
         </div>
 
         <div class="list" id="list"></div>
@@ -853,13 +852,12 @@ POLICY (LÅST):
 
     // ============================================================
     // AO-TRAININGS-AI-PROMPT-CONTRACT-01: PROMPT BLUEPRINTS (CONST)
-    // - Ingen storage. Ingen datamodell. Endast styrtext till worker.
     // ============================================================
 
     const LEVEL_1_5_DEFS = {
       "1": "Nivå 1: känna igen / välja rätt. Enkelt och direkt. Inga fler-stegs resonemang.",
       "2": "Nivå 2: använda rutin i ny variant. Enkelt scenario, ett tydligt steg.",
-      "3": "Nivå 3: två steg eller kort scenario. Kräver tolkning och att man räknar/avgör.",
+      "3": "Nivå 3: två steg eller kort scenario. Kräver att eleven tolkar och räknar/avgör.",
       "4": "Nivå 4: resonera / motivera / hitta fel. Kräver förklaring eller felsökning.",
       "5": "Nivå 5: tillämpa i verklig situation. Avvägning, konsekvens, policy/säkerhet."
     };
@@ -881,7 +879,6 @@ POLICY (LÅST):
       "- Max 2 frågor med samma primära tag."
     ].join(" ");
 
-    // Minimal, stabil blueprint per modul. (Utökas senare – men ger direkt bättre “frågespråk”.)
     const MODULE_BLUEPRINTS = {
       grundkompetens: {
         goals: [
@@ -1336,7 +1333,6 @@ POLICY (LÅST):
         mod: safeStr(t.mod || ""),
         area: safeStr(t.area || ""),
         title: safeStr(t.title || ""),
-        // v2.5.1: desc behålls i data för bakåtkompatibilitet men UI/AI använder den ej.
         desc: safeStr(t.desc || t.description || ""),
         goalsLevel: (trimStr(t.goalsLevel) || "normal"),
         goals: safeStr(t.goals || ""),
@@ -1424,7 +1420,7 @@ POLICY (LÅST):
       selectedId:"",
       edit:null,
       dirty:false,
-      filters:{ q:"", status:"", onlyProblems:false },
+      filters:{ q:"", status:"", onlyProblems:false, showAll:false },
       lastWorkerOk:null,
       lastWorkerMsg:"",
       auth:{ empNo:"", role:"", scopeId:"" },
@@ -1506,11 +1502,20 @@ POLICY (LÅST):
       clearNode(elList);
 
       const list = asArray(window.STATE.visible);
+
+      // v2.5.2: tom lista tills sök eller "Visa alla"
       if (list.length === 0){
         const empty = document.createElement("div");
         empty.className = "muted2";
         empty.style.padding = "12px 4px";
-        empty.textContent = "Inga utbildningar matchar filtret.";
+
+        const hasAnyFilter = !!trimStr(window.STATE.filters.q) || !!trimStr(window.STATE.filters.status) || !!window.STATE.filters.onlyProblems;
+        if (!window.STATE.filters.showAll && !hasAnyFilter){
+          empty.textContent = "Sök för att hitta utbildningar, eller tryck “Visa alla”.";
+        } else {
+          empty.textContent = "Inga utbildningar matchar filtret.";
+        }
+
         elList.appendChild(empty);
         return;
       }
@@ -1527,7 +1532,8 @@ POLICY (LÅST):
 
         const title = document.createElement("div");
         title.className = "title";
-        title.textContent = trimStr(t.title) ? t.title : "— (saknar titel)"; /* FIX v2.5.2: syntax */
+        // P0 FIX v2.5.2: korrekt guard (ingen syntax-krasch)
+        title.textContent = trimStr(t.title) ? t.title : "— (saknar titel)";
 
         const meta = document.createElement("div");
         meta.className = "meta";
@@ -1751,7 +1757,7 @@ POLICY (LÅST):
           addTextarea(card, "Instruktion",
             item0.instruction || "",
             (v)=>{ item0.instruction = safeStr(v); },
-            "Vad ska deltagaren göra?"
+            "Vad ska eleven göra?"
           );
           addTextarea(card, "Leverabel",
             item0.deliverable || "",
@@ -1809,6 +1815,13 @@ POLICY (LÅST):
       const status = trimStr(window.STATE.filters.status);
       const onlyProblems = !!window.STATE.filters.onlyProblems;
 
+      // v2.5.2: visa inte allt per default
+      const defaultHidden = (!window.STATE.filters.showAll && !q && !status && !onlyProblems);
+      if (defaultHidden){
+        window.STATE.visible = [];
+        return;
+      }
+
       let list = asArray(window.STATE.all);
       if (q) list = list.filter(t => trimStr(t.title).toLowerCase().includes(q));
       if (status) list = list.filter(t => t.status === status);
@@ -1830,7 +1843,6 @@ POLICY (LÅST):
         mod: safeStr(t.mod),
         area: safeStr(t.area),
         title: safeStr(t.title),
-        // v2.5.1: desc sparas oförändrat (bakåtkompat), men UI/AI använder ej.
         desc: safeStr(t.desc),
         goalsLevel: trimStr(t.goalsLevel) || "normal",
         goals: safeStr(t.goals),
@@ -1857,6 +1869,33 @@ POLICY (LÅST):
         if (list[i] && list[i].id === id) return list[i];
       }
       return null;
+    }
+
+    function tryAutoFillTitleAndGoals(){
+      try{
+        const t = window.STATE.edit;
+        if (!t) return;
+
+        const modLabel = safeStr(t.mod || "");
+        const areaLabel = safeStr(t.area || "");
+        const modId = getModuleIdByLabel(modLabel);
+        const fixedGoals = getFixedGoalsText(modId, areaLabel);
+
+        // Title: om tom -> sätt från område/modul
+        if (!trimStr(t.title)){
+          const guess = trimStr(areaLabel) ? areaLabel : (trimStr(modLabel) ? modLabel : "");
+          if (trimStr(guess)){
+            t.title = guess;
+            if ($("title")) $("title").value = t.title;
+          }
+        }
+
+        // Goals: om tom -> sätt MAL_FASTA
+        if (!trimStr(t.goals) && trimStr(fixedGoals)){
+          t.goals = fixedGoals;
+          if ($("goals")) $("goals").value = t.goals;
+        }
+      }catch(_){}
     }
 
     window.HRTrainingsInit = function(){
@@ -1928,7 +1967,7 @@ POLICY (LÅST):
       const t = normalizeTraining({
         id: "tr_" + nowTs(),
         mod: "", area: "", title: "",
-        desc: "", // kvar i data, ej i UI
+        desc: "",
         goalsLevel: "normal", goals: "",
         status: "draft",
         blocks: []
@@ -2005,6 +2044,26 @@ POLICY (LÅST):
       window.setDirty(false);
       applyFilters();
       refreshUI();
+    };
+
+    window.HRTrainingsWipeAll = function(){
+      try{
+        // Fail-closed: explicit user action only
+        writeJSONStorage(KEY_TRAININGS, []);
+        window.STATE.all = [];
+        window.STATE.visible = [];
+        window.STATE.selectedId = "";
+        window.STATE.edit = null;
+        window.setDirty(false);
+        window.STATE.filters.showAll = false;
+        applyFilters();
+        refreshUI();
+        setStateInfo("ok", "Status: Rensat");
+        const hint = $("aiHint");
+        if (hint) hint.textContent = "Rensade alla utbildningar (storage).";
+      }catch(_){
+        setStateInfo("bad", "Fail-closed: Kunde inte rensa");
+      }
     };
 
     window.HRTrainingsAddBlock = function(kind){
@@ -2126,9 +2185,6 @@ POLICY (LÅST):
       lines.push("SVARIGHET_1_5: " + safeStr(diff || "auto"));
       lines.push("FEEDBACK: " + (fb ? "ja" : "nej"));
       lines.push("TITEL: " + safeStr(t.title || ""));
-
-      // v2.5.1: BESKRIVNING borttagen ur AI-kontext (renare + mindre brus)
-      // (fältet kan finnas kvar i data men påverkar inte AI)
 
       if (trimStr(fixedGoals)){
         lines.push("MAL_FASTA:");
@@ -2355,6 +2411,7 @@ POLICY (LÅST):
       if ($("q")){
         $("q").addEventListener("input", ()=>{
           window.STATE.filters.q = safeStr($("q").value || "");
+          window.STATE.filters.showAll = false; // sökstyrt
           applyFilters();
           window.renderList();
         });
@@ -2362,6 +2419,7 @@ POLICY (LÅST):
       if ($("fStatus")){
         $("fStatus").addEventListener("change", ()=>{
           window.STATE.filters.status = safeStr($("fStatus").value || "");
+          window.STATE.filters.showAll = false;
           applyFilters();
           window.renderList();
         });
@@ -2369,24 +2427,44 @@ POLICY (LÅST):
       if ($("onlyProblems")){
         $("onlyProblems").addEventListener("change", ()=>{
           window.STATE.filters.onlyProblems = !!$("onlyProblems").checked;
+          window.STATE.filters.showAll = false;
           applyFilters();
           window.renderList();
           window.renderBlocks();
         });
       }
 
-      function clearFilters(){
+      function showAll(){
         if ($("q")) $("q").value = "";
         if ($("fStatus")) $("fStatus").value = "";
         window.STATE.filters.q = "";
         window.STATE.filters.status = "";
+        window.STATE.filters.showAll = true;
         applyFilters();
         window.renderList();
       }
-      if ($("btnShowAll")) $("btnShowAll").addEventListener("click", clearFilters);
+
+      function clearFilters(){
+        if ($("q")) $("q").value = "";
+        if ($("fStatus")) $("fStatus").value = "";
+        if ($("onlyProblems")) $("onlyProblems").checked = false;
+        window.STATE.filters.q = "";
+        window.STATE.filters.status = "";
+        window.STATE.filters.onlyProblems = false;
+        window.STATE.filters.showAll = false;
+        applyFilters();
+        window.renderList();
+        window.renderBlocks();
+      }
+
+      if ($("btnShowAll")) $("btnShowAll").addEventListener("click", showAll);
       if ($("btnClear")) $("btnClear").addEventListener("click", clearFilters);
 
       if ($("btnNew")) $("btnNew").addEventListener("click", ()=> window.HRTrainingsNew());
+      if ($("btnWipeAll")) $("btnWipeAll").addEventListener("click", ()=>{
+        const ok = confirm("Rensa ALLA utbildningar? Detta tar bort allt i AO-057_TRAININGS_V1.");
+        if (ok) window.HRTrainingsWipeAll();
+      });
 
       if ($("btnModAll")) $("btnModAll").addEventListener("click", ()=>{
         refreshModuleLists();
@@ -2426,15 +2504,21 @@ POLICY (LÅST):
               }
             }
             updateSubjectCallout();
+            tryAutoFillTitleAndGoals(); // v2.5.2
           }
           if (id === "area"){
             updateSubjectCallout();
+            tryAutoFillTitleAndGoals(); // v2.5.2
           }
 
           if (id === "title"){
             applyFilters();
             window.renderList();
             window.renderEditor();
+          }
+
+          if (id === "goals"){
+            // Mål påverkar inte listfilter, men debug+dirty hanteras redan.
           }
         });
       }
@@ -2488,10 +2572,11 @@ POLICY (LÅST):
 
     /* ============================================================
        ÄNDRINGSLOGG (≤8) — v2.5.2
-       - FIX: Rättar syntaxfel i renderList() (stoppar JS och påverkar “Skapa ny”).
-       - COPY: Tar bort “eleven” i nivådefinition (prompt-copy).
-       - COPY: Task-placeholder “Vad ska deltagaren göra?” (neutral).
-       - UX: Tooltip på “Visa bara problem” (förklaring, ingen redesign).
+       - P0 FIX: Rättade JS-syntax i renderList som blockerade init/save/open.
+       - PATCH: Default: lista dold tills sök/“Visa alla” (showAll-flag).
+       - PATCH: “Visa alla” visar allt; “Rensa” återgår till tomt läge.
+       - PATCH: Auto-fyll Titel + Mål (MAL_FASTA) när Modul/Område väljs om fälten är tomma.
+       - ADD: Knapp “Rensa alla utbildningar” (tömmer AO-057_TRAININGS_V1).
        - KEEP: Inga nya keys/datamodell. Fail-closed kvar. XSS-safe kvar.
     ============================================================ */
   })();
