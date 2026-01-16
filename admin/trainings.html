@@ -1,5 +1,5 @@
 <!-- ============================================================
-AO-TRAININGS-AI-PROMPT-CONTRACT-01 (PROD AUTOPATCH v2.6.1) | FIL-ID: admin/trainings.html
+AO-TRAININGS-AI-PROMPT-CONTRACT-01 (PROD AUTOPATCH v2.6.2) | FIL-ID: admin/trainings.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN – Skapa/Redigera utbildningar + AI-stöd (provfrågor + facit) med tydligt prompt-kontrakt
 
@@ -1408,10 +1408,24 @@ POLICY (LÅST):
     }
 
     function normalizeAll(list){
+      // FIX(v2.6.2): dedupe ids (korrupt/legacy storage kan ha dubletter -> “kan inte öppna”)
       const arr = asArray(list);
       const out = [];
+      const seen = Object.create(null);
+
       for (let i=0;i<arr.length;i++){
-        try{ out.push(normalizeTraining(arr[i])); }catch(_){}
+        try{
+          const nt = normalizeTraining(arr[i]);
+          let id = trimStr(nt.id);
+
+          if (!id || seen[id]){
+            const seed = (trimStr(nt.title) || "untitled") + "|" + i + "|" + nowTs();
+            nt.id = "tr_" + nowTs().toString(36) + "_" + i + "_" + stableHash(seed);
+            id = nt.id;
+          }
+          seen[id] = true;
+          out.push(nt);
+        }catch(_){}
       }
       return out;
     }
@@ -2381,6 +2395,7 @@ POLICY (LÅST):
 
       const chapFocus = CHAPTER_FOCUS[chapter] ? CHAPTER_FOCUS[chapter] : CHAPTER_FOCUS["Introduktion"];
       const stepDef = STEP_1_5_DEFS[String(step)] || STEP_1_5_DEFS["1"];
+      const stepFocus = (stepDef + (trimStr(stepHint) ? (" " + stepHint) : "")).trim();
 
       const lines = [];
       lines.push("LANG: sv");
@@ -2393,6 +2408,7 @@ POLICY (LÅST):
       lines.push("KAPITEL_FOKUS: " + chapFocus);
 
       lines.push("STEG_1_5: " + step);
+      lines.push("STEG_FOKUS: " + stepFocus); // ADD(v2.6.2): explicit enligt AO (Steg 1 ≠ Steg 2)
       lines.push("STEG_DEF: " + stepDef);
       if (trimStr(stepHint)) lines.push("STEG_OMRADE_HINT: " + stepHint);
 
@@ -2671,13 +2687,19 @@ POLICY (LÅST):
       });
 
       if ($("btnClear")) $("btnClear").addEventListener("click", ()=>{
+        // FIX(v2.6.2): “Rensa” ska även släppa problem-filter för att undvika “fastnar i listläge”.
         if ($("q")) $("q").value = "";
         if ($("fStatus")) $("fStatus").value = "";
+        if ($("onlyProblems")) $("onlyProblems").checked = false;
+
         window.STATE.filters.q = "";
         window.STATE.filters.status = "";
+        window.STATE.filters.onlyProblems = false;
         window.STATE.filters.showAll = false;
+
         applyFilters();
         window.renderList();
+        window.renderBlocks();
       });
 
       if ($("btnNew")) $("btnNew").addEventListener("click", ()=> window.HRTrainingsNew());
@@ -2806,12 +2828,11 @@ POLICY (LÅST):
     });
 
     /* ============================================================
-       ÄNDRINGSLOGG (≤8) — v2.6.1
-       - FIX(P0): Auto-signaturer (titel/mål) sätts bara när data faktiskt är auto (förhindrar oavsiktlig överskrivning).
-       - FIX(P0): Legacy-titlar migreras till kursplan-format när modul+område+kapitel+steg är giltigt.
-       - CHANGE(P0): Generera (AI) är nu låst till kursplanen (mod+område+kapitel+steg).
-       - ADD(P1): “Visa bara problem” flaggar även kursplan-mismatch i äldre utbildningar.
-       - KEEP: Inga nya storage-keys/datamodell. Fail-closed kvar. XSS-safe kvar.
+       ÄNDRINGSLOGG (≤8) — v2.6.2
+       - ADD(P0): AI-kontrakt: skickar STEG_FOKUS (explicit) för tydligare skillnad Steg 1 ≠ Steg 2.
+       - FIX(P0): Dedupe av utbildnings-id vid load (korrupt/legacy dubletter kan annars ge “kan inte öppna”).
+       - FIX(P1): “Rensa” återställer även “Visa bara problem” + döljer listan korrekt.
+       - KEEP: Kursplan-motor (kapitel+steg), fail-closed, inga nya keys/datamodell.
     ============================================================ */
   })();
   </script>
