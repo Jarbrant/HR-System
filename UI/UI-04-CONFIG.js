@@ -1,5 +1,5 @@
 /* ============================================================
-AO-002 v1.8 (PATCH) + AO-AUTH-PIN-V1 (TEST PATCH) | FILE: UI/UI-04-CONFIG.js
+AO-002 v1.9 (PATCH) + AO-AUTH-PIN-V1 (TEST PATCH) | FILE: UI/UI-04-CONFIG.js
 Projekt: HR-System
 Syfte: Central config för RBAC + route-tillgång + default routing + AUTH-policy (PIN-test)
 Nivå: UI-only (GitHub Pages) | localStorage-first
@@ -29,10 +29,10 @@ PATCH v1.7 (DEPLOY/DIAG HARDENING):
 - Tydlig konsolrad när filen laddas (för att bevisa att den deployats/laddats)
 - Fail-safe init av worker-globals (ingen lagring)
 
-PATCH v1.8 (WORKER BASE URL FIX):
-- Sätter WORKER.BASE_URL till riktig URL (inkl /v1) som fallback
-- Respekterar redan satt window.__HR_WORKER_BASE_URL
-- Loggar tydligt final workerBase
+PATCH v1.9 (WORKER BASE URL FIX – SDK-KOMPATIBEL):
+- WORKER.BASE_URL ska vara origin (utan /v1). SDK lägger på /v1 internt.
+- Skyddar mot dubbel "/v1/v1" som kan ge 404/CORS-liknande nätfel.
+- Respekterar redan satt window.__HR_WORKER_BASE_URL (t.ex. från banner/init).
 ============================================================ */
 (function () {
   "use strict";
@@ -43,7 +43,7 @@ PATCH v1.8 (WORKER BASE URL FIX):
   const DIAG = Object.freeze({
     enabled: true,
     tag: "UI-04-CONFIG",
-    version: "v1.8",
+    version: "v1.9",
   });
 
   function diagInfo(msg) {
@@ -149,10 +149,11 @@ PATCH v1.8 (WORKER BASE URL FIX):
   // -------------------------
   // WORKER – runtime-only (NO STORAGE)
   // -------------------------
-  // VIKTIGT: baseUrl måste vara FULL inklusive /v1 eftersom UI anropar t.ex. /v1/health.
-  // Exempel: "https://hrsystem.andersmenyit.workers.dev/v1"
+  // VIKTIGT (SDK): BASE_URL ska vara ORIGIN utan /v1.
+  // Exempel: "https://hrsystem.andersmenyit.workers.dev"
+  // SDK lägger på "/v1" när den anropar (t.ex. "/v1/health", "/v1/ai").
   const WORKER = Object.freeze({
-    BASE_URL: "https://REPLACE-ME.workers.dev/v1",
+    BASE_URL: "https://hrsystem.andersmenyit.workers.dev", // <-- SÄTT DIN ORIGIN HÄR (utan /v1)
     REQUIRE_AUTH: false,
   });
 
@@ -216,11 +217,29 @@ PATCH v1.8 (WORKER BASE URL FIX):
   // WORKER runtime globals (NO STORAGE)
   // -------------------------
   // Respektera redan satta värden (t.ex. om du sätter dem i en banner/init).
+  // PATCH v1.9: skydda mot att någon råkat sätta ".../v1" (ger dubbel v1 i SDK).
+  function normalizeWorkerBaseUrl(u) {
+    const s = (typeof u === "string") ? u.trim() : "";
+    if (!s) return "";
+    // ta bort trailing slash
+    let out = s.replace(/\/+$/g, "");
+    // om någon har lagt /v1 på slutet -> ta bort (SDK lägger på)
+    out = out.replace(/\/v1$/i, "");
+    return out;
+  }
+
   try {
-    const cur = (typeof window.__HR_WORKER_BASE_URL === "string") ? window.__HR_WORKER_BASE_URL.trim() : "";
+    const curRaw = (typeof window.__HR_WORKER_BASE_URL === "string") ? window.__HR_WORKER_BASE_URL : "";
+    const cur = normalizeWorkerBaseUrl(curRaw);
+    const fallback = normalizeWorkerBaseUrl(String(WORKER.BASE_URL || ""));
+
     if (!cur) {
-      window.__HR_WORKER_BASE_URL = String(WORKER.BASE_URL || "").trim();
+      window.__HR_WORKER_BASE_URL = fallback;
+    } else {
+      // om cur behövde normaliseras (t.ex. hade /v1) -> skriv tillbaka normaliserat
+      if (cur !== curRaw.trim()) window.__HR_WORKER_BASE_URL = cur;
     }
+
     if (typeof window.__HR_WORKER_REQUIRE_AUTH !== "boolean") {
       window.__HR_WORKER_REQUIRE_AUTH = (WORKER.REQUIRE_AUTH === true);
     }
@@ -231,17 +250,20 @@ PATCH v1.8 (WORKER BASE URL FIX):
   // -------------------------
   // DIAG
   // -------------------------
-  const finalWorkerBase = (typeof window.__HR_WORKER_BASE_URL === "string") ? window.__HR_WORKER_BASE_URL.trim() : "";
+  const finalWorkerBase = normalizeWorkerBaseUrl(window.__HR_WORKER_BASE_URL);
   diagInfo(`Loaded. BASE_PATH="${BASE_PATH}" workerBase="${finalWorkerBase}"`);
 
   if (!finalWorkerBase || finalWorkerBase.indexOf("REPLACE-ME") !== -1) {
-    diagWarn(`Worker BASE_URL är inte satt korrekt. Sätt WORKER.BASE_URL i UI-04-CONFIG.js till din riktiga URL (inkl /v1).`);
+    diagWarn(
+      `Worker BASE_URL är inte satt korrekt. Sätt WORKER.BASE_URL i UI-04-CONFIG.js till din origin (utan /v1).`
+    );
   }
 
   /* ============================================================
      ÄNDRINGSLOGG (≤8)
-     - FIX: WORKER.BASE_URL fallback måste vara riktig URL inkl /v1
-     - KEEP: respekterar redan satt window.__HR_WORKER_BASE_URL
-     - ADD: tydlig diagWarn om REPLACE-ME/empty
+     - FIX: SDK-kompatibel workerBase (utan /v1) + normalisering mot dubbel /v1
+     - CHANGE: WORKER.BASE_URL satt till origin (utan /v1) som fallback
+     - KEEP: respekterar already-set window.__HR_WORKER_BASE_URL
+     - ADD: diagWarn text uppdaterad (utan /v1)
   ============================================================ */
 })();
