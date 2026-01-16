@@ -1,13 +1,13 @@
 <!-- ============================================================
-AO-TRAININGS-PATCH-03 (PROD AUTOPATCH v2.4.1) | FIL-ID: admin/trainings.html
+AO-TRAININGS-AI-PROMPT-CONTRACT-01 (PROD AUTOPATCH v2.5.0) | FIL-ID: admin/trainings.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
-Syfte: ADMIN – Skapa/Redigera utbildningar + AI-stöd (provfrågor + facit)
+Syfte: ADMIN – Skapa/Redigera utbildningar + AI-stöd (provfrågor + facit) med tydligt prompt-kontrakt
 
-PATCH (v2.4.1) – CSS-CONFLICT FIX (UI-02 MASTER):
-- UI/UI-02-STYLES.css är master för basdesign/tokens.
-- Trainings-sidan använder endast sid-specifik CSS (layout + block-semantik).
-- Namespacing: alla sid-regler prefixas med .trainingsPage för att undvika krockar.
-- Behåller funktionalitet/logik oförändrad.
+PATCH (v2.5.0) – PROMPT-CONTRACT + QUALITY GUARDS:
+- ADD: Module Blueprint (const) för modulmål + område/nivå 1–5 + frågemix.
+- PATCH: buildSDKContextString() -> styrd prompt med MODULE_ID, LEVEL_PROFILE, ANSWERKEY_SPEC, VARIATION_SPEC.
+- ADD: Fail-closed quality-guards för provfrågor: filtrerar dubletter + frågor utan facit.
+- ADD: Compatibility bridge: stöd för strukturerat facit (answer_key/worked_solution) mappas till UI-fälten.
 
 POLICY (LÅST):
 - UI-only • Fail-closed • localStorage-first (data), sessionStorage först (auth) • fallback localStorage
@@ -754,7 +754,6 @@ POLICY (LÅST):
 
   <!-- ============================================================
        BLOCK 11/11 — CORE ENGINE (JS) [PROD]
-       (Oförändrad logik från v2.4.0 – endast CSS-konflikt fixad)
   ============================================================ -->
   <script>
   (function(){
@@ -829,7 +828,7 @@ POLICY (LÅST):
           const r = window.HRWorkerSDK.init({
             baseUrl: baseUrl,
             requireAuth: requireAuth,
-            getToken: function(){ return ""; }
+            getToken: function(){ return ""; } // POLICY: token lagras inte i klienten
           });
           if (!r || r.ok !== true){
             window.__HR_WORKER_SDK_INITED__ = false;
@@ -861,6 +860,198 @@ POLICY (LÅST):
       }catch(_){ return false; }
     }
     function asArray(v){ return Array.isArray(v) ? v : []; }
+
+    // ============================================================
+    // AO-TRAININGS-AI-PROMPT-CONTRACT-01: PROMPT BLUEPRINTS (CONST)
+    // - Ingen storage. Ingen datamodell. Endast styrtext till worker.
+    // ============================================================
+
+    const LEVEL_1_5_DEFS = {
+      "1": "Nivå 1: känna igen / välja rätt. Enkelt och direkt. Inga fler-stegs resonemang.",
+      "2": "Nivå 2: använda rutin i ny variant. Enkelt scenario, ett tydligt steg.",
+      "3": "Nivå 3: två steg eller kort scenario. Kräver att eleven tolkar och räknar/avgör.",
+      "4": "Nivå 4: resonera / motivera / hitta fel. Kräver förklaring eller felsökning.",
+      "5": "Nivå 5: tillämpa i verklig situation. Avvägning, konsekvens, policy/säkerhet."
+    };
+
+    const ANSWERKEY_SPEC_SHORT = [
+      "FACIT_SPEC:",
+      "- mcq: correctOption (A/B/C/D) + kort motivering.",
+      "- short/numeric: entydigt svar + ev. enhetsangivelse.",
+      "- calc: entydigt svar + 2-6 steg i worked_solution.",
+      "- reason/concept: rubric (3-6 punkter) med vad som ger poäng.",
+      "- alltid: common_mistakes (2-4) kort."
+    ].join(" ");
+
+    const VARIATION_SPEC_SHORT = [
+      "VARIATION_SPEC:",
+      "- Inga duplicerade frågor i batch.",
+      "- Minst 5 frågetyper vid 12 frågor.",
+      "- Minst 3 svårighetsnivåer representerade (om auto: spridning).",
+      "- Max 2 frågor med samma primära tag."
+    ].join(" ");
+
+    // Minimal, stabil blueprint per modul. (Utökas senare – men ger direkt bättre “frågespråk”.)
+    const MODULE_BLUEPRINTS = {
+      grundkompetens: {
+        goals: [
+          "Eleven kan kommunicera tydligt och återge instruktioner korrekt.",
+          "Eleven kan följa rutiner och upptäcka oklarheter.",
+          "Eleven kan förklara centrala begrepp med egna ord.",
+          "Eleven kan lösa grundläggande problem stegvis."
+        ],
+        area: {
+          "Kommunikation & tydlighet": {
+            goals: ["Tydlig återgivning", "Välja rätt kanal/ton", "Bekräfta förståelse"],
+            levelHints: {
+              "1":"Känna igen tydlig/otydlig formulering.",
+              "2":"Omskriv en mening tydligare.",
+              "3":"Välj bästa svar i ett scenario (kund/kollega).",
+              "4":"Motivera varför ett svar är bäst + risk vid otydlighet.",
+              "5":"Hantera konflikt/eskalering med konsekvensbedömning."
+            },
+            tags: ["tydlighet","budskap","återkoppling","missförstånd","ton"]
+          }
+        },
+        mix12: { mcq:3, short:3, scenario:3, reason:2, error_find:1 }
+      },
+
+      matematik_logik: {
+        goals: [
+          "Eleven kan använda procent i vardagsnära situationer.",
+          "Eleven kan omvandla mellan vanliga enheter korrekt.",
+          "Eleven kan resonera om tid och ordningsföljd.",
+          "Eleven kan lösa logiska problem stegvis."
+        ],
+        area: {
+          "Procent & beräkningar": {
+            goals: ["Beräkna procent av tal", "Beräkna förändring", "Tolkar procent i text"],
+            levelHints: {
+              "1":"Känna igen 10%, 25%, 50% i enkla fall.",
+              "2":"Beräkna procent av ett tal (ett steg).",
+              "3":"Två steg: rabatt + nytt pris eller del + helhet.",
+              "4":"Felsök: hitta fel i en procentberäkning och rätta.",
+              "5":"Tillämpa: jämför två alternativ och motivera."
+            },
+            tags: ["procent","rabatt","ökning","minskning","jämförelse"]
+          },
+          "Enheter & omvandling": {
+            goals: ["Omvandla längd/vikt/volym", "Välja rätt enhet", "Rimlighetsbedömning"],
+            levelHints: {
+              "1":"Välj rätt enhet (g, kg, l, ml).",
+              "2":"Enkel omvandling (t.ex. 1000 g = 1 kg).",
+              "3":"Två steg eller blandade enheter i text.",
+              "4":"Felsök fel enhet/decimalkomma.",
+              "5":"Tillämpa i scenario (recept/logistik) och motivera."
+            },
+            tags: ["enheter","omvandling","gram","liter","rimlighet"]
+          },
+          "Tidsresonemang": {
+            goals: ["Läsa tid", "Beräkna tidsskillnad", "Planera ordning"],
+            levelHints: {
+              "1":"Klockan hel/halv/kvart.",
+              "2":"Skillnad i minuter/timmar (ett steg).",
+              "3":"Tidtabell: start/slut med paus.",
+              "4":"Felsök orimlig tidsplan.",
+              "5":"Scenario: optimera tid med motivering."
+            },
+            tags: ["tid","minuter","timmar","schema","planering"]
+          },
+          "Logiskt tänkande": {
+            goals: ["Mönster", "Om–så", "Uteslutning"],
+            levelHints: {
+              "1":"Fortsätt mönster (enkelt).",
+              "2":"Om–så regler, en slutsats.",
+              "3":"Två regler, dra slutsats.",
+              "4":"Hitta motsägelse/fel i resonemang.",
+              "5":"Lös ett logikpussel med motivering."
+            },
+            tags: ["logik","mönster","regler","uteslutning","slutsats"]
+          }
+        },
+        mix12: { mcq:3, numeric:3, calc:3, reason:2, error_find:1 }
+      },
+
+      arbetsmiljo: {
+        goals: [
+          "Eleven kan identifiera risker och beskriva rätt åtgärd.",
+          "Eleven kan följa säkerhetsrutiner och rapportera tillbud.",
+          "Eleven förstår grundläggande ergonomi.",
+          "Eleven känner till psykosociala risker och stödvägar."
+        ],
+        mix12: { mcq:3, short:3, scenario:4, reason:2, error_find:0 }
+      },
+
+      infosakerhet: {
+        goals: [
+          "Eleven kan skapa och hantera säkra lösenord och konton.",
+          "Eleven kan känna igen phishing och agera rätt.",
+          "Eleven hanterar information säkert i vardagen.",
+          "Eleven vet hur incidenter rapporteras."
+        ],
+        mix12: { mcq:4, short:3, scenario:3, reason:2, error_find:0 }
+      },
+
+      hr_policy: {
+        goals: [
+          "Eleven förstår uppförandekod och professionellt beteende.",
+          "Eleven vet vad trakasserier är och hur man agerar.",
+          "Eleven förstår jäv och undviker intressekonflikter.",
+          "Eleven känner till rapportvägar och eskalering."
+        ],
+        mix12: { mcq:3, short:3, scenario:4, reason:2, error_find:0 }
+      },
+
+      kvalitet: {
+        goals: [
+          "Eleven kan beskriva avvikelsehantering och vad som ska rapporteras.",
+          "Eleven förstår orsak och åtgärd i enkla exempel.",
+          "Eleven kan följa rutiner och använda dokument korrekt.",
+          "Eleven förstår uppföljning och lärande."
+        ],
+        mix12: { mcq:3, short:3, scenario:3, reason:2, error_find:1 }
+      },
+
+      etik: {
+        goals: [
+          "Eleven kan bemöta människor respektfullt.",
+          "Eleven kan sätta gränser och eskalera vid behov.",
+          "Eleven tar ansvar för sitt beteende och sina beslut.",
+          "Eleven kan kommunicera respektfullt även under stress."
+        ],
+        mix12: { mcq:3, short:3, scenario:4, reason:2, error_find:0 }
+      },
+
+      miljo: {
+        goals: [
+          "Eleven kan sortera avfall och följa rutiner.",
+          "Eleven kan minska resursslöseri i vardagen.",
+          "Eleven kan känna igen enkla miljörisker.",
+          "Eleven kan beskriva förebyggande åtgärder."
+        ],
+        mix12: { mcq:3, short:3, scenario:3, reason:2, error_find:1 }
+      },
+
+      haccp: {
+        goals: [
+          "Eleven kan identifiera biologiska/kemiska/fysiska faror.",
+          "Eleven förstår kritiska styrpunkter och kontroller.",
+          "Eleven kan temperatur/hygien-rutiner och avvikelser.",
+          "Eleven kan beskriva åtgärder vid avvikelse."
+        ],
+        mix12: { mcq:3, short:3, scenario:3, reason:2, error_find:1 }
+      },
+
+      swot: {
+        goals: [
+          "Eleven kan klassificera givna scenarier som S/W/O/T.",
+          "Eleven kan motivera klassificeringen kort.",
+          "Eleven kan känna igen gränsfall och välja bästa kategori.",
+          "Eleven följer låsningen: ingen fri analys, endast klassificering."
+        ],
+        mix12: { mcq:4, short:3, scenario:3, reason:2, error_find:0 }
+      }
+    };
 
     const MODULE_STOMME = [
       { id:"grundkompetens", label:"Grundkompetens", subject:"generic",
@@ -907,6 +1098,73 @@ POLICY (LÅST):
       const m = findModuleByLabel(modLabel);
       if (!m) return "generic";
       return m.subject || "generic";
+    }
+
+    function getModuleIdByLabel(modLabel){
+      const m = findModuleByLabel(modLabel);
+      return m ? safeStr(m.id || "") : "";
+    }
+
+    function getBlueprintFor(modId){
+      const id = trimStr(modId);
+      return (id && MODULE_BLUEPRINTS[id]) ? MODULE_BLUEPRINTS[id] : null;
+    }
+
+    function getFixedGoalsText(modId, areaLabel){
+      const bp = getBlueprintFor(modId);
+      if (!bp) return "";
+      const base = asArray(bp.goals);
+      const area = (bp.area && bp.area[areaLabel]) ? bp.area[areaLabel] : null;
+
+      const lines = [];
+      base.slice(0,5).forEach(g => lines.push("- " + safeStr(g)));
+      if (area && Array.isArray(area.goals) && area.goals.length){
+        lines.push("");
+        lines.push("Område-mål:");
+        area.goals.slice(0,4).forEach(g => lines.push("- " + safeStr(g)));
+      }
+      return lines.join("\n").trim();
+    }
+
+    function getAreaLevelHint(modId, areaLabel, level){
+      const bp = getBlueprintFor(modId);
+      const area = (bp && bp.area && bp.area[areaLabel]) ? bp.area[areaLabel] : null;
+      if (area && area.levelHints && area.levelHints[level]) return safeStr(area.levelHints[level]);
+      return "";
+    }
+
+    function getTagHints(modId, areaLabel){
+      const bp = getBlueprintFor(modId);
+      const area = (bp && bp.area && bp.area[areaLabel]) ? bp.area[areaLabel] : null;
+      const tags = area && Array.isArray(area.tags) ? area.tags : [];
+      return tags.slice(0,8).map(t => safeStr(t)).filter(Boolean);
+    }
+
+    function getMixSpec(modId, qTypeUi){
+      const bp = getBlueprintFor(modId);
+      const mix = bp && bp.mix12 ? bp.mix12 : { mcq:3, short:3, scenario:3, reason:2, error_find:1 };
+
+      // UI override: om användaren valt en fast typ – styr mixen hårdare.
+      const forced = trimStr(qTypeUi);
+      if (forced && forced !== "auto"){
+        if (forced === "mcq_single") return { mcq:12 };
+        if (forced === "true_false") return { true_false:12 };
+        if (forced === "numeric") return { numeric:12 };
+        if (forced === "short_answer") return { short:12 };
+      }
+      return mix;
+    }
+
+    function mixToString(mix){
+      const keys = Object.keys(mix || {});
+      const parts = [];
+      keys.forEach(k=>{
+        const n = mix[k];
+        if (typeof n === "number" && isFinite(n) && n > 0){
+          parts.push(k + ":" + Math.round(n));
+        }
+      });
+      return parts.join(", ");
     }
 
     function renderDatalist(listEl, values){
@@ -966,6 +1224,60 @@ POLICY (LÅST):
       if (!("feedbackEnabled" in b.meta)) b.meta.feedbackEnabled = false;
     }
 
+    // Bridge för strukturerat facit -> UI-fält (a/explanation/workedSteps)
+    function bridgeAnswerKeyToLegacy(item0, raw){
+      try{
+        if (!item0 || typeof item0 !== "object") return;
+        const ak = raw && (raw.answer_key || raw.answerKey || raw.answerKeyObj || null);
+        if (!ak || typeof ak !== "object") return;
+
+        // correct/answer
+        if (!trimStr(item0.a)){
+          const correct = ("correct" in ak) ? safeStr(ak.correct) : ("answer" in ak) ? safeStr(ak.answer) : "";
+          if (trimStr(correct)) item0.a = correct;
+        }
+
+        // worked_solution / workedSteps
+        const ws = ak.worked_solution || ak.workedSolution || ak.steps || null;
+        if (Array.isArray(ws) && (!Array.isArray(item0.workedSteps) || item0.workedSteps.length === 0)){
+          item0.workedSteps = ws.map(x => safeStr(x)).filter(Boolean).slice(0,6);
+        }
+
+        // rubric + common mistakes -> explanation (kort)
+        const rubric = Array.isArray(ak.rubric) ? ak.rubric : null;
+        const cm = Array.isArray(ak.common_mistakes) ? ak.common_mistakes : null;
+
+        const parts = [];
+        if (rubric && rubric.length){
+          parts.push("Bedömning:");
+          rubric.slice(0,6).forEach(r=>{
+            if (typeof r === "string") parts.push("- " + r);
+            else if (r && typeof r === "object"){
+              const txt = safeStr(r.point || r.text || r.criteria || "");
+              const pts = ("points" in r) ? safeStr(r.points) : "";
+              parts.push("- " + (pts ? ("(" + pts + "p) ") : "") + txt);
+            }
+          });
+        }
+        if (cm && cm.length){
+          parts.push("Vanliga fel:");
+          cm.slice(0,4).forEach(m=>{
+            if (typeof m === "string") parts.push("- " + m);
+            else if (m && typeof m === "object"){
+              const what = safeStr(m.mistake || m.what || "");
+              const note = safeStr(m.note || m.comment || "");
+              parts.push("- " + what + (note ? (" – " + note) : ""));
+            }
+          });
+        }
+        const extra = parts.join("\n").trim();
+        if (extra){
+          if (!trimStr(item0.explanation)) item0.explanation = extra;
+          else item0.explanation = (trimStr(item0.explanation) + "\n\n" + extra).trim();
+        }
+      }catch(_){}
+    }
+
     function normalizeBlock(raw){
       const b = (raw && typeof raw === "object") ? raw : {};
       const kind = normalizeKind(b.kind || b.type || b.blockType);
@@ -1022,6 +1334,10 @@ POLICY (LÅST):
           if (!("a" in i0)) i0.a = "";
           if (!("explanation" in i0)) i0.explanation = "";
           if (!("workedSteps" in i0) || !Array.isArray(i0.workedSteps)) i0.workedSteps = [];
+
+          // Bridge: om strukturerat facit finns i blocket -> mappa till legacy UI-fält
+          bridgeAnswerKeyToLegacy(i0, b);
+
           out.items[0] = i0;
         }
       }
@@ -1805,37 +2121,75 @@ POLICY (LÅST):
       const fb = $("aiFeedbackEnabled") ? !!$("aiFeedbackEnabled").checked : false;
       const qType = $("aiQuestionType") ? $("aiQuestionType").value : "auto";
 
-      const mod = safeStr(t.mod || "");
-      const area = safeStr(t.area || "");
-      const subjectId = calcSubjectId(mod, area);
+      const modLabel = safeStr(t.mod || "");
+      const areaLabel = safeStr(t.area || "");
+      const subjectId = calcSubjectId(modLabel, areaLabel);
+      const moduleId = getModuleIdByLabel(modLabel);
 
+      const fixedGoals = getFixedGoalsText(moduleId, areaLabel);
+      const levelHint = (diff !== "auto") ? getAreaLevelHint(moduleId, areaLabel, diff) : "";
+      const tagHints = getTagHints(moduleId, areaLabel);
+      const mix = getMixSpec(moduleId, qType);
+
+      // Kontext byggs som ett stabilt “kontrakt” i klassrumsspråk.
       const lines = [];
       lines.push("LANG: sv");
       lines.push("SUBJECT_ID: " + subjectId);
-      lines.push("MODUL: " + mod);
-      lines.push("OMRADE: " + area);
+      lines.push("MODULE_ID: " + (moduleId || "unknown"));
+      lines.push("MODUL: " + modLabel);
+      lines.push("OMRADE: " + areaLabel);
       lines.push("SVARIGHET_1_5: " + safeStr(diff || "auto"));
       lines.push("FEEDBACK: " + (fb ? "ja" : "nej"));
       lines.push("TITEL: " + safeStr(t.title || ""));
       lines.push("BESKRIVNING: " + safeStr(t.desc || ""));
-      lines.push("MAL: " + safeStr(t.goals || ""));
+
+      // Mål: både fasta (om finns) och manuella (från textarea).
+      if (trimStr(fixedGoals)){
+        lines.push("MAL_FASTA:");
+        // håll kort
+        lines.push(fixedGoals.slice(0, 600));
+      }
+      const manualGoals = safeStr(t.goals || "");
+      if (trimStr(manualGoals)){
+        lines.push("MAL_MANUELL:");
+        lines.push(manualGoals.slice(0, 500));
+      } else {
+        lines.push("MAL_MANUELL: (tom) – använd MAL_FASTA som primär.");
+      }
+
+      // Nivådefinition (stabil) + ev. områdeshint för vald nivå
+      if (diff !== "auto" && LEVEL_1_5_DEFS[String(diff)]){
+        lines.push("NIVA_DEF: " + LEVEL_1_5_DEFS[String(diff)]);
+        if (trimStr(levelHint)) lines.push("NIVA_OMRADE_HINT: " + levelHint);
+      } else {
+        lines.push("NIVA_DEF: " + "Använd nivå 1–5: 1=enkelt val, 3=två steg, 5=tillämpning i scenario.");
+      }
+
+      // Taggar (hjälper variation)
+      if (tagHints.length){
+        lines.push("TAGGAR_HINT: " + tagHints.join(", "));
+      }
 
       if (content === "questions"){
-        lines.push("OUTPUT: endast question-blocks (type=question)");
-        lines.push("KRAV: tydlig provfråga + facit (answerKey).");
+        lines.push("OUTPUT: endast question-blocks (type=question).");
+        lines.push("KRAV: provkänsla. tydlig frågetyp. entydigt facit eller rubric.");
         lines.push("FORBUD: meta-text, generiska svar, 'som AI', 'det beror på'.");
-        lines.push("FRAGETYP: " + (qType === "auto" ? "auto" : qType));
+        lines.push("FRAGETYP_UI: " + (qType === "auto" ? "auto" : qType));
+        lines.push("FRAGEMIX_12: " + mixToString(mix));
+        lines.push(ANSWERKEY_SPEC_SHORT);
+        lines.push(VARIATION_SPEC_SHORT);
 
         if (subjectId === "swot"){
           lines.push("SWOT_LOCK: klassificering av givna scenarier, INTE fri analys.");
         }
         if (subjectId === "math" || subjectId === "haccp"){
-          lines.push("MATH_LOCK: numeric eller mcq_single med metodkrav. alltid kort stegvis metod.");
+          lines.push("LOCK: om beräkning/temperatur -> visa metod kort i 2-6 steg.");
         }
       } else {
         lines.push("OUTPUT: blandade utbildningsblock (info/task/question/document) där det passar.");
       }
 
+      // Storleksguard
       let out = lines.join("\n").trim();
       if (out.length > 2000) out = out.slice(0, 2000);
       return out;
@@ -1867,6 +2221,27 @@ POLICY (LÅST):
       }
     };
 
+    function canonicalQuestionKey(nb){
+      try{
+        const i0 = nb && nb.items && nb.items[0] ? nb.items[0] : null;
+        const q = i0 ? trimStr(i0.q || "") : "";
+        if (!q) return "";
+        const s = q.toLowerCase().replace(/\s+/g, " ").trim();
+        return stableHash(s);
+      }catch(_){ return ""; }
+    }
+
+    function isValidQuestionBlock(nb){
+      try{
+        if (!nb) return false;
+        if (normalizeKind(nb.kind) !== "question") return false;
+        const i0 = nb.items && nb.items[0] ? nb.items[0] : {};
+        if (!trimStr(i0.q)) return false;
+        if (!trimStr(i0.a)) return false; // fail-closed: provfrågor måste ha facit
+        return true;
+      }catch(_){ return false; }
+    }
+
     window.HRTrainingsGenerateAI = async function(){
       try{
         const t = window.STATE.edit;
@@ -1882,6 +2257,7 @@ POLICY (LÅST):
         }
 
         const hint = $("aiHint");
+        const content = $("aiContent") ? $("aiContent").value : "blocks";
         if (hint) hint.textContent = "Genererar…";
 
         const okSdk = ensureSDKOrFail();
@@ -1900,7 +2276,7 @@ POLICY (LÅST):
           count: (isFinite(count) ? count : 1),
           context: contextText,
           language: "sv",
-          format: ($("aiContent") && $("aiContent").value === "questions") ? "question" : "training-blocks",
+          format: (content === "questions") ? "question" : "training-blocks",
           subject: window.STATE.subjectId || "generic",
           difficultyHint: ($("aiDifficulty") ? $("aiDifficulty").value : "auto")
         });
@@ -1922,7 +2298,8 @@ POLICY (LÅST):
           return;
         }
 
-        const normBlocks = incoming.map((b, idx)=>{
+        // Normalisera först
+        const normBlocksRaw = incoming.map((b, idx)=>{
           const nb = normalizeBlock(b);
           nb.kind = normalizeKind(nb.kind);
 
@@ -1930,14 +2307,61 @@ POLICY (LÅST):
           nb.meta.difficulty = $("aiDifficulty") ? $("aiDifficulty").value : "";
           nb.meta.feedbackEnabled = $("aiFeedbackEnabled") ? !!$("aiFeedbackEnabled").checked : false;
 
+          // tags hints (om worker inte sätter tags)
+          if ((!Array.isArray(nb.meta.tags) || nb.meta.tags.length === 0)){
+            const modId = getModuleIdByLabel(safeStr(t.mod || ""));
+            const tags = getTagHints(modId, safeStr(t.area || ""));
+            if (tags.length) nb.meta.tags = tags.slice(0,6);
+          }
+
           nb.id = mkId("b", nb.kind + "|" + trimStr(nb.title) + "|aiidx:" + idx + "|len:" + t.blocks.length);
           return nb;
         });
 
+        // Quality guards endast för provfrågor
+        let normBlocks = normBlocksRaw;
+        let droppedDup = 0;
+        let droppedBad = 0;
+
+        if (content === "questions"){
+          const seen = {};
+          const kept = [];
+          for (let i=0;i<normBlocksRaw.length;i++){
+            const nb = normBlocksRaw[i];
+            if (!isValidQuestionBlock(nb)){
+              droppedBad++;
+              continue;
+            }
+            const key = canonicalQuestionKey(nb);
+            if (key && seen[key]){
+              droppedDup++;
+              continue;
+            }
+            if (key) seen[key] = true;
+            kept.push(nb);
+          }
+          normBlocks = kept;
+
+          if (normBlocks.length === 0){
+            const msg = "Fail-closed: Inga godkända provfrågor (saknar facit eller dubletter).";
+            if (hint) hint.textContent = msg;
+            setWorkerInfo(false, "Kvalitet (fail-closed)");
+            return;
+          }
+        }
+
         normBlocks.forEach(b => t.blocks.push(b));
 
         window.setDirty(true);
-        if (hint) hint.textContent = "Klart: lade till " + normBlocks.length + " block.";
+
+        if (hint){
+          let msg = "Klart: lade till " + normBlocks.length + " block.";
+          if (content === "questions" && (droppedDup || droppedBad)){
+            msg += " (filtrerade " + droppedBad + " utan facit + " + droppedDup + " dubletter)";
+          }
+          hint.textContent = msg;
+        }
+
         refreshUI();
       }catch(_){
         try{
@@ -2085,11 +2509,12 @@ POLICY (LÅST):
     });
 
     /* ============================================================
-       ÄNDRINGSLOGG (≤8) — v2.4.1
-       - FIX: UI-02 är master; bort med bas-tokens från sidan.
-       - ADD: Namespacing .trainingsPage för att undvika CSS-krockar.
-       - ADD: Cache-bust på UI-02 link för att eliminera “äldre CSS”.
-       - KEEP: All logik/keys/XSS/fail-closed oförändrat.
+       ÄNDRINGSLOGG (≤8) — v2.5.0
+       - ADD: Module Blueprint (const) modulmål + område/nivå 1–5 + frågemix.
+       - PATCH: buildSDKContextString -> prompt-kontrakt med MODULE_ID, nivåprofil, mål, mix.
+       - ADD: Kvalitetsguard för provfrågor: filtrerar dubletter + saknar facit (fail-closed).
+       - ADD: Bridge för strukturerat facit (answer_key/worked_solution) till legacy UI-fält.
+       - KEEP: Inga nya keys/datamodell. UI/UX oförändrat (endast styrtext + guards).
     ============================================================ */
   })();
   </script>
