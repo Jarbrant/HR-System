@@ -1,15 +1,21 @@
 <!-- ============================================================
-AO-TRAININGS-AI-PROMPT-CONTRACT-01 (PROD AUTOPATCH v2.5.3) | FIL-ID: admin/trainings.html
+AO-TRAININGS-AI-PROMPT-CONTRACT-01 (PROD AUTOPATCH v2.6.0) | FIL-ID: admin/trainings.html
 Projekt: HR-System (GitHub Pages / localStorage-first)
 Syfte: ADMIN – Skapa/Redigera utbildningar + AI-stöd (provfrågor + facit) med tydligt prompt-kontrakt
 
-PATCH (v2.5.3) – STEG 1–5 + NIVÅSTYRNING + CLEANUP:
-- FIX(P0): Tar bort dubbelstyrning: Svårighet (1–5) bort (Steg 1–5 + Nivå intro/normal/advanced styr istället).
-- PATCH(P0): Tar bort “Worker-läge” (brus) – mode låses till training i denna AO.
-- PATCH(P1): Lägger till “Steg 1–5” (förinställt) som styr mål + AI-kontext + titelprefix.
-- PATCH(P1): goalsLevel (Intro/Normal/Avancerad) skickas tydligt till AI (UTBILDNINGSNIVA).
-- PATCH(P1): Block-UI städas: tar bort manuella mall-/skapa-knappar (AI är primär källa). Redigering/radering av befintliga block kvar.
-- KEEP: Vänsterlista vilande tills sök/filter eller “Visa alla”. Autofyll Titel + Mål vid modul/område (endast om tomt).
+PATCHPLAN A1 + B (+ C-LIGHT):
+A1) TITEL-MOTOR (KURSPLAN)
+- ADD(P0): Ny “Titel (kapitel)” väljare (6 fasta alternativ) efter Modul/Område.
+- ADD(P0): Steg 1–5 ligger under Titel (kapitel) och styr progression.
+- CHANGE(P0): Mål auto-fylls först när Modul + Område + Titel (kapitel) finns (inte när modul väljs).
+- KEEP: Ingen ny datamodell. Vi kodar in kapitel+steg i title-strängen (parse/compose).
+
+B) AI-KONTRAKT (NIVÅ + KAPITEL + STEG)
+- KEEP(P0): UTBILDNINGSNIVA (Intro/Normal/Avancerad) ska vara kvar och skickas till AI.
+- ADD(P0): KAPITEL + KAPITEL_FOKUS + STEG_FOKUS skickas till AI för att Steg 1 ≠ Steg 2 i alla områden.
+
+C-LIGHT) CLEAN UI
+- REMOVE(P1): Tar bort “AI-pill” och “Worker-pill” i header (rutorna) – status visas via hint-text + State-pill.
 
 POLICY (LÅST):
 - UI-only • Fail-closed • localStorage-first (data), sessionStorage först (auth) • fallback localStorage
@@ -45,32 +51,22 @@ POLICY (LÅST):
        OBS: Inga bas-tokens här. UI-02 äger basdesign.
   ========================== -->
   <style>
-    /* ============================================================
-       TRAININGS PAGE – SID-SPECIFIK CSS (NAMESPACED)
-       - Undvik krockar med UI-02 genom att alltid prefixa .trainingsPage
-       - Inga :root bas-tokens här (UI-02 är master)
-    ============================================================ */
-
-    /* Endast semantik-tokens som är unika för denna sida */
     .trainingsPage{
       --ok:#16a34a;
       --warn:#d97706;
       --bad:#dc2626;
 
-      /* Block-semantik */
       --blockDocument:#9ca3af;
       --blockTask:#22c55e;
       --blockQuestion:#0ea5e9;
       --blockBothA: var(--blockTask);
       --blockBothB: var(--blockQuestion);
 
-      /* Legacy tokens (behålls) */
       --blockInfo:#0ea5e9;
       --blockQuiz:#f59e0b;
       --blockDoc:#a855f7;
       --blockPersona:#f43f5e;
 
-      /* Fokus – om UI-02 redan har focus tokens kan dessa tas bort senare */
       --focusRing: rgba(11,95,255,.22);
       --focusRing2: rgba(11,95,255,.10);
     }
@@ -466,16 +462,6 @@ POLICY (LÅST):
           <span id="stateText">Status: OK</span>
         </span>
 
-        <span class="pill" id="aiModePill" aria-label="AI-läge" title="Valt AI-innehåll">
-          <span class="pillDot" aria-hidden="true"></span>
-          <span id="aiModeText">AI: —</span>
-        </span>
-
-        <span class="pill" id="workerPill" aria-label="Worker-status" title="Senaste worker-test">
-          <span class="pillDot" aria-hidden="true"></span>
-          <span id="workerText">Worker: —</span>
-        </span>
-
         <span class="pill" id="whoPill" aria-label="Inloggad användare" title="Inloggad användare • empNo • roll • scope">
           <span class="pillDot" aria-hidden="true"></span>
           <span id="whoText">—</span>
@@ -569,12 +555,28 @@ POLICY (LÅST):
         </section>
 
         <!-- =========================
-             BLOCK 6/10 – Grundinfo (Steg 1–5 + Titel)
+             BLOCK 6/10 – Kursplan (Titel-kapitel + Steg 1–5) [NY]
+             LÅS: modul → område → titel(kapitel) → steg → mål → AI → block
         ========================== -->
-        <section class="editorSection" aria-labelledby="h-basic">
-          <h3 id="h-basic">Grundinfo</h3>
+        <section class="editorSection" aria-labelledby="h-plan">
+          <h3 id="h-plan">Kursplan</h3>
 
           <div class="row2" style="margin-top:10px;">
+            <div>
+              <label class="label" for="courseTitle">Titel (kapitel)</label>
+              <select class="select" id="courseTitle" data-watch-dirty="true">
+                <option value="Introduktion" selected>Introduktion</option>
+                <option value="Grundläggande färdighet">Grundläggande färdighet</option>
+                <option value="Tillämpning">Tillämpning</option>
+                <option value="Analys & förståelse">Analys & förståelse</option>
+                <option value="Självständigt utförande">Självständigt utförande</option>
+                <option value="Fördjupning & ansvar">Fördjupning & ansvar</option>
+              </select>
+              <div class="inlineHelp" style="margin-top:8px;">
+                Kapitel styr <strong>vilken typ</strong> av uppgifter AI ska skapa (kursplansmotor).
+              </div>
+            </div>
+
             <div>
               <label class="label" for="courseStep">Steg (1–5)</label>
               <select class="select" id="courseStep" data-watch-dirty="true">
@@ -585,16 +587,16 @@ POLICY (LÅST):
                 <option value="5">Steg 5</option>
               </select>
               <div class="inlineHelp" style="margin-top:8px;">
-                Steg styr kursplanen: mål + AI-innehåll ska skilja sig mellan Steg 1 och Steg 5.
+                Steg styr progressionen: <strong>Steg 1 ≠ Steg 2</strong>, i alla områden.
               </div>
             </div>
+          </div>
 
-            <div aria-label="Titel">
-              <label class="label" for="title">Titel</label>
-              <input class="input" id="title" placeholder="Förinställs av Steg + område (kan ändras)" autocomplete="off" data-watch-dirty="true" />
-              <div class="inlineHelp" style="margin-top:8px;">
-                Titeln får automatiskt en <strong>Steg-prefix</strong> (t.ex. “Steg 2 – …”) och används i AI-kontext.
-              </div>
+          <div style="margin-top:10px;">
+            <label class="label" for="titleDisplay">Titel (genererad)</label>
+            <input class="input" id="titleDisplay" readonly value="—" aria-label="Titel genererad av kursplan" />
+            <div class="inlineHelp" style="margin-top:8px;">
+              Titeln skapas av <strong>kapitel + steg + område</strong> och används i vänsterlistan + AI-kontext.
             </div>
           </div>
         </section>
@@ -620,12 +622,11 @@ POLICY (LÅST):
 
         <!-- =========================
              BLOCK 8/10 – AI (enkel, regelstyrd)
-             POLICY: Worker-läge borttaget. Svårighet 1–5 borttaget.
         ========================== -->
         <section class="editorSection" aria-labelledby="h-ai">
           <h3 id="h-ai">AI</h3>
           <div class="muted2">
-            Välj vad AI ska skapa. För provfrågor krävs alltid facit. <strong>Intro/Normal/Avancerat</strong> styr nivån, och <strong>Steg 1–5</strong> styr progressionen.
+            Välj vad AI ska skapa. För provfrågor krävs alltid facit. <strong>Intro/Normal/Avancerat</strong> styr nivån, och <strong>Kapitel + Steg</strong> styr kursplanen.
           </div>
 
           <div class="row2" style="margin-top:10px;">
@@ -753,13 +754,15 @@ POLICY (LÅST):
       setPill($("statePill"), $("stateText"), mode, text);
     }
 
+    // NOTE(CLEANUP): Worker-pill borttagen i UI. Vi behåller state internt och skriver ev. status i aiHint.
     function setWorkerInfo(ok, msg){
       window.STATE.lastWorkerOk = (ok === true) ? true : (ok === false) ? false : null;
       window.STATE.lastWorkerMsg = safeStr(msg);
-      const pill = $("workerPill"), t = $("workerText");
-      if (ok === true) setPill(pill, t, "ok", "Worker: OK");
-      else if (ok === false) setPill(pill, t, "bad", "Worker: " + safeStr(msg || "Fel"));
-      else setPill(pill, t, "", "Worker: —");
+      const hint = $("aiHint");
+      if (hint){
+        if (ok === true) hint.textContent = "Worker: OK";
+        else if (ok === false) hint.textContent = "Worker: " + safeStr(msg || "Fel");
+      }
     }
 
     function getWorkerBaseUrl(){
@@ -823,10 +826,28 @@ POLICY (LÅST):
     function asArray(v){ return Array.isArray(v) ? v : []; }
 
     // ============================================================
-    // AO-TRAININGS-AI-PROMPT-CONTRACT-01: PROMPT BLUEPRINTS (CONST)
-    // - Ingen storage. Ingen datamodell. Endast styrtext till worker.
-    // - OBS: Steg 1–5 används som kursprogression (inte “svårighet”-dropdown).
+    // KURSPLAN-MOTOR (AO-01): 6 kapitel + steg 1–5
+    // - Ingen ny datamodell: vi kodar in kapitel+steg i training.title.
+    // - Parse/compose gör att UI alltid kan återställa valen.
     // ============================================================
+
+    const COURSE_TITLES_6 = [
+      "Introduktion",
+      "Grundläggande färdighet",
+      "Tillämpning",
+      "Analys & förståelse",
+      "Självständigt utförande",
+      "Fördjupning & ansvar"
+    ];
+
+    const CHAPTER_FOCUS = {
+      "Introduktion": "Begrepp, känna igen, enkla exempel, trygg start.",
+      "Grundläggande färdighet": "Metodträning, repetera, en tydlig teknik, fler grunduppgifter.",
+      "Tillämpning": "Scenario, använda kunskapen i verklig situation, praktiska beslut.",
+      "Analys & förståelse": "Motivera, hitta fel, jämföra alternativ, resonera om varför.",
+      "Självständigt utförande": "Utföra utan stöd, kombinera moment, leverera korrekt resultat.",
+      "Fördjupning & ansvar": "Konsekvensbedömning, policy/rutin, kvalitetssäkring, ansvarstagande."
+    };
 
     const STEP_1_5_DEFS = {
       "1": "Steg 1: introduktion. Känna igen, förstå begrepp, enkla exempel.",
@@ -835,6 +856,42 @@ POLICY (LÅST):
       "4": "Steg 4: fördjupa. Motivera, hitta fel, resonera kring val.",
       "5": "Steg 5: tillämpa. Verkligt scenario, konsekvensbedömning, policy/rutin."
     };
+
+    // Title-format (LÅST): "<KAPITEL> – Steg <1-5> – <OMRÅDE|MODUL>"
+    function parseCourseFromTitle(title){
+      const t = trimStr(title);
+      const res = { chapter:"", step:"", tail:"" };
+      if (!t) return res;
+
+      // tillåt både – och -
+      const m = t.match(/^(.+?)\s*[–-]\s*steg\s*([1-5])\s*[–-]\s*(.+)$/i);
+      if (!m) return res;
+
+      const chap = trimStr(m[1]);
+      const step = trimStr(m[2]);
+      const tail = trimStr(m[3]);
+
+      if (COURSE_TITLES_6.indexOf(chap) === -1) return res;
+
+      res.chapter = chap;
+      res.step = step;
+      res.tail = tail;
+      return res;
+    }
+
+    function composeCourseTitle(modLabel, areaLabel, chapter, step){
+      const c = trimStr(chapter) || "Introduktion";
+      const s = String(step || "1");
+      const a = trimStr(areaLabel);
+      const m = trimStr(modLabel);
+      const tail = a ? a : (m ? m : "Utbildning");
+      return c + " – Steg " + s + " – " + tail;
+    }
+
+    // ============================================================
+    // AO-TRAININGS-AI-PROMPT-CONTRACT-01: PROMPT BLUEPRINTS (CONST)
+    // - OBS: Steg 1–5 + Kapitel används som kursmotor.
+    // ============================================================
 
     const ANSWERKEY_SPEC_SHORT = [
       "FACIT_SPEC:",
@@ -849,7 +906,7 @@ POLICY (LÅST):
       "VARIATION_SPEC:",
       "- Inga duplicerade frågor i batch.",
       "- Minst 5 frågetyper vid 12 frågor.",
-      "- Progression styrs av STEG_1_5: undvik att Steg 1 och Steg 5 känns lika.",
+      "- Progression styrs av KAPITEL + STEG_1_5: undvik att Steg 1 och Steg 2 känns lika.",
       "- Max 2 frågor med samma primära tag."
     ].join(" ");
 
@@ -1166,12 +1223,6 @@ POLICY (LÅST):
       }catch(_){}
     }
 
-    function setAIModePill(){
-      const content = $("aiContent") ? $("aiContent").value : "blocks";
-      const label = "AI: " + (content === "questions" ? "provfrågor" : "block");
-      setPill($("aiModePill"), $("aiModeText"), "", label);
-    }
-
     function normalizeKind(rawKind){
       const k = trimStr(rawKind).toLowerCase();
       if (!k) return "info";
@@ -1316,7 +1367,6 @@ POLICY (LÅST):
         mod: safeStr(t.mod || ""),
         area: safeStr(t.area || ""),
         title: safeStr(t.title || ""),
-        // v2.5.1+: desc behålls i data för bakåtkompatibilitet men UI/AI använder den ej.
         desc: safeStr(t.desc || t.description || ""),
         goalsLevel: (trimStr(t.goalsLevel) || "normal"),
         goals: safeStr(t.goals || ""),
@@ -1404,13 +1454,14 @@ POLICY (LÅST):
       selectedId:"",
       edit:null,
       dirty:false,
-      filters:{ q:"", status:"", onlyProblems:false, showAll:false }, // showAll är runtime-only (ingen storage)
+      filters:{ q:"", status:"", onlyProblems:false, showAll:false },
       lastWorkerOk:null,
       lastWorkerMsg:"",
       auth:{ empNo:"", role:"", scopeId:"" },
       subjectId:"generic",
       _rendering:false,
-      _autoGoalsSig:"" // runtime-only: för att kunna uppdatera autofyllda mål vid stegbyte
+      _autoGoalsSig:"",
+      _autoTitleSig:""
     };
 
     Object.defineProperty(window.STATE, "trainings", {
@@ -1443,7 +1494,9 @@ POLICY (LÅST):
 
         if (btnGen){
           const modOk = !!trimStr($("mod") ? $("mod").value : "");
-          btnGen.disabled = !(can && modOk);
+          const areaOk = !!trimStr($("area") ? $("area").value : "");
+          // Fail-closed: AI kräver modul+område (för subject + motor)
+          btnGen.disabled = !(can && modOk && areaOk);
         }
 
         if (btnDel) btnDel.disabled = !(can && !!trimStr(window.STATE.selectedId));
@@ -1514,7 +1567,6 @@ POLICY (LÅST):
       const showAll = !!window.STATE.filters.showAll;
       const onlyProblems = !!window.STATE.filters.onlyProblems;
 
-      // Viloläge – döljer listan tills sök/filter eller “Visa alla”.
       if (!showAll && !q && !st && !onlyProblems){
         const empty = document.createElement("div");
         empty.className = "muted2";
@@ -1585,73 +1637,55 @@ POLICY (LÅST):
       }
     };
 
-    function parseStepFromTitle(title){
-      const t = trimStr(title);
-      const m = t.match(/^steg\s*([1-5])\b/i);
-      return m ? String(m[1]) : "";
-    }
-
-    function getCurrentStep(){
+    function getCurrentCourseStep(){
       const el = $("courseStep");
       if (el && trimStr(el.value)) return String(el.value);
-      // fallback: försöker läsa från titel
       const t = window.STATE.edit;
-      const fromTitle = t ? parseStepFromTitle(t.title) : "";
-      return fromTitle || "1";
+      const p = t ? parseCourseFromTitle(t.title) : { step:"" };
+      return p.step || "1";
     }
 
-    function makeDefaultTitle(modLabel, areaLabel, step){
-      const s = String(step || "1");
-      const a = trimStr(areaLabel);
-      const m = trimStr(modLabel);
-      const tail = a ? a : (m ? m : "Utbildning");
-      return "Steg " + s + " – " + tail;
-    }
-
-    function applyStepPrefixToTitle(step){
+    function getCurrentCourseChapter(){
+      const el = $("courseTitle");
+      const v = el ? trimStr(el.value) : "";
+      if (v && COURSE_TITLES_6.indexOf(v) !== -1) return v;
       const t = window.STATE.edit;
-      if (!t) return;
-
-      const s = String(step || "1");
-      const cur = safeStr(t.title || "");
-      const trimmed = trimStr(cur);
-
-      // Om tom titel: skapa default (Steg X – område/modul)
-      if (!trimmed){
-        const modLabel = safeStr(t.mod || "");
-        const areaLabel = safeStr(t.area || "");
-        const next = makeDefaultTitle(modLabel, areaLabel, s);
-        t.title = next;
-        if ($("title")) $("title").value = next;
-        return;
-      }
-
-      // Om titeln börjar med "Steg <n>" -> byt n men behåll resten
-      const m = trimmed.match(/^steg\s*[1-5]\s*([–:-])\s*/i);
-      if (m){
-        const rest = trimmed.replace(/^steg\s*[1-5]\s*[–:-]\s*/i, "");
-        const next = "Steg " + s + " – " + rest;
-        t.title = next;
-        if ($("title")) $("title").value = next;
-        return;
-      }
-
-      // Annars: prefixa bara om det inte redan finns
-      const next2 = "Steg " + s + " – " + trimmed;
-      t.title = next2;
-      if ($("title")) $("title").value = next2;
+      const p = t ? parseCourseFromTitle(t.title) : { chapter:"" };
+      return p.chapter || "Introduktion";
     }
 
-    function buildAutoGoalsText(modId, areaLabel, step){
+    function canCoursePlanAuto(modLabel, areaLabel, chapter, step){
+      // Fail-closed: modul+område krävs för att generera titel+mål konsekvent
+      if (!trimStr(modLabel)) return false;
+      if (!trimStr(areaLabel)) return false;
+      if (!trimStr(chapter) || COURSE_TITLES_6.indexOf(chapter) === -1) return false;
+      const s = String(step || "1");
+      if (!["1","2","3","4","5"].includes(s)) return false;
+      return true;
+    }
+
+    function syncTitleDisplay(value){
+      const el = $("titleDisplay");
+      if (el) el.value = safeStr(value || "—");
+    }
+
+    function buildAutoGoalsText(modId, areaLabel, chapter, step){
       const fixed = getFixedGoalsText(modId, areaLabel);
       const s = String(step || "1");
+      const c = trimStr(chapter) || "Introduktion";
+
       const stepDef = STEP_1_5_DEFS[s] ? STEP_1_5_DEFS[s] : STEP_1_5_DEFS["1"];
       const stepHint = getAreaStepHint(modId, areaLabel, s);
+      const chapFocus = CHAPTER_FOCUS[c] ? CHAPTER_FOCUS[c] : CHAPTER_FOCUS["Introduktion"];
 
       const lines = [];
+      lines.push("Kapitel: " + c);
+      lines.push("- Fokus: " + chapFocus);
+      lines.push("");
       lines.push("Steg " + s + " – fokus:");
       lines.push("- " + stepDef);
       if (trimStr(stepHint)) lines.push("- " + stepHint);
+
       if (trimStr(fixed)){
         lines.push("");
         lines.push("Bas/område-mål:");
@@ -1660,49 +1694,57 @@ POLICY (LÅST):
       return lines.join("\n").trim();
     }
 
-    function autoFillTitleAndGoalsIfEmpty(reason){
-      // GUARD: skriver bara om fälten är tomma, eller om de är autofyllda sedan innan.
-      // (Ingen overwrite av användartext.)
+    function applyCoursePlan(reason){
+      // GUARD: vi skriver bara automatiskt om title/goals om de är tomma eller tidigare auto.
       try{
         const t = window.STATE.edit;
-        if (!t) return;
+        if (!t) { syncTitleDisplay("—"); return; }
 
         const modLabel = safeStr(t.mod || "");
         const areaLabel = safeStr(t.area || "");
-        if (!trimStr(modLabel)) return;
+        const chapter = getCurrentCourseChapter();
+        const step = getCurrentCourseStep();
 
-        const step = getCurrentStep();
-
-        // Titel: endast om tom
-        if (!trimStr(t.title)){
-          const sug = makeDefaultTitle(modLabel, areaLabel, step);
-          t.title = sug;
-          if ($("title")) $("title").value = sug;
+        const ok = canCoursePlanAuto(modLabel, areaLabel, chapter, step);
+        if (!ok){
+          // visar ändå ett förslag om möjligt (men skriver inte in i data)
+          const preview = composeCourseTitle(modLabel, areaLabel, chapter, step);
+          syncTitleDisplay(preview);
+          return;
         }
 
-        // Mål: fyll om tom, eller om det matchar tidigare autofylld signatur
+        const composed = composeCourseTitle(modLabel, areaLabel, chapter, step);
+        const composedSig = stableHash(composed);
+
+        const curTitle = safeStr(t.title || "");
+        const curTitleSig = stableHash(curTitle);
+        const mayOverwriteTitle = (!trimStr(curTitle)) || (window.STATE._autoTitleSig && window.STATE._autoTitleSig === curTitleSig);
+
+        if (mayOverwriteTitle){
+          t.title = composed;
+          window.STATE._autoTitleSig = composedSig;
+        }
+        syncTitleDisplay(mayOverwriteTitle ? composed : curTitle);
+
+        // goals
         const modId = getModuleIdByLabel(modLabel);
-        const nextGoals = buildAutoGoalsText(modId, areaLabel, step);
+        const nextGoals = buildAutoGoalsText(modId, areaLabel, chapter, step);
         const nextSig = stableHash(nextGoals);
 
         const curGoals = safeStr(t.goals || "");
         const curSig = stableHash(curGoals);
+        const mayOverwriteGoals = (!trimStr(curGoals)) || (window.STATE._autoGoalsSig && window.STATE._autoGoalsSig === curSig);
 
-        const mayOverwriteAuto = (window.STATE._autoGoalsSig && window.STATE._autoGoalsSig === curSig);
-
-        if (!trimStr(curGoals) || mayOverwriteAuto){
+        if (mayOverwriteGoals){
           if (trimStr(nextGoals)){
             t.goals = nextGoals;
             window.STATE._autoGoalsSig = nextSig;
             if ($("goals")) $("goals").value = nextGoals;
           }
-        } else {
-          // användaren har skrivit egna mål → rör inte
         }
 
-        if (reason === "step"){
-          // vid stegbyte vill vi också säkra titelprefix (men utan att förstöra custom text)
-          applyStepPrefixToTitle(step);
+        if (reason) {
+          // reason används bara för spårning/logik. Inga extra side effects här.
         }
       }catch(_){}
     }
@@ -1714,29 +1756,34 @@ POLICY (LÅST):
       if (ctx) ctx.textContent = t ? ("Redigerar: " + (trimStr(t.title) ? t.title : "Ny utbildning")) : "Redigerar: —";
 
       const lock = !t;
-      ["mod","area","courseStep","title","goalsLevel","goals","aiContent","aiCount","aiQuestionType","aiFeedbackEnabled"]
+      ["mod","area","courseTitle","courseStep","goalsLevel","goals","aiContent","aiCount","aiQuestionType","aiFeedbackEnabled"]
         .forEach(id => { const el = $(id); if (el) el.disabled = lock; });
 
       window.STATE._rendering = true;
       try{
         if ($("mod")) $("mod").value = t ? safeStr(t.mod) : "";
         if ($("area")) $("area").value = t ? safeStr(t.area) : "";
-        if ($("title")) $("title").value = t ? safeStr(t.title) : "";
+
         if ($("goalsLevel")) $("goalsLevel").value = t ? safeStr(t.goalsLevel || "normal") : "normal";
         if ($("goals")) $("goals").value = t ? safeStr(t.goals) : "";
 
-        // courseStep är UI-deriverad (ingen datamodell): från title-prefix
-        if ($("courseStep")){
-          const fromTitle = t ? parseStepFromTitle(t.title) : "";
-          $("courseStep").value = fromTitle || "1";
+        // Återställ Kapitel/Steg från title (om den matchar formatet)
+        const parsed = t ? parseCourseFromTitle(t.title) : { chapter:"", step:"" };
+
+        if ($("courseTitle")){
+          $("courseTitle").value = (parsed.chapter && COURSE_TITLES_6.indexOf(parsed.chapter) !== -1) ? parsed.chapter : "Introduktion";
         }
+        if ($("courseStep")){
+          $("courseStep").value = (parsed.step && ["1","2","3","4","5"].includes(parsed.step)) ? parsed.step : "1";
+        }
+
+        syncTitleDisplay(t ? t.title : "—");
       }catch(_){}
       window.STATE._rendering = false;
 
       refreshModuleLists();
       updateSubjectCallout();
       syncQuestionControlsVisibility();
-      setAIModePill();
       window.syncButtons();
     };
 
@@ -1813,7 +1860,9 @@ POLICY (LÅST):
         else if (k === "both") dot.style.background = "linear-gradient(90deg, var(--blockBothA) 0 50%, var(--blockBothB) 50% 100%)";
         else dot.style.background = "var(--blockQuestion)";
 
-        const typeChip = mkChip("Typ: " + k);
+        const typeChip = document.createElement("span");
+        typeChip.className = "chip";
+        typeChip.textContent = "Typ: " + k;
 
         left.appendChild(dot);
         left.appendChild(typeChip);
@@ -1958,7 +2007,6 @@ POLICY (LÅST):
       const onlyProblems = !!window.STATE.filters.onlyProblems;
       const showAll = !!window.STATE.filters.showAll;
 
-      // Viloläge – inga aktiva filter och showAll=false => visa ingenting i listan.
       if (!showAll && !q && !status && !onlyProblems){
         window.STATE.visible = [];
         return;
@@ -1985,7 +2033,6 @@ POLICY (LÅST):
         mod: safeStr(t.mod),
         area: safeStr(t.area),
         title: safeStr(t.title),
-        // desc sparas oförändrat (bakåtkompat), men UI/AI använder ej.
         desc: safeStr(t.desc),
         goalsLevel: trimStr(t.goalsLevel) || "normal",
         goals: safeStr(t.goals),
@@ -2063,14 +2110,12 @@ POLICY (LÅST):
         if ($("fStatus")) window.STATE.filters.status = safeStr($("fStatus").value || "");
         if ($("onlyProblems")) window.STATE.filters.onlyProblems = !!$("onlyProblems").checked;
 
-        // Viloläge som default (om inget filter)
         window.STATE.filters.showAll = false;
 
         applyFilters();
         bindEvents();
 
         syncQuestionControlsVisibility();
-        setAIModePill();
 
         window.renderList();
         window.renderEditor();
@@ -2098,8 +2143,8 @@ POLICY (LÅST):
       window.STATE.selectedId = t.id;
       window.STATE.edit = t;
 
-      // default steg 1 i UI och autofyll om modul/område väljs senare
       window.STATE._autoGoalsSig = "";
+      window.STATE._autoTitleSig = "";
 
       applyFilters();
       window.setDirty(true);
@@ -2113,8 +2158,8 @@ POLICY (LÅST):
       window.STATE.selectedId = t.id;
       window.STATE.edit = t;
 
-      // när man öppnar: matcha autoGoalsSig mot nuvarande goals (om det verkar vara autofyllt)
       window.STATE._autoGoalsSig = stableHash(safeStr(t.goals || ""));
+      window.STATE._autoTitleSig = stableHash(safeStr(t.title || ""));
 
       window.setDirty(false);
       refreshUI();
@@ -2138,6 +2183,7 @@ POLICY (LÅST):
 
       window.STATE.edit = findTrainingById(id);
       window.STATE._autoGoalsSig = window.STATE.edit ? stableHash(safeStr(window.STATE.edit.goals || "")) : "";
+      window.STATE._autoTitleSig = window.STATE.edit ? stableHash(safeStr(window.STATE.edit.title || "")) : "";
       window.setDirty(false);
       applyFilters();
       refreshUI();
@@ -2218,7 +2264,6 @@ POLICY (LÅST):
         window.STATE.edit = null;
         window.STATE.dirty = false;
 
-        // tillbaka till viloläge
         window.STATE.filters.q = "";
         window.STATE.filters.status = "";
         window.STATE.filters.onlyProblems = false;
@@ -2266,13 +2311,17 @@ POLICY (LÅST):
       const subjectId = calcSubjectId(modLabel, areaLabel);
       const moduleId = getModuleIdByLabel(modLabel);
 
-      const step = getCurrentStep();
+      const chapter = getCurrentCourseChapter();
+      const step = getCurrentCourseStep();
       const goalsLevel = trimStr(t.goalsLevel) || "normal";
 
       const fixedGoals = getFixedGoalsText(moduleId, areaLabel);
       const stepHint = getAreaStepHint(moduleId, areaLabel, step);
       const tagHints = getTagHints(moduleId, areaLabel);
       const mix = getMixSpec(moduleId, qType);
+
+      const chapFocus = CHAPTER_FOCUS[chapter] ? CHAPTER_FOCUS[chapter] : CHAPTER_FOCUS["Introduktion"];
+      const stepDef = STEP_1_5_DEFS[String(step)] || STEP_1_5_DEFS["1"];
 
       const lines = [];
       lines.push("LANG: sv");
@@ -2281,15 +2330,16 @@ POLICY (LÅST):
       lines.push("MODUL: " + modLabel);
       lines.push("OMRADE: " + areaLabel);
 
+      lines.push("KAPITEL_6: " + chapter);
+      lines.push("KAPITEL_FOKUS: " + chapFocus);
+
       lines.push("STEG_1_5: " + step);
-      lines.push("STEG_DEF: " + (STEP_1_5_DEFS[String(step)] || STEP_1_5_DEFS["1"]));
+      lines.push("STEG_DEF: " + stepDef);
       if (trimStr(stepHint)) lines.push("STEG_OMRADE_HINT: " + stepHint);
 
       lines.push("UTBILDNINGSNIVA: " + goalsLevel);
       lines.push("FEEDBACK: " + (fb ? "ja" : "nej"));
       lines.push("TITEL: " + safeStr(t.title || ""));
-
-      // v2.5.1+: BESKRIVNING borttagen ur AI-kontext
 
       if (trimStr(fixedGoals)){
         lines.push("MAL_FASTA:");
@@ -2324,11 +2374,11 @@ POLICY (LÅST):
         }
       } else {
         lines.push("OUTPUT: blandade utbildningsblock (info/task/question/document) där det passar.");
-        lines.push("PROGRESSION_LOCK: anpassa innehåll till STEG_1_5 så att Steg 1 och Steg 5 inte blir samma typ av uppgifter.");
+        lines.push("PROGRESSION_LOCK: anpassa innehåll till KAPITEL_6 + STEG_1_5 så att Steg 1 och Steg 2 inte blir samma typ av uppgifter.");
       }
 
       let out = lines.join("\n").trim();
-      if (out.length > 2200) out = out.slice(0, 2200);
+      if (out.length > 2300) out = out.slice(0, 2300);
       return out;
     }
 
@@ -2387,11 +2437,14 @@ POLICY (LÅST):
           return;
         }
 
-        if (!trimStr(t.mod)){
+        if (!trimStr(t.mod) || !trimStr(t.area)){
           const hint = $("aiHint");
-          if (hint) hint.textContent = "Välj modul först (för rätt subjectId).";
+          if (hint) hint.textContent = "Välj modul + område först (för rätt subjectId och kursplan).";
           return;
         }
+
+        // Course plan apply innan AI (så att title/goals är konsekventa)
+        applyCoursePlan("ai");
 
         const hint = $("aiHint");
         const content = $("aiContent") ? $("aiContent").value : "blocks";
@@ -2401,13 +2454,12 @@ POLICY (LÅST):
         if (!okSdk.ok) return;
 
         syncQuestionControlsVisibility();
-        setAIModePill();
 
         const count = $("aiCount") ? parseInt($("aiCount").value, 10) : 1;
         const contextText = buildSDKContextString();
 
         const r = await window.HRWorkerSDK.aiGenerate({
-          mode: "training", // POLICY: Worker-läge borttaget, låst
+          mode: "training",
           count: (isFinite(count) ? count : 1),
           context: contextText,
           language: "sv",
@@ -2432,7 +2484,8 @@ POLICY (LÅST):
           return;
         }
 
-        const step = getCurrentStep();
+        const step = getCurrentCourseStep();
+        const chapter = getCurrentCourseChapter();
 
         const normBlocksRaw = incoming.map((b, idx)=>{
           const nb = normalizeBlock(b);
@@ -2441,19 +2494,21 @@ POLICY (LÅST):
           ensureBlockMeta(nb);
           nb.meta.feedbackEnabled = $("aiFeedbackEnabled") ? !!$("aiFeedbackEnabled").checked : false;
 
-          // tags default från område
           if ((!Array.isArray(nb.meta.tags) || nb.meta.tags.length === 0)){
             const modId = getModuleIdByLabel(safeStr(t.mod || ""));
             const tags = getTagHints(modId, safeStr(t.area || ""));
             if (tags.length) nb.meta.tags = tags.slice(0,6);
           }
 
-          // För att ge “kursplan-känsla”: prefixa rubrik med Steg om den saknar det
+          // Kursplans-känsla: prefixa rubrik med Kapitel + Steg om den saknar det
           const curTitle = trimStr(nb.title);
-          if (curTitle && !/^steg\s*[1-5]\b/i.test(curTitle)){
-            nb.title = "Steg " + step + ": " + curTitle;
-          } else if (!curTitle){
-            nb.title = "Steg " + step;
+          const prefix = chapter + " • Steg " + step + ": ";
+          if (curTitle){
+            if (!curTitle.toLowerCase().includes("steg " + step.toLowerCase())){
+              nb.title = prefix + curTitle;
+            }
+          } else {
+            nb.title = prefix + "Block";
           }
 
           nb.id = mkId("b", nb.kind + "|" + trimStr(nb.title) + "|aiidx:" + idx + "|len:" + t.blocks.length);
@@ -2517,7 +2572,7 @@ POLICY (LÅST):
         $("q").addEventListener("input", ()=>{
           const v = safeStr($("q").value || "");
           window.STATE.filters.q = v;
-          window.STATE.filters.showAll = !!trimStr(v); // sök => visa listan
+          window.STATE.filters.showAll = !!trimStr(v);
           applyFilters();
           window.renderList();
         });
@@ -2526,7 +2581,7 @@ POLICY (LÅST):
         $("fStatus").addEventListener("change", ()=>{
           const v = safeStr($("fStatus").value || "");
           window.STATE.filters.status = v;
-          window.STATE.filters.showAll = !!trimStr(v); // filter => visa listan
+          window.STATE.filters.showAll = !!trimStr(v);
           applyFilters();
           window.renderList();
         });
@@ -2534,7 +2589,6 @@ POLICY (LÅST):
       if ($("onlyProblems")){
         $("onlyProblems").addEventListener("change", ()=>{
           window.STATE.filters.onlyProblems = !!$("onlyProblems").checked;
-          // onlyProblems => visa listan (annars blir det konstigt)
           window.STATE.filters.showAll = window.STATE.filters.onlyProblems ? true : window.STATE.filters.showAll;
           applyFilters();
           window.renderList();
@@ -2553,7 +2607,7 @@ POLICY (LÅST):
         if ($("fStatus")) $("fStatus").value = "";
         window.STATE.filters.q = "";
         window.STATE.filters.status = "";
-        window.STATE.filters.showAll = false; // tillbaka till viloläge
+        window.STATE.filters.showAll = false;
         applyFilters();
         window.renderList();
       });
@@ -2572,6 +2626,8 @@ POLICY (LÅST):
         if (window.STATE.edit){
           window.STATE.edit.mod = "";
           window.STATE.edit.area = "";
+          // OBS: vi auto-fyller INTE mål/titel här (låst flöde)
+          applyCoursePlan("clear");
           window.setDirty(true);
         }
         refreshModuleLists();
@@ -2601,8 +2657,8 @@ POLICY (LÅST):
             }
             updateSubjectCallout();
 
-            // autofyll titel + mål (om tom/autofyllt)
-            autoFillTitleAndGoalsIfEmpty("mod");
+            // LÅS: modul/område ska inte direkt trigga mål. Vi uppdaterar bara titleDisplay-preview.
+            applyCoursePlan("mod");
 
             applyFilters();
             window.renderList();
@@ -2612,14 +2668,9 @@ POLICY (LÅST):
           if (id === "area"){
             updateSubjectCallout();
 
-            autoFillTitleAndGoalsIfEmpty("area");
+            // LÅS: område ska inte direkt trigga mål. Vi uppdaterar bara titleDisplay-preview.
+            applyCoursePlan("area");
 
-            applyFilters();
-            window.renderList();
-            window.renderEditor();
-          }
-
-          if (id === "title"){
             applyFilters();
             window.renderList();
             window.renderEditor();
@@ -2629,19 +2680,26 @@ POLICY (LÅST):
 
       bindField("mod", "mod");
       bindField("area", "area");
-      bindField("title", "title");
       bindField("goalsLevel", "goalsLevel");
       bindField("goals", "goals");
 
+      // Kursplan: Kapitel + Steg driver titel + mål
+      if ($("courseTitle")){
+        $("courseTitle").addEventListener("change", ()=>{
+          if (window.STATE._rendering) return;
+          if (!window.STATE.edit) return;
+          applyCoursePlan("chapter");
+          window.setDirty(true);
+          applyFilters();
+          refreshUI();
+        });
+      }
       if ($("courseStep")){
         $("courseStep").addEventListener("change", ()=>{
           if (window.STATE._rendering) return;
           if (!window.STATE.edit) return;
-
-          autoFillTitleAndGoalsIfEmpty("step");
-          setAIModePill();
+          applyCoursePlan("step");
           window.setDirty(true);
-
           applyFilters();
           refreshUI();
         });
@@ -2650,14 +2708,6 @@ POLICY (LÅST):
       if ($("aiContent")){
         $("aiContent").addEventListener("change", ()=>{
           syncQuestionControlsVisibility();
-          setAIModePill();
-        });
-      }
-
-      if ($("aiQuestionType")){
-        $("aiQuestionType").addEventListener("change", ()=>{
-          // inga side effects – påverkar mix-spec i context
-          setAIModePill();
         });
       }
 
@@ -2688,13 +2738,11 @@ POLICY (LÅST):
     });
 
     /* ============================================================
-       ÄNDRINGSLOGG (≤8) — v2.5.3
-       - REMOVE(P0): Worker-läge borttaget (låst mode=training).
-       - REMOVE(P0): Svårighet (1–5) borttaget (ingen dubbelstyrning).
-       - ADD(P1): Steg 1–5 selector (förinställt) styr titelprefix + mål + AI-kontext.
-       - ADD(P1): UTBILDNINGSNIVA (intro/normal/advanced) skickas tydligt till AI.
-       - CLEANUP(P1): Block-sektion: tar bort manuella mall-/skapa-knappar (AI primär).
-       - UI(P2): Provfrågekontroller visas bara när “Provfrågor + facit” är valt.
+       ÄNDRINGSLOGG (≤8) — v2.6.0
+       - ADD(P0): Titel (kapitel) 6 val + Steg 1–5 driver kursplan (titel+mål+AI-kontext).
+       - CHANGE(P0): Mål auto-fylls först när modul+område+kapitel finns (inte vid modul-val).
+       - ADD(P0): AI-kontext inkluderar KAPITEL_FOKUS + STEG_DEF för att Steg 1 ≠ Steg 2 i alla områden.
+       - CLEAN(P1): Tar bort header “AI/Worker pills” (rutorna) – status visas via hint/state.
        - KEEP: Inga nya storage-keys/datamodell. Fail-closed kvar. XSS-safe kvar.
     ============================================================ */
   })();
