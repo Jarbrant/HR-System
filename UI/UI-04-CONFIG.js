@@ -1,5 +1,5 @@
 /* ============================================================
-AO-002 v1.7 (PATCH) + AO-AUTH-PIN-V1 (TEST PATCH) | FILE: UI/UI-04-CONFIG.js
+AO-002 v1.8 (PATCH) + AO-AUTH-PIN-V1 (TEST PATCH) | FILE: UI/UI-04-CONFIG.js
 Projekt: HR-System
 Syfte: Central config för RBAC + route-tillgång + default routing + AUTH-policy (PIN-test)
 Nivå: UI-only (GitHub Pages) | localStorage-first
@@ -28,6 +28,11 @@ PATCH v1.7 (DEPLOY/DIAG HARDENING):
 - Auto-detekterar BASE_PATH ("/HR-System" eller "") baserat på location.pathname
 - Tydlig konsolrad när filen laddas (för att bevisa att den deployats/laddats)
 - Fail-safe init av worker-globals (ingen lagring)
+
+PATCH v1.8 (WORKER BASE URL FIX):
+- Sätter WORKER.BASE_URL till riktig URL (inkl /v1) som fallback
+- Respekterar redan satt window.__HR_WORKER_BASE_URL
+- Loggar tydligt final workerBase
 ============================================================ */
 (function () {
   "use strict";
@@ -36,9 +41,9 @@ PATCH v1.7 (DEPLOY/DIAG HARDENING):
   // DIAG (no storage)
   // -------------------------
   const DIAG = Object.freeze({
-    enabled: true, // safe: endast console.*; ingen lagring
+    enabled: true,
     tag: "UI-04-CONFIG",
-    version: "v1.7",
+    version: "v1.8",
   });
 
   function diagInfo(msg) {
@@ -46,22 +51,25 @@ PATCH v1.7 (DEPLOY/DIAG HARDENING):
       if (DIAG.enabled && typeof console !== "undefined" && console && typeof console.info === "function") {
         console.info(`[${DIAG.tag} ${DIAG.version}] ${msg}`);
       }
-    } catch (_) {
-      // ignore
-    }
+    } catch (_) {}
+  }
+  function diagWarn(msg) {
+    try {
+      if (DIAG.enabled && typeof console !== "undefined" && console && typeof console.warn === "function") {
+        console.warn(`[${DIAG.tag} ${DIAG.version}] ${msg}`);
+      }
+    } catch (_) {}
   }
 
   // -------------------------
   // Base-path (GitHub Pages)
   // -------------------------
-  // Repo: Jarbrant/HR-System => public path: /HR-System
-  // Auto: om pathname börjar med "/HR-System/" => BASE_PATH="/HR-System" annars ""
   const BASE_PATH = (function detectBasePath() {
     try {
       const p = String((window.location && window.location.pathname) || "");
       return p.startsWith("/HR-System/") ? "/HR-System" : "";
     } catch (_) {
-      return "/HR-System"; // konservativt default
+      return "/HR-System";
     }
   })();
 
@@ -78,50 +86,34 @@ PATCH v1.7 (DEPLOY/DIAG HARDENING):
   // -------------------------
   // Public routes (explicit allowlist)
   // -------------------------
-  // Endast dessa får nås utan session.
   const PUBLIC_ROUTES = Object.freeze([
     "/UI/UI-01-SKELETON.html",
     "/index.html",
   ]);
 
   // -------------------------
-  // Default route per role (MÅSTE finnas i repo)
+  // Default route per role
   // -------------------------
   const DEFAULT_ROUTE_BY_ROLE = Object.freeze({
     [ROLES.SYSTEM_ADMIN]: "/system/dashboard.html",
     [ROLES.ADMIN]: "/admin/home.html",
-
-    // Manager landar i egen vy
     [ROLES.MANAGER]: "/manager/overview.html",
-
     [ROLES.EMPLOYEE]: "/employee/home.html",
   });
 
   // -------------------------
   // Allowed routes per role (PREFIXES)
   // -------------------------
-  // Fail-closed: roll får bara röra sig i sin egen zon.
   const ROUTES_BY_ROLE = Object.freeze({
-    [ROLES.SYSTEM_ADMIN]: Object.freeze([
-      "/system/",
-    ]),
-    [ROLES.ADMIN]: Object.freeze([
-      "/admin/",
-    ]),
-    [ROLES.MANAGER]: Object.freeze([
-      // PATCH v1.5: isolera Manager till manager-ytan (ingen /admin/ här)
-      "/manager/",
-    ]),
-    [ROLES.EMPLOYEE]: Object.freeze([
-      "/employee/",
-    ]),
+    [ROLES.SYSTEM_ADMIN]: Object.freeze(["/system/"]),
+    [ROLES.ADMIN]: Object.freeze(["/admin/"]),
+    [ROLES.MANAGER]: Object.freeze(["/manager/"]),
+    [ROLES.EMPLOYEE]: Object.freeze(["/employee/"]),
   });
 
   // -------------------------
   // Permissions (minimal nivå 1)
   // -------------------------
-  // Obs: permissions används av UI-sidorna via HRApp.hasPermission().
-  // Configen påverkar inte storage.
   const PERMISSIONS_BY_ROLE = Object.freeze({
     [ROLES.SYSTEM_ADMIN]: Object.freeze([
       "SYSTEM_VIEW_DASHBOARD",
@@ -155,13 +147,13 @@ PATCH v1.7 (DEPLOY/DIAG HARDENING):
   });
 
   // -------------------------
-  // WORKER – runtime-only
+  // WORKER – runtime-only (NO STORAGE)
   // -------------------------
-  // LÅST: Ingen lagring här. Defaultvärden kan “skrivas över” i runtime.
-  // Fail-closed: tom BASE_URL betyder att UI-sidor måste stoppa worker-anrop.
+  // VIKTIGT: baseUrl måste vara FULL inklusive /v1 eftersom UI anropar t.ex. /v1/health.
+  // Exempel: "https://hrsystem.andersmenyit.workers.dev/v1"
   const WORKER = Object.freeze({
-    BASE_URL: "",         // ex: "https://xxxx.workers.dev" (utan /v1 – SDK fixar /v1)
-    REQUIRE_AUTH: false,  // om true: SDK skickar Authorization om getToken() ger token
+    BASE_URL: "https://REPLACE-ME.workers.dev/v1",
+    REQUIRE_AUTH: false,
   });
 
   // -------------------------
@@ -205,9 +197,6 @@ PATCH v1.7 (DEPLOY/DIAG HARDENING):
     TEST_DEFAULT_SCOPE_ID: "org_34eeebca45ba98_19b7e607383",
   });
 
-  // -------------------------
-  // Debug
-  // -------------------------
   const DEBUG = false;
 
   // Export config (no storage)
@@ -226,11 +215,11 @@ PATCH v1.7 (DEPLOY/DIAG HARDENING):
   // -------------------------
   // WORKER runtime globals (NO STORAGE)
   // -------------------------
-  // Fail-closed: tom URL => UI ska visa fel och inte skicka requests.
+  // Respektera redan satta värden (t.ex. om du sätter dem i en banner/init).
   try {
-    // Respektera redan satta värden (t.ex. från en banner/init)
-    if (typeof window.__HR_WORKER_BASE_URL !== "string" || window.__HR_WORKER_BASE_URL === "") {
-      window.__HR_WORKER_BASE_URL = WORKER.BASE_URL;
+    const cur = (typeof window.__HR_WORKER_BASE_URL === "string") ? window.__HR_WORKER_BASE_URL.trim() : "";
+    if (!cur) {
+      window.__HR_WORKER_BASE_URL = String(WORKER.BASE_URL || "").trim();
     }
     if (typeof window.__HR_WORKER_REQUIRE_AUTH !== "boolean") {
       window.__HR_WORKER_REQUIRE_AUTH = (WORKER.REQUIRE_AUTH === true);
@@ -240,14 +229,19 @@ PATCH v1.7 (DEPLOY/DIAG HARDENING):
   }
 
   // -------------------------
-  // DIAG (bevisa att filen laddas)
+  // DIAG
   // -------------------------
-  diagInfo(`Loaded. BASE_PATH="${BASE_PATH}" workerBase="${String(window.__HR_WORKER_BASE_URL || "")}"`);
+  const finalWorkerBase = (typeof window.__HR_WORKER_BASE_URL === "string") ? window.__HR_WORKER_BASE_URL.trim() : "";
+  diagInfo(`Loaded. BASE_PATH="${BASE_PATH}" workerBase="${finalWorkerBase}"`);
+
+  if (!finalWorkerBase || finalWorkerBase.indexOf("REPLACE-ME") !== -1) {
+    diagWarn(`Worker BASE_URL är inte satt korrekt. Sätt WORKER.BASE_URL i UI-04-CONFIG.js till din riktiga URL (inkl /v1).`);
+  }
 
   /* ============================================================
      ÄNDRINGSLOGG (≤8)
-     - ADD: v1.7 diag log (bevisar att filen laddas i prod)
-     - ADD: auto BASE_PATH detect ("/HR-System" vs "")
-     - KEEP: RBAC/AUTH/WORKER policies oförändrade
+     - FIX: WORKER.BASE_URL fallback måste vara riktig URL inkl /v1
+     - KEEP: respekterar redan satt window.__HR_WORKER_BASE_URL
+     - ADD: tydlig diagWarn om REPLACE-ME/empty
   ============================================================ */
 })();
