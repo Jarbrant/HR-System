@@ -18,12 +18,19 @@ API (LÅST):
 Kontrakt (return-format):
 - { ok:true,  data, requestId? }
 - { ok:false, error:{ code, message, details? }, requestId? }
+
+PATCH v1.1 (SDK-CONTRACT-FIX + TRACE):
+- Om workern svarar med {ok:false,...} vid HTTP 200 => SDK returnerar ok:false (inte ok:true).
+- requestId hämtas både från headers och body (fallback).
+- Lägger på ofarliga client-trace headers (X-HR-Client / X-HR-SDK).
 ============================================================ */
 
 (function(){
   "use strict";
 
   const SDK = {};
+  SDK.VERSION = "1.1.0";
+
   const STATE = {
     inited: false,
     baseUrl: "",
@@ -78,6 +85,33 @@ Kontrakt (return-format):
     }
   }
 
+  function getBodyRequestId(data){
+    try{
+      if (!isObj(data)) return "";
+      // vanligast: {requestId:"..."} eller {data:{requestId:"..."}}
+      const a = trimStr(data.requestId || "");
+      if (a) return a;
+      if (isObj(data.data)){
+        const b = trimStr(data.data.requestId || "");
+        if (b) return b;
+      }
+      return "";
+    }catch(_){
+      return "";
+    }
+  }
+
+  function attachRequestId(obj, requestId){
+    try{
+      if (!obj || !requestId) return obj;
+      if (typeof obj.requestId === "string" && trimStr(obj.requestId)) return obj;
+      obj.requestId = requestId;
+      return obj;
+    }catch(_){
+      return obj;
+    }
+  }
+
   function getAuthHeader(){
     try{
       if (!STATE.requireAuth) return null;
@@ -90,10 +124,19 @@ Kontrakt (return-format):
     }
   }
 
+  function addClientTraceHeaders(headers){
+    try{
+      headers["X-HR-Client"] = "HR-System";
+      headers["X-HR-SDK"] = "UI-04-WORKER-SDK.js@" + SDK.VERSION;
+    }catch(_){}
+    return headers;
+  }
+
   async function safeFetchJson(url, opts){
     try{
       const r = await fetch(url, opts);
-      const reqId = getHeaderRequestId(r.headers);
+
+      const headerReqId = getHeaderRequestId(r.headers);
 
       let data = null;
       let text = "";
@@ -106,6 +149,9 @@ Kontrakt (return-format):
       if (text){
         try{ data = JSON.parse(text); }catch(_){ data = null; }
       }
+
+      const bodyReqId = getBodyRequestId(data);
+      const reqId = trimStr(headerReqId || bodyReqId || "");
 
       if (!r.ok){
         // fail-closed: försök läsa standardfel
@@ -127,12 +173,31 @@ Kontrakt (return-format):
         return mkErr("HTTP_ERROR", msg || "Fel", { status:r.status, body:data || text || "" }, reqId);
       }
 
-      // ok
+      // HTTP ok
       if (data === null){
         // accept tomt svar som ok (men data=null)
         return mkOk(null, reqId);
       }
+
+      // Viktigt: om workern redan använder {ok:true/false,...} ska vi respektera det
+      if (isObj(data) && typeof data.ok === "boolean"){
+        attachRequestId(data, reqId);
+
+        // Normalisera minimalt: om ok:true men saknar data-fält -> skapa data:null
+        if (data.ok === true && !("data" in data)) data.data = null;
+
+        // Om ok:false men saknar error -> fail-closed ändå
+        if (data.ok === false && !(data.error && isObj(data.error) && data.error.code)){
+          data.error = data.error && isObj(data.error) ? data.error : {};
+          if (!data.error.code) data.error.code = "ERROR";
+          if (!data.error.message) data.error.message = "Fel";
+        }
+        return data;
+      }
+
+      // Annars: legacy/raw-json => wrappar enligt SDK-kontraktet
       return mkOk(data, reqId);
+
     }catch(e){
       return mkErr("NETWORK_ERROR", "Nät/CORS-fel", { message: safeStr(e && e.message) }, "");
     }
@@ -165,7 +230,7 @@ Kontrakt (return-format):
       STATE.requireAuth = requireAuth;
       STATE.getToken = getToken;
 
-      return mkOk({ baseUrl: STATE.baseUrl, requireAuth: STATE.requireAuth });
+      return mkOk({ baseUrl: STATE.baseUrl, requireAuth: STATE.requireAuth, sdkVersion: SDK.VERSION });
     }catch(e){
       STATE.inited = false;
       return mkErr("INIT_ERROR", "Kunde inte initiera SDK", { message: safeStr(e && e.message) });
@@ -177,10 +242,12 @@ Kontrakt (return-format):
     if (notOk) return notOk;
 
     const url = STATE.baseUrl + "/v1/health";
-    const headers = { "Accept": "application/json" };
+    let headers = { "Accept": "application/json" };
 
     const auth = getAuthHeader();
     if (auth) headers["Authorization"] = auth;
+
+    headers = addClientTraceHeaders(headers);
 
     return await safeFetchJson(url, {
       method: "GET",
@@ -213,13 +280,15 @@ Kontrakt (return-format):
     const ctx = (context.length > 4000) ? context.slice(0, 4000) : context;
 
     const url = STATE.baseUrl + "/v1/ai/generate";
-    const headers = {
+    let headers = {
       "Accept": "application/json",
       "Content-Type": "application/json"
     };
 
     const auth = getAuthHeader();
     if (auth) headers["Authorization"] = auth;
+
+    headers = addClientTraceHeaders(headers);
 
     const body = JSON.stringify({
       mode,
