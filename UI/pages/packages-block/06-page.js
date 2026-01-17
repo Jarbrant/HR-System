@@ -7,6 +7,10 @@ Policy (LÅST):
 - Inga nya storage-keys/datamodell
 - XSS-safe rendering: all render via 05-render.js (textContent)
 - SYSTEM_ADMIN = steward/read-only
+
+PATCH v1.0 (META-FALLBACK):
+- FIX: Derivera Modul/Steg/Område från titel om fält saknas (tolerant)
+- FIX: Modul-dropdown + Area-datalist byggs från samma meta (inte bara t.module/t.area)
 ============================================================ */
 (function () {
   "use strict";
@@ -125,43 +129,44 @@ Policy (LÅST):
 
   // ---------- utils ----------
   function nowTs() { return Date.now(); }
-  function deepClone(obj) { try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; } }
-  function normStr(v) { return String(v ?? "").trim(); }
 
-  // PATCH: robust meta extraction (module/area/step) utan datamodelländring
-  function getByPath(obj, path) {
-    const parts = String(path || "").split(".");
-    let cur = obj;
-    for (const p of parts) {
-      if (!cur || typeof cur !== "object") return undefined;
-      cur = cur[p];
-    }
-    return cur;
+  function deepClone(obj) {
+    try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
   }
 
-  function pickFirstStr(obj, keysOrPaths) {
-    for (const k of (Array.isArray(keysOrPaths) ? keysOrPaths : [])) {
-      const v = (String(k).includes(".") ? getByPath(obj, k) : (obj && obj[k]));
-      const s = String(v ?? "").trim();
+  function normStr(v) { return String(v ?? "").trim(); }
+
+  function pickFirstStr() {
+    for (let i = 0; i < arguments.length; i++) {
+      const s = normStr(arguments[i]);
       if (s) return s;
     }
     return "";
   }
 
-  function inferStepFromTitle(title) {
-    const t = String(title || "");
-    const m = t.match(/Steg\s*([0-9]{1,3})/i);
-    return m ? ("Steg " + m[1]) : "";
-  }
+  // Titel-parser (tolerant): "Modul – Steg 2 – Område"
+  function parseTitleParts(title) {
+    const t = normStr(title);
+    if (!t) return { module: "", step: "", area: "" };
 
-  function normalizeStepValue(rawStep, title) {
-    const s = String(rawStep ?? "").trim();
-    if (s) return s;
-    const n = (typeof rawStep === "number") ? rawStep : NaN;
-    if (!Number.isFinite(n)) return "";
-    const nn = (n <= 0) ? 1 : Math.floor(n);
-    const inf = inferStepFromTitle(title);
-    return inf || ("Steg " + String(nn));
+    // Match: <module> – Steg <n> – <area>
+    const m = t.match(/^\s*(.*?)\s*[-–—]\s*Steg\s*([0-9]+)\s*[-–—]\s*(.*?)\s*$/i);
+    if (m) {
+      const mod = normStr(m[1]);
+      const stepNum = normStr(m[2]);
+      const area = normStr(m[3]);
+      return { module: mod, step: stepNum ? ("Steg " + stepNum) : "", area: area };
+    }
+
+    // Match: "Steg 2 – <rest>"
+    const m2 = t.match(/^\s*Steg\s*([0-9]+)\s*[-–—]\s*(.*?)\s*$/i);
+    if (m2) {
+      const stepNum = normStr(m2[1]);
+      const rest = normStr(m2[2]);
+      return { module: "", step: stepNum ? ("Steg " + stepNum) : "", area: rest };
+    }
+
+    return { module: "", step: "", area: "" };
   }
 
   function countComposition(block) {
@@ -367,6 +372,13 @@ Policy (LÅST):
     setMsgSafe(STATE.selectedId ? "Klart. Valt block laddat." : "Klart. Välj ett block.");
   }
 
+  // ---------- persistence ----------
+  function stripComp(b) {
+    const x = deepClone(b);
+    if (x && typeof x === "object") delete x.__comp;
+    return x;
+  }
+
   function persistEditedBlock() {
     if (!STATE.edited || !STATE.selectedId) return { ok: false, err: "Inget block valt." };
     const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
@@ -387,12 +399,6 @@ Policy (LÅST):
     refreshLeftList();
     updateRightPanel();
     return { ok: true };
-  }
-
-  function stripComp(b) {
-    const x = deepClone(b);
-    if (x && typeof x === "object") delete x.__comp;
-    return x;
   }
 
   function setVerifiedAndPersist() {
@@ -424,61 +430,13 @@ Policy (LÅST):
     return persistEditedBlock();
   }
 
-  // ---------- trainings (export) ----------
+  // ---------- trainings (export) - tolerant ----------
   function loadTrainings() {
     const r = store.loadTrainingsState();
     STATE.trainingsCorrupt = !r.ok && !!r.corrupt;
     STATE.trainingsMissing = !!r.missing;
     STATE.trainings = r.ok ? (r.trainings || []) : [];
     STATE.trainSelIndex = -1;
-  }
-
-  function extractTrainingMeta(t, idx) {
-    const title = normStr(t && (t.title || t.name)) || `Utbildning ${idx + 1}`;
-
-    // PATCH: fler fält + nested (meta/ctx/context)
-    const module = pickFirstStr(t, [
-      // flat
-      "module","modul","moduleName","moduleTitle","moduleLabel","moduleText",
-      "moduleId","modId","moduleKey","moduleCode","moduleSlug","moduleRef","moduleRefId",
-      "moduleNo","moduleIndex","scopeModule","trainingModule",
-      // nested
-      "meta.module","meta.moduleName","meta.moduleTitle","meta.moduleLabel","meta.moduleId","meta.moduleKey",
-      "ctx.module","ctx.moduleName","ctx.moduleTitle","ctx.moduleId",
-      "context.module","context.moduleName","context.moduleTitle","context.moduleId",
-      "scope.module","scope.moduleName","scope.moduleId",
-    ]) || "";
-
-    const area = pickFirstStr(t, [
-      "area","areaName","topic","category","areaTitle","areaLabel",
-      "meta.area","meta.areaName","meta.topic","ctx.area","ctx.areaName",
-      "context.area","context.areaName",
-    ]) || "";
-
-    const rawStep = (
-      pickFirstStr(t, ["step","stepLabel","stepId","stepNo","stepIndex","meta.step","meta.stepId","ctx.step","context.step"]) ||
-      (t && (t.step || t.stepId || t.stepNo || t.stepIndex)) || ""
-    );
-    const step = normalizeStepValue(rawStep, title) || inferStepFromTitle(title) || "";
-
-    const items = extractTrainingItems(t);
-
-    // Om modul saknas helt men det finns ett moduleId-liknande fält: visa det hellre än —
-    let moduleFinal = module;
-    if (!moduleFinal) {
-      const mid = pickFirstStr(t, ["moduleId","modId","moduleKey","meta.moduleId","meta.moduleKey","ctx.moduleId","context.moduleId"]);
-      if (mid) moduleFinal = String(mid).trim(); // hellre ID än tomt
-    }
-
-    return {
-      index: idx,
-      title,
-      module: moduleFinal,
-      area,
-      step,
-      itemsCount: items.length,
-      items,
-    };
   }
 
   function extractTrainingItems(t) {
@@ -493,8 +451,42 @@ Policy (LÅST):
     return [];
   }
 
+  function extractTrainingMeta(t, idx) {
+    const title = pickFirstStr(t && (t.title || t.name), `Utbildning ${idx + 1}`);
+    const parsed = parseTitleParts(title);
+
+    const module = pickFirstStr(
+      t && (t.module || t.modul || t.moduleName || t.moduleTitle),
+      t && t.meta && (t.meta.module || t.meta.moduleName),
+      parsed.module
+    );
+
+    const area = pickFirstStr(
+      t && (t.area || t.omrade || t.areaName || t.areaTitle),
+      t && t.meta && (t.meta.area || t.meta.areaName),
+      parsed.area
+    );
+
+    const step = pickFirstStr(
+      t && (t.step || t.stepId || t.stepName),
+      t && t.meta && (t.meta.step || t.meta.stepName),
+      parsed.step
+    );
+
+    const items = extractTrainingItems(t);
+    return {
+      index: idx,
+      title,
+      module,
+      area,
+      step,
+      itemsCount: items.length,
+      items,
+    };
+  }
+
   function refreshTrainingUI() {
-    // module dropdown (tolerant)
+    // build module dropdown (FRÅN META)
     if (DOM.qTrainModule) {
       const mods = new Set();
       for (let i = 0; i < STATE.trainings.length; i++) {
@@ -516,7 +508,7 @@ Policy (LÅST):
       DOM.qTrainModule.value = cur;
     }
 
-    // area datalist (tolerant)
+    // build area datalist (FRÅN META)
     if (DOM.dlTrainAreas) {
       DOM.dlTrainAreas.innerHTML = "";
       const areas = new Set();
@@ -540,8 +532,8 @@ Policy (LÅST):
     for (let i = 0; i < STATE.trainings.length; i++) {
       const meta = extractTrainingMeta(STATE.trainings[i], i);
       if (m && meta.module !== m) continue;
-      if (a && !meta.area.toLowerCase().includes(a)) continue;
-      if (f && !meta.title.toLowerCase().includes(f)) continue;
+      if (a && !String(meta.area || "").toLowerCase().includes(a)) continue;
+      if (f && !String(meta.title || "").toLowerCase().includes(f)) continue;
       meta.active = (STATE.trainSelIndex === i);
       hits.push(meta);
     }
@@ -604,6 +596,7 @@ Policy (LÅST):
     setMsgSafe("Export klar. Sök eller tryck “Visa alla” och välj det nya blocket.");
   }
 
+  // ---------- print ----------
   function printSelected() {
     if (!STATE.selectedId || !STATE.edited) return;
     const w = window.open("", "_blank");
@@ -622,6 +615,7 @@ Policy (LÅST):
     w.print();
   }
 
+  // ---------- wiring ----------
   function wireEvents() {
     if (DOM.btnToggleInfo) {
       DOM.btnToggleInfo.addEventListener("click", function () {
@@ -670,7 +664,9 @@ Policy (LÅST):
       });
     }
 
-    if (DOM.btnPrint) DOM.btnPrint.addEventListener("click", printSelected);
+    if (DOM.btnPrint) {
+      DOM.btnPrint.addEventListener("click", printSelected);
+    }
 
     if (DOM.btnToggleExport && DOM.exportBody) {
       DOM.btnToggleExport.addEventListener("click", function () {
@@ -694,7 +690,9 @@ Policy (LÅST):
       });
     }
 
-    if (DOM.btnExportTraining) DOM.btnExportTraining.addEventListener("click", exportSelectedTraining);
+    if (DOM.btnExportTraining) {
+      DOM.btnExportTraining.addEventListener("click", exportSelectedTraining);
+    }
   }
 
   function boot() {
@@ -749,18 +747,24 @@ Policy (LÅST):
   }
 
   try {
-    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
-    else boot();
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", boot);
+    } else {
+      boot();
+    }
   } catch (e) {
     setMsgSafe(`JS-fel vid start: ${String((e && e.message) || e)}`);
   }
 
-  NS.page = { boot: boot, state: STATE };
+  NS.page = {
+    boot: boot,
+    state: STATE,
+  };
 
   /* ============================================================
      ÄNDRINGSLOGG (≤8)
-     - FIX: modul/område/step hämtas från fler fält + nested meta/ctx/context
-     - FIX: modul fallback visar ID (moduleId/moduleKey) om label saknas
-     - KEEP: ingen ny storage-key/datamodell; endast läsning/rendering påverkas
+     - FIX: Modul/Steg/Område kan härledas från titel vid saknade fält
+     - FIX: Modul-dropdown + area-datalist baseras på meta (inte bara t.module/t.area)
+     - KEEP: Inga nya keys/datamodell; endast tolerant läsning
   ============================================================ */
 })();
