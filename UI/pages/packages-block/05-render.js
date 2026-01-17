@@ -1,10 +1,10 @@
 /* ============================================================
 AO-PACKAGES-BLOCK-MODULAR-01 | FILE 05/06 | FIL-ID: UI/pages/packages-block/05-render.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Render (DOM) för Block-editor: listor + vald block + exportlistor + pills
+Syfte: Render/UI (XSS-safe) för packages-block: listor, pills, vald block-editor
 Policy (LÅST):
 - UI-only • Fail-closed
-- XSS-safe rendering: textContent, inga osäkra innerHTML
+- XSS-safe: textContent, inga osäkra innerHTML
 - Ingen storage här (bara UI)
 ============================================================ */
 (function () {
@@ -13,67 +13,52 @@ Policy (LÅST):
   const NS = (window.PackagesBlock = window.PackagesBlock || {});
   if (NS.render) return; // idempotent
 
-  // Optional deps (förväntas finnas i andra filer)
-  const contract = NS.contract || null;
-
-  // -----------------------------
-  // DOM cache
-  // -----------------------------
-  function byId(id) { return document.getElementById(id); }
+  // ---------- DOM ----------
+  function $id(id) { return document.getElementById(id); }
 
   const DOM = {
-    msgBox: byId("msgBox"),
-    lockBox: byId("lockBox"),
+    msgBox: $id("msgBox"),
+    lockBox: $id("lockBox"),
 
-    statePill: byId("statePill"),
-    selPill: byId("selPill"),
-    whoPill: byId("whoPill"),
-    modePill: byId("modePill"),
-    verifyPill: byId("verifyPill"),
+    statePill: $id("statePill"),
+    selPill: $id("selPill"),
+    whoPill: $id("whoPill"),
+    modePill: $id("modePill"),
+    verifyPill: $id("verifyPill"),
+    topEditing: $id("topEditing"),
+    topEditingText: $id("topEditingText"),
 
-    topEditing: byId("topEditing"),
-    topEditingText: byId("topEditingText"),
+    countBlocks: $id("countBlocks"),
+    blockList: $id("blockList"),
 
-    countBlocks: byId("countBlocks"),
-    blockList: byId("blockList"),
+    trainPreview: $id("trainPreview"),
+    trainPreviewDetail: $id("trainPreviewDetail"),
+    trainExportHint: $id("trainExportHint"),
 
-    trainPreview: byId("trainPreview"),
-    trainPreviewDetail: byId("trainPreviewDetail"),
-    trainExportHint: byId("trainExportHint"),
-
-    selDetail: byId("selDetail"),
-    selHint: byId("selHint"),
+    selDetail: $id("selDetail"),
+    selHint: $id("selHint"),
   };
 
-  // -----------------------------
-  // Tiny helpers (XSS-safe)
-  // -----------------------------
+  // ---------- Helpers ----------
   function clear(el) {
     if (!el) return;
     while (el.firstChild) el.removeChild(el.firstChild);
   }
 
-  function div(cls, text) {
-    const d = document.createElement("div");
-    if (cls) d.className = cls;
-    if (text != null) d.textContent = String(text);
-    return d;
+  function el(tag, cls, text) {
+    const n = document.createElement(tag || "div");
+    if (cls) n.className = cls;
+    if (text !== undefined && text !== null) n.textContent = String(text);
+    return n;
   }
 
-  function span(cls, text) {
-    const s = document.createElement("span");
-    if (cls) s.className = cls;
-    if (text != null) s.textContent = String(text);
-    return s;
+  function pill(cls, text) {
+    return el("span", cls || "pill", text || "");
   }
 
-  function btnMini(text, title) {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "miniBtn";
-    b.textContent = String(text || "");
-    if (title) b.title = String(title);
-    return b;
+  function setVisible(node, yes) {
+    if (!node) return;
+    node.style.display = yes ? "" : "none";
   }
 
   function safeSnippet(v, n) {
@@ -83,15 +68,7 @@ Policy (LÅST):
     return s.slice(0, max) + (s.length > max ? "…" : "");
   }
 
-  function mkChoiceIdByIndex(i) {
-    const letters = "ABCDE";
-    if (i >= 0 && i < letters.length) return letters[i];
-    return "C" + String(i + 1);
-  }
-
-  // -----------------------------
-  // Messages / lockbox
-  // -----------------------------
+  // ---------- Message / Lock ----------
   function setMsg(kind, text) {
     if (!DOM.msgBox) return;
     DOM.msgBox.className = "msg" + (kind ? (" " + kind) : "");
@@ -121,9 +98,7 @@ Policy (LÅST):
     DOM.lockBox.appendChild(ul);
   }
 
-  // -----------------------------
-  // Pills / topbar
-  // -----------------------------
+  // ---------- Pills / Top ----------
   function setWhoPill(text) {
     if (!DOM.whoPill) return;
     DOM.whoPill.style.display = "inline-flex";
@@ -163,27 +138,14 @@ Policy (LÅST):
     DOM.topEditingText.textContent = String(text || "—");
   }
 
-  // -----------------------------
-  // Blocklista (vänster)
-  // -----------------------------
+  // ---------- Block list ----------
   function renderSearchFirstPlaceholder(nAll) {
     if (!DOM.blockList) return;
     clear(DOM.blockList);
-
-    DOM.blockList.appendChild(div("muted2", "Sök för att visa block."));
-    DOM.blockList.appendChild(div("tiny muted2", nAll ? "Tips: Du kan också trycka “Visa alla”." : "Tips: Exportera från utbildningar för att skapa ett block."));
+    DOM.blockList.appendChild(el("div", "muted2", "Sök för att visa block."));
+    DOM.blockList.appendChild(el("div", "tiny muted2", nAll ? "Tips: Du kan också trycka “Visa alla”." : "Tips: Exportera från utbildningar för att skapa ett block."));
   }
 
-  /**
-   * renderBlockList
-   * @param {Object} opts
-   *  - discoveryActive: boolean
-   *  - allCount: number
-   *  - visible: array of blocks already normalized enough for display:
-   *    { blockId,title,module,area,step,status,verifiedAt, __comp?:{q,t,d,miss,kind,strictFail} }
-   *  - selectedBlockId: string
-   *  - onSelect: function(blockId)
-   */
   function renderBlockList(opts) {
     const o = opts || {};
     const discoveryActive = !!o.discoveryActive;
@@ -205,7 +167,7 @@ Policy (LÅST):
     clear(DOM.blockList);
 
     if (!visible.length) {
-      DOM.blockList.appendChild(div("muted2", allCount ? "Inga träffar (justera sök/filter)." : "Inga block ännu."));
+      DOM.blockList.appendChild(el("div", "muted2", allCount ? "Inga träffar (justera sök/filter)." : "Inga block ännu."));
       return;
     }
 
@@ -215,88 +177,59 @@ Policy (LÅST):
       const id = String(b.blockId || "");
       const comp = b.__comp || b.comp || null;
 
-      const row = document.createElement("div");
-      row.className = "rowItem" + (id && id === selectedId ? " active" : "");
+      const row = el("div", "rowItem" + (id && id === selectedId ? " active" : ""));
       row.setAttribute("role", "button");
       row.setAttribute("tabindex", "0");
       row.dataset.blockid = id;
 
-      const top = document.createElement("div");
-      top.className = "rowTop";
+      const top = el("div", "rowTop");
+      const left = el("div", "");
+      const title = el("div", "rowTitle", b.title || "(utan rubrik)");
 
-      const left = document.createElement("div");
-      const title = div("rowTitle", b.title || "(utan rubrik)");
-      const meta = div("tiny", `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"} • ${comp ? (Number(comp.q||0)+Number(comp.t||0)+Number(comp.d||0)) : "—"} item(s)`);
+      const q = comp ? Number(comp.q || 0) : 0;
+      const d = comp ? Number(comp.d || 0) : 0;
+      const t = comp ? Number(comp.t || 0) : 0;
 
-      const icoRow = document.createElement("div");
-      icoRow.className = "icoRow";
+      // “Hittat” = antal items (inte antal frågor) – exakt din fråga i bilden
+      const meta = el(
+        "div",
+        "tiny",
+        `${b.module || "—"} • ${b.area || "—"} • ${b.step || "—"} • Hittat: ${Number(comp ? (q + d + t) : 0)} item(s)`
+      );
 
-      const qN = comp ? Number(comp.q || 0) : 0;
-      const dN = comp ? Number(comp.d || 0) : 0;
-      const tN = comp ? Number(comp.t || 0) : 0;
-      const miss = comp ? Number(comp.miss || 0) : 0;
-      const strictFail = comp ? Number(comp.strictFail || 0) : 0;
-      const kind = comp ? String(comp.kind || "") : "";
-
-      icoRow.appendChild(span("icoPill", `❓ ${qN}`));
-      icoRow.appendChild(span("icoPill", `📄 ${dN}`));
-      icoRow.appendChild(span("icoPill", `✅ ${tN}`));
-      icoRow.appendChild(span("icoPill", `🧩 ${kind === "mixed" ? "Mixed" : (kind ? "Single" : "—")}`));
+      const icoRow = el("div", "icoRow");
+      icoRow.appendChild(pill("icoPill", `❓ ${q}`));
+      icoRow.appendChild(pill("icoPill", `📄 ${d}`));
+      icoRow.appendChild(pill("icoPill", `✅ ${t}`));
 
       left.appendChild(title);
       left.appendChild(meta);
       left.appendChild(icoRow);
 
-      const right = document.createElement("div");
+      const right = el("div", "");
       const st = String(b.status || "draft").toLowerCase() === "published" ? "published" : "draft";
-      const statusPill = span("pill " + (st === "published" ? "ok" : "warn"), st === "published" ? "Publicerad" : "Utkast");
-      right.appendChild(statusPill);
+      right.appendChild(pill("pill " + (st === "published" ? "ok" : "warn"), st === "published" ? "Publicerad" : "Utkast"));
 
       const verified = Number(b.verifiedAt || 0) > 0;
-      const vPill = span(verified ? "verifyPill ok" : "verifyPill warn", verified ? "Verifierad" : "Ej verifierad");
+      const vPill = pill(verified ? "verifyPill ok" : "verifyPill warn", verified ? "Verifierad" : "Ej verifierad");
       vPill.style.marginTop = "6px";
       right.appendChild(vPill);
-
-      if (miss > 0) {
-        const missP = span("qaPill bad", `Facit-fel: ${miss}`);
-        missP.style.marginTop = "6px";
-        right.appendChild(missP);
-      }
-      if (contract && contract.CONTRACT_V1_STRICT && strictFail > 0) {
-        const cf = span("qaPill bad", `Kontrakt-fel: ${strictFail}`);
-        cf.style.marginTop = "6px";
-        right.appendChild(cf);
-      }
 
       top.appendChild(left);
       top.appendChild(right);
       row.appendChild(top);
 
-      const choose = function () {
-        if (typeof o.onSelect === "function" && id) o.onSelect(id);
-      };
+      const choose = function () { if (typeof o.onSelect === "function" && id) o.onSelect(id); };
       row.addEventListener("click", choose);
       row.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault();
-          choose();
-        }
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(); }
       });
 
       DOM.blockList.appendChild(row);
     }
   }
 
-  // -----------------------------
-  // Exportlist (utbildningar)
-  // -----------------------------
-  /**
-   * renderTrainingHits
-   * @param {Object} opts
-   *  - corrupt:boolean, missing:boolean
-   *  - hits: array { index,title,module,area,step, itemsCount,q,d,task, docOnly, active:boolean }
-   *  - onPickTraining: fn(index)
-   */
+  // ---------- Trainings export (placeholder) ----------
   function renderTrainingHits(opts) {
     const o = opts || {};
     if (!DOM.trainPreview) return;
@@ -304,48 +237,34 @@ Policy (LÅST):
     clear(DOM.trainPreview);
 
     if (o.corrupt) {
-      DOM.trainPreview.appendChild(div("muted2", "Låst för säkerhet: utbildningsdata verkar vara trasig."));
+      DOM.trainPreview.appendChild(el("div", "muted2", "Låst: utbildningsdata är trasig (korrupt JSON)."));
       return;
     }
 
     const hits = Array.isArray(o.hits) ? o.hits : [];
     if (!hits.length) {
-      DOM.trainPreview.appendChild(div("muted2", o.missing ? "Inga utbildningar hittades ännu." : "Inga träffar. Prova annan modul/område eller sök fritt."));
+      DOM.trainPreview.appendChild(el("div", "muted2", o.missing ? "Inga utbildningar hittades ännu." : "Inga träffar / export inte kopplad än."));
       return;
     }
 
-    const max = Math.min(hits.length, 80);
-    for (let i = 0; i < max; i++) {
-      const h = hits[i] || {};
-      const row = document.createElement("div");
-      row.className = "exportRow" + (h.active ? " active" : "");
+    for (const h of hits.slice(0, 80)) {
+      const row = el("div", "exportRow" + (h.active ? " active" : ""));
       row.setAttribute("role", "button");
       row.setAttribute("tabindex", "0");
 
-      const left = document.createElement("div");
-      left.className = "left";
+      const left = el("div", "left");
+      left.appendChild(el("div", "t", h.title || "—"));
+      left.appendChild(el("div", "s",
+        `Modul: ${h.module || "—"}\nOmråde: ${h.area || "—"}\nSteg: ${h.step || "—"}\nInnehåll: ${Number(h.itemsCount||0)} delar`
+      ));
 
-      const tt = div("t", h.title || "—");
-      const sub = div("s", [
-        h.module ? ("Modul: " + h.module) : "Modul: —",
-        h.area ? ("Område: " + h.area) : "Område: —",
-        h.step ? ("Steg: " + h.step) : "Steg: —",
-        `Innehåll: ${Number(h.itemsCount || 0)} ${Number(h.itemsCount || 0) === 1 ? "del" : "delar"} • ❓ ${Number(h.q||0)} • 📄 ${Number(h.d||0)} • ✅ ${Number(h.task||0)}` + (h.docOnly ? " • (info-only)" : "")
-      ].join("\n"));
-
-      left.appendChild(tt);
-      left.appendChild(sub);
-
-      const right = document.createElement("div");
-      const p = span("pill " + (Number(h.itemsCount || 0) ? "ok" : "warn"), Number(h.itemsCount || 0) ? (h.active ? "Vald" : "Redo") : "Tomt");
-      right.appendChild(p);
+      const right = el("div", "");
+      right.appendChild(pill("pill ok", h.active ? "Vald" : "Redo"));
 
       row.appendChild(left);
       row.appendChild(right);
 
-      const pick = function () {
-        if (typeof o.onPickTraining === "function") o.onPickTraining(Number(h.index));
-      };
+      const pick = function () { if (typeof o.onPickTraining === "function") o.onPickTraining(Number(h.index)); };
       row.addEventListener("click", pick);
       row.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); }
@@ -355,39 +274,21 @@ Policy (LÅST):
     }
   }
 
-  /**
-   * renderExportPreview
-   * @param {Object} opts
-   *  - title:string
-   *  - items: array of normalized items {kind,text,choices?,answerKeyObj?,instruction?,deliverable?}
-   */
   function renderExportPreview(opts) {
     const o = opts || {};
     if (!DOM.trainPreviewDetail) return;
-
     clear(DOM.trainPreviewDetail);
 
     const items = Array.isArray(o.items) ? o.items : [];
-    if (!items.length) {
-      DOM.trainPreviewDetail.style.display = "none";
-      return;
-    }
+    if (!items.length) { DOM.trainPreviewDetail.style.display = "none"; return; }
 
     DOM.trainPreviewDetail.style.display = "block";
+    DOM.trainPreviewDetail.appendChild(el("div", "tiny", `Export-preview: ${items.length} item(s)`));
 
-    DOM.trainPreviewDetail.appendChild(div("tiny", `Export-preview: ${items.length} item(s)`));
-
-    const max = Math.min(items.length, 30);
-    for (let i = 0; i < max; i++) {
-      const it = items[i] || {};
-      const row = document.createElement("div");
-      row.className = "exportItemRow";
-
-      const pill = span("pill " + (String(it.kind) === "question" ? "ok" : "warn"), `${String(it.kind || "document")}`);
-      const tx = span("tiny", safeSnippet(it.text, 120));
-
-      row.appendChild(pill);
-      row.appendChild(tx);
+    for (const it of items.slice(0, 30)) {
+      const row = el("div", "exportItemRow");
+      row.appendChild(pill("pill warn", String(it.kind || "document")));
+      row.appendChild(el("span", "tiny", safeSnippet(it.text, 120)));
       DOM.trainPreviewDetail.appendChild(row);
     }
   }
@@ -397,352 +298,25 @@ Policy (LÅST):
     DOM.trainExportHint.textContent = String(text || "");
   }
 
-  // -----------------------------
-  // Vald block (höger)
-  // -----------------------------
+  // ---------- Selected block ----------
   function renderSelectedEmpty() {
     if (DOM.selHint) DOM.selHint.textContent = "Välj ett block i vänsterlistan för att se frågor + facit.";
     if (DOM.selDetail) clear(DOM.selDetail);
   }
 
-  function renderSelectedHeader(blockTitle) {
-    if (!DOM.selDetail) return;
-    DOM.selDetail.appendChild(div("previewTitle", blockTitle || "(utan rubrik)"));
-  }
-
-  function renderValidationBox(reasons) {
-    if (!DOM.selDetail) return;
-    if (!Array.isArray(reasons) || !reasons.length) return;
-
-    const box = div("errList", "");
-    const h = div("h", "Validering stoppar Verifiera/Publicera");
-    h.className = "h";
-    box.appendChild(h);
-
-    const ul = document.createElement("ul");
-    const max = Math.min(reasons.length, 12);
-    for (let i = 0; i < max; i++) {
-      const li = document.createElement("li");
-      li.textContent = String(reasons[i]);
-      ul.appendChild(li);
-    }
-    if (reasons.length > 12) {
-      const li = document.createElement("li");
-      li.textContent = `… +${reasons.length - 12} till`;
-      ul.appendChild(li);
-    }
-    box.appendChild(ul);
-    DOM.selDetail.appendChild(box);
-  }
-
-  function buildChoiceRows(stateItem, idx, canEdit, onPatchItem) {
-    const wrap = document.createElement("div");
-    const choices = Array.isArray(stateItem.choices) ? stateItem.choices.slice(0, 10) : [];
-    const rows = Math.max(3, Math.min(6, choices.length || 3));
-
-    function commit(rowIndex, newId, newText) {
-      const arr = Array.isArray(stateItem.choices) ? stateItem.choices.slice(0, 10) : [];
-      while (arr.length < rows) arr.push({ id: mkChoiceIdByIndex(arr.length), text: "" });
-
-      arr[rowIndex] = {
-        id: String(newId || mkChoiceIdByIndex(rowIndex)).trim() || mkChoiceIdByIndex(rowIndex),
-        text: String(newText || "").trim()
-      };
-
-      // trim empties
-      const out = arr
-        .map((c, i) => ({
-          id: String(c.id || mkChoiceIdByIndex(i)).trim() || mkChoiceIdByIndex(i),
-          text: String(c.text || "").trim()
-        }))
-        .filter((c) => c.text)
-        .slice(0, 10);
-
-      onPatchItem(idx, function (it) {
-        const next = Object.assign({}, it);
-        next.choices = out;
-        next.options = out.map((c) => c.text).slice(0, 10);
-        next.answerKeyObj = next.answerKeyObj && typeof next.answerKeyObj === "object"
-          ? Object.assign({}, next.answerKeyObj)
-          : { kind: "mcq_single", correctChoiceId: "", rationale: "" };
-        next.answerKeyObj.kind = "mcq_single";
-        // keep legacy answerKey as id (deterministiskt)
-        next.answerKey = String(next.answerKeyObj.correctChoiceId || "").trim();
-        return next;
-      });
-    }
-
-    for (let i = 0; i < rows; i++) {
-      const row = document.createElement("div");
-      row.className = "optRow";
-
-      const idInp = document.createElement("input");
-      idInp.type = "text";
-      idInp.placeholder = "Id (A/B/C…)";
-      idInp.value = String(choices[i] && choices[i].id ? choices[i].id : mkChoiceIdByIndex(i));
-      idInp.disabled = !canEdit;
-      idInp.style.maxWidth = "90px";
-
-      const txtInp = document.createElement("input");
-      txtInp.type = "text";
-      txtInp.placeholder = `Alternativ ${i + 1}`;
-      txtInp.value = String(choices[i] && choices[i].text ? choices[i].text : "");
-      txtInp.disabled = !canEdit;
-
-      const bClear = btnMini("Rensa");
-      bClear.className = "optBtn";
-      bClear.disabled = !canEdit;
-
-      function onInput() { commit(i, idInp.value, txtInp.value); }
-      idInp.addEventListener("input", onInput);
-      txtInp.addEventListener("input", onInput);
-
-      bClear.addEventListener("click", function () {
-        txtInp.value = "";
-        commit(i, idInp.value, "");
-      });
-
-      row.appendChild(idInp);
-      row.appendChild(txtInp);
-      row.appendChild(bClear);
-      wrap.appendChild(row);
-    }
-
-    const hint = div("tiny muted2", "Tips: Id bör vara A/B/C… och facit ska vara ett av dessa id:n.");
-    hint.style.marginTop = "8px";
-    wrap.appendChild(hint);
-
-    return wrap;
-  }
-
-  /**
-   * renderSelectedDetail
-   * @param {Object} opts
-   *  - block: normalized block {title, items:[...] }
-   *  - canEdit: boolean
-   *  - validationReasons: array (optional)
-   *  - onPatchItem(index, patchFnOrObject): callback used to change STATE.edit.items[index]
-   */
   function renderSelectedDetail(opts) {
     const o = opts || {};
     const b = o.block || null;
-
     if (!DOM.selDetail) return;
 
     clear(DOM.selDetail);
 
-    if (!b) {
-      renderSelectedEmpty();
-      return;
-    }
+    if (!b) { renderSelectedEmpty(); return; }
 
     if (DOM.selHint) {
       DOM.selHint.textContent = "Valt block: redigera frågor (alternativ + facit + rationale) och uppgifter (instruktion + leverans).";
     }
 
-    renderSelectedHeader(b.title || "(utan rubrik)");
-    renderValidationBox(o.validationReasons || []);
+    DOM.selDetail.appendChild(el("div", "previewTitle", b.title || "(utan rubrik)"));
 
-    const meta = div("tiny muted2", "Obs: All rendering är XSS-säker. Spara/Verifiera/Publicera styrs av app-logiken.");
-    meta.style.marginTop = "6px";
-    DOM.selDetail.appendChild(meta);
-
-    const items = Array.isArray(b.items) ? b.items : [];
-    if (!items.length) {
-      const empty = div("muted2", "Inga items i blocket.");
-      empty.style.marginTop = "10px";
-      DOM.selDetail.appendChild(empty);
-      return;
-    }
-
-    const canEdit = !!o.canEdit;
-    const onPatchItem = typeof o.onPatchItem === "function" ? o.onPatchItem : function () {};
-
-    for (let idx = 0; idx < items.length; idx++) {
-      const it = items[idx] || {};
-      const kind = String(it.kind || "document");
-
-      const card = document.createElement("div");
-      card.className = "itemCard";
-
-      const top = document.createElement("div");
-      top.className = "itemRowTop";
-
-      const left = div("tiny", `${idx + 1}/${items.length} • ${kind}`);
-      const right = document.createElement("div");
-
-      // optional: kontrakt-status pill (om contract finns)
-      if (contract && contract.CONTRACT_V1_STRICT) {
-        let ok = true;
-        try {
-          if (kind === "question") ok = !!contract.validateQuestionStrict(it).ok;
-          else if (kind === "task") ok = !!contract.validateTaskStrict(it).ok;
-          else ok = !!contract.validateDocStrict(it).ok;
-        } catch (_) { ok = false; }
-        right.appendChild(span("qaPill " + (ok ? "ok" : "bad"), ok ? "Kontrakt OK" : "Kontrakt-fel"));
-      }
-
-      top.appendChild(left);
-      top.appendChild(right);
-      card.appendChild(top);
-
-      if (kind === "question") {
-        // Question text
-        card.appendChild(div("fieldLbl tiny", "Frågetext"));
-        const taQ = document.createElement("textarea");
-        taQ.value = String(it.text || "");
-        taQ.disabled = !canEdit;
-        taQ.addEventListener("input", function () {
-          const v = String(taQ.value || "");
-          onPatchItem(idx, function (cur) {
-            const next = Object.assign({}, cur);
-            next.text = v;
-            return next;
-          });
-        });
-        card.appendChild(taQ);
-
-        // Choices
-        card.appendChild(div("fieldLbl tiny", "Alternativ (3–5)"));
-        card.appendChild(buildChoiceRows(it, idx, canEdit, onPatchItem));
-
-        // Facit
-        card.appendChild(div("fieldLbl tiny", "Facit (correctChoiceId)"));
-        const fac = document.createElement("input");
-        fac.type = "text";
-        fac.placeholder = "t.ex. A";
-        fac.value = String(it.answerKeyObj && it.answerKeyObj.correctChoiceId ? it.answerKeyObj.correctChoiceId : "");
-        fac.disabled = !canEdit;
-        fac.addEventListener("input", function () {
-          const v = String(fac.value || "").trim();
-          onPatchItem(idx, function (cur) {
-            const next = Object.assign({}, cur);
-            next.answerKeyObj = next.answerKeyObj && typeof next.answerKeyObj === "object"
-              ? Object.assign({}, next.answerKeyObj)
-              : { kind: "mcq_single", correctChoiceId: "", rationale: "" };
-            next.answerKeyObj.kind = "mcq_single";
-            next.answerKeyObj.correctChoiceId = v;
-            next.answerKey = v; // legacy
-            return next;
-          });
-        });
-        card.appendChild(fac);
-
-        // Rationale
-        card.appendChild(div("fieldLbl tiny", "Rationale (krav)"));
-        const taR = document.createElement("textarea");
-        taR.value = String(it.answerKeyObj && it.answerKeyObj.rationale ? it.answerKeyObj.rationale : "");
-        taR.disabled = !canEdit;
-        taR.addEventListener("input", function () {
-          const v = String(taR.value || "");
-          onPatchItem(idx, function (cur) {
-            const next = Object.assign({}, cur);
-            next.answerKeyObj = next.answerKeyObj && typeof next.answerKeyObj === "object"
-              ? Object.assign({}, next.answerKeyObj)
-              : { kind: "mcq_single", correctChoiceId: "", rationale: "" };
-            next.answerKeyObj.kind = "mcq_single";
-            next.answerKeyObj.rationale = v;
-            return next;
-          });
-        });
-        card.appendChild(taR);
-
-      } else if (kind === "task") {
-        // Instruction
-        card.appendChild(div("fieldLbl tiny", "Instruktion (krav)"));
-        const taI = document.createElement("textarea");
-        taI.value = String(it.instruction || "");
-        taI.disabled = !canEdit;
-        taI.addEventListener("input", function () {
-          const v = String(taI.value || "");
-          onPatchItem(idx, function (cur) {
-            const next = Object.assign({}, cur);
-            next.instruction = v;
-            // text kan byggas i store/app, men vi håller det konsekvent här också:
-            const parts = [];
-            if (String(next.instruction || "").trim()) parts.push("Instruktion: " + String(next.instruction || "").trim());
-            if (String(next.deliverable || "").trim()) parts.push("Leverans: " + String(next.deliverable || "").trim());
-            next.text = parts.join("\n\n") || String(next.text || "");
-            return next;
-          });
-        });
-        card.appendChild(taI);
-
-        // Deliverable
-        card.appendChild(div("fieldLbl tiny", "Leverans (krav)"));
-        const taD = document.createElement("textarea");
-        taD.value = String(it.deliverable || "");
-        taD.disabled = !canEdit;
-        taD.addEventListener("input", function () {
-          const v = String(taD.value || "");
-          onPatchItem(idx, function (cur) {
-            const next = Object.assign({}, cur);
-            next.deliverable = v;
-            const parts = [];
-            if (String(next.instruction || "").trim()) parts.push("Instruktion: " + String(next.instruction || "").trim());
-            if (String(next.deliverable || "").trim()) parts.push("Leverans: " + String(next.deliverable || "").trim());
-            next.text = parts.join("\n\n") || String(next.text || "");
-            return next;
-          });
-        });
-        card.appendChild(taD);
-
-        // Employee view (read-only)
-        card.appendChild(div("fieldLbl tiny", "Visning (employee text, auto)"));
-        const taE = document.createElement("textarea");
-        taE.value = String(it.text || "");
-        taE.disabled = true;
-        card.appendChild(taE);
-
-      } else {
-        // Document
-        card.appendChild(div("fieldLbl tiny", "Dokumenttext"));
-        const ta = document.createElement("textarea");
-        ta.value = String(it.text || "");
-        ta.disabled = !canEdit;
-        ta.addEventListener("input", function () {
-          const v = String(ta.value || "");
-          onPatchItem(idx, function (cur) {
-            const next = Object.assign({}, cur);
-            next.text = v;
-            return next;
-          });
-        });
-        card.appendChild(ta);
-      }
-
-      DOM.selDetail.appendChild(card);
-    }
-  }
-
-  // -----------------------------
-  // Exports
-  // -----------------------------
-  NS.render = {
-    // msg/lock
-    setMsg,
-    showLockBox,
-
-    // pills/top
-    setWhoPill,
-    setModePill,
-    setSelectionPill,
-    setStatePill,
-    setVerifyPill,
-    setTopEditing,
-
-    // lists
-    renderSearchFirstPlaceholder,
-    renderBlockList,
-
-    // export
-    renderTrainingHits,
-    renderExportPreview,
-    setTrainExportHint,
-
-    // selected
-    renderSelectedDetail,
-    renderSelectedEmpty,
-  };
-})();
-
+    const reasons = Array.isArray(o.validationReasons) ? o.validatio
