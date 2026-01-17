@@ -56,16 +56,46 @@ Policy (LÅST):
     return el("span", cls || "pill", text || "");
   }
 
-  function setVisible(node, yes) {
-    if (!node) return;
-    node.style.display = yes ? "" : "none";
-  }
-
   function safeSnippet(v, n) {
     const s = String(v ?? "").trim();
     if (!s) return "(utan text)";
     const max = Math.max(0, Number(n || 0));
     return s.slice(0, max) + (s.length > max ? "…" : "");
+  }
+
+  function normStr(v) { return String(v ?? "").trim(); }
+
+  function kindLabel(kind) {
+    const k = String(kind || "document");
+    if (k === "question") return { icon: "❓", name: "Fråga" };
+    if (k === "task") return { icon: "✅", name: "Uppgift" };
+    return { icon: "📄", name: "Dokument" };
+  }
+
+  function makeInput(type, value, placeholder) {
+    const i = document.createElement("input");
+    i.type = type || "text";
+    i.className = "input";
+    if (placeholder) i.placeholder = String(placeholder);
+    i.value = String(value ?? "");
+    i.autocomplete = "off";
+    return i;
+  }
+
+  function makeTextarea(value, placeholder) {
+    const t = document.createElement("textarea");
+    t.className = "input";
+    if (placeholder) t.placeholder = String(placeholder);
+    t.value = String(value ?? "");
+    return t;
+  }
+
+  // För att undvika att UI “fladdrar” vid varje tecken (rerender från 06-page),
+  // patchar vi på blur/change (inte på input).
+  function patchOnBlurAndChange(node, patchFn) {
+    if (!node || typeof patchFn !== "function") return;
+    node.addEventListener("change", patchFn);
+    node.addEventListener("blur", patchFn);
   }
 
   // ---------- Message / Lock ----------
@@ -189,8 +219,6 @@ Policy (LÅST):
       const q = comp ? Number(comp.q || 0) : 0;
       const d = comp ? Number(comp.d || 0) : 0;
       const t = comp ? Number(comp.t || 0) : 0;
-
-      // “Hittat” = antal items (inte antal frågor) – exakt din fråga i bilden
       const meta = el(
         "div",
         "tiny",
@@ -229,7 +257,7 @@ Policy (LÅST):
     }
   }
 
-  // ---------- Trainings export (placeholder) ----------
+  // ---------- Trainings export ----------
   function renderTrainingHits(opts) {
     const o = opts || {};
     if (!DOM.trainPreview) return;
@@ -254,8 +282,10 @@ Policy (LÅST):
 
       const left = el("div", "left");
       left.appendChild(el("div", "t", h.title || "—"));
+
+      // Viktigt: visa modul/område/steg här (din önskan)
       left.appendChild(el("div", "s",
-        `Modul: ${h.module || "—"}\nOmråde: ${h.area || "—"}\nSteg: ${h.step || "—"}\nInnehåll: ${Number(h.itemsCount||0)} delar`
+        `Modul: ${h.module || "—"}\nOmråde: ${h.area || "—"}\nSteg: ${h.step || "—"}\nInnehåll: ${Number(h.itemsCount || 0)} delar`
       ));
 
       const right = el("div", "");
@@ -298,15 +328,225 @@ Policy (LÅST):
     DOM.trainExportHint.textContent = String(text || "");
   }
 
-  // ---------- Selected block ----------
+  // ---------- Selected block (editor) ----------
   function renderSelectedEmpty() {
     if (DOM.selHint) DOM.selHint.textContent = "Välj ett block i vänsterlistan för att se frågor + facit.";
     if (DOM.selDetail) clear(DOM.selDetail);
   }
 
+  function renderValidationList(reasons) {
+    const arr = Array.isArray(reasons) ? reasons.filter(Boolean) : [];
+    if (!arr.length) return null;
+
+    const box = el("div", "errList");
+    box.appendChild(el("div", "h", "Verifiering stoppar:"));
+    const ul = document.createElement("ul");
+    for (const r of arr.slice(0, 50)) {
+      const li = document.createElement("li");
+      li.textContent = String(r);
+      ul.appendChild(li);
+    }
+    box.appendChild(ul);
+    return box;
+  }
+
+  function renderItemEditor(it, idx, canEdit, onPatchItem) {
+    const item = it && typeof it === "object" ? it : {};
+    const kind = String(item.kind || "document");
+    const kMeta = kindLabel(kind);
+
+    const card = el("div", "itemCard");
+    const top = el("div", "itemRowTop");
+    const left = el("div", "");
+    left.appendChild(el("div", "previewTitle", `${kMeta.icon} ${kMeta.name} #${idx + 1}`));
+    const right = el("div", "");
+    right.appendChild(pill("pill", canEdit ? "Redigering: på" : "Read-only"));
+    top.appendChild(left);
+    top.appendChild(right);
+    card.appendChild(top);
+
+    card.appendChild(el("div", "divider", "")); // visuell spacer
+
+    // --- QUESTION ---
+    if (kind === "question") {
+      // fråga
+      card.appendChild(el("div", "fieldLbl", "Frågetext"));
+      const qText = makeTextarea(item.text || "", "Skriv frågan här…");
+      qText.disabled = !canEdit;
+      patchOnBlurAndChange(qText, function () {
+        if (!canEdit) return;
+        if (typeof onPatchItem !== "function") return;
+        const v = qText.value;
+        onPatchItem(idx, function (cur) {
+          const x = cur && typeof cur === "object" ? cur : {};
+          x.text = String(v || "");
+          x.kind = "question";
+          return x;
+        });
+      });
+      card.appendChild(qText);
+
+      // svarsalternativ (options)
+      card.appendChild(el("div", "fieldLbl", "Svarsalternativ"));
+      const options = Array.isArray(item.options) ? item.options.map((s) => String(s ?? "")) : [];
+      const optWrap = el("div", "");
+      const maxOpt = Math.max(2, Math.min(12, options.length || 4));
+
+      function patchOptionsFromUI() {
+        if (!canEdit) return;
+        if (typeof onPatchItem !== "function") return;
+        const next = [];
+        const rows = optWrap.querySelectorAll("input[data-opt='1']");
+        rows.forEach((inp) => {
+          const val = String(inp.value || "").trim();
+          if (val) next.push(val);
+        });
+        onPatchItem(idx, function (cur) {
+          const x = cur && typeof cur === "object" ? cur : {};
+          x.kind = "question";
+          x.options = next;
+          return x;
+        });
+      }
+
+      for (let i = 0; i < maxOpt; i++) {
+        const row = el("div", "optRow");
+        const inp = makeInput("text", options[i] || "", `Alternativ ${i + 1}`);
+        inp.dataset.opt = "1";
+        inp.disabled = !canEdit;
+        patchOnBlurAndChange(inp, patchOptionsFromUI);
+        row.appendChild(inp);
+        optWrap.appendChild(row);
+      }
+
+      if (canEdit) {
+        const help = el("div", "tiny muted2", "Tips: Lämna tomma rader om du vill ha färre alternativ.");
+        help.style.marginTop = "6px";
+        optWrap.appendChild(help);
+      }
+
+      card.appendChild(optWrap);
+
+      // facit
+      card.appendChild(el("div", "fieldLbl", "Facit (answerKey)"));
+      const ak = makeInput("text", item.answerKey || "", "t.ex. exakt text eller id beroende på modell");
+      ak.disabled = !canEdit;
+      patchOnBlurAndChange(ak, function () {
+        if (!canEdit) return;
+        if (typeof onPatchItem !== "function") return;
+        const v = ak.value;
+        onPatchItem(idx, function (cur) {
+          const x = cur && typeof cur === "object" ? cur : {};
+          x.kind = "question";
+          x.answerKey = String(v || "");
+          return x;
+        });
+      });
+      card.appendChild(ak);
+
+      // rationale (om finns / används)
+      const rationale = (item.answerKeyObj && typeof item.answerKeyObj === "object") ? String(item.answerKeyObj.rationale || "") : "";
+      card.appendChild(el("div", "fieldLbl", "Motivering (valfritt)"));
+      const rat = makeTextarea(rationale, "Varför är detta rätt svar? (valfritt)");
+      rat.disabled = !canEdit;
+      patchOnBlurAndChange(rat, function () {
+        if (!canEdit) return;
+        if (typeof onPatchItem !== "function") return;
+        const v = rat.value;
+        onPatchItem(idx, function (cur) {
+          const x = cur && typeof cur === "object" ? cur : {};
+          x.kind = "question";
+          const obj = (x.answerKeyObj && typeof x.answerKeyObj === "object") ? x.answerKeyObj : {};
+          obj.rationale = String(v || "");
+          x.answerKeyObj = obj;
+          return x;
+        });
+      });
+      card.appendChild(rat);
+
+      return card;
+    }
+
+    // --- TASK ---
+    if (kind === "task") {
+      card.appendChild(el("div", "fieldLbl", "Uppgiftstext"));
+      const tText = makeTextarea(item.text || "", "Beskriv uppgiften…");
+      tText.disabled = !canEdit;
+      patchOnBlurAndChange(tText, function () {
+        if (!canEdit) return;
+        if (typeof onPatchItem !== "function") return;
+        const v = tText.value;
+        onPatchItem(idx, function (cur) {
+          const x = cur && typeof cur === "object" ? cur : {};
+          x.kind = "task";
+          x.text = String(v || "");
+          return x;
+        });
+      });
+      card.appendChild(tText);
+
+      card.appendChild(el("div", "fieldLbl", "Instruktion (valfritt)"));
+      const instr = makeTextarea(item.instruction || "", "Instruktioner…");
+      instr.disabled = !canEdit;
+      patchOnBlurAndChange(instr, function () {
+        if (!canEdit) return;
+        if (typeof onPatchItem !== "function") return;
+        const v = instr.value;
+        onPatchItem(idx, function (cur) {
+          const x = cur && typeof cur === "object" ? cur : {};
+          x.kind = "task";
+          x.instruction = String(v || "");
+          return x;
+        });
+      });
+      card.appendChild(instr);
+
+      card.appendChild(el("div", "fieldLbl", "Leverans (valfritt)"));
+      const del = makeTextarea(item.deliverable || "", "Vad ska lämnas in / levereras?");
+      del.disabled = !canEdit;
+      patchOnBlurAndChange(del, function () {
+        if (!canEdit) return;
+        if (typeof onPatchItem !== "function") return;
+        const v = del.value;
+        onPatchItem(idx, function (cur) {
+          const x = cur && typeof cur === "object" ? cur : {};
+          x.kind = "task";
+          x.deliverable = String(v || "");
+          return x;
+        });
+      });
+      card.appendChild(del);
+
+      return card;
+    }
+
+    // --- DOCUMENT ---
+    card.appendChild(el("div", "fieldLbl", "Text"));
+    const dText = makeTextarea(item.text || "", "Skriv dokumenttext…");
+    dText.disabled = !canEdit;
+    patchOnBlurAndChange(dText, function () {
+      if (!canEdit) return;
+      if (typeof onPatchItem !== "function") return;
+      const v = dText.value;
+      onPatchItem(idx, function (cur) {
+        const x = cur && typeof cur === "object" ? cur : {};
+        x.kind = "document";
+        x.text = String(v || "");
+        return x;
+      });
+    });
+    card.appendChild(dText);
+
+    return card;
+  }
+
   function renderSelectedDetail(opts) {
     const o = opts || {};
     const b = o.block || null;
+    const canEdit = !!o.canEdit;
+    const reasons = Array.isArray(o.validationReasons) ? o.validationReasons : [];
+    const onPatchItem = (typeof o.onPatchItem === "function") ? o.onPatchItem : null;
+
     if (!DOM.selDetail) return;
 
     clear(DOM.selDetail);
@@ -314,9 +554,78 @@ Policy (LÅST):
     if (!b) { renderSelectedEmpty(); return; }
 
     if (DOM.selHint) {
-      DOM.selHint.textContent = "Valt block: redigera frågor (alternativ + facit + rationale) och uppgifter (instruktion + leverans).";
+      DOM.selHint.textContent = canEdit
+        ? "Valt block: redigera items nedan. Ändringar sparas via “Spara ändringar”."
+        : "Valt block (Read-only): du kan granska items, men inte redigera.";
     }
 
-    DOM.selDetail.appendChild(el("div", "previewTitle", b.title || "(utan rubrik)"));
+    // Top summary
+    const title = el("div", "previewTitle", b.title || "(utan rubrik)");
+    DOM.selDetail.appendChild(title);
 
-    const reasons = Array.isArray(o.validationReasons) ? o.validatio
+    const meta = el("div", "tiny", "");
+    meta.textContent =
+      `Modul: ${normStr(b.module) || "—"}  •  ` +
+      `Område: ${normStr(b.area) || "—"}  •  ` +
+      `Steg: ${normStr(b.step) || "—"}  •  ` +
+      `Status: ${(String(b.status || "draft").toLowerCase() === "published") ? "Publicerad" : "Utkast"}`;
+    meta.style.marginTop = "6px";
+    DOM.selDetail.appendChild(meta);
+
+    // Validation list (if any)
+    const vbox = renderValidationList(reasons);
+    if (vbox) {
+      vbox.style.marginTop = "10px";
+      DOM.selDetail.appendChild(vbox);
+    }
+
+    // Items
+    const items = Array.isArray(b.items) ? b.items : [];
+    const itemsHdr = el("div", "fieldLbl", `Items (${items.length})`);
+    itemsHdr.style.marginTop = "12px";
+    DOM.selDetail.appendChild(itemsHdr);
+
+    if (!items.length) {
+      DOM.selDetail.appendChild(el("div", "muted2", "Inga items i detta block ännu."));
+      return;
+    }
+
+    // Render each item editor
+    for (let i = 0; i < items.length; i++) {
+      const editor = renderItemEditor(items[i], i, canEdit, onPatchItem);
+      DOM.selDetail.appendChild(editor);
+    }
+
+    // Footer note
+    const note = el("div", "tiny muted2", canEdit
+      ? "Tips: ändringar skickas när du lämnar ett fält (blur/change)."
+      : "Read-only: byt till ADMIN/MANAGER för att kunna redigera.");
+    note.style.marginTop = "10px";
+    DOM.selDetail.appendChild(note);
+  }
+
+  // ---------- Export ----------
+  NS.render = {
+    // msg/lock
+    setMsg: setMsg,
+    showLockBox: showLockBox,
+
+    // pills/top
+    setWhoPill: setWhoPill,
+    setModePill: setModePill,
+    setSelectionPill: setSelectionPill,
+    setStatePill: setStatePill,
+    setVerifyPill: setVerifyPill,
+    setTopEditing: setTopEditing,
+
+    // lists
+    renderBlockList: renderBlockList,
+    renderTrainingHits: renderTrainingHits,
+    renderExportPreview: renderExportPreview,
+    setTrainExportHint: setTrainExportHint,
+
+    // selected
+    renderSelectedEmpty: renderSelectedEmpty,
+    renderSelectedDetail: renderSelectedDetail,
+  };
+})();
