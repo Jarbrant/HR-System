@@ -132,6 +132,34 @@ Policy (LÅST):
 
   function normStr(v) { return String(v ?? "").trim(); }
 
+  // PATCH: robust meta extraction (module/area/step) utan datamodelländring
+  function pickFirstStr(obj, keys) {
+    for (const k of (Array.isArray(keys) ? keys : [])) {
+      const v = obj && obj[k];
+      const s = String(v ?? "").trim();
+      if (s) return s;
+    }
+    return "";
+  }
+
+  function inferStepFromTitle(title) {
+    const t = String(title || "");
+    const m = t.match(/Steg\s*([0-9]{1,3})/i);
+    return m ? ("Steg " + m[1]) : "";
+  }
+
+  function normalizeStepValue(rawStep, title) {
+    const s = String(rawStep ?? "").trim();
+    if (s) return s;
+    const n = (typeof rawStep === "number") ? rawStep : NaN;
+    if (!Number.isFinite(n)) return "";
+    // undvik "Steg 0" i UI
+    const nn = (n <= 0) ? 1 : Math.floor(n);
+    // om titel redan har steg, låt infer ta det
+    const inf = inferStepFromTitle(title);
+    return inf || ("Steg " + String(nn));
+  }
+
   function countComposition(block) {
     const items = Array.isArray(block && block.items) ? block.items : [];
     let q = 0, d = 0, t = 0, missingKey = 0;
@@ -420,10 +448,16 @@ Policy (LÅST):
   }
 
   function extractTrainingMeta(t, idx) {
+    // Titel (tolerant)
     const title = normStr(t && (t.title || t.name)) || `Utbildning ${idx + 1}`;
-    const module = normStr(t && t.module) || "";
-    const area = normStr(t && t.area) || "";
-    const step = normStr(t && (t.step || t.stepId)) || "";
+
+    // PATCH: plocka från flera möjliga fält (utan datamodelländring)
+    const module = pickFirstStr(t, ["module", "moduleName", "moduleTitle", "moduleId"]) || "";
+    const area = pickFirstStr(t, ["area", "areaName", "topic", "category"]) || "";
+
+    const rawStep = (t && (t.step || t.stepLabel || t.stepId || t.stepNo || t.stepIndex)) ?? "";
+    const step = normalizeStepValue(rawStep, title) || inferStepFromTitle(title) || "";
+
     const items = extractTrainingItems(t);
     return {
       index: idx,
@@ -450,11 +484,12 @@ Policy (LÅST):
   }
 
   function refreshTrainingUI() {
-    // build module dropdown
+    // build module dropdown (PATCH: använd tolerant meta-plock)
     if (DOM.qTrainModule) {
       const mods = new Set();
-      for (const tr of STATE.trainings) {
-        const m = normStr(tr && tr.module);
+      for (let i = 0; i < STATE.trainings.length; i++) {
+        const tr = STATE.trainings[i];
+        const m = pickFirstStr(tr, ["module", "moduleName", "moduleTitle", "moduleId"]);
         if (m) mods.add(m);
       }
       const cur = DOM.qTrainModule.value || "";
@@ -472,12 +507,13 @@ Policy (LÅST):
       DOM.qTrainModule.value = cur;
     }
 
-    // build area datalist
+    // build area datalist (PATCH: tolerant)
     if (DOM.dlTrainAreas) {
       DOM.dlTrainAreas.innerHTML = "";
       const areas = new Set();
-      for (const tr of STATE.trainings) {
-        const a = normStr(tr && tr.area);
+      for (let i = 0; i < STATE.trainings.length; i++) {
+        const tr = STATE.trainings[i];
+        const a = pickFirstStr(tr, ["area", "areaName", "topic", "category"]);
         if (a) areas.add(a);
       }
       Array.from(areas).sort().slice(0, 200).forEach((a) => {
@@ -737,4 +773,12 @@ Policy (LÅST):
     boot: boot,
     state: STATE,
   };
+
+  /* ============================================================
+     ÄNDRINGSLOGG (≤8)
+     - FIX: extractTrainingMeta plockar module/area/step från flera möjliga fält (tolerant)
+     - FIX: inferStepFromTitle (”Steg 2” i titel) används som fallback
+     - FIX: refreshTrainingUI bygger modul/område-listor tolerant (inte bara tr.module/tr.area)
+     - KEEP: ingen ny storage-key/datamodell; endast UI-render påverkas
+  ============================================================ */
 })();
