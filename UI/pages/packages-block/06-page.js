@@ -5,12 +5,8 @@ Syfte: Bootstrap + state + event wiring för Block-editor (packages-block)
 Policy (LÅST):
 - UI-only • Fail-closed
 - Inga nya storage-keys/datamodell
-- XSS-safe rendering: all render via 05-render.js (textContent)
+- XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
-
-PATCH v1.0 (META-FALLBACK):
-- FIX: Derivera Modul/Steg/Område från titel om fält saknas (tolerant)
-- FIX: Modul-dropdown + Area-datalist byggs från samma meta (inte bara t.module/t.area)
 ============================================================ */
 (function () {
   "use strict";
@@ -136,37 +132,9 @@ PATCH v1.0 (META-FALLBACK):
 
   function normStr(v) { return String(v ?? "").trim(); }
 
-  function pickFirstStr() {
-    for (let i = 0; i < arguments.length; i++) {
-      const s = normStr(arguments[i]);
-      if (s) return s;
-    }
-    return "";
-  }
-
-  // Titel-parser (tolerant): "Modul – Steg 2 – Område"
-  function parseTitleParts(title) {
-    const t = normStr(title);
-    if (!t) return { module: "", step: "", area: "" };
-
-    // Match: <module> – Steg <n> – <area>
-    const m = t.match(/^\s*(.*?)\s*[-–—]\s*Steg\s*([0-9]+)\s*[-–—]\s*(.*?)\s*$/i);
-    if (m) {
-      const mod = normStr(m[1]);
-      const stepNum = normStr(m[2]);
-      const area = normStr(m[3]);
-      return { module: mod, step: stepNum ? ("Steg " + stepNum) : "", area: area };
-    }
-
-    // Match: "Steg 2 – <rest>"
-    const m2 = t.match(/^\s*Steg\s*([0-9]+)\s*[-–—]\s*(.*?)\s*$/i);
-    if (m2) {
-      const stepNum = normStr(m2[1]);
-      const rest = normStr(m2[2]);
-      return { module: "", step: stepNum ? ("Steg " + stepNum) : "", area: rest };
-    }
-
-    return { module: "", step: "", area: "" };
+  function clearChildren(node) {
+    if (!node) return;
+    while (node.firstChild) node.removeChild(node.firstChild);
   }
 
   function countComposition(block) {
@@ -176,6 +144,7 @@ PATCH v1.0 (META-FALLBACK):
       const k = String(it && it.kind ? it.kind : "document");
       if (k === "question") {
         q++;
+        // "saknar facit" – tolerant: answerKey eller answerKeyObj.correctChoiceId
         const ak = normStr(it && (it.answerKey || (it.answerKeyObj && it.answerKeyObj.correctChoiceId)));
         if (!ak) missingKey++;
       } else if (k === "task") t++;
@@ -188,6 +157,7 @@ PATCH v1.0 (META-FALLBACK):
     const it = raw && typeof raw === "object" ? raw : {};
     const kind = String(it.kind || "document");
     if (kind === "question") {
+      // Accept: {options:[...], answerKey:"..."} OR {choices:[{id,text}], answerKeyObj:{correctChoiceId,rationale}}
       return {
         kind: "question",
         questionId: normStr(it.questionId) || normStr(it.id) || "",
@@ -196,6 +166,7 @@ PATCH v1.0 (META-FALLBACK):
         answerType: normStr(it.answerType) || "choice",
         options: Array.isArray(it.options) ? it.options.map((x) => normStr(x)).filter(Boolean) : [],
         answerKey: normStr(it.answerKey) || "",
+        // legacy strict fields (if present)
         choices: Array.isArray(it.choices) ? it.choices : undefined,
         answerKeyObj: it.answerKeyObj && typeof it.answerKeyObj === "object" ? it.answerKeyObj : undefined,
       };
@@ -211,6 +182,7 @@ PATCH v1.0 (META-FALLBACK):
         answerType: normStr(it.answerType) || "checkbox",
       };
     }
+    // document
     return {
       kind: "document",
       text: normStr(it.text) || "",
@@ -238,6 +210,12 @@ PATCH v1.0 (META-FALLBACK):
     return out;
   }
 
+  function stripComp(b) {
+    const x = deepClone(b);
+    if (x && typeof x === "object") delete x.__comp;
+    return x;
+  }
+
   function buildVisibleBlocks() {
     const q = normStr(DOM.qBlocks && DOM.qBlocks.value).toLowerCase();
     const st = DOM.filterStatus ? String(DOM.filterStatus.value || "all") : "all";
@@ -262,7 +240,9 @@ PATCH v1.0 (META-FALLBACK):
       });
     }
 
+    // stable sort: updated desc
     arr.sort((a, b) => (Number(b.updatedAt || 0) - Number(a.updatedAt || 0)));
+
     STATE.visibleBlocks = arr;
   }
 
@@ -320,18 +300,25 @@ PATCH v1.0 (META-FALLBACK):
 
   function updateRightPanel() {
     const reasons = computeValidationReasonsForSelected();
-    const ok = reasons.length === 0;
 
+    // verify pill
+    const ok = reasons.length === 0;
     try {
       if (render && typeof render.setVerifyPill === "function") {
-        render.setVerifyPill(ok ? "Verifiering: OK" : `Verifiering: ${reasons.length} problem`, ok ? "verifyPill ok" : "verifyPill warn", !!STATE.selectedId);
+        render.setVerifyPill(
+          ok ? "Verifiering: OK" : `Verifiering: ${reasons.length} problem`,
+          ok ? "verifyPill ok" : "verifyPill warn",
+          !!STATE.selectedId
+        );
       }
     } catch (_) {}
 
+    // enable buttons
     if (DOM.btnPrint) DOM.btnPrint.disabled = !STATE.selectedId;
     if (DOM.btnVerify) DOM.btnVerify.disabled = !(STATE.selectedId && STATE.canWrite && ok);
     if (DOM.btnPublish) DOM.btnPublish.disabled = !(STATE.selectedId && STATE.canWrite && ok);
 
+    // render selected (editor UI)
     if (render && typeof render.renderSelectedDetail === "function") {
       render.renderSelectedDetail({
         block: STATE.edited,
@@ -350,8 +337,8 @@ PATCH v1.0 (META-FALLBACK):
             next.__comp = countComposition(next);
             STATE.edited = next;
             setDirty(true);
-            refreshLeftList();
-            updateRightPanel();
+            refreshLeftList(); // composition counts + list
+            updateRightPanel(); // re-validate + re-render
           } catch (e) {
             setMsgSafe(`Kunde inte uppdatera item: ${String((e && e.message) || e)}`);
           }
@@ -373,19 +360,13 @@ PATCH v1.0 (META-FALLBACK):
   }
 
   // ---------- persistence ----------
-  function stripComp(b) {
-    const x = deepClone(b);
-    if (x && typeof x === "object") delete x.__comp;
-    return x;
-  }
-
   function persistEditedBlock() {
     if (!STATE.edited || !STATE.selectedId) return { ok: false, err: "Inget block valt." };
     const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
     if (idx < 0) return { ok: false, err: "Block hittades inte i listan." };
 
     const next = deepClone(STATE.edited);
-    next.status = "draft";
+    next.status = "draft"; // spara ändringar -> draft
     next.updatedAt = nowTs();
     next.__comp = countComposition(next);
 
@@ -393,6 +374,7 @@ PATCH v1.0 (META-FALLBACK):
     const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
     if (!save.ok) return save;
 
+    // refresh selection from source-of-truth array
     STATE.selected = STATE.allBlocks[idx];
     STATE.edited = deepClone(STATE.selected);
     setDirty(false);
@@ -440,6 +422,7 @@ PATCH v1.0 (META-FALLBACK):
   }
 
   function extractTrainingItems(t) {
+    // Tolerant: items directly OR blocks[].items
     if (t && Array.isArray(t.items)) return t.items.map(normalizeItem);
     if (t && Array.isArray(t.blocks)) {
       const flat = [];
@@ -452,69 +435,47 @@ PATCH v1.0 (META-FALLBACK):
   }
 
   function extractTrainingMeta(t, idx) {
-    const title = pickFirstStr(t && (t.title || t.name), `Utbildning ${idx + 1}`);
-    const parsed = parseTitleParts(title);
-
-    const module = pickFirstStr(
-      t && (t.module || t.modul || t.moduleName || t.moduleTitle),
-      t && t.meta && (t.meta.module || t.meta.moduleName),
-      parsed.module
-    );
-
-    const area = pickFirstStr(
-      t && (t.area || t.omrade || t.areaName || t.areaTitle),
-      t && t.meta && (t.meta.area || t.meta.areaName),
-      parsed.area
-    );
-
-    const step = pickFirstStr(
-      t && (t.step || t.stepId || t.stepName),
-      t && t.meta && (t.meta.step || t.meta.stepName),
-      parsed.step
-    );
-
+    const title = normStr(t && (t.title || t.name)) || `Utbildning ${idx + 1}`;
+    const module = normStr(t && t.module) || "";
+    const area = normStr(t && t.area) || "";
+    const step = normStr(t && (t.step || t.stepId)) || "";
     const items = extractTrainingItems(t);
-    return {
-      index: idx,
-      title,
-      module,
-      area,
-      step,
-      itemsCount: items.length,
-      items,
-    };
+    return { index: idx, title, module, area, step, itemsCount: items.length, items };
   }
 
   function refreshTrainingUI() {
-    // build module dropdown (FRÅN META)
+    // build module dropdown
     if (DOM.qTrainModule) {
       const mods = new Set();
-      for (let i = 0; i < STATE.trainings.length; i++) {
-        const meta = extractTrainingMeta(STATE.trainings[i], i);
-        if (meta.module) mods.add(meta.module);
+      for (const tr of STATE.trainings) {
+        const m = normStr(tr && tr.module);
+        if (m) mods.add(m);
       }
       const cur = DOM.qTrainModule.value || "";
-      DOM.qTrainModule.innerHTML = "";
+      clearChildren(DOM.qTrainModule);
+
       const opt0 = document.createElement("option");
       opt0.value = "";
       opt0.textContent = "Alla moduler";
       DOM.qTrainModule.appendChild(opt0);
+
       Array.from(mods).sort().forEach((m) => {
         const o = document.createElement("option");
         o.value = m;
         o.textContent = m;
         DOM.qTrainModule.appendChild(o);
       });
+
       DOM.qTrainModule.value = cur;
     }
 
-    // build area datalist (FRÅN META)
+    // build area datalist
     if (DOM.dlTrainAreas) {
-      DOM.dlTrainAreas.innerHTML = "";
+      clearChildren(DOM.dlTrainAreas);
       const areas = new Set();
-      for (let i = 0; i < STATE.trainings.length; i++) {
-        const meta = extractTrainingMeta(STATE.trainings[i], i);
-        if (meta.area) areas.add(meta.area);
+      for (const tr of STATE.trainings) {
+        const a = normStr(tr && tr.area);
+        if (a) areas.add(a);
       }
       Array.from(areas).sort().slice(0, 200).forEach((a) => {
         const o = document.createElement("option");
@@ -530,10 +491,11 @@ PATCH v1.0 (META-FALLBACK):
 
     const hits = [];
     for (let i = 0; i < STATE.trainings.length; i++) {
-      const meta = extractTrainingMeta(STATE.trainings[i], i);
+      const tr = STATE.trainings[i];
+      const meta = extractTrainingMeta(tr, i);
       if (m && meta.module !== m) continue;
-      if (a && !String(meta.area || "").toLowerCase().includes(a)) continue;
-      if (f && !String(meta.title || "").toLowerCase().includes(f)) continue;
+      if (a && !meta.area.toLowerCase().includes(a)) continue;
+      if (f && !meta.title.toLowerCase().includes(f)) continue;
       meta.active = (STATE.trainSelIndex === i);
       hits.push(meta);
     }
@@ -556,8 +518,13 @@ PATCH v1.0 (META-FALLBACK):
       });
     }
 
+    // hint
     if (render && typeof render.setTrainExportHint === "function") {
-      render.setTrainExportHint(STATE.canWrite ? "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)." : "Read-only: du kan inte exportera i SYSTEM_ADMIN-läge.");
+      render.setTrainExportHint(
+        STATE.canWrite
+          ? "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)."
+          : "Read-only: du kan inte exportera i SYSTEM_ADMIN-läge."
+      );
     }
 
     if (DOM.btnExportTraining) {
@@ -591,7 +558,7 @@ PATCH v1.0 (META-FALLBACK):
     const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
     if (!save.ok) { setMsgSafe(`Kunde inte exportera: ${save.err || "okänt fel"}`); return; }
 
-    STATE.discoveryActive = true;
+    STATE.discoveryActive = true; // så användaren ser blocket
     refreshLeftList();
     setMsgSafe("Export klar. Sök eller tryck “Visa alla” och välj det nya blocket.");
   }
@@ -668,6 +635,7 @@ PATCH v1.0 (META-FALLBACK):
       DOM.btnPrint.addEventListener("click", printSelected);
     }
 
+    // Export toggle
     if (DOM.btnToggleExport && DOM.exportBody) {
       DOM.btnToggleExport.addEventListener("click", function () {
         STATE.exportOpen = !STATE.exportOpen;
@@ -677,6 +645,7 @@ PATCH v1.0 (META-FALLBACK):
       });
     }
 
+    // Export filters
     [DOM.qTrainModule, DOM.qTrainArea, DOM.qTrainFree].filter(Boolean).forEach((el) => {
       el.addEventListener("input", refreshTrainingUI);
       el.addEventListener("change", refreshTrainingUI);
@@ -696,8 +665,10 @@ PATCH v1.0 (META-FALLBACK):
   }
 
   function boot() {
+    // Always set message quickly so HTML watchdog won't fire
     setMsgSafe("Startar kontrollrummet…");
 
+    // dependency sanity
     const missing = [];
     if (!store) missing.push("03-store.js");
     if (!render) missing.push("05-render.js");
@@ -709,11 +680,16 @@ PATCH v1.0 (META-FALLBACK):
       return;
     }
 
-    const who = (core && typeof core.getRole === "function") ? core.getRole() : { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
+    // role
+    const who = (core && typeof core.getRole === "function")
+      ? core.getRole()
+      : { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
+
     STATE.role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
     STATE.empNo = String(who.empNo || "");
     STATE.canWrite = !!who.canWrite;
 
+    // pills
     try {
       render.setWhoPill(`Inloggad: ${STATE.empNo || "—"} (${STATE.role})`);
       render.setModePill(STATE.canWrite ? "Edit: på" : "Read-only", STATE.canWrite ? "pill ok" : "pill warn");
@@ -723,6 +699,7 @@ PATCH v1.0 (META-FALLBACK):
       render.setTopEditing("—", false);
     } catch (_) {}
 
+    // load blocks
     const r = store.loadBlocksState();
     if (!r.ok && r.corrupt) {
       showLock([store.lockReasonFor(store.BLOCKS_KEY), "Åtgärd: rensa/återställ AO-0XX_BLOCKS_V1 (korrupt JSON)."]);
@@ -734,18 +711,21 @@ PATCH v1.0 (META-FALLBACK):
     }
 
     STATE.allBlocks = (r.blocks || []).map(normalizeBlock);
-    STATE.discoveryActive = false;
+    STATE.discoveryActive = false; // search-first
     refreshLeftList();
 
+    // trainings load
     loadTrainings();
     refreshTrainingUI();
 
+    // wire
     wireEvents();
 
     setMsgSafe("Klart. Sök eller tryck “Visa alla”.");
     STATE.ready = true;
   }
 
+  // Boot safely
   try {
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", boot);
@@ -760,11 +740,4 @@ PATCH v1.0 (META-FALLBACK):
     boot: boot,
     state: STATE,
   };
-
-  /* ============================================================
-     ÄNDRINGSLOGG (≤8)
-     - FIX: Modul/Steg/Område kan härledas från titel vid saknade fält
-     - FIX: Modul-dropdown + area-datalist baseras på meta (inte bara t.module/t.area)
-     - KEEP: Inga nya keys/datamodell; endast tolerant läsning
-  ============================================================ */
 })();
