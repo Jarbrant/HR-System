@@ -58,6 +58,8 @@
   - v1.6: Frågor: stöd för choices[{id,text}] + answerKey{kind,correctChoiceId,rationale} (bakåtkompatibelt).
   - v1.6: Uppgifter: stöd för instruction + deliverable (bakåtkompatibelt).
   - v1.6: Print: skriver ut facit + rationale + valalternativ.
+  - v1.6.1: Exportlist: “Innehåll: X delar” (inte “Hittat”), för att undvika att det tolkas som antal frågor.
+  - v1.6.1: Exportlist: robust meta-utläsning för Modul/Område/Steg (alias + fallback från block) → färre “Modul: —”.
   ============================================================ -->
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
@@ -2097,16 +2099,6 @@
       return String(o.title || o.name || o.trainingTitle || "—").trim() || "—";
     }
 
-    function trainingMeta(t){
-      const o = t && typeof t === "object" ? t : {};
-      const meta = o.meta && typeof o.meta === "object" ? o.meta : {};
-      return {
-        module: String(o.module || meta.module || "").trim(),
-        area: String(o.area || meta.area || "").trim(),
-        step: String(o.step || meta.step || "").trim()
-      };
-    }
-
     function extractTrainingBlocks(t){
       const o = t && typeof t === "object" ? t : {};
       const blocks =
@@ -2125,13 +2117,56 @@
       if(Array.isArray(items)) return [{
         blockId: genId("tmp"),
         title: trainingTitle(t),
-        module: trainingMeta(t).module,
-        area: trainingMeta(t).area,
-        step: trainingMeta(t).step,
+        module: "",
+        area: "",
+        step: "",
         items
       }];
 
       return [];
+    }
+
+    function trainingMeta(t){
+      // v1.6.1: robust meta-utläsning (alias + fallback från block)
+      const o = t && typeof t === "object" ? t : {};
+      const meta = (o.meta && typeof o.meta === "object") ? o.meta : (o.metadata && typeof o.metadata === "object") ? o.metadata : {};
+
+      function pickStr(){
+        for(let i=0;i<arguments.length;i++){
+          const v = arguments[i];
+          if(typeof v === "string" && v.trim()) return v.trim();
+        }
+        return "";
+      }
+
+      let module = pickStr(
+        o.module, o.modul, o.moduleName, o.moduleTitle, o.mod, o.modName,
+        meta.module, meta.modul, meta.moduleName, meta.moduleTitle, meta.mod, meta.modName
+      );
+      let area = pickStr(
+        o.area, o.omrade, o.område, o.areaName, o.areaTitle, o.topic,
+        meta.area, meta.omrade, meta.område, meta.areaName, meta.areaTitle, meta.topic
+      );
+      let step = pickStr(
+        o.step, o.steg, o.stepName, o.stepTitle,
+        meta.step, meta.steg, meta.stepName, meta.stepTitle
+      );
+
+      // Fallback från första blocket (om meta saknas)
+      if(!module || !area || !step){
+        try{
+          const bl = extractTrainingBlocks(o);
+          if(Array.isArray(bl) && bl.length){
+            const b0 = bl[0] && typeof bl[0] === "object" ? bl[0] : {};
+            const bMeta = (b0.meta && typeof b0.meta === "object") ? b0.meta : {};
+            module = module || pickStr(b0.module, b0.modul, bMeta.module, bMeta.modul, bMeta.moduleName, bMeta.moduleTitle);
+            area   = area   || pickStr(b0.area, b0.omrade, b0.område, bMeta.area, bMeta.omrade, bMeta.område, bMeta.areaName, bMeta.areaTitle);
+            step   = step   || pickStr(b0.step, b0.steg, bMeta.step, bMeta.steg, bMeta.stepName, bMeta.stepTitle);
+          }
+        }catch{}
+      }
+
+      return { module, area, step };
     }
 
     function normalizeTrainingToExportBlock(t){
@@ -2362,7 +2397,8 @@
           meta.module ? ("Modul: " + meta.module) : "Modul: —",
           meta.area ? ("Område: " + meta.area) : "Område: —",
           meta.step ? ("Steg: " + meta.step) : "Steg: —",
-          `Hittat: ${cnt.itemsCount} item(s) • ❓ ${cnt.q} • 📄 ${cnt.d} • ✅ ${cnt.task}` + (cnt.docOnly ? " • (info-only)" : "")
+          // v1.6.1: tydligare label (delar, inte "hittat")
+          `Innehåll: ${cnt.itemsCount} ${cnt.itemsCount === 1 ? "del" : "delar"} • ❓ ${cnt.q} • 📄 ${cnt.d} • ✅ ${cnt.task}` + (cnt.docOnly ? " • (info-only)" : "")
         ].join("\n");
 
         left.appendChild(tt);
@@ -2378,281 +2414,4 @@
         row.appendChild(right);
 
         function choose(){
-          STATE.selectedTrainingIndex = idx;
-          renderTrainingHits();
-          renderExportPreviewForTraining(idx);
-          setExportUiState();
-          updateActionEnablement();
-        }
-        row.addEventListener("click", choose);
-        row.addEventListener("keydown", (e) => {
-          if(e.key === "Enter" || e.key === " "){ e.preventDefault(); choose(); }
-        });
-
-        trainPreview.appendChild(row);
-      });
-
-      setExportUiState();
-    }
-
-    function exportSelectedTraining(){
-      if(STATE.locked){ setMsg("err","Låst (för säkerhet)."); return; }
-      if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte exportera."); return; }
-      if(STATE.trainingsCorrupt){ setMsg("err", `Låst för säkerhet: ${TRAININGS_KEY} är trasig.`); return; }
-
-      const idx = STATE.selectedTrainingIndex;
-      if(idx < 0 || idx >= (STATE.trainings?.length || 0)){
-        setMsg("warn","Välj en utbildning först (klicka i listan).");
-        return;
-      }
-
-      const stBlocks = loadBlocksState();
-      if(stBlocks.corrupt){
-        setMsg("err", `Låst för säkerhet: ${BLOCKS_KEY} är trasig.`);
-        return;
-      }
-
-      const t = STATE.trainings[idx];
-      const newBlock = normalizeTrainingToExportBlock(t);
-
-      const all = (Array.isArray(stBlocks.blocks) ? stBlocks.blocks : []).map(normalizeBlock);
-      all.push(newBlock);
-
-      const res = saveBlocks(all);
-      if(!res || !res.ok){
-        setMsg("err", res?.err || "Kunde inte spara exporten.");
-        return;
-      }
-
-      STATE.all = all;
-
-      if(filterStatus && filterStatus.value !== "all") filterStatus.value = "all";
-      if(qBlocks && qBlocks.value.trim()) qBlocks.value = "";
-      if(fHasQ) fHasQ.checked = false;
-      if(fHasD) fHasD.checked = false;
-      if(fNoKey) fNoKey.checked = false;
-      if(fUnverified) fUnverified.checked = false;
-
-      STATE.showAllBlocks = false;
-      if(btnShowAllBlocks){
-        btnShowAllBlocks.setAttribute("aria-pressed","false");
-        btnShowAllBlocks.textContent = "Visa alla";
-        btnShowAllBlocks.title = "Visa hela listan utan sök";
-      }
-
-      renderBlockList(true);
-      try{ selectBlockByObject(newBlock); }catch{}
-
-      setMsg("ok", "Export klar: nytt block (utkast) skapat och valt.");
-    }
-
-    // ---------- events ----------
-    let tDeb;
-    function debounce(fn, ms){
-      return function(){
-        clearTimeout(tDeb);
-        const args = arguments;
-        tDeb = setTimeout(()=>fn.apply(null,args), ms);
-      };
-    }
-    const renderDeb = debounce(()=>{ renderBlockList(true); }, 180);
-
-    qBlocks.addEventListener("input", renderDeb);
-    filterStatus.addEventListener("change", ()=>renderBlockList(true));
-    fHasQ.addEventListener("change", ()=>renderBlockList(true));
-    fHasD.addEventListener("change", ()=>renderBlockList(true));
-    fNoKey.addEventListener("change", ()=>renderBlockList(true));
-    fUnverified.addEventListener("change", ()=>renderBlockList(true));
-
-    if(btnShowAllBlocks){
-      btnShowAllBlocks.addEventListener("click", ()=>{
-        const on = btnShowAllBlocks.getAttribute("aria-pressed") === "true";
-        const next = !on;
-        btnShowAllBlocks.setAttribute("aria-pressed", String(next));
-        btnShowAllBlocks.textContent = next ? "Sök först" : "Visa alla";
-        btnShowAllBlocks.title = next ? "Återgå till sök-läge" : "Visa hela listan utan sök";
-        STATE.showAllBlocks = next;
-        renderBlockList(true);
-      });
-    }
-
-    // =========================================================
-    // P0 FIX: Export-toggle (Visa/Dölj)
-    // =========================================================
-    btnToggleExport.addEventListener("click", ()=>{
-      const isOpen = btnToggleExport.getAttribute("aria-expanded") === "true";
-      const nextOpen = !isOpen;
-      btnToggleExport.setAttribute("aria-expanded", String(nextOpen));
-      btnToggleExport.textContent = nextOpen ? "Dölj" : "Visa";
-      exportBody.style.display = nextOpen ? "block" : "none";
-    });
-
-    btnToggleInfo.addEventListener("click", ()=>{
-      const showing = btnToggleInfo.dataset.on === "1";
-      btnToggleInfo.dataset.on = showing ? "0" : "1";
-      btnToggleInfo.textContent = showing ? "Visa info" : "Dölj info";
-      if(introBox) introBox.style.display = showing ? "none" : "block";
-      setMsg("", "");
-    });
-
-    const trainDeb = debounce(()=>{ renderTrainingHits(); }, 220);
-    qTrainModule.addEventListener("change", ()=>{ renderTrainingHits(); });
-    qTrainArea.addEventListener("input", trainDeb);
-    qTrainFree.addEventListener("input", trainDeb);
-
-    btnReloadTrainings.addEventListener("click", ()=>{
-      setMsg("", "");
-      safeInitTrainings(true);
-    });
-
-    btnExportTraining.addEventListener("click", ()=>{
-      setMsg("", "");
-      exportSelectedTraining();
-    });
-
-    btnVerify.addEventListener("click", ()=>{
-      setMsg("", "");
-      verifyBlock();
-    });
-
-    btnPrint.addEventListener("click", ()=>{
-      setMsg("", "");
-      printSelectedBlock();
-    });
-
-    btnPublish.addEventListener("click", ()=>{
-      setMsg("", "");
-      publishBlock();
-    });
-
-    btnSaveEdits.addEventListener("click", ()=>{
-      setMsg("", "");
-      saveEditsDraft();
-    });
-
-    navLogout.addEventListener("click", (e)=>{
-      e.preventDefault();
-      if(confirm("Logga ut?")){
-        try{ HRApp.logout(); }catch{ location.href = "../index.html"; }
-      }
-    });
-
-    // ---------- init ----------
-    function renderEmptySystemHint(){
-      clear(blockList);
-      const wrap = document.createElement("div");
-      wrap.className = "muted2";
-      wrap.textContent = "Sök för att visa block. (Inga block hittade ännu.)";
-      blockList.appendChild(wrap);
-
-      STATE.selectedBlock = "";
-      STATE.edit = null;
-      markDirty(false);
-      renderSelectedDetail();
-      updateStatePill();
-      setSelectionPill();
-      setTopbarEditing();
-      setVerifyPill();
-      updateActionEnablement();
-    }
-
-    function safeInitBlocks(){
-      const st = loadBlocksState();
-      if(st.corrupt){
-        STATE.lockReasons = [`Låst för säkerhet: ${BLOCKS_KEY} är trasig.`];
-        STATE.all = [];
-        STATE.visible = [];
-        applyLockFromState();
-        renderEmptySystemHint();
-        setMsg("err", `Låst för säkerhet: ${BLOCKS_KEY} är trasig.`);
-        return;
-      }
-
-      STATE.lockReasons = [];
-      applyLockFromState();
-
-      STATE.all = Array.isArray(st.blocks) ? st.blocks.map(normalizeBlock).filter(b=>b.blockId) : [];
-
-      if(STATE.all.length === 0){
-        renderEmptySystemHint();
-        return;
-      }
-
-      renderBlockList(true);
-      selectBlockByObject(null);
-    }
-
-    function safeInitTrainings(showToast){
-      const st = loadTrainingsState();
-      STATE.trainingsOk = !!st.ok;
-      STATE.trainingsCorrupt = !!st.corrupt;
-      STATE.trainingsMissing = !!st.missing;
-      STATE.trainings = Array.isArray(st.trainings) ? st.trainings : [];
-      STATE.selectedTrainingIndex = -1;
-
-      if(STATE.trainingsCorrupt){
-        if(showToast) setMsg("warn", `Utbildningar låsta: ${TRAININGS_KEY} är trasig.`);
-        setExportUiState();
-        renderTrainingHits();
-        return;
-      }
-
-      fillDatalists();
-      renderTrainingHits();
-      setExportUiState();
-      if(showToast) setMsg("ok", "Utbildningar uppdaterade.");
-    }
-
-    function bootstrap(){
-      setMsg("", "");
-      setWhoPill();
-      setModePill();
-
-      if(introBox) introBox.style.display = "none";
-      btnToggleInfo.dataset.on = "0";
-      btnToggleInfo.textContent = "Visa info";
-
-      // Export stängd vid start
-      btnToggleExport.setAttribute("aria-expanded","false");
-      btnToggleExport.textContent = "Visa";
-      if(exportBody) exportBody.style.display = "none";
-
-      if(btnShowAllBlocks){
-        btnShowAllBlocks.setAttribute("aria-pressed","false");
-        btnShowAllBlocks.textContent = "Visa alla";
-        btnShowAllBlocks.title = "Visa hela listan utan sök";
-      }
-      STATE.showAllBlocks = false;
-
-      markDirty(false);
-
-      if(isSystemAdmin){
-        setMsg("warn", "Read-only (Systemansvarig): Spara/verifiering/publicering/export är låsta. Utskrift är tillåten.");
-      }
-
-      safeInitBlocks();
-      safeInitTrainings(false);
-
-      updateStatePill();
-      setSelectionPill();
-      setTopbarEditing();
-      setVerifyPill();
-      renderSelectedDetail();
-      updateActionEnablement();
-    }
-
-    document.addEventListener("DOMContentLoaded", ()=>{
-      try{ bootstrap(); }
-      catch(e){
-        console.error(e);
-        setMsg("err", "Init-fel: kunde inte starta vyn säkert.");
-        renderEmptySystemHint();
-      }
-    });
-
-    window.__PKG_BLOCK__ = { STATE, BLOCKS_KEY, TRAININGS_KEY, CONTRACT_V1_STRICT };
-  })();
-  </script>
-
-</body>
-</html>
+          STATE
