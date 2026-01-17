@@ -19,17 +19,17 @@ Kontrakt (return-format):
 - { ok:true,  data, requestId? }
 - { ok:false, error:{ code, message, details? }, requestId? }
 
-PATCH v1.1 (SDK-CONTRACT-FIX + TRACE):
-- Om workern svarar med {ok:false,...} vid HTTP 200 => SDK returnerar ok:false (inte ok:true).
-- requestId hämtas både från headers och body (fallback).
-- Lägger på ofarliga client-trace headers (X-HR-Client / X-HR-SDK).
+PATCH v1.1.1 (LOAD/EXPORT-HARDENING):
+- Robust export även om tidigare HRWorkerSDK är låst (non-configurable/non-writable).
+- Sätter window.HRWorkerSDK via “merge/upgrade” istället för att fastna i defineProperty.
+- Safe console-trace (en rad) för att snabbt se att filen verkligen körs.
 ============================================================ */
 
 (function(){
   "use strict";
 
   const SDK = {};
-  SDK.VERSION = "1.1.0";
+  SDK.VERSION = "1.1.1";
 
   const STATE = {
     inited: false,
@@ -48,7 +48,6 @@ PATCH v1.1 (SDK-CONTRACT-FIX + TRACE):
 
   function normalizeBaseUrl(url){
     let u = trimStr(url);
-    // ta bort trailing slash
     while (u.endsWith("/")) u = u.slice(0, -1);
     return u;
   }
@@ -88,7 +87,6 @@ PATCH v1.1 (SDK-CONTRACT-FIX + TRACE):
   function getBodyRequestId(data){
     try{
       if (!isObj(data)) return "";
-      // vanligast: {requestId:"..."} eller {data:{requestId:"..."}}
       const a = trimStr(data.requestId || "");
       if (a) return a;
       if (isObj(data.data)){
@@ -154,7 +152,6 @@ PATCH v1.1 (SDK-CONTRACT-FIX + TRACE):
       const reqId = trimStr(headerReqId || bodyReqId || "");
 
       if (!r.ok){
-        // fail-closed: försök läsa standardfel
         const msg =
           (data && isObj(data) && data.error && isObj(data.error) && data.error.message)
             ? safeStr(data.error.message)
@@ -175,18 +172,15 @@ PATCH v1.1 (SDK-CONTRACT-FIX + TRACE):
 
       // HTTP ok
       if (data === null){
-        // accept tomt svar som ok (men data=null)
         return mkOk(null, reqId);
       }
 
-      // Viktigt: om workern redan använder {ok:true/false,...} ska vi respektera det
+      // Respektera worker-kontrakt {ok:true/false,...}
       if (isObj(data) && typeof data.ok === "boolean"){
         attachRequestId(data, reqId);
 
-        // Normalisera minimalt: om ok:true men saknar data-fält -> skapa data:null
         if (data.ok === true && !("data" in data)) data.data = null;
 
-        // Om ok:false men saknar error -> fail-closed ändå
         if (data.ok === false && !(data.error && isObj(data.error) && data.error.code)){
           data.error = data.error && isObj(data.error) ? data.error : {};
           if (!data.error.code) data.error.code = "ERROR";
@@ -195,7 +189,7 @@ PATCH v1.1 (SDK-CONTRACT-FIX + TRACE):
         return data;
       }
 
-      // Annars: legacy/raw-json => wrappar enligt SDK-kontraktet
+      // Legacy/raw json => wrap
       return mkOk(data, reqId);
 
     }catch(e){
@@ -266,7 +260,6 @@ PATCH v1.1 (SDK-CONTRACT-FIX + TRACE):
     const language = trimStr(p.language || "sv");
     const context = safeStr(p.context || "");
 
-    // fail-closed validering
     if (!(mode === "training" || mode === "document")){
       return mkErr("VALIDATION_ERROR", "mode måste vara 'training' eller 'document'", { mode });
     }
@@ -276,7 +269,7 @@ PATCH v1.1 (SDK-CONTRACT-FIX + TRACE):
     if (!language){
       return mkErr("VALIDATION_ERROR", "language saknas", {});
     }
-    // context får vara tomt, men begränsa storlek för stabilitet
+
     const ctx = (context.length > 4000) ? context.slice(0, 4000) : context;
 
     const url = STATE.baseUrl + "/v1/ai/generate";
@@ -305,16 +298,41 @@ PATCH v1.1 (SDK-CONTRACT-FIX + TRACE):
     });
   };
 
-  // export
-  try{
-    Object.defineProperty(window, "HRWorkerSDK", {
-      value: SDK,
-      writable: false,
-      configurable: false,
-      enumerable: true
-    });
-  }catch(_){
-    // fallback om defineProperty misslyckas
-    window.HRWorkerSDK = SDK;
-  }
+  // ---------- Export (hardened) ----------
+  (function exportSDK(){
+    // 1) Sätt/uppgradera via merge (fungerar även om tidigare property är låst)
+    try{
+      const existing = window.HRWorkerSDK;
+      if (existing && typeof existing === "object"){
+        // Uppgradera in-place (minskar risk att fastna på låst defineProperty)
+        existing.VERSION = SDK.VERSION;
+        existing.init = SDK.init;
+        existing.health = SDK.health;
+        existing.aiGenerate = SDK.aiGenerate;
+      }else{
+        window.HRWorkerSDK = SDK;
+      }
+    }catch(_){}
+
+    // 2) Försök låsa med defineProperty om det är möjligt (men CONFIGURABLE=true så uppdatering inte låser fast permanent)
+    try{
+      const desc = Object.getOwnPropertyDescriptor(window, "HRWorkerSDK");
+      const canDefine = !desc || desc.configurable === true;
+      if (canDefine){
+        Object.defineProperty(window, "HRWorkerSDK", {
+          value: window.HRWorkerSDK || SDK,
+          writable: false,
+          configurable: true,
+          enumerable: true
+        });
+      }
+    }catch(_){}
+
+    // 3) Minimal trace så du ser att filen verkligen körts (inte bara laddats)
+    try{
+      // En rad, ofarligt
+      console.info("[UI-04-WORKER-SDK] loaded v" + SDK.VERSION);
+    }catch(_){}
+  })();
+
 })();
