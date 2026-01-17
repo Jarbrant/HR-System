@@ -125,17 +125,23 @@ Policy (LÅST):
 
   // ---------- utils ----------
   function nowTs() { return Date.now(); }
-
-  function deepClone(obj) {
-    try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
-  }
-
+  function deepClone(obj) { try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; } }
   function normStr(v) { return String(v ?? "").trim(); }
 
   // PATCH: robust meta extraction (module/area/step) utan datamodelländring
-  function pickFirstStr(obj, keys) {
-    for (const k of (Array.isArray(keys) ? keys : [])) {
-      const v = obj && obj[k];
+  function getByPath(obj, path) {
+    const parts = String(path || "").split(".");
+    let cur = obj;
+    for (const p of parts) {
+      if (!cur || typeof cur !== "object") return undefined;
+      cur = cur[p];
+    }
+    return cur;
+  }
+
+  function pickFirstStr(obj, keysOrPaths) {
+    for (const k of (Array.isArray(keysOrPaths) ? keysOrPaths : [])) {
+      const v = (String(k).includes(".") ? getByPath(obj, k) : (obj && obj[k]));
       const s = String(v ?? "").trim();
       if (s) return s;
     }
@@ -153,9 +159,7 @@ Policy (LÅST):
     if (s) return s;
     const n = (typeof rawStep === "number") ? rawStep : NaN;
     if (!Number.isFinite(n)) return "";
-    // undvik "Steg 0" i UI
     const nn = (n <= 0) ? 1 : Math.floor(n);
-    // om titel redan har steg, låt infer ta det
     const inf = inferStepFromTitle(title);
     return inf || ("Steg " + String(nn));
   }
@@ -167,13 +171,46 @@ Policy (LÅST):
       const k = String(it && it.kind ? it.kind : "document");
       if (k === "question") {
         q++;
-        // "saknar facit" – tolerant: answerKey eller answerKeyObj.correctChoiceId
         const ak = normStr(it && (it.answerKey || (it.answerKeyObj && it.answerKeyObj.correctChoiceId)));
         if (!ak) missingKey++;
       } else if (k === "task") t++;
       else d++;
     }
     return { q, d, t, missingKey, items: items.length };
+  }
+
+  function normalizeItem(raw) {
+    const it = raw && typeof raw === "object" ? raw : {};
+    const kind = String(it.kind || "document");
+    if (kind === "question") {
+      return {
+        kind: "question",
+        questionId: normStr(it.questionId) || normStr(it.id) || "",
+        text: normStr(it.text) || "",
+        requiresAnswer: it.requiresAnswer !== false,
+        answerType: normStr(it.answerType) || "choice",
+        options: Array.isArray(it.options) ? it.options.map((x) => normStr(x)).filter(Boolean) : [],
+        answerKey: normStr(it.answerKey) || "",
+        choices: Array.isArray(it.choices) ? it.choices : undefined,
+        answerKeyObj: it.answerKeyObj && typeof it.answerKeyObj === "object" ? it.answerKeyObj : undefined,
+      };
+    }
+    if (kind === "task") {
+      return {
+        kind: "task",
+        taskId: normStr(it.taskId) || "",
+        text: normStr(it.text) || "",
+        instruction: normStr(it.instruction) || "",
+        deliverable: normStr(it.deliverable) || "",
+        requiresDone: it.requiresDone !== false,
+        answerType: normStr(it.answerType) || "checkbox",
+      };
+    }
+    return {
+      kind: "document",
+      text: normStr(it.text) || "",
+      requiresSign: !!it.requiresSign,
+    };
   }
 
   function normalizeBlock(raw) {
@@ -194,44 +231,6 @@ Policy (LÅST):
     };
     out.__comp = countComposition(out);
     return out;
-  }
-
-  function normalizeItem(raw) {
-    const it = raw && typeof raw === "object" ? raw : {};
-    const kind = String(it.kind || "document");
-    if (kind === "question") {
-      // Accept: {options:[...], answerKey:"..."} OR {choices:[{id,text}], answerKeyObj:{correctChoiceId,rationale}}
-      const q = {
-        kind: "question",
-        questionId: normStr(it.questionId) || normStr(it.id) || "",
-        text: normStr(it.text) || "",
-        requiresAnswer: it.requiresAnswer !== false,
-        answerType: normStr(it.answerType) || "choice",
-        options: Array.isArray(it.options) ? it.options.map((x) => normStr(x)).filter(Boolean) : [],
-        answerKey: normStr(it.answerKey) || "",
-        // legacy strict fields (if present)
-        choices: Array.isArray(it.choices) ? it.choices : undefined,
-        answerKeyObj: it.answerKeyObj && typeof it.answerKeyObj === "object" ? it.answerKeyObj : undefined,
-      };
-      return q;
-    }
-    if (kind === "task") {
-      return {
-        kind: "task",
-        taskId: normStr(it.taskId) || "",
-        text: normStr(it.text) || "",
-        instruction: normStr(it.instruction) || "",
-        deliverable: normStr(it.deliverable) || "",
-        requiresDone: it.requiresDone !== false,
-        answerType: normStr(it.answerType) || "checkbox",
-      };
-    }
-    // document
-    return {
-      kind: "document",
-      text: normStr(it.text) || "",
-      requiresSign: !!it.requiresSign,
-    };
   }
 
   function buildVisibleBlocks() {
@@ -258,14 +257,7 @@ Policy (LÅST):
       });
     }
 
-    // if user clicked "Visa alla"
-    if (STATE.discoveryActive && !q) {
-      // show all
-    }
-
-    // stable sort: updated desc
     arr.sort((a, b) => (Number(b.updatedAt || 0) - Number(a.updatedAt || 0)));
-
     STATE.visibleBlocks = arr;
   }
 
@@ -306,7 +298,6 @@ Policy (LÅST):
     if (!STATE.edited) return [];
     if (!contract) return [];
 
-    // We pass normalizeItem + emoji mapper
     const emojiForKind = function (k) {
       const s = String(k || "");
       if (s === "question") return "❓";
@@ -324,21 +315,18 @@ Policy (LÅST):
 
   function updateRightPanel() {
     const reasons = computeValidationReasonsForSelected();
-
-    // verify pill
     const ok = reasons.length === 0;
+
     try {
       if (render && typeof render.setVerifyPill === "function") {
         render.setVerifyPill(ok ? "Verifiering: OK" : `Verifiering: ${reasons.length} problem`, ok ? "verifyPill ok" : "verifyPill warn", !!STATE.selectedId);
       }
     } catch (_) {}
 
-    // enable buttons
     if (DOM.btnPrint) DOM.btnPrint.disabled = !STATE.selectedId;
     if (DOM.btnVerify) DOM.btnVerify.disabled = !(STATE.selectedId && STATE.canWrite && ok);
     if (DOM.btnPublish) DOM.btnPublish.disabled = !(STATE.selectedId && STATE.canWrite && ok);
 
-    // render selected
     if (render && typeof render.renderSelectedDetail === "function") {
       render.renderSelectedDetail({
         block: STATE.edited,
@@ -357,8 +345,8 @@ Policy (LÅST):
             next.__comp = countComposition(next);
             STATE.edited = next;
             setDirty(true);
-            refreshLeftList(); // composition counts
-            updateRightPanel(); // re-validate
+            refreshLeftList();
+            updateRightPanel();
           } catch (e) {
             setMsgSafe(`Kunde inte uppdatera item: ${String((e && e.message) || e)}`);
           }
@@ -379,14 +367,13 @@ Policy (LÅST):
     setMsgSafe(STATE.selectedId ? "Klart. Valt block laddat." : "Klart. Välj ett block.");
   }
 
-  // ---------- persistence ----------
   function persistEditedBlock() {
     if (!STATE.edited || !STATE.selectedId) return { ok: false, err: "Inget block valt." };
     const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
     if (idx < 0) return { ok: false, err: "Block hittades inte i listan." };
 
     const next = deepClone(STATE.edited);
-    next.status = "draft"; // spara ändringar -> draft (enligt UI-text)
+    next.status = "draft";
     next.updatedAt = nowTs();
     next.__comp = countComposition(next);
 
@@ -394,7 +381,6 @@ Policy (LÅST):
     const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
     if (!save.ok) return save;
 
-    // refresh selection from source-of-truth array
     STATE.selected = STATE.allBlocks[idx];
     STATE.edited = deepClone(STATE.selected);
     setDirty(false);
@@ -438,7 +424,7 @@ Policy (LÅST):
     return persistEditedBlock();
   }
 
-  // ---------- trainings (export) - tolerant ----------
+  // ---------- trainings (export) ----------
   function loadTrainings() {
     const r = store.loadTrainingsState();
     STATE.trainingsCorrupt = !r.ok && !!r.corrupt;
@@ -448,21 +434,46 @@ Policy (LÅST):
   }
 
   function extractTrainingMeta(t, idx) {
-    // Titel (tolerant)
     const title = normStr(t && (t.title || t.name)) || `Utbildning ${idx + 1}`;
 
-    // PATCH: plocka från flera möjliga fält (utan datamodelländring)
-    const module = pickFirstStr(t, ["module", "moduleName", "moduleTitle", "moduleId"]) || "";
-    const area = pickFirstStr(t, ["area", "areaName", "topic", "category"]) || "";
+    // PATCH: fler fält + nested (meta/ctx/context)
+    const module = pickFirstStr(t, [
+      // flat
+      "module","modul","moduleName","moduleTitle","moduleLabel","moduleText",
+      "moduleId","modId","moduleKey","moduleCode","moduleSlug","moduleRef","moduleRefId",
+      "moduleNo","moduleIndex","scopeModule","trainingModule",
+      // nested
+      "meta.module","meta.moduleName","meta.moduleTitle","meta.moduleLabel","meta.moduleId","meta.moduleKey",
+      "ctx.module","ctx.moduleName","ctx.moduleTitle","ctx.moduleId",
+      "context.module","context.moduleName","context.moduleTitle","context.moduleId",
+      "scope.module","scope.moduleName","scope.moduleId",
+    ]) || "";
 
-    const rawStep = (t && (t.step || t.stepLabel || t.stepId || t.stepNo || t.stepIndex)) ?? "";
+    const area = pickFirstStr(t, [
+      "area","areaName","topic","category","areaTitle","areaLabel",
+      "meta.area","meta.areaName","meta.topic","ctx.area","ctx.areaName",
+      "context.area","context.areaName",
+    ]) || "";
+
+    const rawStep = (
+      pickFirstStr(t, ["step","stepLabel","stepId","stepNo","stepIndex","meta.step","meta.stepId","ctx.step","context.step"]) ||
+      (t && (t.step || t.stepId || t.stepNo || t.stepIndex)) || ""
+    );
     const step = normalizeStepValue(rawStep, title) || inferStepFromTitle(title) || "";
 
     const items = extractTrainingItems(t);
+
+    // Om modul saknas helt men det finns ett moduleId-liknande fält: visa det hellre än —
+    let moduleFinal = module;
+    if (!moduleFinal) {
+      const mid = pickFirstStr(t, ["moduleId","modId","moduleKey","meta.moduleId","meta.moduleKey","ctx.moduleId","context.moduleId"]);
+      if (mid) moduleFinal = String(mid).trim(); // hellre ID än tomt
+    }
+
     return {
       index: idx,
       title,
-      module,
+      module: moduleFinal,
       area,
       step,
       itemsCount: items.length,
@@ -471,7 +482,6 @@ Policy (LÅST):
   }
 
   function extractTrainingItems(t) {
-    // Tolerant: items directly OR blocks[].items OR content blocks
     if (t && Array.isArray(t.items)) return t.items.map(normalizeItem);
     if (t && Array.isArray(t.blocks)) {
       const flat = [];
@@ -484,13 +494,12 @@ Policy (LÅST):
   }
 
   function refreshTrainingUI() {
-    // build module dropdown (PATCH: använd tolerant meta-plock)
+    // module dropdown (tolerant)
     if (DOM.qTrainModule) {
       const mods = new Set();
       for (let i = 0; i < STATE.trainings.length; i++) {
-        const tr = STATE.trainings[i];
-        const m = pickFirstStr(tr, ["module", "moduleName", "moduleTitle", "moduleId"]);
-        if (m) mods.add(m);
+        const meta = extractTrainingMeta(STATE.trainings[i], i);
+        if (meta.module) mods.add(meta.module);
       }
       const cur = DOM.qTrainModule.value || "";
       DOM.qTrainModule.innerHTML = "";
@@ -507,14 +516,13 @@ Policy (LÅST):
       DOM.qTrainModule.value = cur;
     }
 
-    // build area datalist (PATCH: tolerant)
+    // area datalist (tolerant)
     if (DOM.dlTrainAreas) {
       DOM.dlTrainAreas.innerHTML = "";
       const areas = new Set();
       for (let i = 0; i < STATE.trainings.length; i++) {
-        const tr = STATE.trainings[i];
-        const a = pickFirstStr(tr, ["area", "areaName", "topic", "category"]);
-        if (a) areas.add(a);
+        const meta = extractTrainingMeta(STATE.trainings[i], i);
+        if (meta.area) areas.add(meta.area);
       }
       Array.from(areas).sort().slice(0, 200).forEach((a) => {
         const o = document.createElement("option");
@@ -530,8 +538,7 @@ Policy (LÅST):
 
     const hits = [];
     for (let i = 0; i < STATE.trainings.length; i++) {
-      const tr = STATE.trainings[i];
-      const meta = extractTrainingMeta(tr, i);
+      const meta = extractTrainingMeta(STATE.trainings[i], i);
       if (m && meta.module !== m) continue;
       if (a && !meta.area.toLowerCase().includes(a)) continue;
       if (f && !meta.title.toLowerCase().includes(f)) continue;
@@ -557,7 +564,6 @@ Policy (LÅST):
       });
     }
 
-    // hint
     if (render && typeof render.setTrainExportHint === "function") {
       render.setTrainExportHint(STATE.canWrite ? "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)." : "Read-only: du kan inte exportera i SYSTEM_ADMIN-läge.");
     }
@@ -593,12 +599,11 @@ Policy (LÅST):
     const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
     if (!save.ok) { setMsgSafe(`Kunde inte exportera: ${save.err || "okänt fel"}`); return; }
 
-    STATE.discoveryActive = true; // så användaren ser blocket
+    STATE.discoveryActive = true;
     refreshLeftList();
     setMsgSafe("Export klar. Sök eller tryck “Visa alla” och välj det nya blocket.");
   }
 
-  // ---------- print ----------
   function printSelected() {
     if (!STATE.selectedId || !STATE.edited) return;
     const w = window.open("", "_blank");
@@ -617,7 +622,6 @@ Policy (LÅST):
     w.print();
   }
 
-  // ---------- wiring ----------
   function wireEvents() {
     if (DOM.btnToggleInfo) {
       DOM.btnToggleInfo.addEventListener("click", function () {
@@ -666,11 +670,8 @@ Policy (LÅST):
       });
     }
 
-    if (DOM.btnPrint) {
-      DOM.btnPrint.addEventListener("click", printSelected);
-    }
+    if (DOM.btnPrint) DOM.btnPrint.addEventListener("click", printSelected);
 
-    // Export toggle
     if (DOM.btnToggleExport && DOM.exportBody) {
       DOM.btnToggleExport.addEventListener("click", function () {
         STATE.exportOpen = !STATE.exportOpen;
@@ -680,7 +681,6 @@ Policy (LÅST):
       });
     }
 
-    // Export filters
     [DOM.qTrainModule, DOM.qTrainArea, DOM.qTrainFree].filter(Boolean).forEach((el) => {
       el.addEventListener("input", refreshTrainingUI);
       el.addEventListener("change", refreshTrainingUI);
@@ -694,16 +694,12 @@ Policy (LÅST):
       });
     }
 
-    if (DOM.btnExportTraining) {
-      DOM.btnExportTraining.addEventListener("click", exportSelectedTraining);
-    }
+    if (DOM.btnExportTraining) DOM.btnExportTraining.addEventListener("click", exportSelectedTraining);
   }
 
   function boot() {
-    // Always set message quickly so HTML watchdog won't fire
     setMsgSafe("Startar kontrollrummet…");
 
-    // dependency sanity
     const missing = [];
     if (!store) missing.push("03-store.js");
     if (!render) missing.push("05-render.js");
@@ -715,13 +711,11 @@ Policy (LÅST):
       return;
     }
 
-    // role
     const who = (core && typeof core.getRole === "function") ? core.getRole() : { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
     STATE.role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
     STATE.empNo = String(who.empNo || "");
     STATE.canWrite = !!who.canWrite;
 
-    // pills
     try {
       render.setWhoPill(`Inloggad: ${STATE.empNo || "—"} (${STATE.role})`);
       render.setModePill(STATE.canWrite ? "Edit: på" : "Read-only", STATE.canWrite ? "pill ok" : "pill warn");
@@ -731,12 +725,10 @@ Policy (LÅST):
       render.setTopEditing("—", false);
     } catch (_) {}
 
-    // load blocks
     const r = store.loadBlocksState();
     if (!r.ok && r.corrupt) {
       showLock([store.lockReasonFor(store.BLOCKS_KEY), "Åtgärd: rensa/återställ AO-0XX_BLOCKS_V1 (korrupt JSON)."]);
       setMsgSafe("Låst (fail-closed): Blockbank är trasig.");
-      // disable actions
       if (DOM.btnVerify) DOM.btnVerify.disabled = true;
       if (DOM.btnPublish) DOM.btnPublish.disabled = true;
       if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = true;
@@ -744,41 +736,31 @@ Policy (LÅST):
     }
 
     STATE.allBlocks = (r.blocks || []).map(normalizeBlock);
-    STATE.discoveryActive = false; // search-first
+    STATE.discoveryActive = false;
     refreshLeftList();
 
-    // trainings load
     loadTrainings();
     refreshTrainingUI();
 
-    // wire
     wireEvents();
 
     setMsgSafe("Klart. Sök eller tryck “Visa alla”.");
     STATE.ready = true;
   }
 
-  // Boot safely
   try {
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", boot);
-    } else {
-      boot();
-    }
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
+    else boot();
   } catch (e) {
     setMsgSafe(`JS-fel vid start: ${String((e && e.message) || e)}`);
   }
 
-  NS.page = {
-    boot: boot,
-    state: STATE,
-  };
+  NS.page = { boot: boot, state: STATE };
 
   /* ============================================================
      ÄNDRINGSLOGG (≤8)
-     - FIX: extractTrainingMeta plockar module/area/step från flera möjliga fält (tolerant)
-     - FIX: inferStepFromTitle (”Steg 2” i titel) används som fallback
-     - FIX: refreshTrainingUI bygger modul/område-listor tolerant (inte bara tr.module/tr.area)
-     - KEEP: ingen ny storage-key/datamodell; endast UI-render påverkas
+     - FIX: modul/område/step hämtas från fler fält + nested meta/ctx/context
+     - FIX: modul fallback visar ID (moduleId/moduleKey) om label saknas
+     - KEEP: ingen ny storage-key/datamodell; endast läsning/rendering påverkas
   ============================================================ */
 })();
