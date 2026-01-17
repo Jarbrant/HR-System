@@ -896,13 +896,9 @@ POLICY (LÅST):
     function looksAutoGoals(goalsText){
       const g = trimStr(goalsText);
       if (!g) return false;
-
-      // v2.6.4: auto-mål börjar med Modul/Område och innehåller Kapitel + Steg-rad
-      // Tolerant: stöder även äldre format som började direkt med "Kapitel:".
       const hasKapitel = (g.indexOf("Kapitel: ") !== -1);
       const hasSteg = (/\nSteg\s+[1-5]\s+–\s+fokus:/i).test("\n" + g);
       if (hasKapitel && hasSteg) return true;
-
       return false;
     }
 
@@ -921,7 +917,6 @@ POLICY (LÅST):
 
     // ============================================================
     // AO-TRAININGS-AI-PROMPT-CONTRACT-01: PROMPT BLUEPRINTS (CONST)
-    // - OBS: Steg 1–5 + Kapitel används som kursmotor.
     // ============================================================
 
     const ANSWERKEY_SPEC_SHORT = [
@@ -941,7 +936,6 @@ POLICY (LÅST):
       "- Max 2 frågor med samma primära tag."
     ].join(" ");
 
-    // Minimal, stabil blueprint per modul.
     const MODULE_BLUEPRINTS = {
       grundkompetens: {
         goals: [
@@ -1418,7 +1412,6 @@ POLICY (LÅST):
     }
 
     function normalizeAll(list){
-      // FIX(v2.6.2): dedupe ids (korrupt/legacy storage kan ha dubletter -> “kan inte öppna”)
       const arr = asArray(list);
       const out = [];
       const seen = Object.create(null);
@@ -1445,7 +1438,6 @@ POLICY (LÅST):
     }
 
     function canCoursePlanAuto(modLabel, areaLabel, chapter, step){
-      // Fail-closed: modul+område krävs för att generera titel+mål konsekvent
       if (!trimStr(modLabel)) return false;
       if (!trimStr(areaLabel)) return false;
       if (!trimStr(chapter) || COURSE_TITLES_6.indexOf(chapter) === -1) return false;
@@ -1469,7 +1461,6 @@ POLICY (LÅST):
       if (!trimStr(t.title)) probs.push("Saknar titel");
       if (t.status === "published" && (!t.blocks || t.blocks.length === 0)) probs.push("Publicerad utan block");
 
-      // Kursplan-format (P1): flagga legacy/mismatch när modul+område finns
       if (trimStr(t.mod) && trimStr(t.area) && trimStr(t.title)){
         const p = parseCourseFromTitle(t.title);
         if (!p.chapter || !p.step) probs.push("Titel saknar kursplan");
@@ -1604,8 +1595,6 @@ POLICY (LÅST):
           const chapter = getCurrentCourseChapter();
           const step = getCurrentCourseStep();
           const planOk = canCoursePlanAuto($("mod") ? $("mod").value : "", $("area") ? $("area").value : "", chapter, step);
-
-          // Fail-closed: AI kräver modul+område+kapitel+steg + kursplan aktiverad (touched eller befintlig titel)
           const planActive = courseReadyByTouchOrExisting();
           btnGen.disabled = !(can && modOk && areaOk && planOk && planActive);
         }
@@ -1765,7 +1754,6 @@ POLICY (LÅST):
       const stepHint = getAreaStepHint(modId, areaLabel, s);
       const chapFocus = CHAPTER_FOCUS[c] ? CHAPTER_FOCUS[c] : CHAPTER_FOCUS["Introduktion"];
 
-      // P0(v2.6.4): Mål ska alltid börja med Modul + Område.
       const lines = [];
       lines.push("Modul: " + (trimStr(modLabel) ? trimStr(modLabel) : "—"));
       lines.push("Område: " + (trimStr(areaLabel) ? trimStr(areaLabel) : "—"));
@@ -1787,8 +1775,6 @@ POLICY (LÅST):
     }
 
     function applyCoursePlan(reason, opts){
-      // GUARD: auto-write av title/goals kräver courseTouched (eller force via AI).
-      // Preview-only används vid mod/area så att kursplan inte skriver data bara pga defaults.
       try{
         const t = window.STATE.edit;
         if (!t) { syncTitleDisplay("—"); return; }
@@ -1811,14 +1797,11 @@ POLICY (LÅST):
         const curParsed = parseCourseFromTitle(curTitle);
         const isLegacyTitle = (!!trimStr(curTitle) && !curParsed.chapter && !curParsed.step);
 
-        // Always update preview field if we can form something reasonable.
         syncTitleDisplay(composed);
-
         if (!ok) return;
 
         const canWriteByActivation = courseReadyByTouchOrExisting();
         const allowWrite = forceWrite || (canWriteByActivation && !previewOnly);
-
         if (!allowWrite) return;
 
         const mayOverwriteTitle =
@@ -1831,7 +1814,6 @@ POLICY (LÅST):
           window.STATE._autoTitleSig = composedSig;
         }
 
-        // goals: skriv endast om tomt eller tidigare auto (vi rör inte manuella mål)
         const modId = getModuleIdByLabel(modLabel);
         const nextGoals = buildAutoGoalsText(modLabel, modId, areaLabel, chapter, step);
         const nextSig = stableHash(nextGoals);
@@ -1851,9 +1833,7 @@ POLICY (LÅST):
           }
         }
 
-        if (reason) {
-          // reason används bara för spårning/logik. Inga extra side effects här.
-        }
+        if (reason) { /* no-op */ }
       }catch(_){}
     }
 
@@ -1879,7 +1859,6 @@ POLICY (LÅST):
         if ($("goalsLevel")) $("goalsLevel").value = t ? safeStr(t.goalsLevel || "normal") : "normal";
         if ($("goals")) $("goals").value = t ? safeStr(t.goals) : "";
 
-        // Återställ Kapitel/Steg från title (om den matchar formatet)
         const parsed = t ? parseCourseFromTitle(t.title) : { chapter:"", step:"" };
 
         if ($("courseTitle")){
@@ -2173,6 +2152,10 @@ POLICY (LÅST):
       return null;
     }
 
+    // =========================
+    // INIT / CRUD
+    // =========================
+
     window.HRTrainingsInit = function(){
       try{
         if (!window.HRApp || !window.HR_CONFIG){
@@ -2257,7 +2240,7 @@ POLICY (LÅST):
 
       window.STATE._autoGoalsSig = "";
       window.STATE._autoTitleSig = "";
-      window.STATE.courseTouched = false; // GUARD(v2.6.3): kräver aktivt val av kapitel/steg för auto-write
+      window.STATE.courseTouched = false;
 
       applyFilters();
       window.setDirty(true);
@@ -2271,15 +2254,12 @@ POLICY (LÅST):
       window.STATE.selectedId = t.id;
       window.STATE.edit = t;
 
-      // auto-signaturer endast när data verkligen är "auto"
       window.STATE._autoTitleSig = isCourseTitleExactMatch(t) ? stableHash(safeStr(t.title || "")) : "";
       window.STATE._autoGoalsSig = looksAutoGoals(safeStr(t.goals || "")) ? stableHash(safeStr(t.goals || "")) : "";
 
-      // courseTouched: true om utbildningen redan har kursplan i titeln, annars false
       const p = parseCourseFromTitle(safeStr(t.title || ""));
       window.STATE.courseTouched = !!(p && p.chapter && p.step);
 
-      // Preview bara vid select om den saknar kursplan (undvik tysta writes)
       if (window.STATE.courseTouched){
         applyCoursePlan("select", { previewOnly:false, forceWrite:false });
       } else {
@@ -2312,7 +2292,6 @@ POLICY (LÅST):
       window.STATE._autoTitleSig = (e && isCourseTitleExactMatch(e)) ? stableHash(safeStr(e.title || "")) : "";
       window.STATE._autoGoalsSig = (e && looksAutoGoals(safeStr(e.goals || ""))) ? stableHash(safeStr(e.goals || "")) : "";
 
-      // reset courseTouched beroende på kursplan i titeln
       const p = e ? parseCourseFromTitle(safeStr(e.title || "")) : { chapter:"", step:"" };
       window.STATE.courseTouched = !!(p && p.chapter && p.step);
 
@@ -2356,7 +2335,6 @@ POLICY (LÅST):
       window.STATE._autoTitleSig = isCourseTitleExactMatch(window.STATE.edit) ? stableHash(safeStr(window.STATE.edit.title || "")) : "";
       window.STATE._autoGoalsSig = looksAutoGoals(safeStr(window.STATE.edit.goals || "")) ? stableHash(safeStr(window.STATE.edit.goals || "")) : "";
 
-      // om titeln nu är kursplan, anse kursplan aktiv
       const p = parseCourseFromTitle(safeStr(window.STATE.edit.title || ""));
       if (p && p.chapter && p.step) window.STATE.courseTouched = true;
 
@@ -2427,6 +2405,10 @@ POLICY (LÅST):
       }
     };
 
+    // =========================
+    // SDK / AI helpers (oförändrat från din senaste sanning)
+    // =========================
+
     function pickBlocksFromSDKData(data){
       try{
         if (!data) return [];
@@ -2482,7 +2464,7 @@ POLICY (LÅST):
       lines.push("KAPITEL_FOKUS: " + chapFocus);
 
       lines.push("STEG_1_5: " + step);
-      lines.push("STEG_FOKUS: " + stepFocus); // ADD(v2.6.2): explicit enligt AO
+      lines.push("STEG_FOKUS: " + stepFocus);
       lines.push("STEG_DEF: " + stepDef);
       if (trimStr(stepHint)) lines.push("STEG_OMRADE_HINT: " + stepHint);
 
@@ -2592,13 +2574,9 @@ POLICY (LÅST):
           return;
         }
 
-        // Force: Generera aktiverar kursplanen (så titel/mål kan auto-skrivas om de är tomma/auto).
         window.STATE.courseTouched = true;
-
-        // Kursplan apply innan AI (så att title/goals är konsekventa)
         applyCoursePlan("ai", { previewOnly:false, forceWrite:true });
 
-        // Fail-closed: säkerställ att kursplanen är giltig innan AI
         const chapter = getCurrentCourseChapter();
         const step = getCurrentCourseStep();
         if (!canCoursePlanAuto(trimStr(t.mod), trimStr(t.area), chapter, step) || !courseReadyByTouchOrExisting()){
@@ -2661,7 +2639,6 @@ POLICY (LÅST):
             if (tags.length) nb.meta.tags = tags.slice(0,6);
           }
 
-          // Kursplans-känsla: prefixa rubrik med Kapitel + Steg om den saknar det
           const curTitle = trimStr(nb.title);
           const prefix = chapterNow + " • Steg " + stepNow + ": ";
           if (curTitle){
@@ -2728,6 +2705,10 @@ POLICY (LÅST):
       }
     };
 
+    // =========================
+    // EVENTS / UI binding
+    // =========================
+
     function bindEvents(){
       if ($("q")){
         $("q").addEventListener("input", ()=>{
@@ -2764,7 +2745,6 @@ POLICY (LÅST):
       });
 
       if ($("btnClear")) $("btnClear").addEventListener("click", ()=>{
-        // FIX(v2.6.2): “Rensa” ska även släppa problem-filter för att undvika “fastnar i listläge”.
         if ($("q")) $("q").value = "";
         if ($("fStatus")) $("fStatus").value = "";
         if ($("onlyProblems")) $("onlyProblems").checked = false;
@@ -2794,10 +2774,8 @@ POLICY (LÅST):
         if (window.STATE.edit){
           window.STATE.edit.mod = "";
           window.STATE.edit.area = "";
-          // reset touch: ny modul/område kräver aktiv kursplan
           window.STATE.courseTouched = false;
 
-          // preview only
           applyCoursePlanPreview("clear");
           window.setDirty(true);
         }
@@ -2828,97 +2806,101 @@ POLICY (LÅST):
             }
             updateSubjectCallout();
 
-            // LÅS(v2.6.3): modul ska inte trigga auto-write av mål/titel (preview-only)
-            applyCoursePlanPreview("mod");
+            // LÅS(v2.6.3): modul ska inte trigga auto-write av mål/titel (preview-only om kursplan ej aktiv)
+            if (courseReadyByTouchOrExisting()){
+              applyCoursePlan("mod", { previewOnly:false, forceWrite:false });
+            } else {
+              applyCoursePlanPreview("mod");
+            }
 
-            applyFilters();
-            window.renderList();
-            window.renderEditor();
+            window.syncButtons();
+            refreshUI();
+            return;
           }
 
           if (id === "area"){
             updateSubjectCallout();
 
-            // LÅS(v2.6.3): område ska inte trigga auto-write av mål/titel (preview-only)
-            applyCoursePlanPreview("area");
+            if (courseReadyByTouchOrExisting()){
+              applyCoursePlan("area", { previewOnly:false, forceWrite:false });
+            } else {
+              applyCoursePlanPreview("area");
+            }
 
-            applyFilters();
-            window.renderList();
-            window.renderEditor();
+            window.syncButtons();
+            refreshUI();
+            return;
           }
+
+          if (id === "goals"){
+            // Manuella mål respekteras. (Auto-write skyddas av _autoGoalsSig och courseTouched.)
+            window.syncButtons();
+            window.renderDebug();
+            return;
+          }
+
+          window.syncButtons();
+          window.renderDebug();
         });
       }
 
+      // Persistenta fält
       bindField("mod", "mod");
       bindField("area", "area");
       bindField("goalsLevel", "goalsLevel");
       bindField("goals", "goals");
 
-      // Kursplan: Kapitel + Steg driver titel + mål (och aktiverar courseTouched)
-      if ($("courseTitle")){
-        $("courseTitle").addEventListener("change", ()=>{
-          if (window.STATE._rendering) return;
-          if (!window.STATE.edit) return;
-          window.STATE.courseTouched = true;
-          applyCoursePlan("chapter", { previewOnly:false, forceWrite:false });
-          window.setDirty(true);
-          applyFilters();
-          refreshUI();
-        });
-      }
-      if ($("courseStep")){
-        $("courseStep").addEventListener("change", ()=>{
-          if (window.STATE._rendering) return;
-          if (!window.STATE.edit) return;
-          window.STATE.courseTouched = true;
-          applyCoursePlan("step", { previewOnly:false, forceWrite:false });
-          window.setDirty(true);
-          applyFilters();
-          refreshUI();
-        });
-      }
+      // Kursplan: kapitel + steg (ej egen datamodell — påverkar title/goals via compose/parse)
+      if ($("courseTitle")) $("courseTitle").addEventListener("change", ()=>{
+        if (window.STATE._rendering) return;
+        if (!window.STATE.edit) return;
+        window.STATE.courseTouched = true;
+        applyCoursePlan("chapter", { previewOnly:false, forceWrite:false });
+        window.setDirty(true);
+        refreshUI();
+      });
 
-      if ($("aiContent")){
-        $("aiContent").addEventListener("change", ()=>{
-          syncQuestionControlsVisibility();
-        });
-      }
+      if ($("courseStep")) $("courseStep").addEventListener("change", ()=>{
+        if (window.STATE._rendering) return;
+        if (!window.STATE.edit) return;
+        window.STATE.courseTouched = true;
+        applyCoursePlan("step", { previewOnly:false, forceWrite:false });
+        window.setDirty(true);
+        refreshUI();
+      });
+
+      // AI UI (ej persisterat i training-objektet)
+      if ($("aiContent")) $("aiContent").addEventListener("change", ()=>{
+        syncQuestionControlsVisibility();
+        window.syncButtons();
+      });
+
+      if ($("btnTestAI")) $("btnTestAI").addEventListener("click", ()=> window.HRTrainingsTestWorker());
+      if ($("btnGenAI")) $("btnGenAI").addEventListener("click", ()=> window.HRTrainingsGenerateAI());
 
       if ($("btnRevert")) $("btnRevert").addEventListener("click", ()=> window.HRTrainingsRevert());
       if ($("btnSaveDraft")) $("btnSaveDraft").addEventListener("click", ()=> window.HRTrainingsSave("draft"));
       if ($("btnSavePublish")) $("btnSavePublish").addEventListener("click", ()=> window.HRTrainingsSave("publish"));
 
-      if ($("btnTestAI")) $("btnTestAI").addEventListener("click", ()=> window.HRTrainingsTestWorker());
-      if ($("btnGenAI")) $("btnGenAI").addEventListener("click", ()=> window.HRTrainingsGenerateAI());
-
-      if ($("btnLogout")){
-        $("btnLogout").addEventListener("click", ()=>{
-          try{
-            if (window.HRApp && typeof window.HRApp.logout === "function"){
-              window.HRApp.logout();
-              return;
-            }
-          }catch(_){}
-          try{ sessionStorage.removeItem(KEY_AUTH); }catch(_){}
-          try{ localStorage.removeItem(KEY_AUTH); }catch(_){}
-          try{ location.href = "../UI/UI-01-SKELETON.html?err=logout"; }catch(_){}
-        });
-      }
+      if ($("btnLogout")) $("btnLogout").addEventListener("click", ()=>{
+        try{
+          if (window.HRApp && typeof window.HRApp.logout === "function"){
+            window.HRApp.logout();
+          } else {
+            try{ sessionStorage.removeItem(KEY_AUTH); }catch(_){}
+          }
+        }catch(_){}
+        try{ location.href = "../index.html"; }catch(__){}
+      });
     }
 
-    document.addEventListener("DOMContentLoaded", function(){
-      window.HRTrainingsInit();
+    // =========================
+    // BOOT
+    // =========================
+    document.addEventListener("DOMContentLoaded", ()=>{
+      try{ window.HRTrainingsInit(); }catch(_){}
     });
 
-    /* ============================================================
-       ÄNDRINGSLOGG (≤8) — v2.6.4
-       - ADD(P0): Mål auto-text börjar alltid med "Modul:" + "Område:" (tydlig rubrik).
-       - FIX(P1): looksAutoGoals uppdaterad för nya auto-målformatet (overwrite-skyddet blir stabilt).
-       - KEEP(P0): “courseTouched”-guard: modul/område skriver inte auto titel+mål pga defaults (preview-only).
-       - KEEP(P0): Generera kräver kursplan aktiv (touched eller befintlig kursplan i titeln) – fail-closed.
-       - KEEP(P0): STEG_FOKUS skickas till AI (Steg 1 ≠ Steg 2).
-       - KEEP: Fail-closed, inga nya keys/datamodell.
-    ============================================================ */
   })();
   </script>
 </body>
