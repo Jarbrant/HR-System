@@ -7,6 +7,10 @@ Policy (LÅST):
 - Inga nya storage-keys/datamodell
 - XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
+
+PATCH v1.0.1 (UI-wire förbättringar, ingen redesign):
+- Lägger till säkra callbacks till renderSelectedDetail: onPatchMeta, onAddItem, onRemoveItem, onMoveItem
+- Centraliserar “applyEditedBlockChange” så list + validering uppdateras stabilt
 ============================================================ */
 (function () {
   "use strict";
@@ -298,6 +302,26 @@ Policy (LÅST):
     }
   }
 
+  // ---------- central apply helper (stabil uppdatering) ----------
+  function applyEditedBlockChange(mutatorFn) {
+    if (!STATE.canWrite) return { ok: false, err: "Read-only." };
+    if (!STATE.edited) return { ok: false, err: "Inget block valt." };
+
+    try {
+      const cur = STATE.edited;
+      const nextDraft = deepClone(cur);
+      const mutated = mutatorFn ? mutatorFn(nextDraft) : nextDraft;
+      const next = normalizeBlock(Object.assign({}, mutated, { updatedAt: nowTs() }));
+      STATE.edited = next;
+      setDirty(true);
+      refreshLeftList();
+      updateRightPanel();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, err: String((e && e.message) || e) };
+    }
+  }
+
   function updateRightPanel() {
     const reasons = computeValidationReasonsForSelected();
 
@@ -324,24 +348,86 @@ Policy (LÅST):
         block: STATE.edited,
         canEdit: STATE.canWrite,
         validationReasons: reasons,
+
+        // item patch (befintlig)
         onPatchItem: function (idx, mutFn) {
           if (!STATE.canWrite) return;
           const cur = STATE.edited;
           if (!cur || !Array.isArray(cur.items)) return;
           if (idx < 0 || idx >= cur.items.length) return;
-          try {
-            const nextItems = cur.items.slice();
-            const nextIt = mutFn(nextItems[idx]);
-            nextItems[idx] = normalizeItem(nextIt);
-            const next = Object.assign({}, cur, { items: nextItems, updatedAt: nowTs() });
-            next.__comp = countComposition(next);
-            STATE.edited = next;
-            setDirty(true);
-            refreshLeftList(); // composition counts + list
-            updateRightPanel(); // re-validate + re-render
-          } catch (e) {
-            setMsgSafe(`Kunde inte uppdatera item: ${String((e && e.message) || e)}`);
-          }
+
+          applyEditedBlockChange(function (draft) {
+            const items = Array.isArray(draft.items) ? draft.items.slice() : [];
+            const nextIt = mutFn ? mutFn(items[idx]) : items[idx];
+            items[idx] = normalizeItem(nextIt);
+            draft.items = items;
+            return draft;
+          });
+        },
+
+        // meta patch (NY)
+        onPatchMeta: function (mutFn) {
+          if (!STATE.canWrite) return;
+          applyEditedBlockChange(function (draft) {
+            const next = mutFn ? mutFn(draft) : draft;
+            // fail-safe: normalisera strängar
+            next.title = normStr(next.title) || "(utan rubrik)";
+            next.module = normStr(next.module || "");
+            next.area = normStr(next.area || "");
+            next.step = normStr(next.step || "");
+            return next;
+          });
+        },
+
+        // add/remove/move item (NY – valfritt för render att använda)
+        onAddItem: function (kind, afterIdx) {
+          if (!STATE.canWrite) return;
+          const k = String(kind || "document");
+          applyEditedBlockChange(function (draft) {
+            const items = Array.isArray(draft.items) ? draft.items.slice() : [];
+            const base =
+              k === "question" ? { kind: "question", text: "", options: ["Alternativ 1", "Alternativ 2"], answerKey: "" } :
+              k === "task" ? { kind: "task", text: "", instruction: "", deliverable: "" } :
+              { kind: "document", text: "" };
+
+            const ni = normalizeItem(base);
+
+            let pos = Number.isFinite(afterIdx) ? Number(afterIdx) + 1 : items.length;
+            if (pos < 0) pos = 0;
+            if (pos > items.length) pos = items.length;
+
+            items.splice(pos, 0, ni);
+            draft.items = items;
+            return draft;
+          });
+        },
+
+        onRemoveItem: function (idx) {
+          if (!STATE.canWrite) return;
+          applyEditedBlockChange(function (draft) {
+            const items = Array.isArray(draft.items) ? draft.items.slice() : [];
+            const i = Number(idx);
+            if (i >= 0 && i < items.length) items.splice(i, 1);
+            draft.items = items;
+            return draft;
+          });
+        },
+
+        onMoveItem: function (idx, dir) {
+          if (!STATE.canWrite) return;
+          applyEditedBlockChange(function (draft) {
+            const items = Array.isArray(draft.items) ? draft.items.slice() : [];
+            const i = Number(idx);
+            const d = String(dir || "");
+            const j = d === "up" ? (i - 1) : d === "down" ? (i + 1) : i;
+            if (i >= 0 && i < items.length && j >= 0 && j < items.length && i !== j) {
+              const tmp = items[i];
+              items[i] = items[j];
+              items[j] = tmp;
+            }
+            draft.items = items;
+            return draft;
+          });
         },
       });
     }
