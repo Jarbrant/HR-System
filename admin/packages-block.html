@@ -53,17 +53,16 @@
   - SYSTEM_ADMIN = steward-läge (read-only)
 
   Ändringslogg (≤8):
-  - v1.5: Ny högerpanel för valt block (granska/redigera) inkl facit
-  - v1.5: “Spara ändringar” (draft) för valt block, fail-closed + RO för SYSTEM_ADMIN
+  - v1.6: FIX: Export-toggle (Visa/Dölj) fungerar igen (P0).
+  - v1.6: Kontrollrum: Strikt kontrakt v1-validering (fail-closed) för task/question + förbjudna fraser.
+  - v1.6: Frågor: stöd för choices[{id,text}] + answerKey{kind,correctChoiceId,rationale} (bakåtkompatibelt).
+  - v1.6: Uppgifter: stöd för instruction + deliverable (bakåtkompatibelt).
+  - v1.6: Print: skriver ut facit + rationale + valalternativ.
   ============================================================ -->
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
 
   <style>
-    /* =========================================================
-       AO-02 — BLOCK 2/17
-       Item-typ färger + fokus-styles
-       ========================================================= */
     :root{
       --doc-bg: rgba(243,244,246,.9);
       --doc-line: rgba(107,114,128,.35);
@@ -83,8 +82,6 @@
 
     .muted2{ color: var(--muted); font-size:.92rem; line-height:1.35; }
 
-    /* AO-UX-COLLAPSE-SEARCHFIRST-01:
-       Säkerställ två tydliga ytor (vänster/höger) på breda skärmar. */
     .grid2{
       display:grid;
       grid-template-columns: 420px 1fr;
@@ -95,7 +92,6 @@
       .grid2{ grid-template-columns: 1fr; }
     }
 
-    /* AO-05 icons helpers */
     .ico{ display:inline-flex; align-items:center; gap:6px; }
     .ico .k{ font-weight:900; }
     .icoRow{ display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
@@ -186,7 +182,6 @@
     .previewText{ margin-top:10px; white-space:pre-wrap; }
     .divider{ border-top:1px dashed var(--line); margin:12px 0; }
 
-    /* AO-03 topbar editing label */
     .topEdit{
       display:inline-flex;
       align-items:center;
@@ -202,7 +197,6 @@
     .topEdit .t{ font-weight:900; }
     .topEdit .m{ color: var(--muted); }
 
-    /* AO-01 info box */
     .infoBox{
       border:1px solid rgba(59,130,246,.18);
       background: rgba(219,234,254,.35);
@@ -213,7 +207,6 @@
     }
     .infoBox ul{ margin:8px 0 0 18px; color:#1e3a8a; }
 
-    /* Kontrollrum: små verifieringspiller */
     .verifyPill{
       display:inline-flex;
       align-items:center;
@@ -228,7 +221,6 @@
     .verifyPill.ok{ border-color: rgba(16,185,129,.35); background: rgba(209,250,229,.55); }
     .verifyPill.warn{ border-color: rgba(245,158,11,.35); background: rgba(254,243,199,.7); }
 
-    /* Högerkolumn: liten top-rad (utan editor) */
     .rightTop{
       padding:10px;
       border-bottom:1px solid var(--line);
@@ -236,7 +228,6 @@
       border-radius: 14px 14px 0 0;
     }
 
-    /* AO-UX-SHOW-ANSWER-RIGHT-01: vald block-panel */
     .selPanel{
       margin:10px;
       padding:10px;
@@ -287,18 +278,24 @@
       font-size:.86rem;
     }
     .optBtn:disabled{ opacity:.6; cursor:not-allowed; }
+
+    .errList{
+      margin-top:10px;
+      border:1px solid rgba(239,68,68,.25);
+      background: rgba(254,226,226,.35);
+      border-radius:12px;
+      padding:10px;
+    }
+    .errList .h{ font-weight:950; color:#7f1d1d; }
+    .errList ul{ margin:8px 0 0 18px; color:#7f1d1d; }
   </style>
 </head>
 
 <body>
-  <!-- =========================================
-     BLOCK 3/17 – Topbar / Navigation
-     ========================================= -->
   <header class="top">
     <div class="brand">
       <strong>HR-System</strong>
       <span class="muted">• Admin/Manager • Block-editor</span>
-      <!-- AO-03: visar aktivt block -->
       <span class="topEdit" id="topEditing" style="display:none;">
         <span class="t">Valt block:</span>
         <span class="m" id="topEditingText">—</span>
@@ -315,18 +312,12 @@
     </nav>
   </header>
 
-  <!-- =========================================
-     BLOCK 4/17 – Main: Intro + statuspiller + actionbar
-     ========================================= -->
   <main class="container">
     <div class="row space-between wrap" style="align-items:flex-start;">
       <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
         <span class="pill" id="statePill" title="Översikt: items / frågor utan facit / dokument-only">Status: —</span>
         <span class="pill" id="selPill">Val: —</span>
-
-        <!-- Kontrollrum: verifieringstatus för valt block -->
         <span class="verifyPill warn" id="verifyPill" title="Verifiering gäller valt block" style="display:none;">Verifiering: —</span>
-
         <span class="pill" id="whoPill" style="display:none;">Inloggad: —</span>
         <span class="pill" id="modePill" style="display:none;">Läge: —</span>
         <button class="miniBtn" id="btnToggleInfo" type="button">Visa info</button>
@@ -341,7 +332,6 @@
       <div id="lockBox" class="lockbox" style="display:none;"></div>
     </div>
 
-    <!-- AO-01: tydlig introtext (dold vid init enligt “Sök först”) -->
     <div class="infoBox" id="introBox" style="display:none;">
       <strong>Det här gör du här:</strong>
       <div class="tiny" style="margin-top:6px;">
@@ -355,16 +345,15 @@
       <div class="tiny" style="margin-top:8px;">
         <strong>Export:</strong> Hämta innehåll från <span class="mono">admin/trainings.html</span> → skapa 1 nytt block (utkast) i block-banken.
       </div>
+      <div class="tiny" style="margin-top:8px;">
+        <strong>Kontrakt:</strong> Kontrollrummet kör <span class="mono">Kontrakt v1 (strikt)</span> vid verifiera/publicera (fail-closed).
+      </div>
     </div>
 
     <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
 
     <div class="grid2" style="margin-top:12px;">
-      <!-- =========================================
-         BLOCK 5/17 – Left column: Blocklista + filter + listcontainer
-         ========================================= -->
       <section class="card sideCard" aria-label="Blocklista">
-
         <div style="padding:10px; border-bottom:1px solid var(--line); background: rgba(250,250,250,.92);">
           <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
             <div>
@@ -410,9 +399,6 @@
         </div>
       </section>
 
-      <!-- =========================================
-         BLOCK 6/17 – Right column: Export + Selected Block (facit)
-         ========================================= -->
       <section class="card" aria-label="Hämta från utbildningar + valt block">
         <div class="rightTop">
           <div class="row space-between wrap" style="align-items:center; margin:0;">
@@ -482,7 +468,6 @@
           </div>
         </div>
 
-        <!-- AO-UX-SHOW-ANSWER-RIGHT-01 -->
         <div class="selPanel" aria-label="Valt block (granska/redigera)">
           <div class="selHdr">
             <div style="min-width:0;">
@@ -498,23 +483,49 @@
           <div id="selDetail" style="margin-top:10px;"></div>
 
           <div class="tiny muted2" style="margin-top:10px;">
-            <strong>Not:</strong> Publicera/verifiera använder validering. Spara ändringar sparar som utkast (behåller status).
+            <strong>Not:</strong> Verifiera/Publicera använder strikt kontrakt (fail-closed). Spara ändringar sparar som utkast (behåller status).
           </div>
         </div>
 
         <div class="tiny" style="padding:0 10px 10px;">
-          <strong>Tips:</strong> Efter export kan du söka/filtrera i vänsterlistan för att hitta nya blocket, eller klicka direkt när det auto-väljs.
+          <strong>Tips:</strong> Efter export kan du söka/filtrera i vänsterlistan för att hitta nya blocket.
         </div>
       </section>
     </div>
   </main>
 
-  <!-- =========================================================
-     BLOCK 12/17 – Runtime core (DOM + storage + auth + STATE)
-     ========================================================= -->
   <script>
   (function(){
     "use strict";
+
+    // =========================================================
+    // KONTRAKT v1 (STRIKT) — Kontrollrum (fail-closed)
+    // =========================================================
+    const CONTRACT_V1_STRICT = true; // LÅST default: true
+    const FORBIDDEN_PHRASES = [
+      "beskriv hur du tänkte",
+      "utför uppgiften",
+      "lämna in",
+      "mellanled",
+      "reflektera",
+      "diskutera"
+    ];
+    const Q_ALLOWED_KIND = "mcq_single";
+    const Q_CHOICES_MIN = 3;
+    const Q_CHOICES_MAX = 5;
+    const Q_RATIONALE_MIN_CHARS = 20;
+
+    function containsForbiddenPhrase(text){
+      const s = String(text || "").toLowerCase();
+      if(!s.trim()) return false;
+      return FORBIDDEN_PHRASES.some(p => s.includes(String(p).toLowerCase()));
+    }
+
+    function mkChoiceIdByIndex(i){
+      const letters = "ABCDE";
+      if(i >= 0 && i < letters.length) return letters[i];
+      return "C" + String(i+1);
+    }
 
     // ---------- DOM ----------
     const elMsg = document.getElementById("msgBox");
@@ -559,11 +570,9 @@
 
     const navLogout = document.getElementById("navLogout");
 
-    // AO-03 topbar selection
     const topEditing = document.getElementById("topEditing");
     const topEditingText = document.getElementById("topEditingText");
 
-    // AO-UX-SHOW-ANSWER-RIGHT-01
     const selDetail = document.getElementById("selDetail");
     const selHint = document.getElementById("selHint");
     const btnSaveEdits = document.getElementById("btnSaveEdits");
@@ -666,51 +675,168 @@
       return "📄";
     }
 
-    // AO-07: central null-safe text for previews/snippets
     function safeSnippet(v, n){
       const s = String(v ?? "").trim();
       if(!s) return "(utan text)";
       return s.slice(0, n) + (s.length > n ? "…" : "");
     }
 
-    function facitOkForQuestion(it){
-      if(!it || String(it.kind||"") !== "question") return true;
-      const key = String(it.answerKey || "").trim();
-      if(!key) return false;
-      const opts = Array.isArray(it.options) ? it.options.map(x=>String(x||"").trim()).filter(Boolean) : [];
-      if(opts.length >= 2){
-        return opts.includes(key);
-      }
-      return true;
+    // ---------- Question/task builders (back-compat) ----------
+    function normalizeChoicesFromLegacyOptions(options){
+      const opts = Array.isArray(options) ? options.map(x=>String(x||"").trim()).filter(Boolean) : [];
+      return opts.slice(0, 10).map((txt, i)=>({ id: mkChoiceIdByIndex(i), text: normText(txt, 80) }));
     }
 
+    function normalizeChoices(it){
+      // supports: choices:[{id,text}] OR choices:[string] OR options:[string]
+      if(Array.isArray(it?.choices)){
+        if(it.choices.length && typeof it.choices[0] === "object"){
+          const out = it.choices.map((c, i)=>({
+            id: normText(c?.id || mkChoiceIdByIndex(i), 10) || mkChoiceIdByIndex(i),
+            text: normText(c?.text ?? c?.label ?? "", 80)
+          })).filter(c=>c.text.trim());
+          // ensure unique ids
+          const seen = new Set();
+          out.forEach((c, i)=>{
+            let id = c.id || mkChoiceIdByIndex(i);
+            while(seen.has(id)) id = id + "_";
+            seen.add(id);
+            c.id = id;
+          });
+          return out.slice(0, 10);
+        }
+        // choices as strings
+        return normalizeChoicesFromLegacyOptions(it.choices);
+      }
+      return normalizeChoicesFromLegacyOptions(it?.options);
+    }
+
+    function normalizeAnswerKey(it, choices){
+      // supports:
+      // - answerKey: {kind, correctChoiceId, rationale}
+      // - teacherKey style: {correctChoiceId, rationale}
+      // - legacy answerKey string: "A" or matching option text
+      const ak0 = it?.answerKey;
+      const teacherKey0 = it?.teacherKey;
+
+      if(ak0 && typeof ak0 === "object" && !Array.isArray(ak0)){
+        return {
+          kind: String(ak0.kind || Q_ALLOWED_KIND),
+          correctChoiceId: String(ak0.correctChoiceId || ""),
+          rationale: normText(ak0.rationale ?? "", 800)
+        };
+      }
+
+      if(teacherKey0 && typeof teacherKey0 === "object" && !Array.isArray(teacherKey0)){
+        return {
+          kind: Q_ALLOWED_KIND,
+          correctChoiceId: String(teacherKey0.correctChoiceId || ""),
+          rationale: normText(teacherKey0.rationale ?? "", 800)
+        };
+      }
+
+      const legacy = String(ak0 ?? it?.facit ?? "").trim();
+      if(!legacy) return { kind: Q_ALLOWED_KIND, correctChoiceId:"", rationale:"" };
+
+      // If legacy is exactly an id like "A"
+      if(choices.some(c => String(c.id) === legacy)){
+        return { kind: Q_ALLOWED_KIND, correctChoiceId: legacy, rationale: normText(String(it?.rationale || ""), 800) };
+      }
+
+      // If legacy matches choice text
+      const found = choices.find(c => String(c.text).trim() === legacy);
+      if(found){
+        return { kind: Q_ALLOWED_KIND, correctChoiceId: String(found.id), rationale: normText(String(it?.rationale || ""), 800) };
+      }
+
+      // unknown → store as empty (fail-closed on validate)
+      return { kind: Q_ALLOWED_KIND, correctChoiceId:"", rationale: normText(String(it?.rationale || ""), 800) };
+    }
+
+    function buildLegacyAnswerKeyString(answerKeyObj, choices){
+      const id = String(answerKeyObj?.correctChoiceId || "");
+      if(!id) return "";
+      const c = choices.find(x => String(x.id) === id);
+      // Prefer id for determinism; text is OK too, but id is safer.
+      return String(c?.id || id);
+    }
+
+    function parseTaskTextToFields(text){
+      const s = String(text || "");
+      const mInstr = s.match(/Instruktion\s*:\s*([\s\S]*?)(\n{2,}|$)/i);
+      const mDeliv = s.match(/Leverans\s*:\s*([\s\S]*?)(\n{2,}|$)/i);
+      const instruction = normText(mInstr ? mInstr[1] : "", 1000);
+      const deliverable = normText(mDeliv ? mDeliv[1] : "", 600);
+      return { instruction, deliverable };
+    }
+
+    function buildTaskTextFromFields(instruction, deliverable){
+      const i = String(instruction||"").trim();
+      const d = String(deliverable||"").trim();
+      const parts = [];
+      if(i) parts.push("Instruktion: " + i);
+      if(d) parts.push("Leverans: " + d);
+      return parts.join("\n\n");
+    }
+
+    // ---------- normalization ----------
     function normalizeItem(it0, index){
       const it = (it0 && typeof it0 === "object") ? it0 : {};
       const kind = (String(it.kind || it.type || "document").toLowerCase());
+
       if(kind === "question"){
+        const choices = normalizeChoices(it);
+        const akObj = normalizeAnswerKey(it, choices);
+
+        // question text: support it.question (new) else it.text/rawText/content
+        const qText = normText(it.question ?? it.text ?? it.rawText ?? it.content ?? "", 1400);
+
         return {
           kind:"question",
           questionId: String(it.questionId || it.id || genId("q")),
-          text: normText(it.text ?? it.rawText ?? it.content ?? "", 1000),
-          options: Array.isArray(it.options) ? it.options.map(x=>normText(x,60)).filter(Boolean).slice(0,10) : [],
-          requiresAnswer: (it.requiresAnswer !== false),
-          answerKey: normText(it.answerKey ?? it.facit ?? "", 200),
-          answerType: (Array.isArray(it.options) && it.options.length >= 2) ? "choice" : "text"
+          // display / employee text
+          text: qText,
+          // new contract fields
+          choices,
+          answerKeyObj: akObj,
+          // legacy fields (kept for back-compat)
+          options: choices.map(c=>c.text).filter(Boolean).slice(0, 10),
+          answerKey: normText(
+            typeof it.answerKey === "string" ? it.answerKey : buildLegacyAnswerKeyString(akObj, choices),
+            200
+          ),
+          answerType: "choice",
+          requiresAnswer: (it.requiresAnswer !== false)
         };
       }
+
       if(kind === "task"){
+        const raw = normText(it.text ?? it.rawText ?? it.content ?? "", 1800);
+        const fromFields = {
+          instruction: normText(it.instruction ?? "", 1000),
+          deliverable: normText(it.deliverable ?? "", 600)
+        };
+        const parsed = parseTaskTextToFields(raw);
+
+        const instruction = fromFields.instruction || parsed.instruction;
+        const deliverable = fromFields.deliverable || parsed.deliverable;
+
         return {
           kind:"task",
           taskId: String(it.taskId || it.id || genId("t")),
-          text: normText(it.text ?? it.rawText ?? it.content ?? "", 1000),
+          instruction,
+          deliverable,
+          // employee display text (legacy compatible)
+          text: buildTaskTextFromFields(instruction, deliverable) || raw,
           requiresDone: (it.requiresDone !== false),
           answerType: "checkbox",
           scale: null
         };
       }
+
       const doc = {
         kind:"document",
-        text: normText(it.text ?? it.rawText ?? it.content ?? "", 2000),
+        text: normText(it.text ?? it.rawText ?? it.content ?? "", 2400),
         requiresSign: (it.requiresSign !== false)
       };
       if(typeof it._docId === "string") doc._docId = it._docId;
@@ -820,13 +946,8 @@
       selectedTrainingIndex: -1,
       trainingVisibleIndexes: [],
 
-      // AO-UX-COLLAPSE-SEARCHFIRST-01: runtime-flag (ingen lagring)
       showAllBlocks: false,
-
-      // AO-05 optimization: cheap render cache
       _lastBlockRenderKey: "",
-
-      // AO-UX-SHOW-ANSWER-RIGHT-01
       dirty: false
     };
 
@@ -850,19 +971,32 @@
         : (!hasBlock ? "Välj ett block först." : (STATE.dirty ? "Spara dina ändringar (draft)" : "Gör en ändring först."));
     }
 
-    // ---------- pills + topbar context ----------
+    // ---------- pills + topbar ----------
     function blockComposition(b){
       const items = Array.isArray(b?.items) ? b.items : [];
-      let q=0,t=0,d=0, miss=0;
+      let q=0,t=0,d=0, miss=0, strictFail=0;
+
       items.forEach((it0, idx)=>{
         const it = normalizeItem(it0, idx);
-        if(it.kind==="question"){ q++; if(!facitOkForQuestion(it)) miss++; }
-        else if(it.kind==="task"){ t++; }
-        else { d++; }
+        if(it.kind==="question"){
+          q++;
+          const chk = validateQuestionStrict(it);
+          if(!chk.ok) strictFail++;
+          if(!chk.facitOk) miss++;
+        }else if(it.kind==="task"){
+          t++;
+          const chkT = validateTaskStrict(it);
+          if(!chkT.ok) strictFail++;
+        }else{
+          d++;
+          const chkD = validateDocStrict(it);
+          if(!chkD.ok) strictFail++;
+        }
       });
+
       const docOnly = (d>0 && q===0 && t===0);
       const kind = (q+t+d===0) ? "empty" : (docOnly ? "document" : (q>0 && t===0 && d===0 ? "question" : (t>0 && q===0 && d===0 ? "task" : "mixed")));
-      return { q,t,d,miss,docOnly,kind };
+      return { q,t,d,miss,docOnly,kind, strictFail };
     }
 
     function setTopbarEditing(){
@@ -938,8 +1072,9 @@
         return;
       }
       const comp = blockComposition(b);
-      elState.textContent = `Status: ${comp.q+comp.t+comp.d} items • ${comp.miss} frågor utan facit • ${comp.docOnly ? 1 : 0} info`;
-      elState.className = "pill " + ((comp.miss === 0) ? "ok" : "warn");
+      const strict = CONTRACT_V1_STRICT ? ` • kontrakt-fel: ${comp.strictFail}` : "";
+      elState.textContent = `Status: ${comp.q+comp.t+comp.d} items • ${comp.miss} frågor med facit-fel${strict} • ${comp.docOnly ? 1 : 0} info`;
+      elState.className = "pill " + ((comp.miss === 0 && comp.strictFail === 0) ? "ok" : "warn");
     }
 
     // ---------- lock ----------
@@ -951,32 +1086,142 @@
       updateSaveEnablement();
     }
 
+    // ---------- STRICT validators ----------
+    function validateDocStrict(it){
+      const reasons = [];
+      const text = String(it?.text || "").trim();
+      if(!text) reasons.push("Dokumenttext saknas.");
+      if(text && text.length < 40) reasons.push("Dokumenttext är för kort (min 40 tecken).");
+      if(containsForbiddenPhrase(text)) reasons.push("Dokument innehåller förbjuden fras.");
+      return { ok: reasons.length===0, reasons };
+    }
+
+    function validateTaskStrict(it){
+      const reasons = [];
+      const instruction = String(it?.instruction || "").trim();
+      const deliverable = String(it?.deliverable || "").trim();
+      if(!instruction) reasons.push("Uppgift saknar Instruktion.");
+      if(!deliverable) reasons.push("Uppgift saknar Leverans.");
+      if(containsForbiddenPhrase(instruction) || containsForbiddenPhrase(deliverable) || containsForbiddenPhrase(String(it?.text||""))){
+        reasons.push("Uppgift innehåller förbjuden fras.");
+      }
+      return { ok: reasons.length===0, reasons };
+    }
+
+    function validateQuestionStrict(it){
+      const reasons = [];
+      const qText = String(it?.text || "").trim();
+      const choices = Array.isArray(it?.choices) ? it.choices : [];
+      const ak = it?.answerKeyObj && typeof it.answerKeyObj === "object" ? it.answerKeyObj : { kind:Q_ALLOWED_KIND, correctChoiceId:"", rationale:"" };
+
+      let facitOk = true;
+
+      if(!qText) reasons.push("Frågetext saknas.");
+      if(qText && qText.length < 12) reasons.push("Frågetext är för kort.");
+      if(containsForbiddenPhrase(qText)) reasons.push("Frågetext innehåller förbjuden fras.");
+
+      if(String(ak.kind||"") !== Q_ALLOWED_KIND) reasons.push(`Frågetyp måste vara ${Q_ALLOWED_KIND}.`);
+
+      const trimmed = choices.map(c=>({ id:String(c?.id||"").trim(), text:String(c?.text||"").trim() })).filter(c=>c.text);
+      if(trimmed.length < Q_CHOICES_MIN || trimmed.length > Q_CHOICES_MAX){
+        reasons.push(`Fråga måste ha ${Q_CHOICES_MIN}–${Q_CHOICES_MAX} alternativ.`);
+      }
+
+      const ids = trimmed.map(c=>c.id).filter(Boolean);
+      const idSet = new Set(ids);
+      if(ids.length !== idSet.size) reasons.push("Alternativ-id måste vara unika.");
+
+      const correctId = String(ak.correctChoiceId || "").trim();
+      if(!correctId){
+        reasons.push("Facit saknas (correctChoiceId).");
+        facitOk = false;
+      }else{
+        const exists = trimmed.some(c=>c.id === correctId);
+        if(!exists){
+          reasons.push("Facit pekar på ett alternativ som inte finns.");
+          facitOk = false;
+        }
+      }
+
+      const rationale = String(ak.rationale || "").trim();
+      if(!rationale){
+        reasons.push("Rationale krävs (teacherKey).");
+      }else if(rationale.length < Q_RATIONALE_MIN_CHARS){
+        reasons.push(`Rationale är för kort (min ${Q_RATIONALE_MIN_CHARS} tecken).`);
+      }
+      if(containsForbiddenPhrase(rationale)) reasons.push("Rationale innehåller förbjuden fras.");
+
+      return { ok: reasons.length===0, reasons, facitOk };
+    }
+
+    function validateForPublish(block){
+      const b = block && typeof block === "object" ? block : null;
+      const reasons = [];
+      if(!b){ reasons.push("Inget block valt."); return { ok:false, reasons }; }
+
+      const items = Array.isArray(b.items) ? b.items : [];
+      if(items.length === 0) reasons.push("Minst 1 item krävs.");
+
+      items.forEach((it0, idx)=>{
+        const it = normalizeItem(it0, idx);
+
+        if(containsForbiddenPhrase(it.text) && it.kind !== "task"){ // task kontrolleras via fields
+          reasons.push(`${emojiForKind(it.kind)} Item ${idx+1}: Innehåller förbjuden fras.`);
+        }
+
+        if(CONTRACT_V1_STRICT){
+          if(it.kind === "question"){
+            const chk = validateQuestionStrict(it);
+            chk.reasons.forEach(r => reasons.push(`❓ Item ${idx+1}: ${r}`));
+          }else if(it.kind === "task"){
+            const chkT = validateTaskStrict(it);
+            chkT.reasons.forEach(r => reasons.push(`✅ Item ${idx+1}: ${r}`));
+          }else{
+            const chkD = validateDocStrict(it);
+            chkD.reasons.forEach(r => reasons.push(`📄 Item ${idx+1}: ${r}`));
+          }
+        }else{
+          // legacy minimal safety
+          if(it.kind === "question"){
+            const key = String(it.answerKey || "").trim();
+            if(!key) reasons.push(`❓ Item ${idx+1}: Fråga saknar facit`);
+          }
+          if(it.kind === "document" && !String(it.text||"").trim()){
+            reasons.push(`📄 Item ${idx+1}: Dokument är tomt`);
+          }
+        }
+      });
+
+      return { ok: reasons.length === 0, reasons };
+    }
+
+    function validateForVerify(block){
+      return validateForPublish(block);
+    }
+
     function updateActionEnablement(){
       const canWrite = (!STATE.locked && !isSystemAdmin);
       const hasBlock = !!STATE.edit;
 
-      // Print: tillåts även read-only (kontrollrum)
       btnPrint.disabled = !hasBlock;
       btnPrint.title = hasBlock ? "Skriv ut vald block" : "Välj ett block först.";
 
-      // publish rules
       if(!canWrite || !hasBlock){
         btnPublish.disabled = true;
         btnPublish.title = isSystemAdmin ? "Steward-läge (read-only)." : "Välj ett block först.";
       }else{
         const chk = validateForPublish(STATE.edit);
         btnPublish.disabled = !chk.ok;
-        btnPublish.title = chk.ok ? "Redo att publicera" : ("Publicering stoppad: " + chk.reasons.join(" • "));
+        btnPublish.title = chk.ok ? "Redo att publicera" : ("Publicering stoppad: " + chk.reasons.slice(0,3).join(" • ") + (chk.reasons.length>3 ? " …" : ""));
       }
 
-      // verify rules
       if(!canWrite || !hasBlock){
         btnVerify.disabled = true;
         btnVerify.title = isSystemAdmin ? "Steward-läge (read-only)." : "Välj ett block först.";
       }else{
         const chkV = validateForVerify(STATE.edit);
         btnVerify.disabled = !chkV.ok;
-        btnVerify.title = chkV.ok ? "Markera blocket som verifierat (utan att publicera)" : ("Verifiering stoppad: " + chkV.reasons.join(" • "));
+        btnVerify.title = chkV.ok ? "Markera blocket som verifierat (utan att publicera)" : ("Verifiering stoppad: " + chkV.reasons.slice(0,3).join(" • ") + (chkV.reasons.length>3 ? " …" : ""));
       }
 
       btnExportTraining.disabled = !(canWrite && !STATE.trainingsCorrupt && STATE.selectedTrainingIndex >= 0);
@@ -1077,7 +1322,7 @@
 
     function buildRenderKey(){
       computeVisible();
-      const ids = (STATE.visible || []).map(b => `${b.blockId}:${b.status}:${Number(b.verifiedAt||0)}`).join("|");
+      const ids = (STATE.visible || []).map(b => `${b.blockId}:${b.status}:${Number(b.verifiedAt||0)}:${(b.__comp?.strictFail||0)}:${(b.__comp?.miss||0)}`).join("|");
       const f = [
         String(filterStatus?.value||""),
         String(qBlocks?.value||""),
@@ -1168,8 +1413,16 @@
             const miss = document.createElement("span");
             miss.className = "qaPill bad";
             miss.style.marginTop = "6px";
-            miss.textContent = `Facit saknas: ${comp.miss}`;
+            miss.textContent = `Facit-fel: ${comp.miss}`;
             right.appendChild(miss);
+          }
+
+          if(CONTRACT_V1_STRICT && comp.strictFail > 0){
+            const cf = document.createElement("span");
+            cf.className = "qaPill bad";
+            cf.style.marginTop = "6px";
+            cf.textContent = `Kontrakt-fel: ${comp.strictFail}`;
+            right.appendChild(cf);
           }
 
           top.appendChild(left);
@@ -1192,32 +1445,6 @@
           else r.classList.remove("active");
         });
       }
-    }
-
-    // ---------- validation ----------
-    function validateForPublish(block){
-      const b = block && typeof block === "object" ? block : null;
-      const reasons = [];
-      if(!b){ reasons.push("Inget block valt."); return { ok:false, reasons }; }
-
-      const items = Array.isArray(b.items) ? b.items : [];
-      if(items.length === 0) reasons.push("Minst 1 item krävs.");
-
-      items.forEach((it0, idx)=>{
-        const it = normalizeItem(it0, idx);
-        if(it.kind === "question" && !facitOkForQuestion(it)){
-          reasons.push(`❓ Item ${idx+1}: Fråga saknar facit`);
-        }
-        if(it.kind === "document" && !String(it.text||"").trim()){
-          reasons.push(`📄 Item ${idx+1}: Dokument är tomt`);
-        }
-      });
-
-      return { ok: reasons.length === 0, reasons };
-    }
-
-    function validateForVerify(block){
-      return validateForPublish(block);
     }
 
     // ---------- writeback ----------
@@ -1266,6 +1493,7 @@
         setMsg("err","Kan inte verifiera. Åtgärda följande:");
         showLockBox(chk.reasons);
         updateActionEnablement();
+        renderSelectedDetail();
         return;
       }
 
@@ -1300,12 +1528,12 @@
         setMsg("err","Kan inte publicera. Åtgärda följande:");
         showLockBox(chk.reasons);
         updateActionEnablement();
+        renderSelectedDetail();
         return;
       }
 
       const now = Date.now();
       STATE.edit.status = "published";
-      // Publicering räknas som verifiering också (kontrollrum)
       STATE.edit.verifiedAt = now;
       STATE.edit.verifiedBy = String(empNo || "");
       STATE.edit.updatedAt = now;
@@ -1372,13 +1600,14 @@
         `Steg: ${b.step || "—"}`,
         `Status: ${blockStatusLabel(b.status)}`,
         `Items: ${comp.q+comp.t+comp.d} • Frågor: ${comp.q} • Dokument: ${comp.d} • Uppgifter: ${comp.t}`,
-        `${v.text}`
+        `${v.text}`,
+        CONTRACT_V1_STRICT ? "Kontrakt: v1 (strikt)" : "Kontrakt: av"
       ].join("\n");
 
       let body = `<h1>${escapeHtml(b.title || "Block")}</h1><div class="meta">${escapeHtml(metaLines)}</div>`;
 
-      if(comp.miss > 0){
-        body += `<div class="meta warn">OBS: ${comp.miss} fråga(or) saknar facit enligt reglerna.</div>`;
+      if(comp.miss > 0 || (CONTRACT_V1_STRICT && comp.strictFail > 0)){
+        body += `<div class="meta warn">OBS: Fel upptäckta i validering (facit/kontrakt). Kontrollera i kontrollrummet.</div>`;
       }
 
       const items = Array.isArray(b.items) ? b.items : [];
@@ -1394,16 +1623,17 @@
 
           let extra = "";
           if(kind === "question"){
-            const ok = facitOkForQuestion(it);
-            const opts = Array.isArray(it.options) ? it.options.filter(Boolean) : [];
-            extra += `<div class="meta">Svarstyp: ${opts.length>=2 ? "Val" : "Fri text"} • Facit: ${ok ? "OK" : "SAKNAS"}</div>`;
-            if(opts.length>=2){
-              extra += `<div class="meta">Alternativ:\n- ${escapeHtml(opts.join("\n- "))}</div>`;
+            const chk = validateQuestionStrict(it);
+            const choices = (it.choices || []).slice(0, 10);
+            extra += `<div class="meta">Frågetyp: ${escapeHtml(String(it.answerKeyObj?.kind||Q_ALLOWED_KIND))} • Facit: ${chk.facitOk ? "OK" : "FEL/SAKNAS"}</div>`;
+            if(choices.length){
+              extra += `<div class="meta">Alternativ:\n- ${escapeHtml(choices.map(c=>`${c.id}) ${c.text}`).join("\n- "))}</div>`;
             }
-            extra += `<div class="meta">Facit: ${escapeHtml(String(it.answerKey||""))}</div>`;
+            extra += `<div class="meta">Facit (correctChoiceId): ${escapeHtml(String(it.answerKeyObj?.correctChoiceId||""))}</div>`;
+            extra += `<div class="meta">Rationale: ${escapeHtml(String(it.answerKeyObj?.rationale||""))}</div>`;
           }
           if(kind === "task"){
-            extra += `<div class="meta">Kräver klar: ${it.requiresDone !== false ? "Ja" : "Nej"}</div>`;
+            extra += `<div class="meta">Instruktion: ${escapeHtml(String(it.instruction||""))}\nLeverans: ${escapeHtml(String(it.deliverable||""))}</div>`;
           }
           if(kind === "document"){
             extra += `<div class="meta">Kräver signering: ${it.requiresSign !== false ? "Ja" : "Nej"}</div>`;
@@ -1440,7 +1670,7 @@
       }
     }
 
-    // ---------- AO-UX-SHOW-ANSWER-RIGHT-01: Selected detail renderer ----------
+    // ---------- Selected detail renderer ----------
     function renderSelectedDetail(){
       clear(selDetail);
 
@@ -1450,29 +1680,54 @@
         return;
       }
 
+      const comp = blockComposition(b);
       if(selHint){
-        const comp = blockComposition(b);
         selHint.textContent = [
           `Modul: ${b.module || "—"}`,
           `Område: ${b.area || "—"}`,
           `Steg: ${b.step || "—"}`,
           `Status: ${blockStatusLabel(b.status)} • Items: ${comp.q+comp.t+comp.d} (❓ ${comp.q} • 📄 ${comp.d} • ✅ ${comp.t})`,
+          CONTRACT_V1_STRICT ? `Kontrakt: v1 (strikt) • Fel: ${comp.strictFail}` : "Kontrakt: av",
           isVerified(b) ? `Verifierad: ${String(b.verifiedBy||"—")} • ${new Date(Number(b.verifiedAt||0)).toLocaleString("sv-SE")}` : "Verifierad: Ej verifierad"
         ].join("\n");
       }
 
       const canWrite = (!STATE.locked && !isSystemAdmin);
 
-      // Title (read-only display)
+      // Title
       const title = document.createElement("div");
       title.className = "previewTitle";
       title.textContent = b.title || "(utan rubrik)";
       selDetail.appendChild(title);
 
+      // Validation summary box (strict)
+      const chk = validateForPublish(b);
+      if(!chk.ok){
+        const box = document.createElement("div");
+        box.className = "errList";
+        const h = document.createElement("div");
+        h.className = "h";
+        h.textContent = "Validering stoppar Verifiera/Publicera";
+        box.appendChild(h);
+        const ul = document.createElement("ul");
+        chk.reasons.slice(0, 12).forEach(r=>{
+          const li = document.createElement("li");
+          li.textContent = String(r);
+          ul.appendChild(li);
+        });
+        if(chk.reasons.length > 12){
+          const li = document.createElement("li");
+          li.textContent = `… +${chk.reasons.length-12} till`;
+          ul.appendChild(li);
+        }
+        box.appendChild(ul);
+        selDetail.appendChild(box);
+      }
+
       const meta = document.createElement("div");
       meta.className = "tiny muted2";
       meta.style.marginTop = "6px";
-      meta.textContent = "Här ser du (och vid ADMIN/MANAGER: kan redigera) frågor + facit för Employee.";
+      meta.textContent = "Redigera i kontrollrummet: frågor (choices + facit + rationale) och uppgifter (instruktion + leverans).";
       selDetail.appendChild(meta);
 
       const items = Array.isArray(b.items) ? b.items : [];
@@ -1500,15 +1755,22 @@
 
         const right = document.createElement("div");
         if(it.kind === "question"){
-          const ok = facitOkForQuestion(it);
+          const chkQ = validateQuestionStrict(it);
           const pill = document.createElement("span");
-          pill.className = "qaPill " + (ok ? "ok" : "bad");
-          pill.textContent = ok ? "Facit OK" : "Facit saknas/ogiltigt";
+          pill.className = "qaPill " + (chkQ.ok ? "ok" : "bad");
+          pill.textContent = chkQ.ok ? "Kontrakt OK" : "Kontrakt-fel";
+          right.appendChild(pill);
+        }else if(it.kind === "task"){
+          const chkT = validateTaskStrict(it);
+          const pill = document.createElement("span");
+          pill.className = "qaPill " + (chkT.ok ? "ok" : "bad");
+          pill.textContent = chkT.ok ? "Kontrakt OK" : "Kontrakt-fel";
           right.appendChild(pill);
         }else{
+          const chkD = validateDocStrict(it);
           const pill = document.createElement("span");
-          pill.className = "qaPill warn";
-          pill.textContent = it.kind === "task" ? "Uppgift" : "Dokument";
+          pill.className = "qaPill " + (chkD.ok ? "ok" : "bad");
+          pill.textContent = chkD.ok ? "Kontrakt OK" : "Kontrakt-fel";
           right.appendChild(pill);
         }
 
@@ -1516,118 +1778,251 @@
         top.appendChild(right);
         card.appendChild(top);
 
-        // Text edit
-        const lbl = document.createElement("div");
-        lbl.className = "fieldLbl tiny";
-        lbl.textContent = it.kind === "question" ? "Frågetext" : (it.kind === "task" ? "Uppgiftstext" : "Dokumenttext");
-        card.appendChild(lbl);
+        const canEdit = canWrite;
 
-        const ta = document.createElement("textarea");
-        ta.value = String(it.text || "");
-        ta.disabled = !canWrite;
-        ta.addEventListener("input", ()=>{
-          if(!STATE.edit) return;
-          const cur = normalizeItem(STATE.edit.items[idx], idx);
-          cur.text = normText(ta.value, (cur.kind === "document" ? 2000 : 1000));
-          STATE.edit.items[idx] = cur;
-          markDirty(true);
-          updateStatePill();
-          renderSelectedTopBadgesOnly();
-        });
-        card.appendChild(ta);
-
-        // Question extras
         if(it.kind === "question"){
-          const optsLbl = document.createElement("div");
-          optsLbl.className = "fieldLbl tiny";
-          optsLbl.textContent = "Alternativ (valfria)";
-          card.appendChild(optsLbl);
+          // Question text
+          const lblQ = document.createElement("div");
+          lblQ.className = "fieldLbl tiny";
+          lblQ.textContent = "Frågetext";
+          card.appendChild(lblQ);
 
-          const optsWrap = document.createElement("div");
-          const renderOpts = ()=>{
-            clear(optsWrap);
+          const taQ = document.createElement("textarea");
+          taQ.value = String(it.text || "");
+          taQ.disabled = !canEdit;
+          taQ.addEventListener("input", ()=>{
+            if(!STATE.edit) return;
+            const cur = normalizeItem(STATE.edit.items[idx], idx);
+            cur.text = normText(taQ.value, 1400);
+            STATE.edit.items[idx] = cur;
+            markDirty(true);
+            updateStatePill();
+            setSelectionPill();
+            setTopbarEditing();
+            updateActionEnablement();
+          });
+          card.appendChild(taQ);
+
+          // Choices
+          const lblC = document.createElement("div");
+          lblC.className = "fieldLbl tiny";
+          lblC.textContent = `Alternativ (krav: ${Q_CHOICES_MIN}–${Q_CHOICES_MAX})`;
+          card.appendChild(lblC);
+
+          const wrap = document.createElement("div");
+          const renderChoices = ()=>{
+            clear(wrap);
             const cur = normalizeItem((STATE.edit?.items || [])[idx], idx);
-            const opts = Array.isArray(cur.options) ? cur.options.slice(0,10) : [];
+            const choices = Array.isArray(cur.choices) ? cur.choices.slice(0, 10) : [];
+            const rows = Math.max(Q_CHOICES_MIN, Math.min(6, choices.length || Q_CHOICES_MIN));
 
-            const rows = Math.max(2, Math.min(6, opts.length || 2));
             for(let i=0;i<rows;i++){
               const row = document.createElement("div");
               row.className = "optRow";
 
-              const inp = document.createElement("input");
-              inp.type = "text";
-              inp.placeholder = `Alternativ ${i+1}`;
-              inp.value = String(opts[i] || "");
-              inp.disabled = !canWrite;
-              inp.addEventListener("input", ()=>{
+              const idInp = document.createElement("input");
+              idInp.type = "text";
+              idInp.placeholder = "Id (A/B/C…)";
+              idInp.value = String(choices[i]?.id || mkChoiceIdByIndex(i));
+              idInp.disabled = !canEdit;
+              idInp.style.maxWidth = "90px";
+
+              const txtInp = document.createElement("input");
+              txtInp.type = "text";
+              txtInp.placeholder = `Alternativ ${i+1}`;
+              txtInp.value = String(choices[i]?.text || "");
+              txtInp.disabled = !canEdit;
+
+              const btnClear = document.createElement("button");
+              btnClear.type = "button";
+              btnClear.className = "optBtn";
+              btnClear.textContent = "Rensa";
+              btnClear.disabled = !canEdit;
+
+              function commit(){
                 if(!STATE.edit) return;
                 const c = normalizeItem(STATE.edit.items[idx], idx);
-                const arr = Array.isArray(c.options) ? c.options.slice(0,10) : [];
-                arr[i] = normText(inp.value, 60);
-                // normalize: trim + remove empty later
-                c.options = arr.map(x=>String(x||"")).map(x=>x.trim()).slice(0,10);
+                const arr = Array.isArray(c.choices) ? c.choices.slice(0,10) : [];
+                while(arr.length < rows) arr.push({ id: mkChoiceIdByIndex(arr.length), text:"" });
+                arr[i] = {
+                  id: normText(idInp.value || mkChoiceIdByIndex(i), 10) || mkChoiceIdByIndex(i),
+                  text: normText(txtInp.value || "", 80)
+                };
+                // Normalize: trim empties
+                c.choices = arr.map((x, j)=>({
+                  id: normText(String(x.id||mkChoiceIdByIndex(j)).trim(), 10) || mkChoiceIdByIndex(j),
+                  text: normText(String(x.text||"").trim(), 80)
+                })).filter(x=>x.text.trim()).slice(0, 10);
+
+                // Sync legacy
+                c.options = c.choices.map(x=>x.text).slice(0, 10);
+                c.answerKey = buildLegacyAnswerKeyString(c.answerKeyObj || {correctChoiceId:""}, c.choices);
+
+                // Ensure answerKeyObj kind exists
+                c.answerKeyObj = c.answerKeyObj && typeof c.answerKeyObj === "object" ? c.answerKeyObj : { kind:Q_ALLOWED_KIND, correctChoiceId:"", rationale:"" };
+                c.answerKeyObj.kind = Q_ALLOWED_KIND;
+
                 STATE.edit.items[idx] = c;
                 markDirty(true);
                 updateStatePill();
-                renderSelectedTopBadgesOnly();
+                setSelectionPill();
+                setTopbarEditing();
+                updateActionEnablement();
+              }
+
+              idInp.addEventListener("input", commit);
+              txtInp.addEventListener("input", commit);
+              btnClear.addEventListener("click", ()=>{
+                txtInp.value = "";
+                commit();
               });
 
-              const btnDel = document.createElement("button");
-              btnDel.type = "button";
-              btnDel.className = "optBtn";
-              btnDel.textContent = "Rensa";
-              btnDel.disabled = !canWrite;
-              btnDel.addEventListener("click", ()=>{
-                inp.value = "";
-                inp.dispatchEvent(new Event("input"));
-              });
-
-              row.appendChild(inp);
-              row.appendChild(btnDel);
-              optsWrap.appendChild(row);
+              row.appendChild(idInp);
+              row.appendChild(txtInp);
+              row.appendChild(btnClear);
+              wrap.appendChild(row);
             }
 
-            // Hint about answer rule
             const hint = document.createElement("div");
             hint.className = "tiny muted2";
             hint.style.marginTop = "8px";
-            hint.textContent = "Om du har minst 2 alternativ: facit måste matcha exakt ett av alternativen.";
-            optsWrap.appendChild(hint);
+            hint.textContent = "Tips: Id bör vara A/B/C… och facit ska vara ett av dessa id:n.";
+            wrap.appendChild(hint);
           };
-          renderOpts();
-          card.appendChild(optsWrap);
 
-          const facLbl = document.createElement("div");
-          facLbl.className = "fieldLbl tiny";
-          facLbl.textContent = "Facit (answerKey)";
-          card.appendChild(facLbl);
+          renderChoices();
+          card.appendChild(wrap);
+
+          // CorrectChoiceId
+          const lblF = document.createElement("div");
+          lblF.className = "fieldLbl tiny";
+          lblF.textContent = "Facit (correctChoiceId)";
+          card.appendChild(lblF);
 
           const fac = document.createElement("input");
           fac.type = "text";
-          fac.placeholder = "Skriv facit (måste matcha ett alternativ vid valfråga)";
-          fac.value = String(it.answerKey || "");
-          fac.disabled = !canWrite;
+          fac.placeholder = "t.ex. A";
+          fac.value = String(it.answerKeyObj?.correctChoiceId || "");
+          fac.disabled = !canEdit;
           fac.addEventListener("input", ()=>{
             if(!STATE.edit) return;
             const cur = normalizeItem(STATE.edit.items[idx], idx);
-            cur.answerKey = normText(fac.value, 200);
-            // recompute answerType from options
-            const opts = Array.isArray(cur.options) ? cur.options.map(x=>String(x||"").trim()).filter(Boolean) : [];
-            cur.answerType = (opts.length >= 2) ? "choice" : "text";
+            cur.answerKeyObj = cur.answerKeyObj && typeof cur.answerKeyObj === "object" ? cur.answerKeyObj : { kind:Q_ALLOWED_KIND, correctChoiceId:"", rationale:"" };
+            cur.answerKeyObj.kind = Q_ALLOWED_KIND;
+            cur.answerKeyObj.correctChoiceId = normText(fac.value, 10);
+            cur.answerKey = buildLegacyAnswerKeyString(cur.answerKeyObj, cur.choices || []);
             STATE.edit.items[idx] = cur;
             markDirty(true);
             updateStatePill();
-            renderSelectedTopBadgesOnly();
+            setSelectionPill();
+            setTopbarEditing();
+            updateActionEnablement();
           });
           card.appendChild(fac);
 
-          // live display (read-only, for clarity)
-          const live = document.createElement("div");
-          live.className = "tiny";
-          live.style.marginTop = "8px";
-          const okNow = facitOkForQuestion(it);
-          live.textContent = `Visning: Facit = “${String(it.answerKey||"") || "—"}”`;
-          card.appendChild(live);
+          // Rationale
+          const lblR = document.createElement("div");
+          lblR.className = "fieldLbl tiny";
+          lblR.textContent = "Rationale (krav)";
+          card.appendChild(lblR);
+
+          const taR = document.createElement("textarea");
+          taR.value = String(it.answerKeyObj?.rationale || "");
+          taR.disabled = !canEdit;
+          taR.addEventListener("input", ()=>{
+            if(!STATE.edit) return;
+            const cur = normalizeItem(STATE.edit.items[idx], idx);
+            cur.answerKeyObj = cur.answerKeyObj && typeof cur.answerKeyObj === "object" ? cur.answerKeyObj : { kind:Q_ALLOWED_KIND, correctChoiceId:"", rationale:"" };
+            cur.answerKeyObj.kind = Q_ALLOWED_KIND;
+            cur.answerKeyObj.rationale = normText(taR.value, 800);
+            STATE.edit.items[idx] = cur;
+            markDirty(true);
+            updateStatePill();
+            setSelectionPill();
+            setTopbarEditing();
+            updateActionEnablement();
+          });
+          card.appendChild(taR);
+
+        }else if(it.kind === "task"){
+          // instruction
+          const lblI = document.createElement("div");
+          lblI.className = "fieldLbl tiny";
+          lblI.textContent = "Instruktion (krav)";
+          card.appendChild(lblI);
+
+          const taI = document.createElement("textarea");
+          taI.value = String(it.instruction || "");
+          taI.disabled = !canEdit;
+          taI.addEventListener("input", ()=>{
+            if(!STATE.edit) return;
+            const cur = normalizeItem(STATE.edit.items[idx], idx);
+            cur.instruction = normText(taI.value, 1000);
+            cur.text = buildTaskTextFromFields(cur.instruction, cur.deliverable) || cur.text;
+            STATE.edit.items[idx] = cur;
+            markDirty(true);
+            updateStatePill();
+            setSelectionPill();
+            setTopbarEditing();
+            updateActionEnablement();
+          });
+          card.appendChild(taI);
+
+          // deliverable
+          const lblD = document.createElement("div");
+          lblD.className = "fieldLbl tiny";
+          lblD.textContent = "Leverans (krav)";
+          card.appendChild(lblD);
+
+          const taD = document.createElement("textarea");
+          taD.value = String(it.deliverable || "");
+          taD.disabled = !canEdit;
+          taD.addEventListener("input", ()=>{
+            if(!STATE.edit) return;
+            const cur = normalizeItem(STATE.edit.items[idx], idx);
+            cur.deliverable = normText(taD.value, 600);
+            cur.text = buildTaskTextFromFields(cur.instruction, cur.deliverable) || cur.text;
+            STATE.edit.items[idx] = cur;
+            markDirty(true);
+            updateStatePill();
+            setSelectionPill();
+            setTopbarEditing();
+            updateActionEnablement();
+          });
+          card.appendChild(taD);
+
+          // show employee text
+          const lblE = document.createElement("div");
+          lblE.className = "fieldLbl tiny";
+          lblE.textContent = "Visning (employee text, auto)";
+          card.appendChild(lblE);
+
+          const taE = document.createElement("textarea");
+          taE.value = String(it.text || "");
+          taE.disabled = true;
+          card.appendChild(taE);
+
+        }else{
+          const lbl = document.createElement("div");
+          lbl.className = "fieldLbl tiny";
+          lbl.textContent = "Dokumenttext";
+          card.appendChild(lbl);
+
+          const ta = document.createElement("textarea");
+          ta.value = String(it.text || "");
+          ta.disabled = !canEdit;
+          ta.addEventListener("input", ()=>{
+            if(!STATE.edit) return;
+            const cur = normalizeItem(STATE.edit.items[idx], idx);
+            cur.text = normText(ta.value, 2400);
+            STATE.edit.items[idx] = cur;
+            markDirty(true);
+            updateStatePill();
+            setSelectionPill();
+            setTopbarEditing();
+            updateActionEnablement();
+          });
+          card.appendChild(ta);
         }
 
         selDetail.appendChild(card);
@@ -1636,37 +2031,53 @@
       updateSaveEnablement();
     }
 
-    function renderSelectedTopBadgesOnly(){
-      // cheap: refresh pills and verify display, without rebuilding editor DOM.
-      setSelectionPill();
-      setTopbarEditing();
-      setVerifyPill();
-    }
-
     function saveEditsDraft(){
       if(STATE.locked){ setMsg("err","Låst (för säkerhet)."); return; }
       if(isSystemAdmin){ setMsg("warn","Steward-läge (read-only): kan inte spara."); return; }
       if(!STATE.edit){ setMsg("err","Välj ett block först."); return; }
       if(!STATE.dirty){ setMsg("warn","Inga ändringar att spara."); return; }
 
-      // normalize items hard before save (trim, drop empty options)
       const b = normalizeBlock(STATE.edit);
+
+      // hard normalize + sync legacy fields
       b.items = (Array.isArray(b.items) ? b.items : []).map((it0, idx)=>{
         const it = normalizeItem(it0, idx);
+
         if(it.kind === "question"){
-          const opts = Array.isArray(it.options) ? it.options.map(x=>String(x||"").trim()).filter(Boolean).slice(0,10) : [];
-          it.options = opts;
-          it.answerType = (opts.length >= 2) ? "choice" : "text";
-          it.answerKey = normText(it.answerKey, 200);
+          const choices = Array.isArray(it.choices) ? it.choices.map((c, i)=>({
+            id: normText(String(c.id||mkChoiceIdByIndex(i)).trim(), 10) || mkChoiceIdByIndex(i),
+            text: normText(String(c.text||"").trim(), 80)
+          })).filter(c=>c.text.trim()).slice(0, 10) : [];
+
+          it.choices = choices;
+          it.options = choices.map(c=>c.text).slice(0, 10);
+
+          it.answerKeyObj = it.answerKeyObj && typeof it.answerKeyObj === "object" ? it.answerKeyObj : { kind:Q_ALLOWED_KIND, correctChoiceId:"", rationale:"" };
+          it.answerKeyObj.kind = Q_ALLOWED_KIND;
+          it.answerKeyObj.correctChoiceId = normText(String(it.answerKeyObj.correctChoiceId||"").trim(), 10);
+          it.answerKeyObj.rationale = normText(String(it.answerKeyObj.rationale||"").trim(), 800);
+
+          it.answerKey = buildLegacyAnswerKeyString(it.answerKeyObj, choices);
+          it.text = normText(it.text, 1400);
+          it.answerType = "choice";
         }
-        it.text = normText(it.text, (it.kind === "document" ? 2000 : 1000));
+
+        if(it.kind === "task"){
+          it.instruction = normText(it.instruction, 1000);
+          it.deliverable = normText(it.deliverable, 600);
+          it.text = buildTaskTextFromFields(it.instruction, it.deliverable) || normText(it.text, 1800);
+        }
+
+        if(it.kind === "document"){
+          it.text = normText(it.text, 2400);
+        }
+
         return it;
       });
 
       const now = Date.now();
       b.updatedAt = now;
 
-      // keep status as-is; do not auto-verify
       STATE.edit = b;
 
       const res = syncEditBackToAll();
@@ -1679,9 +2090,6 @@
       updateActionEnablement();
       setMsg("ok", "Sparat. Ändringar är nu lagrade i block-banken.");
     }
-
-    // ---------- print hook unchanged ----------
-    // (printSelectedBlock uses STATE.edit)
 
     // ---------- trainings helpers ----------
     function trainingTitle(t){
@@ -2018,7 +2426,6 @@
 
       STATE.all = all;
 
-      // Reset filters (men behåll “Sök först” som default)
       if(filterStatus && filterStatus.value !== "all") filterStatus.value = "all";
       if(qBlocks && qBlocks.value.trim()) qBlocks.value = "";
       if(fHasQ) fHasQ.checked = false;
@@ -2033,7 +2440,6 @@
         btnShowAllBlocks.title = "Visa hela listan utan sök";
       }
 
-      // Render och auto-välj nya blocket (så knapparna funkar direkt)
       renderBlockList(true);
       try{ selectBlockByObject(newBlock); }catch{}
 
@@ -2041,7 +2447,6 @@
     }
 
     // ---------- events ----------
-    // filters
     let tDeb;
     function debounce(fn, ms){
       return function(){
@@ -2059,7 +2464,6 @@
     fNoKey.addEventListener("change", ()=>renderBlockList(true));
     fUnverified.addEventListener("change", ()=>renderBlockList(true));
 
-    // “Visa alla” toggle (runtime)
     if(btnShowAllBlocks){
       btnShowAllBlocks.addEventListener("click", ()=>{
         const on = btnShowAllBlocks.getAttribute("aria-pressed") === "true";
@@ -2072,15 +2476,17 @@
       });
     }
 
-    // export collapse
+    // =========================================================
+    // P0 FIX: Export-toggle (Visa/Dölj)
+    // =========================================================
     btnToggleExport.addEventListener("click", ()=>{
-      const open = btnToggleExport.getAttribute("aria-expanded") !== "false";
-      btnToggleExport.setAttribute("aria-expanded", String(!open));
-      btnToggleExport.textContent = open ? "Visa" : "Dölj";
-      exportBody.style.display = open ? "block" : "none";
+      const isOpen = btnToggleExport.getAttribute("aria-expanded") === "true";
+      const nextOpen = !isOpen;
+      btnToggleExport.setAttribute("aria-expanded", String(nextOpen));
+      btnToggleExport.textContent = nextOpen ? "Dölj" : "Visa";
+      exportBody.style.display = nextOpen ? "block" : "none";
     });
 
-    // info toggle
     btnToggleInfo.addEventListener("click", ()=>{
       const showing = btnToggleInfo.dataset.on === "1";
       btnToggleInfo.dataset.on = showing ? "0" : "1";
@@ -2089,7 +2495,6 @@
       setMsg("", "");
     });
 
-    // trainings filters
     const trainDeb = debounce(()=>{ renderTrainingHits(); }, 220);
     qTrainModule.addEventListener("change", ()=>{ renderTrainingHits(); });
     qTrainArea.addEventListener("input", trainDeb);
@@ -2105,7 +2510,6 @@
       exportSelectedTraining();
     });
 
-    // verify/print/publish
     btnVerify.addEventListener("click", ()=>{
       setMsg("", "");
       verifyBlock();
@@ -2121,13 +2525,11 @@
       publishBlock();
     });
 
-    // save edits
     btnSaveEdits.addEventListener("click", ()=>{
       setMsg("", "");
       saveEditsDraft();
     });
 
-    // logout
     navLogout.addEventListener("click", (e)=>{
       e.preventDefault();
       if(confirm("Logga ut?")){
@@ -2176,7 +2578,6 @@
         return;
       }
 
-      // Ingen auto-selektion vid init
       renderBlockList(true);
       selectBlockByObject(null);
     }
@@ -2207,7 +2608,6 @@
       setWhoPill();
       setModePill();
 
-      // lugn start
       if(introBox) introBox.style.display = "none";
       btnToggleInfo.dataset.on = "0";
       btnToggleInfo.textContent = "Visa info";
@@ -2250,7 +2650,7 @@
       }
     });
 
-    window.__PKG_BLOCK__ = { STATE, BLOCKS_KEY, TRAININGS_KEY };
+    window.__PKG_BLOCK__ = { STATE, BLOCKS_KEY, TRAININGS_KEY, CONTRACT_V1_STRICT };
   })();
   </script>
 
