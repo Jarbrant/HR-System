@@ -60,42 +60,70 @@ Policy (LÅST):
     const s = String(v ?? "").trim();
     if (!s) return "(utan text)";
     const max = Math.max(0, Number(n || 0));
+    if (!max) return s;
     return s.slice(0, max) + (s.length > max ? "…" : "");
   }
 
   function normStr(v) { return String(v ?? "").trim(); }
+  function isFn(x) { return typeof x === "function"; }
 
-  function kindLabel(kind) {
-    const k = String(kind || "document");
-    if (k === "question") return { icon: "❓", name: "Fråga" };
-    if (k === "task") return { icon: "✅", name: "Uppgift" };
-    return { icon: "📄", name: "Dokument" };
+  function deepClone(obj) {
+    try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
   }
 
-  function makeInput(type, value, placeholder) {
+  function clampLen(s, max) {
+    const str = String(s ?? "");
+    const m = Math.max(0, Number(max || 0));
+    if (!m) return str;
+    return str.length <= m ? str : str.slice(0, m);
+  }
+
+  function btn(cls, text, title) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = cls || "miniBtn";
+    b.textContent = String(text || "");
+    if (title) b.title = String(title);
+    return b;
+  }
+
+  function inputText(value, placeholder) {
     const i = document.createElement("input");
-    i.type = type || "text";
+    i.type = "text";
     i.className = "input";
-    if (placeholder) i.placeholder = String(placeholder);
     i.value = String(value ?? "");
+    if (placeholder) i.placeholder = String(placeholder);
     i.autocomplete = "off";
     return i;
   }
 
-  function makeTextarea(value, placeholder) {
+  function textarea(value, placeholder) {
     const t = document.createElement("textarea");
     t.className = "input";
-    if (placeholder) t.placeholder = String(placeholder);
     t.value = String(value ?? "");
+    if (placeholder) t.placeholder = String(placeholder);
     return t;
   }
 
-  // För att undvika att UI “fladdrar” vid varje tecken (rerender från 06-page),
-  // patchar vi på blur/change (inte på input).
-  function patchOnBlurAndChange(node, patchFn) {
-    if (!node || typeof patchFn !== "function") return;
-    node.addEventListener("change", patchFn);
-    node.addEventListener("blur", patchFn);
+  function select(values, current) {
+    const s = document.createElement("select");
+    s.className = "input";
+    const cur = String(current ?? "");
+    for (const v of values) {
+      const o = document.createElement("option");
+      o.value = String(v.value);
+      o.textContent = String(v.label);
+      s.appendChild(o);
+    }
+    s.value = cur;
+    return s;
+  }
+
+  function labelWrap(lblText, node) {
+    const wrap = el("div", "");
+    wrap.appendChild(el("div", "fieldLbl", lblText));
+    wrap.appendChild(node);
+    return wrap;
   }
 
   // ---------- Message / Lock ----------
@@ -173,7 +201,13 @@ Policy (LÅST):
     if (!DOM.blockList) return;
     clear(DOM.blockList);
     DOM.blockList.appendChild(el("div", "muted2", "Sök för att visa block."));
-    DOM.blockList.appendChild(el("div", "tiny muted2", nAll ? "Tips: Du kan också trycka “Visa alla”." : "Tips: Exportera från utbildningar för att skapa ett block."));
+    DOM.blockList.appendChild(
+      el(
+        "div",
+        "tiny muted2",
+        nAll ? "Tips: Du kan också trycka “Visa alla”." : "Tips: Exportera från utbildningar för att skapa ett block."
+      )
+    );
   }
 
   function renderBlockList(opts) {
@@ -219,6 +253,7 @@ Policy (LÅST):
       const q = comp ? Number(comp.q || 0) : 0;
       const d = comp ? Number(comp.d || 0) : 0;
       const t = comp ? Number(comp.t || 0) : 0;
+
       const meta = el(
         "div",
         "tiny",
@@ -247,7 +282,7 @@ Policy (LÅST):
       top.appendChild(right);
       row.appendChild(top);
 
-      const choose = function () { if (typeof o.onSelect === "function" && id) o.onSelect(id); };
+      const choose = function () { if (isFn(o.onSelect) && id) o.onSelect(id); };
       row.addEventListener("click", choose);
       row.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(); }
@@ -282,8 +317,6 @@ Policy (LÅST):
 
       const left = el("div", "left");
       left.appendChild(el("div", "t", h.title || "—"));
-
-      // Viktigt: visa modul/område/steg här (din önskan)
       left.appendChild(el("div", "s",
         `Modul: ${h.module || "—"}\nOmråde: ${h.area || "—"}\nSteg: ${h.step || "—"}\nInnehåll: ${Number(h.itemsCount || 0)} delar`
       ));
@@ -294,7 +327,7 @@ Policy (LÅST):
       row.appendChild(left);
       row.appendChild(right);
 
-      const pick = function () { if (typeof o.onPickTraining === "function") o.onPickTraining(Number(h.index)); };
+      const pick = function () { if (isFn(o.onPickTraining)) o.onPickTraining(Number(h.index)); };
       row.addEventListener("click", pick);
       row.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); }
@@ -328,20 +361,20 @@ Policy (LÅST):
     DOM.trainExportHint.textContent = String(text || "");
   }
 
-  // ---------- Selected block (editor) ----------
+  // ---------- Selected block editor ----------
   function renderSelectedEmpty() {
     if (DOM.selHint) DOM.selHint.textContent = "Välj ett block i vänsterlistan för att se frågor + facit.";
     if (DOM.selDetail) clear(DOM.selDetail);
   }
 
-  function renderValidationList(reasons) {
+  function renderValidationReasons(reasons) {
     const arr = Array.isArray(reasons) ? reasons.filter(Boolean) : [];
     if (!arr.length) return null;
 
     const box = el("div", "errList");
-    box.appendChild(el("div", "h", "Verifiering stoppar:"));
+    box.appendChild(el("div", "h", "Verifiering blockerad"));
     const ul = document.createElement("ul");
-    for (const r of arr.slice(0, 50)) {
+    for (const r of arr.slice(0, 30)) {
       const li = document.createElement("li");
       li.textContent = String(r);
       ul.appendChild(li);
@@ -350,192 +383,347 @@ Policy (LÅST):
     return box;
   }
 
-  function renderItemEditor(it, idx, canEdit, onPatchItem) {
-    const item = it && typeof it === "object" ? it : {};
-    const kind = String(item.kind || "document");
-    const kMeta = kindLabel(kind);
+  function itemKindLabel(kind) {
+    const k = String(kind || "document");
+    if (k === "question") return "❓ Fråga";
+    if (k === "task") return "✅ Uppgift";
+    return "📄 Dokument";
+  }
 
+  function renderQuestionEditor(it, idx, canEdit, onPatchItem) {
     const card = el("div", "itemCard");
     const top = el("div", "itemRowTop");
-    const left = el("div", "");
-    left.appendChild(el("div", "previewTitle", `${kMeta.icon} ${kMeta.name} #${idx + 1}`));
+    top.appendChild(el("div", "tiny", itemKindLabel("question") + (it.questionId ? ` • ${it.questionId}` : "")));
+
     const right = el("div", "");
-    right.appendChild(pill("pill", canEdit ? "Redigering: på" : "Read-only"));
-    top.appendChild(left);
+    right.appendChild(pill("pill", `#${idx + 1}`));
     top.appendChild(right);
     card.appendChild(top);
 
-    card.appendChild(el("div", "divider", "")); // visuell spacer
-
-    // --- QUESTION ---
-    if (kind === "question") {
-      // fråga
-      card.appendChild(el("div", "fieldLbl", "Frågetext"));
-      const qText = makeTextarea(item.text || "", "Skriv frågan här…");
-      qText.disabled = !canEdit;
-      patchOnBlurAndChange(qText, function () {
-        if (!canEdit) return;
-        if (typeof onPatchItem !== "function") return;
-        const v = qText.value;
-        onPatchItem(idx, function (cur) {
-          const x = cur && typeof cur === "object" ? cur : {};
-          x.text = String(v || "");
-          x.kind = "question";
-          return x;
-        });
-      });
-      card.appendChild(qText);
-
-      // svarsalternativ (options)
-      card.appendChild(el("div", "fieldLbl", "Svarsalternativ"));
-      const options = Array.isArray(item.options) ? item.options.map((s) => String(s ?? "")) : [];
-      const optWrap = el("div", "");
-      const maxOpt = Math.max(2, Math.min(12, options.length || 4));
-
-      function patchOptionsFromUI() {
-        if (!canEdit) return;
-        if (typeof onPatchItem !== "function") return;
-        const next = [];
-        const rows = optWrap.querySelectorAll("input[data-opt='1']");
-        rows.forEach((inp) => {
-          const val = String(inp.value || "").trim();
-          if (val) next.push(val);
-        });
-        onPatchItem(idx, function (cur) {
-          const x = cur && typeof cur === "object" ? cur : {};
-          x.kind = "question";
-          x.options = next;
-          return x;
-        });
-      }
-
-      for (let i = 0; i < maxOpt; i++) {
-        const row = el("div", "optRow");
-        const inp = makeInput("text", options[i] || "", `Alternativ ${i + 1}`);
-        inp.dataset.opt = "1";
-        inp.disabled = !canEdit;
-        patchOnBlurAndChange(inp, patchOptionsFromUI);
-        row.appendChild(inp);
-        optWrap.appendChild(row);
-      }
-
-      if (canEdit) {
-        const help = el("div", "tiny muted2", "Tips: Lämna tomma rader om du vill ha färre alternativ.");
-        help.style.marginTop = "6px";
-        optWrap.appendChild(help);
-      }
-
-      card.appendChild(optWrap);
-
-      // facit
-      card.appendChild(el("div", "fieldLbl", "Facit (answerKey)"));
-      const ak = makeInput("text", item.answerKey || "", "t.ex. exakt text eller id beroende på modell");
-      ak.disabled = !canEdit;
-      patchOnBlurAndChange(ak, function () {
-        if (!canEdit) return;
-        if (typeof onPatchItem !== "function") return;
-        const v = ak.value;
-        onPatchItem(idx, function (cur) {
-          const x = cur && typeof cur === "object" ? cur : {};
-          x.kind = "question";
-          x.answerKey = String(v || "");
-          return x;
-        });
-      });
-      card.appendChild(ak);
-
-      // rationale (om finns / används)
-      const rationale = (item.answerKeyObj && typeof item.answerKeyObj === "object") ? String(item.answerKeyObj.rationale || "") : "";
-      card.appendChild(el("div", "fieldLbl", "Motivering (valfritt)"));
-      const rat = makeTextarea(rationale, "Varför är detta rätt svar? (valfritt)");
-      rat.disabled = !canEdit;
-      patchOnBlurAndChange(rat, function () {
-        if (!canEdit) return;
-        if (typeof onPatchItem !== "function") return;
-        const v = rat.value;
-        onPatchItem(idx, function (cur) {
-          const x = cur && typeof cur === "object" ? cur : {};
-          x.kind = "question";
-          const obj = (x.answerKeyObj && typeof x.answerKeyObj === "object") ? x.answerKeyObj : {};
-          obj.rationale = String(v || "");
-          x.answerKeyObj = obj;
-          return x;
-        });
-      });
-      card.appendChild(rat);
-
-      return card;
-    }
-
-    // --- TASK ---
-    if (kind === "task") {
-      card.appendChild(el("div", "fieldLbl", "Uppgiftstext"));
-      const tText = makeTextarea(item.text || "", "Beskriv uppgiften…");
-      tText.disabled = !canEdit;
-      patchOnBlurAndChange(tText, function () {
-        if (!canEdit) return;
-        if (typeof onPatchItem !== "function") return;
-        const v = tText.value;
-        onPatchItem(idx, function (cur) {
-          const x = cur && typeof cur === "object" ? cur : {};
-          x.kind = "task";
-          x.text = String(v || "");
-          return x;
-        });
-      });
-      card.appendChild(tText);
-
-      card.appendChild(el("div", "fieldLbl", "Instruktion (valfritt)"));
-      const instr = makeTextarea(item.instruction || "", "Instruktioner…");
-      instr.disabled = !canEdit;
-      patchOnBlurAndChange(instr, function () {
-        if (!canEdit) return;
-        if (typeof onPatchItem !== "function") return;
-        const v = instr.value;
-        onPatchItem(idx, function (cur) {
-          const x = cur && typeof cur === "object" ? cur : {};
-          x.kind = "task";
-          x.instruction = String(v || "");
-          return x;
-        });
-      });
-      card.appendChild(instr);
-
-      card.appendChild(el("div", "fieldLbl", "Leverans (valfritt)"));
-      const del = makeTextarea(item.deliverable || "", "Vad ska lämnas in / levereras?");
-      del.disabled = !canEdit;
-      patchOnBlurAndChange(del, function () {
-        if (!canEdit) return;
-        if (typeof onPatchItem !== "function") return;
-        const v = del.value;
-        onPatchItem(idx, function (cur) {
-          const x = cur && typeof cur === "object" ? cur : {};
-          x.kind = "task";
-          x.deliverable = String(v || "");
-          return x;
-        });
-      });
-      card.appendChild(del);
-
-      return card;
-    }
-
-    // --- DOCUMENT ---
-    card.appendChild(el("div", "fieldLbl", "Text"));
-    const dText = makeTextarea(item.text || "", "Skriv dokumenttext…");
-    dText.disabled = !canEdit;
-    patchOnBlurAndChange(dText, function () {
-      if (!canEdit) return;
-      if (typeof onPatchItem !== "function") return;
-      const v = dText.value;
+    // Question text
+    const qText = textarea(it.text || "", "Skriv frågan…");
+    qText.disabled = !canEdit;
+    qText.addEventListener("input", function () {
+      if (!canEdit || !isFn(onPatchItem)) return;
+      const v = clampLen(qText.value, 4000);
       onPatchItem(idx, function (cur) {
-        const x = cur && typeof cur === "object" ? cur : {};
-        x.kind = "document";
-        x.text = String(v || "");
-        return x;
+        const next = deepClone(cur || {});
+        next.kind = "question";
+        next.text = v;
+        return next;
       });
     });
-    card.appendChild(dText);
+    card.appendChild(labelWrap("Fråga", qText));
+
+    // Options model OR legacy choices model
+    const hasLegacyChoices = Array.isArray(it.choices) && it.choices.length > 0;
+
+    if (hasLegacyChoices) {
+      const choices = Array.isArray(it.choices) ? it.choices : [];
+      const list = el("div", "");
+      list.appendChild(el("div", "fieldLbl", "Svarsalternativ"));
+
+      for (let i = 0; i < choices.length; i++) {
+        const c = choices[i] || {};
+        const row = el("div", "optRow");
+        const inp = inputText(c.text || "", `Alternativ ${i + 1}`);
+        inp.disabled = !canEdit;
+        inp.addEventListener("input", function () {
+          if (!canEdit || !isFn(onPatchItem)) return;
+          const v = clampLen(inp.value, 2000);
+          onPatchItem(idx, function (cur) {
+            const next = deepClone(cur || {});
+            const arr = Array.isArray(next.choices) ? next.choices.slice() : [];
+            const cx = deepClone(arr[i] || {});
+            cx.id = normStr(cx.id || c.id || `c${i + 1}`);
+            cx.text = v;
+            arr[i] = cx;
+            next.choices = arr;
+            return next;
+          });
+        });
+
+        const del = btn("optBtn", "Ta bort");
+        del.disabled = !canEdit || choices.length <= 2;
+        del.addEventListener("click", function () {
+          if (!canEdit || !isFn(onPatchItem)) return;
+          onPatchItem(idx, function (cur) {
+            const next = deepClone(cur || {});
+            const arr = Array.isArray(next.choices) ? next.choices.slice() : [];
+            if (arr.length <= 2) return next;
+            arr.splice(i, 1);
+            next.choices = arr;
+
+            const ak = next.answerKeyObj && next.answerKeyObj.correctChoiceId ? String(next.answerKeyObj.correctChoiceId) : "";
+            const ids = arr.map((x) => String(x && x.id || ""));
+            if (ak && ids.indexOf(ak) === -1) {
+              next.answerKeyObj = next.answerKeyObj && typeof next.answerKeyObj === "object" ? next.answerKeyObj : {};
+              next.answerKeyObj.correctChoiceId = "";
+            }
+            return next;
+          });
+        });
+
+        row.appendChild(inp);
+        row.appendChild(del);
+        list.appendChild(row);
+      }
+
+      const add = btn("optBtn", "Lägg till");
+      add.disabled = !canEdit;
+      add.addEventListener("click", function () {
+        if (!canEdit || !isFn(onPatchItem)) return;
+        onPatchItem(idx, function (cur) {
+          const next = deepClone(cur || {});
+          const arr = Array.isArray(next.choices) ? next.choices.slice() : [];
+          const n = arr.length + 1;
+          arr.push({ id: `c${n}`, text: "" });
+          next.choices = arr;
+          return next;
+        });
+      });
+
+      const addRow = el("div", "optRow");
+      addRow.appendChild(add);
+      list.appendChild(addRow);
+
+      card.appendChild(list);
+
+      const values = [{ value: "", label: "Välj facit…" }];
+      for (const c of choices) {
+        const id = String(c && c.id || "");
+        const tx = String(c && c.text || "").trim();
+        values.push({ value: id, label: tx ? tx : id || "(tomt alternativ)" });
+      }
+      const cur = it.answerKeyObj && it.answerKeyObj.correctChoiceId ? String(it.answerKeyObj.correctChoiceId) : "";
+      const s = select(values, cur);
+      s.disabled = !canEdit;
+      s.addEventListener("change", function () {
+        if (!canEdit || !isFn(onPatchItem)) return;
+        const v = String(s.value || "");
+        onPatchItem(idx, function (curIt) {
+          const next = deepClone(curIt || {});
+          next.answerKeyObj = next.answerKeyObj && typeof next.answerKeyObj === "object" ? next.answerKeyObj : {};
+          next.answerKeyObj.correctChoiceId = v;
+          return next;
+        });
+      });
+      card.appendChild(labelWrap("Facit", s));
+
+      const rat = textarea((it.answerKeyObj && it.answerKeyObj.rationale) ? String(it.answerKeyObj.rationale) : "", "Varför är detta rätt? (valfritt)");
+      rat.disabled = !canEdit;
+      rat.addEventListener("input", function () {
+        if (!canEdit || !isFn(onPatchItem)) return;
+        const v = clampLen(rat.value, 4000);
+        onPatchItem(idx, function (curIt) {
+          const next = deepClone(curIt || {});
+          next.answerKeyObj = next.answerKeyObj && typeof next.answerKeyObj === "object" ? next.answerKeyObj : {};
+          next.answerKeyObj.rationale = v;
+          return next;
+        });
+      });
+      card.appendChild(labelWrap("Motivering (valfritt)", rat));
+    } else {
+      const opts = Array.isArray(it.options) ? it.options : [];
+      const list = el("div", "");
+      list.appendChild(el("div", "fieldLbl", "Svarsalternativ"));
+
+      const safeOpts = opts.length ? opts.slice() : ["", ""];
+      while (safeOpts.length < 2) safeOpts.push("");
+
+      for (let i = 0; i < safeOpts.length; i++) {
+        const row = el("div", "optRow");
+        const inp = inputText(safeOpts[i] || "", `Alternativ ${i + 1}`);
+        inp.disabled = !canEdit;
+
+        inp.addEventListener("input", function () {
+          if (!canEdit || !isFn(onPatchItem)) return;
+          const v = clampLen(inp.value, 2000);
+          onPatchItem(idx, function (cur) {
+            const next = deepClone(cur || {});
+            const arr = Array.isArray(next.options) ? next.options.slice() : [];
+            while (arr.length < 2) arr.push("");
+            arr[i] = v;
+            next.options = arr;
+            return next;
+          });
+        });
+
+        const del = btn("optBtn", "Ta bort");
+        del.disabled = !canEdit || safeOpts.length <= 2;
+        del.addEventListener("click", function () {
+          if (!canEdit || !isFn(onPatchItem)) return;
+          onPatchItem(idx, function (cur) {
+            const next = deepClone(cur || {});
+            const arr = Array.isArray(next.options) ? next.options.slice() : [];
+            while (arr.length < 2) arr.push("");
+            if (arr.length <= 2) return next;
+
+            const removed = String(arr[i] || "");
+            arr.splice(i, 1);
+            next.options = arr;
+
+            if (String(next.answerKey || "") === removed) next.answerKey = "";
+            return next;
+          });
+        });
+
+        row.appendChild(inp);
+        row.appendChild(del);
+        list.appendChild(row);
+      }
+
+      const add = btn("optBtn", "Lägg till");
+      add.disabled = !canEdit;
+      add.addEventListener("click", function () {
+        if (!canEdit || !isFn(onPatchItem)) return;
+        onPatchItem(idx, function (cur) {
+          const next = deepClone(cur || {});
+          const arr = Array.isArray(next.options) ? next.options.slice() : [];
+          while (arr.length < 2) arr.push("");
+          arr.push("");
+          next.options = arr;
+          return next;
+        });
+      });
+
+      const addRow = el("div", "optRow");
+      addRow.appendChild(add);
+      list.appendChild(addRow);
+
+      card.appendChild(list);
+
+      const values = [{ value: "", label: "Välj facit…" }];
+      const cur = String(it.answerKey || "");
+      const unique = new Set();
+      for (const o of safeOpts) {
+        const tx = String(o || "");
+        if (unique.has(tx)) continue;
+        unique.add(tx);
+        values.push({ value: tx, label: tx ? tx : "(tomt alternativ)" });
+      }
+      const s = select(values, cur);
+      s.disabled = !canEdit;
+      s.addEventListener("change", function () {
+        if (!canEdit || !isFn(onPatchItem)) return;
+        const v = String(s.value || "");
+        onPatchItem(idx, function (curIt) {
+          const next = deepClone(curIt || {});
+          next.answerKey = v;
+          return next;
+        });
+      });
+      card.appendChild(labelWrap("Facit", s));
+    }
+
+    return card;
+  }
+
+  function renderTaskEditor(it, idx, canEdit, onPatchItem) {
+    const card = el("div", "itemCard");
+    const top = el("div", "itemRowTop");
+    top.appendChild(el("div", "tiny", itemKindLabel("task") + (it.taskId ? ` • ${it.taskId}` : "")));
+
+    const right = el("div", "");
+    right.appendChild(pill("pill", `#${idx + 1}`));
+    top.appendChild(right);
+    card.appendChild(top);
+
+    const instr = textarea(it.instruction || it.text || "", "Instruktion till eleven…");
+    instr.disabled = !canEdit;
+    instr.addEventListener("input", function () {
+      if (!canEdit || !isFn(onPatchItem)) return;
+      const v = clampLen(instr.value, 4000);
+      onPatchItem(idx, function (cur) {
+        const next = deepClone(cur || {});
+        next.kind = "task";
+        next.instruction = v;
+        if (!next.text) next.text = v;
+        return next;
+      });
+    });
+    card.appendChild(labelWrap("Instruktion", instr));
+
+    const deliv = textarea(it.deliverable || "", "Vad ska lämnas in / visas / bockas av?");
+    deliv.disabled = !canEdit;
+    deliv.addEventListener("input", function () {
+      if (!canEdit || !isFn(onPatchItem)) return;
+      const v = clampLen(deliv.value, 2000);
+      onPatchItem(idx, function (cur) {
+        const next = deepClone(cur || {});
+        next.kind = "task";
+        next.deliverable = v;
+        return next;
+      });
+    });
+    card.appendChild(labelWrap("Leverans (valfritt)", deliv));
+
+    const req = document.createElement("input");
+    req.type = "checkbox";
+    req.checked = it.requiresDone !== false;
+    req.disabled = !canEdit;
+    req.addEventListener("change", function () {
+      if (!canEdit || !isFn(onPatchItem)) return;
+      const v = !!req.checked;
+      onPatchItem(idx, function (cur) {
+        const next = deepClone(cur || {});
+        next.kind = "task";
+        next.requiresDone = v;
+        return next;
+      });
+    });
+
+    const reqRow = el("div", "optRow");
+    reqRow.appendChild(req);
+    reqRow.appendChild(el("div", "tiny", "Kräver att eleven markerar klar"));
+    card.appendChild(reqRow);
+
+    return card;
+  }
+
+  function renderDocumentEditor(it, idx, canEdit, onPatchItem) {
+    const card = el("div", "itemCard");
+    const top = el("div", "itemRowTop");
+    top.appendChild(el("div", "tiny", itemKindLabel("document")));
+
+    const right = el("div", "");
+    right.appendChild(pill("pill", `#${idx + 1}`));
+    top.appendChild(right);
+    card.appendChild(top);
+
+    const tx = textarea(it.text || "", "Dokumenttext…");
+    tx.disabled = !canEdit;
+    tx.addEventListener("input", function () {
+      if (!canEdit || !isFn(onPatchItem)) return;
+      const v = clampLen(tx.value, 20000);
+      onPatchItem(idx, function (cur) {
+        const next = deepClone(cur || {});
+        next.kind = "document";
+        next.text = v;
+        return next;
+      });
+    });
+    card.appendChild(labelWrap("Text", tx));
+
+    const sign = document.createElement("input");
+    sign.type = "checkbox";
+    sign.checked = !!it.requiresSign;
+    sign.disabled = !canEdit;
+    sign.addEventListener("change", function () {
+      if (!canEdit || !isFn(onPatchItem)) return;
+      const v = !!sign.checked;
+      onPatchItem(idx, function (cur) {
+        const next = deepClone(cur || {});
+        next.kind = "document";
+        next.requiresSign = v;
+        return next;
+      });
+    });
+
+    const signRow = el("div", "optRow");
+    signRow.appendChild(sign);
+    signRow.appendChild(el("div", "tiny", "Kräver signering (valfritt)"));
+    card.appendChild(signRow);
 
     return card;
   }
@@ -545,72 +733,85 @@ Policy (LÅST):
     const b = o.block || null;
     const canEdit = !!o.canEdit;
     const reasons = Array.isArray(o.validationReasons) ? o.validationReasons : [];
-    const onPatchItem = (typeof o.onPatchItem === "function") ? o.onPatchItem : null;
+    const onPatchItem = isFn(o.onPatchItem) ? o.onPatchItem : null;
 
     if (!DOM.selDetail) return;
-
     clear(DOM.selDetail);
 
     if (!b) { renderSelectedEmpty(); return; }
 
     if (DOM.selHint) {
       DOM.selHint.textContent = canEdit
-        ? "Valt block: redigera items nedan. Ändringar sparas via “Spara ändringar”."
-        : "Valt block (Read-only): du kan granska items, men inte redigera.";
+        ? "Valt block: redigera items. Frågor visar svarsalternativ + facit tydligt."
+        : "Valt block (read-only): du kan granska items men inte ändra.";
     }
 
-    // Top summary
-    const title = el("div", "previewTitle", b.title || "(utan rubrik)");
-    DOM.selDetail.appendChild(title);
+    // Header/meta
+    const head = el("div", "previewCard");
+    head.appendChild(el("div", "previewTitle", b.title || "(utan rubrik)"));
 
-    const meta = el("div", "tiny", "");
-    meta.textContent =
-      `Modul: ${normStr(b.module) || "—"}  •  ` +
-      `Område: ${normStr(b.area) || "—"}  •  ` +
-      `Steg: ${normStr(b.step) || "—"}  •  ` +
-      `Status: ${(String(b.status || "draft").toLowerCase() === "published") ? "Publicerad" : "Utkast"}`;
-    meta.style.marginTop = "6px";
-    DOM.selDetail.appendChild(meta);
+    const meta = el("div", "tiny previewMeta",
+      `BlockID: ${b.blockId || "—"}\n` +
+      `Modul: ${b.module || "—"}\n` +
+      `Område: ${b.area || "—"}\n` +
+      `Steg: ${b.step || "—"}\n` +
+      `Status: ${String(b.status || "draft").toLowerCase() === "published" ? "Publicerad" : "Utkast"}`
+    );
+    head.appendChild(meta);
 
-    // Validation list (if any)
-    const vbox = renderValidationList(reasons);
-    if (vbox) {
-      vbox.style.marginTop = "10px";
-      DOM.selDetail.appendChild(vbox);
-    }
-
-    // Items
     const items = Array.isArray(b.items) ? b.items : [];
-    const itemsHdr = el("div", "fieldLbl", `Items (${items.length})`);
-    itemsHdr.style.marginTop = "12px";
-    DOM.selDetail.appendChild(itemsHdr);
+    const counts = { q: 0, d: 0, t: 0 };
+    for (const it of items) {
+      const k = String(it && it.kind ? it.kind : "document");
+      if (k === "question") counts.q++;
+      else if (k === "task") counts.t++;
+      else counts.d++;
+    }
 
+    const pills = el("div", "icoRow");
+    pills.appendChild(pill("icoPill", `❓ ${counts.q}`));
+    pills.appendChild(pill("icoPill", `📄 ${counts.d}`));
+    pills.appendChild(pill("icoPill", `✅ ${counts.t}`));
+    head.appendChild(pills);
+
+    DOM.selDetail.appendChild(head);
+
+    // Validation reasons (contract)
+    const vbox = renderValidationReasons(reasons);
+    if (vbox) DOM.selDetail.appendChild(vbox);
+
+    DOM.selDetail.appendChild(el("div", "divider"));
+
+    // Items list
     if (!items.length) {
-      DOM.selDetail.appendChild(el("div", "muted2", "Inga items i detta block ännu."));
+      DOM.selDetail.appendChild(el("div", "muted2", "Det här blocket har inga items ännu."));
       return;
     }
 
-    // Render each item editor
+    const listWrap = el("div", "");
+    listWrap.appendChild(el("div", "fieldLbl", `Items (${items.length})`));
+    listWrap.appendChild(el("div", "tiny muted2", "Redigera rad för rad. All rendering är XSS-säker (textContent)."));
+
     for (let i = 0; i < items.length; i++) {
-      const editor = renderItemEditor(items[i], i, canEdit, onPatchItem);
-      DOM.selDetail.appendChild(editor);
+      const it = items[i] || {};
+      const kind = String(it.kind || "document");
+
+      let card = null;
+      if (kind === "question") card = renderQuestionEditor(it, i, canEdit, onPatchItem);
+      else if (kind === "task") card = renderTaskEditor(it, i, canEdit, onPatchItem);
+      else card = renderDocumentEditor(it, i, canEdit, onPatchItem);
+
+      listWrap.appendChild(card);
     }
 
-    // Footer note
-    const note = el("div", "tiny muted2", canEdit
-      ? "Tips: ändringar skickas när du lämnar ett fält (blur/change)."
-      : "Read-only: byt till ADMIN/MANAGER för att kunna redigera.");
-    note.style.marginTop = "10px";
-    DOM.selDetail.appendChild(note);
+    DOM.selDetail.appendChild(listWrap);
   }
 
-  // ---------- Export ----------
+  // ---------- export ----------
   NS.render = {
-    // msg/lock
     setMsg: setMsg,
     showLockBox: showLockBox,
 
-    // pills/top
     setWhoPill: setWhoPill,
     setModePill: setModePill,
     setSelectionPill: setSelectionPill,
@@ -618,14 +819,14 @@ Policy (LÅST):
     setVerifyPill: setVerifyPill,
     setTopEditing: setTopEditing,
 
-    // lists
     renderBlockList: renderBlockList,
     renderTrainingHits: renderTrainingHits,
     renderExportPreview: renderExportPreview,
     setTrainExportHint: setTrainExportHint,
 
-    // selected
     renderSelectedEmpty: renderSelectedEmpty,
     renderSelectedDetail: renderSelectedDetail,
+
+    __dom: DOM
   };
 })();
