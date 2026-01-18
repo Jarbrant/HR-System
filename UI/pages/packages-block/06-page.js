@@ -24,10 +24,12 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
 - P1: Grön kvittens “flyttad/skapat” via render.setTrainExportNotice(ok) (fallback setTrainExportHint)
 - P1: Efter export: stänger exportbox + städar + auto-väljer nya blocket
 
-PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
-- P0: När en utbildningsrad markeras: städar + döljer preview direkt (ingen renderExportPreview på vald)
-- P0: Efter varje renderTrainingHits: om vald rad finns → hard-hide preview (call-order-säker)
-- P1: Vid filter/change + öppna/stäng: hard-hide preview och reset trainSelIndex vid behov
+PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-brus i inkorg):
+- P0: Vid klick i inkorg (trainings-lista) ska endast "Vald" markeras + export-knapp aktiveras (ingen Preview(items))
+- P0: Robust städning: trainPreviewDetail töms/döljs vid val/stäng
+- P1: Heuristik i normalizeItem: om kind="document" men item ser ut som fråga/uppgift → normalisera rätt (fixar "Dokument 1: text saknas")
+- P1: Frågor: säkerställ 3–5 svarsalternativ i normaliserad data (pad/cap), 1 rätt via answerKey/answerKeyObj (kontrakt hanterar validering)
+- P1: onAddItem(question): default 4 alternativ (3–5 krav)
 ============================================================ */
 (function () {
   "use strict";
@@ -159,34 +161,6 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
     if (DOM.trainExportHint) DOM.trainExportHint.textContent = t;
   }
 
-  // ---------- P0: hard-hide preview helpers ----------
-  function clearChildren(node) {
-    if (!node) return;
-    while (node.firstChild) node.removeChild(node.firstChild);
-  }
-
-  function hardHideExportPreview() {
-    // P0: “det ska inte synas när man markerar rutan”
-    if (!DOM.trainPreviewDetail) return;
-    clearChildren(DOM.trainPreviewDetail);
-    DOM.trainPreviewDetail.style.display = "none";
-  }
-
-  function hasActiveExportRowDom() {
-    try {
-      return !!(DOM.trainPreview && DOM.trainPreview.querySelector && DOM.trainPreview.querySelector(".exportRow.active"));
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function hardHidePreviewIfSelected() {
-    // Two sources of truth:
-    // 1) State says we have a selected training
-    // 2) DOM has an active export row
-    if (STATE.trainSelIndex >= 0 || hasActiveExportRowDom()) hardHideExportPreview();
-  }
-
   // ---------- state ----------
   const STATE = {
     ready: false,
@@ -226,6 +200,11 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
 
   function normStr(v) { return String(v ?? "").trim(); }
 
+  function clearChildren(node) {
+    if (!node) return;
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
   function countComposition(block) {
     const items = Array.isArray(block && block.items) ? block.items : [];
     let q = 0, d = 0, t = 0, missingKey = 0;
@@ -242,40 +221,98 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
     return { q, d, t, missingKey, items: items.length };
   }
 
+  // PP-SC-007: heuristik för att tolka gamla/inkorrekt märkta items
+  function looksLikeQuestion(it) {
+    if (!it || typeof it !== "object") return false;
+    if (Array.isArray(it.options) && it.options.length) return true;
+    if (Array.isArray(it.choices) && it.choices.length) return true;
+    if (it.answerKey) return true;
+    if (it.answerKeyObj && typeof it.answerKeyObj === "object" && it.answerKeyObj.correctChoiceId) return true;
+    if (it.requiresAnswer !== undefined) return true;
+    if (String(it.answerType || "").toLowerCase() === "choice") return true;
+    if (it.questionId || it.questionID || it.qid) return true;
+    return false;
+  }
+
+  function looksLikeTask(it) {
+    if (!it || typeof it !== "object") return false;
+    if (it.deliverable) return true;
+    if (it.instruction) return true;
+    if (it.requiresDone !== undefined) return true;
+    if (String(it.answerType || "").toLowerCase() === "checkbox") return true;
+    if (it.taskId) return true;
+    return false;
+  }
+
+  function normalizeQuestionOptions(rawOptions) {
+    // Policy: ingen ny datamodell/keys – vi normaliserar bara item-shape för UI+kontrakt.
+    // Krav (PP-SC-007): 3–5 svarsalternativ.
+    const opts = Array.isArray(rawOptions) ? rawOptions.map((x) => normStr(x)) : [];
+    const cleaned = opts.filter((x) => x !== "");
+    const out = cleaned.slice(0, 5); // cap 5
+
+    // pad till minst 3 (tomma strängar så UI kan visa fält)
+    while (out.length < 3) out.push("");
+
+    return out;
+  }
+
   function normalizeItem(raw) {
-    const it = raw && typeof raw === "object" ? raw : {};
-    const kind = String(it.kind || "document");
+    const it0 = raw && typeof raw === "object" ? raw : {};
+    const kindRaw = String(it0.kind || "").toLowerCase();
+
+    // PP-SC-007: om kind är tom/okänd eller "document" men ser ut som fråga/uppgift → korrigera
+    let kind = kindRaw;
+    if (kind !== "question" && kind !== "task" && kind !== "document") kind = "document";
+
+    if (kind === "document") {
+      const qish = looksLikeQuestion(it0);
+      const tish = looksLikeTask(it0);
+      if (qish && !tish) kind = "question";
+      else if (tish && !qish) kind = "task";
+      else if (qish && tish) kind = "question"; // prefer question om båda matchar (minskar "dokument text saknas")
+    }
+
     if (kind === "question") {
       // Accept: {options:[...], answerKey:"..."} OR {choices:[{id,text}], answerKeyObj:{correctChoiceId,rationale}}
+      const options = (function () {
+        if (Array.isArray(it0.options)) return normalizeQuestionOptions(it0.options);
+        // legacy: choices -> options (text)
+        if (Array.isArray(it0.choices)) return normalizeQuestionOptions(it0.choices.map((c) => (c && c.text) ? c.text : ""));
+        return normalizeQuestionOptions([]);
+      })();
+
       return {
         kind: "question",
-        questionId: normStr(it.questionId) || normStr(it.id) || "",
-        text: normStr(it.text) || "",
-        requiresAnswer: it.requiresAnswer !== false,
-        answerType: normStr(it.answerType) || "choice",
-        options: Array.isArray(it.options) ? it.options.map((x) => normStr(x)).filter(Boolean) : [],
-        answerKey: normStr(it.answerKey) || "",
+        questionId: normStr(it0.questionId) || normStr(it0.id) || normStr(it0.qid) || "",
+        text: normStr(it0.text) || "",
+        requiresAnswer: it0.requiresAnswer !== false,
+        answerType: normStr(it0.answerType) || "choice",
+        options: options,
+        answerKey: normStr(it0.answerKey) || "",
         // legacy strict fields (if present)
-        choices: Array.isArray(it.choices) ? it.choices : undefined,
-        answerKeyObj: it.answerKeyObj && typeof it.answerKeyObj === "object" ? it.answerKeyObj : undefined,
+        choices: Array.isArray(it0.choices) ? it0.choices : undefined,
+        answerKeyObj: it0.answerKeyObj && typeof it0.answerKeyObj === "object" ? it0.answerKeyObj : undefined,
       };
     }
+
     if (kind === "task") {
       return {
         kind: "task",
-        taskId: normStr(it.taskId) || "",
-        text: normStr(it.text) || "",
-        instruction: normStr(it.instruction) || "",
-        deliverable: normStr(it.deliverable) || "",
-        requiresDone: it.requiresDone !== false,
-        answerType: normStr(it.answerType) || "checkbox",
+        taskId: normStr(it0.taskId) || "",
+        text: normStr(it0.text) || "",
+        instruction: normStr(it0.instruction) || "",
+        deliverable: normStr(it0.deliverable) || "",
+        requiresDone: it0.requiresDone !== false,
+        answerType: normStr(it0.answerType) || "checkbox",
       };
     }
+
     // document
     return {
       kind: "document",
-      text: normStr(it.text) || "",
-      requiresSign: !!it.requiresSign,
+      text: normStr(it0.text) || "",
+      requiresSign: !!it0.requiresSign,
     };
   }
 
@@ -349,6 +386,24 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
     } catch (_) {}
   }
 
+  // PP-SC-007: robust städning av preview-pane (inkorg ska inte visa Preview(items))
+  function clearExportPreviewPane() {
+    try {
+      if (DOM.trainPreviewDetail) {
+        DOM.trainPreviewDetail.style.display = "none";
+        // extra: töm noden om render inte gör det
+        while (DOM.trainPreviewDetail.firstChild) DOM.trainPreviewDetail.removeChild(DOM.trainPreviewDetail.firstChild);
+      }
+    } catch (_) {}
+
+    // Om 05-render har renderExportPreview: kalla med tom array som "soft reset"
+    try {
+      if (render && typeof render.renderExportPreview === "function") {
+        render.renderExportPreview({ items: [] });
+      }
+    } catch (_) {}
+  }
+
   // PP-SC-002: central toggle for export container + body + cleanup
   function applyExportVisibility() {
     const open = !!STATE.exportOpen;
@@ -372,14 +427,11 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
 
       if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = true;
 
-      // P0: hard-hide preview alltid vid stängning
-      hardHideExportPreview();
+      // PP-SC-007: inkorg ska inte visa preview alls
+      clearExportPreviewPane();
 
       // refresh list state to match cleared filter
       try { refreshTrainingUI(); } catch (_) {}
-    } else {
-      // P0: när vi öppnar export ska preview starta städat
-      hardHideExportPreview();
     }
   }
 
@@ -494,7 +546,7 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
     if (DOM.pbModalTitle) DOM.pbModalTitle.textContent = "Redigera block";
     if (DOM.pbModalSub) {
       DOM.pbModalSub.textContent = STATE.selected
-        ? `${STATE.selected.title || "—"} • ${STATE.selected.blockId || STATE.selectedId || "—"}`
+        ? `${STATE.selected.module || "—"} • ${STATE.selected.area || "—"} • ${STATE.selected.title || "—"} • ${STATE.selected.step || "—"}`
         : "—";
     }
 
@@ -619,7 +671,8 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
           applyEditedBlockChange(function (draft) {
             const items = Array.isArray(draft.items) ? draft.items.slice() : [];
             const base =
-              k === "question" ? { kind: "question", text: "", options: ["Alternativ 1", "Alternativ 2"], answerKey: "" } :
+              // PP-SC-007: default 4 alternativ (uppfyller 3–5)
+              k === "question" ? { kind: "question", text: "", options: ["Alternativ 1", "Alternativ 2", "Alternativ 3", "Alternativ 4"], answerKey: "" } :
               k === "task" ? { kind: "task", text: "", instruction: "", deliverable: "" } :
               { kind: "document", text: "" };
 
@@ -665,10 +718,10 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
       });
     }
 
-    // keep modal subtitle fresh
+    // keep modal subtitle fresh (include meta)
     if (STATE.modalOpen && DOM.pbModalSub) {
-      DOM.pbModalSub.textContent = STATE.selected
-        ? `${STATE.selected.title || "—"} • ${STATE.selected.blockId || STATE.selectedId || "—"}`
+      DOM.pbModalSub.textContent = STATE.edited
+        ? `${STATE.edited.module || "—"} • ${STATE.edited.area || "—"} • ${STATE.edited.title || "—"} • ${STATE.edited.step || "—"}`
         : "—";
     }
   }
@@ -773,15 +826,12 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
   }
 
   function refreshTrainingUI() {
-    // P0: om vi byter filter/lista → börja alltid med att städa preview
-    hardHideExportPreview();
-
     // modul-lista
     if (DOM.qTrainModule) {
       const mods = new Set();
       for (const tr of STATE.trainings) {
-        const mm = normStr(tr && tr.module);
-        if (mm) mods.add(mm);
+        const m = normStr(tr && tr.module);
+        if (m) mods.add(m);
       }
       const cur = DOM.qTrainModule.value || "";
       clearChildren(DOM.qTrainModule);
@@ -791,10 +841,10 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
       opt0.textContent = "Alla moduler";
       DOM.qTrainModule.appendChild(opt0);
 
-      Array.from(mods).sort().forEach((mm) => {
+      Array.from(mods).sort().forEach((m) => {
         const o = document.createElement("option");
-        o.value = mm;
-        o.textContent = mm;
+        o.value = m;
+        o.textContent = m;
         DOM.qTrainModule.appendChild(o);
       });
 
@@ -820,26 +870,21 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
         corrupt: STATE.trainingsCorrupt,
         missing: STATE.trainingsMissing,
         onPickTraining: function (index) {
-          // P0: när man markerar en utbildning ska preview INTE visas
+          // PP-SC-007: endast markera vald + aktivera export. Ingen Preview(items).
           STATE.trainSelIndex = Number(index);
-
-          // Först: rendera listan med .active
           refreshTrainingUI();
 
-          // Sen: hard-hide preview (call-order säkert)
-          hardHidePreviewIfSelected();
+          const found = hits.find((h) => h.index === STATE.trainSelIndex) || null;
 
-          // enable export
-          const found = hits.find((h) => h.index === STATE.trainSelIndex);
-          if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = !(STATE.canWrite && found && found.itemsCount > 0);
+          // säkerställ att preview-panelen inte "spökar" fram
+          clearExportPreviewPane();
 
-          // (medvetet) INGEN render.renderExportPreview här längre
+          if (DOM.btnExportTraining) {
+            DOM.btnExportTraining.disabled = !(STATE.canWrite && found && found.itemsCount > 0);
+          }
         },
       });
     }
-
-    // P0: efter list-render → om något är valt: se till att preview är borta
-    hardHidePreviewIfSelected();
 
     // PP-SC-005: fokus “markera + export”
     setExportNotice(
@@ -853,6 +898,9 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
       const found = hits.find((h) => h.index === STATE.trainSelIndex);
       DOM.btnExportTraining.disabled = !(STATE.canWrite && found && found.itemsCount > 0);
     }
+
+    // PP-SC-007: inkorg ska aldrig visa preview-pane
+    clearExportPreviewPane();
   }
 
   function exportSelectedTraining() {
@@ -898,9 +946,6 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
     STATE.exportOpen = false;
     applyExportVisibility();
     applyExportIndicator();
-
-    // P0: hard-hide preview efter export (för säkerhets skull)
-    hardHideExportPreview();
 
     setMsgSafe("Export klar. Nytt block är valt.");
   }
@@ -990,27 +1035,14 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
         applyExportIndicator();
 
         // When opening: refresh the UI so it's always current
-        if (STATE.exportOpen) {
-          refreshTrainingUI();
-          // P0: export-open ska alltid starta utan preview
-          hardHideExportPreview();
-        }
+        if (STATE.exportOpen) refreshTrainingUI();
       });
     }
 
     // Export filters (PP-SC-004: endast modul)
     [DOM.qTrainModule].filter(Boolean).forEach((el) => {
-      el.addEventListener("input", function () {
-        // P0: filter-change ska alltid städa preview och reset selection
-        STATE.trainSelIndex = -1;
-        hardHideExportPreview();
-        refreshTrainingUI();
-      });
-      el.addEventListener("change", function () {
-        STATE.trainSelIndex = -1;
-        hardHideExportPreview();
-        refreshTrainingUI();
-      });
+      el.addEventListener("input", refreshTrainingUI);
+      el.addEventListener("change", refreshTrainingUI);
     });
 
     // PP-SC-005: btnReloadTrainings används som “Stäng” (ingen reload)
@@ -1020,7 +1052,6 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
         STATE.exportOpen = false;
         applyExportVisibility();
         applyExportIndicator();
-        hardHideExportPreview();
         setMsgSafe("Stängd.");
       });
     }
@@ -1145,9 +1176,6 @@ PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
 
     // wire
     wireEvents();
-
-    // P0: boot ska alltid lämna preview städat
-    hardHideExportPreview();
 
     setMsgSafe("Klart. Sök eller tryck “Visa alla”.");
     STATE.ready = true;
