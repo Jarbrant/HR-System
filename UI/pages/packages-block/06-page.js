@@ -2,19 +2,21 @@
 AO-PACKAGES-BLOCK-MODULAR-01 | FILE 06/06 | FIL-ID: UI/pages/packages-block/06-page.js
 Projekt: HR-System (GitHub Pages / UI-only)
 Syfte: Bootstrap + state + event wiring för Block-editor (packages-block)
-
 Policy (LÅST):
 - UI-only • Fail-closed
 - Inga nya storage-keys/datamodell
 - XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
 
-PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
-- ADMIN-only: endast ADMIN får write (export/spara/verifiera/publicera). MANAGER + SYSTEM_ADMIN = read-only.
-- Inkorg: “Ej verifierade” fail-safe på vid boot (som tidigare).
-- “Visa”-knapp (export toggle): grön indikator när det finns minst 1 “ny” utbildning att exportera
-  (fingerprint runtime; ingen lagring).
-- Efter export: auto-select nytt block (så du hamnar direkt i granska/redigera).
+PATCH v1.1.0 (PATCHPAKET v1.1 – kontrakt, modal, ADMIN-only):
+- Kontrakt: endast ADMIN får redigera block (MANAGER blir read-only här).
+- Inkorg-indikator: "Visa" (export) markerar grönt när det finns "nya" block.
+  Definition "nytt" (utan ny storage): block med verifiedAt <= 0 räknas som nya.
+- Modal: valt block visas i modal (flyttar befintliga noder, ingen innerHTML, behåller listeners).
+  - Öppnas automatiskt vid val av block
+  - ESC / overlay-klick / Stäng = stänger (fail-safe)
+  - Avbryt: återställ osparade ändringar (efter confirm om dirty)
+  - Spara: triggar samma save som "Spara ändringar" (utkast)
 ============================================================ */
 (function () {
   "use strict";
@@ -76,16 +78,28 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
     selDirtyPill: byId("selDirtyPill"),
     btnSaveEdits: byId("btnSaveEdits"),
 
-    // modal shell (valfritt; påverkar ej v1.1-flödet)
+    // modal shell (optional but expected in v1.1)
     pbModalOverlay: byId("pbModalOverlay"),
     pbModalDialog: byId("pbModalDialog"),
     pbModalBody: byId("pbModalBody"),
+    pbModalFoot: byId("pbModalFoot"),
     pbModalTitle: byId("pbModalTitle"),
     pbModalSub: byId("pbModalSub"),
     pbModalClose: byId("pbModalClose"),
     pbModalCancel: byId("pbModalCancel"),
     pbModalSave: byId("pbModalSave"),
   };
+
+  // We move this panel into modal (no cloning) to keep listeners intact
+  const SEL_PANEL = document.querySelector(".selPanel") || null;
+  const SEL_PANEL_HOME = (function () {
+    if (!SEL_PANEL) return null;
+    const ph = document.createElement("div");
+    ph.setAttribute("data-pb-selpanel-home", "1");
+    // insert placeholder right before panel
+    try { SEL_PANEL.parentNode && SEL_PANEL.parentNode.insertBefore(ph, SEL_PANEL); } catch (_) {}
+    return ph;
+  })();
 
   // ---------- deps ----------
   const core = NS.core;
@@ -120,7 +134,7 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
     discoveryActive: false, // search-first: startar false
     role: "SYSTEM_ADMIN",
     empNo: "",
-    canWrite: false, // ADMIN-only i v1.1
+    canWrite: false,
 
     allBlocks: [],
     visibleBlocks: [],
@@ -140,8 +154,8 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
     exportOpen: false,
     infoOpen: false,
 
-    // export indicator (runtime)
-    hasNewTrainingToExport: false,
+    // modal
+    modalOpen: false,
   };
 
   // ---------- utils ----------
@@ -237,58 +251,38 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
     return x;
   }
 
-  // -----------------------------
-  // “NYTT”-fingerprint (runtime)
-  // Inga storage-keys, ingen lagring.
-  // -----------------------------
-  function fpNorm(s) { return String(s ?? "").trim().toLowerCase(); }
-
-  function trainingFingerprint(meta) {
-    // SCOPE: tillräckligt för “nytt”-indikator utan att bli för strikt
-    const title = fpNorm(meta && meta.title);
-    const module = fpNorm(meta && meta.module);
-    const area = fpNorm(meta && meta.area);
-    const step = fpNorm(meta && meta.step);
-    const cnt = Number(meta && meta.itemsCount) || 0;
-    return `${title}|${module}|${area}|${step}|${cnt}`;
-  }
-
-  function blockFingerprint(block) {
-    const title = fpNorm(block && block.title);
-    const module = fpNorm(block && block.module);
-    const area = fpNorm(block && block.area);
-    const step = fpNorm(block && block.step);
-    const cnt = (block && block.__comp && Number(block.__comp.items)) ? Number(block.__comp.items) : (Array.isArray(block && block.items) ? block.items.length : 0);
-    return `${title}|${module}|${area}|${step}|${Number(cnt) || 0}`;
-  }
-
-  function computeBlockFpSet() {
-    const set = new Set();
-    for (const b of (STATE.allBlocks || [])) {
-      try { set.add(blockFingerprint(b)); } catch (_) {}
+  // ---------- "Nytt" indikator (utan ny storage) ----------
+  // Definition enligt v1.1: "nytt" = block som ej är verifierat (verifiedAt <= 0).
+  function countNewBlocks(blocks) {
+    const arr = Array.isArray(blocks) ? blocks : [];
+    let n = 0;
+    for (const b of arr) {
+      if (!b) continue;
+      if (Number(b.verifiedAt || 0) <= 0) n++;
     }
-    return set;
+    return n;
   }
 
-  function applyExportToggleIndicator() {
-    // UI-only: style knappen utan att kräva CSS-ändring
+  function applyExportIndicator() {
+    const nNew = countNewBlocks(STATE.allBlocks);
+    const hasNew = nNew > 0;
+
+    // Prefer render helper if it exists (added in 05-render v1.1.1), else do minimal DOM tweak here.
+    if (render && typeof render.setExportIndicator === "function") {
+      try { render.setExportIndicator({ hasNew, countNew: nNew }); } catch (_) {}
+      return;
+    }
+
+    // Fail-safe DOM-only indicator (no CSS dependency)
     if (!DOM.btnToggleExport) return;
-    const on = !!STATE.hasNewTrainingToExport;
+    const baseText = STATE.exportOpen ? "Dölj" : "Visa";
+    DOM.btnToggleExport.textContent = hasNew ? (baseText + " (nytt)") : baseText;
 
-    // Text / badge
-    const base = STATE.exportOpen ? "Dölj" : "Visa";
-    DOM.btnToggleExport.textContent = on ? (base + " •") : base;
-
-    // Grön indikator (fail-safe inline)
-    // (Ingen redesign – bara signal)
-    if (on) {
-      DOM.btnToggleExport.style.borderColor = "rgba(16,185,129,.45)";
-      DOM.btnToggleExport.style.boxShadow = "0 0 0 3px rgba(16,185,129,.18)";
-    } else {
-      DOM.btnToggleExport.style.borderColor = "";
-      DOM.btnToggleExport.style.boxShadow = "";
-    }
-    DOM.btnToggleExport.setAttribute("aria-label", on ? "Visa (nytt finns)" : base);
+    // Very small visual cue using existing class names
+    try {
+      DOM.btnToggleExport.className = "miniBtn" + (hasNew ? " ok" : "");
+      DOM.btnToggleExport.title = hasNew ? (`Det finns ${nNew} nya/ej verifierade block.`) : "Visa export";
+    } catch (_) {}
   }
 
   function buildVisibleBlocks() {
@@ -341,6 +335,8 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
       DOM.selDirtyPill.textContent = STATE.dirty ? "Ändringar: osparade" : "";
     }
     if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
+
+    // modal save button mirrors same state
     if (DOM.pbModalSave) DOM.pbModalSave.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
   }
 
@@ -372,6 +368,78 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
     } catch (e) {
       return [`Tekniskt fel i validering: ${String((e && e.message) || e)}`];
     }
+  }
+
+  // ---------- modal helpers (no innerHTML, move nodes) ----------
+  function modalAvailable() {
+    return !!(DOM.pbModalOverlay && DOM.pbModalDialog && DOM.pbModalBody);
+  }
+
+  function setModalHidden(hidden) {
+    if (!modalAvailable()) return;
+    DOM.pbModalOverlay.setAttribute("aria-hidden", hidden ? "true" : "false");
+  }
+
+  function openModal() {
+    if (!modalAvailable()) return;
+    if (STATE.modalOpen) return;
+
+    // Move the existing selection panel into modal body (keeps listeners)
+    if (SEL_PANEL && DOM.pbModalBody) {
+      try {
+        // Clear placeholder text in modal body but keep body itself
+        clearChildren(DOM.pbModalBody);
+        DOM.pbModalBody.appendChild(SEL_PANEL);
+      } catch (_) {}
+    }
+
+    // Title/sub
+    if (DOM.pbModalTitle) DOM.pbModalTitle.textContent = "Redigera block";
+    if (DOM.pbModalSub) {
+      DOM.pbModalSub.textContent = STATE.selected
+        ? `${STATE.selected.title || "—"} • ${STATE.selected.blockId || STATE.selectedId || "—"}`
+        : "—";
+    }
+
+    setModalHidden(false);
+    STATE.modalOpen = true;
+
+    // Focus
+    try { DOM.pbModalBody && DOM.pbModalBody.focus && DOM.pbModalBody.focus(); } catch (_) {}
+
+    // Update save enabled state
+    if (DOM.pbModalSave) DOM.pbModalSave.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
+  }
+
+  function closeModal(restorePanel) {
+    if (!modalAvailable()) return;
+    if (!STATE.modalOpen) return;
+
+    setModalHidden(true);
+    STATE.modalOpen = false;
+
+    // Move panel back to its home position
+    if (restorePanel && SEL_PANEL && SEL_PANEL_HOME && SEL_PANEL_HOME.parentNode) {
+      try {
+        SEL_PANEL_HOME.parentNode.insertBefore(SEL_PANEL, SEL_PANEL_HOME.nextSibling);
+      } catch (_) {}
+    }
+  }
+
+  function confirmLoseEditsIfNeeded() {
+    if (!STATE.dirty) return true;
+    try {
+      return window.confirm("Du har osparade ändringar. Vill du kasta ändringarna?");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function revertEditsToSelected() {
+    if (!STATE.selected) return;
+    STATE.edited = deepClone(STATE.selected);
+    setDirty(false);
+    updateRightPanel();
   }
 
   // ---------- central apply helper (stabil uppdatering) ----------
@@ -409,7 +477,7 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
       }
     } catch (_) {}
 
-    // enable buttons (ADMIN-only)
+    // enable buttons
     if (DOM.btnPrint) DOM.btnPrint.disabled = !STATE.selectedId;
     if (DOM.btnVerify) DOM.btnVerify.disabled = !(STATE.selectedId && STATE.canWrite && ok);
     if (DOM.btnPublish) DOM.btnPublish.disabled = !(STATE.selectedId && STATE.canWrite && ok);
@@ -421,6 +489,7 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
         canEdit: STATE.canWrite,
         validationReasons: reasons,
 
+        // item patch (befintlig)
         onPatchItem: function (idx, mutFn) {
           if (!STATE.canWrite) return;
           const cur = STATE.edited;
@@ -436,6 +505,7 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
           });
         },
 
+        // meta patch (NY)
         onPatchMeta: function (mutFn) {
           if (!STATE.canWrite) return;
           applyEditedBlockChange(function (draft) {
@@ -448,6 +518,7 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
           });
         },
 
+        // add/remove/move item (NY – valfritt för render att använda)
         onAddItem: function (kind, afterIdx) {
           if (!STATE.canWrite) return;
           const k = String(kind || "document");
@@ -500,8 +571,12 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
       });
     }
 
-    if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
-    if (DOM.pbModalSave) DOM.pbModalSave.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
+    // keep modal subtitle fresh
+    if (STATE.modalOpen && DOM.pbModalSub) {
+      DOM.pbModalSub.textContent = STATE.selected
+        ? `${STATE.selected.title || "—"} • ${STATE.selected.blockId || STATE.selectedId || "—"}`
+        : "—";
+    }
   }
 
   function onSelectBlockId(id) {
@@ -514,6 +589,11 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
     applySelectionPills();
     updateRightPanel();
     setMsgSafe(STATE.selectedId ? "Klart. Valt block laddat." : "Klart. Välj ett block.");
+
+    // v1.1: open modal on selection (if modal exists)
+    if (STATE.selectedId && modalAvailable()) {
+      openModal();
+    }
   }
 
   // ---------- persistence ----------
@@ -522,7 +602,7 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
     const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
     if (idx < 0) return { ok: false, err: "Block hittades inte i listan." };
 
-    // Spara exakt som STATE.edited säger (status/verified etc)
+    // P0: spara exakt som STATE.edited säger (status/verified etc)
     const next = deepClone(STATE.edited);
     next.updatedAt = nowTs();
     next.__comp = countComposition(next);
@@ -537,6 +617,7 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
     setDirty(false);
     refreshLeftList();
     updateRightPanel();
+    applyExportIndicator();
     return { ok: true };
   }
 
@@ -658,20 +739,6 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
     }
     STATE.trainHits = hits;
 
-    // “NYTT”-indikator: finns det minst 1 training-hit som inte matchar blockbankens fingerprints?
-    try {
-      const fpSet = computeBlockFpSet();
-      let hasNew = false;
-      for (const h of hits) {
-        const fp = trainingFingerprint(h);
-        if (!fpSet.has(fp)) { hasNew = true; break; }
-      }
-      STATE.hasNewTrainingToExport = hasNew;
-    } catch (_) {
-      STATE.hasNewTrainingToExport = false;
-    }
-    applyExportToggleIndicator();
-
     if (render && typeof render.renderTrainingHits === "function") {
       render.renderTrainingHits({
         hits: hits,
@@ -694,7 +761,7 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
       render.setTrainExportHint(
         STATE.canWrite
           ? "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)."
-          : "Read-only: endast ADMIN kan exportera."
+          : "Read-only: du kan inte exportera i detta läge."
       );
     }
 
@@ -707,13 +774,12 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
   function exportSelectedTraining() {
     const hit = STATE.trainHits.find((h) => h.index === STATE.trainSelIndex);
     if (!hit) { setMsgSafe("Välj en utbildning först."); return; }
-    if (!STATE.canWrite) { setMsgSafe("Read-only: endast ADMIN kan exportera."); return; }
+    if (!STATE.canWrite) { setMsgSafe("Read-only: bara ADMIN kan exportera."); return; }
     if (!hit.items || !hit.items.length) { setMsgSafe("Utbildningen saknar items att exportera."); return; }
 
     const ts = nowTs();
-    const newId = `b_${ts}`;
     const newBlock = normalizeBlock({
-      blockId: newId,
+      blockId: `b_${ts}`,
       title: hit.title,
       module: hit.module,
       area: hit.area,
@@ -730,17 +796,10 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
     const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
     if (!save.ok) { setMsgSafe(`Kunde inte exportera: ${save.err || "okänt fel"}`); return; }
 
-    // så användaren ser blocket direkt (inkorg-läge + lista)
-    STATE.discoveryActive = true;
+    STATE.discoveryActive = true; // så användaren ser blocket
     refreshLeftList();
-
-    // P1: auto-select ny-exporterat block
-    onSelectBlockId(newId);
-
-    // uppdatera indikator (nu kan “nytt” ha minskat)
-    refreshTrainingUI();
-
-    setMsgSafe("Export klar. Nytt block är valt i vänsterlistan.");
+    applyExportIndicator();
+    setMsgSafe("Export klar. Sök eller tryck “Visa alla” och välj det nya blocket.");
   }
 
   // ---------- print ----------
@@ -792,8 +851,7 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
 
     if (DOM.btnSaveEdits) {
       DOM.btnSaveEdits.addEventListener("click", function () {
-        if (!STATE.canWrite) { setMsgSafe("Read-only: endast ADMIN kan spara."); return; }
-        // "Spara ändringar" = spara som utkast
+        // "Spara ändringar" = spara som utkast (men förstör inte publish/verify-flödet)
         if (STATE.edited) STATE.edited.status = "draft";
         const r = persistEditedBlock();
         setMsgSafe(r.ok ? "Sparat. (Som utkast)" : (`Kunde inte spara: ${r.err || "okänt fel"}`));
@@ -802,7 +860,6 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
 
     if (DOM.btnVerify) {
       DOM.btnVerify.addEventListener("click", function () {
-        if (!STATE.canWrite) { setMsgSafe("Read-only: endast ADMIN kan verifiera."); return; }
         const r = setVerifiedAndPersist();
         setMsgSafe(r.ok ? "Verifierat och sparat." : (`Verifiering stoppad: ${r.err || "okänt fel"}`));
       });
@@ -810,7 +867,6 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
 
     if (DOM.btnPublish) {
       DOM.btnPublish.addEventListener("click", function () {
-        if (!STATE.canWrite) { setMsgSafe("Read-only: endast ADMIN kan publicera."); return; }
         const r = setPublishedAndPersist();
         setMsgSafe(r.ok ? "Publicerat och sparat." : (`Publicering stoppad: ${r.err || "okänt fel"}`));
       });
@@ -820,13 +876,14 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
       DOM.btnPrint.addEventListener("click", printSelected);
     }
 
-    // Export toggle
+    // Export toggle (+ update indicator)
     if (DOM.btnToggleExport && DOM.exportBody) {
       DOM.btnToggleExport.addEventListener("click", function () {
         STATE.exportOpen = !STATE.exportOpen;
         DOM.exportBody.style.display = STATE.exportOpen ? "block" : "none";
         DOM.btnToggleExport.setAttribute("aria-expanded", STATE.exportOpen ? "true" : "false");
-        applyExportToggleIndicator();
+        DOM.btnToggleExport.textContent = STATE.exportOpen ? "Dölj" : "Visa";
+        applyExportIndicator();
       });
     }
 
@@ -846,6 +903,49 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
 
     if (DOM.btnExportTraining) {
       DOM.btnExportTraining.addEventListener("click", exportSelectedTraining);
+    }
+
+    // Modal interactions (fail-safe if missing)
+    if (modalAvailable()) {
+      // overlay click closes (only if click is on overlay, not inside dialog)
+      DOM.pbModalOverlay.addEventListener("click", function (e) {
+        if (!STATE.modalOpen) return;
+        if (e && e.target === DOM.pbModalOverlay) {
+          if (!confirmLoseEditsIfNeeded()) return;
+          revertEditsToSelected();
+          closeModal(true);
+        }
+      });
+
+      // ESC closes
+      document.addEventListener("keydown", function (e) {
+        if (!STATE.modalOpen) return;
+        if (e && e.key === "Escape") {
+          e.preventDefault();
+          if (!confirmLoseEditsIfNeeded()) return;
+          revertEditsToSelected();
+          closeModal(true);
+        }
+      });
+
+      const doCancel = function () {
+        if (!confirmLoseEditsIfNeeded()) return;
+        revertEditsToSelected();
+        closeModal(true);
+      };
+
+      if (DOM.pbModalClose) DOM.pbModalClose.addEventListener("click", doCancel);
+      if (DOM.pbModalCancel) DOM.pbModalCancel.addEventListener("click", doCancel);
+
+      if (DOM.pbModalSave) {
+        DOM.pbModalSave.addEventListener("click", function () {
+          // reuse same save semantics as "Spara ändringar"
+          if (!STATE.canWrite) { setMsgSafe("Read-only: bara ADMIN kan spara."); return; }
+          if (DOM.btnSaveEdits) DOM.btnSaveEdits.click();
+          // keep modal open after save (så du kan fortsätta), men uppdatera indikator/text
+          applyExportIndicator();
+        });
+      }
     }
   }
 
@@ -872,8 +972,7 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
 
     STATE.role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
     STATE.empNo = String(who.empNo || "");
-
-    // v1.1: ADMIN-only write
+    // v1.1: ADMIN-only write (MANAGER read-only här)
     STATE.canWrite = (STATE.role === "ADMIN");
 
     // Inkorg default: fUnverified ska vara på (fail-safe)
@@ -897,13 +996,14 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
       if (DOM.btnVerify) DOM.btnVerify.disabled = true;
       if (DOM.btnPublish) DOM.btnPublish.disabled = true;
       if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = true;
-      if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = true;
+      if (DOM.pbModalSave) DOM.pbModalSave.disabled = true;
       return;
     }
 
     STATE.allBlocks = (r.blocks || []).map(normalizeBlock);
     STATE.discoveryActive = false; // search-first
     refreshLeftList();
+    applyExportIndicator();
 
     // trainings load
     loadTrainings();
@@ -911,15 +1011,6 @@ PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
 
     // wire
     wireEvents();
-
-    // ADMIN-only: hård disable i UI (extra fail-safe)
-    if (!STATE.canWrite) {
-      if (DOM.btnVerify) DOM.btnVerify.disabled = true;
-      if (DOM.btnPublish) DOM.btnPublish.disabled = true;
-      if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = true;
-      if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = true;
-      if (DOM.pbModalSave) DOM.pbModalSave.disabled = true;
-    }
 
     setMsgSafe("Klart. Sök eller tryck “Visa alla”.");
     STATE.ready = true;
