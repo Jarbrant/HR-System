@@ -29,6 +29,11 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
 - P0: task: om taskId saknas → auto-sätt stabilt id baserat på blockId + index
 - P0: document: om text saknas men instruction finns → text = instruction (legacy)
 - P2: Modal a11y: flytta/återställ fokus innan aria-hidden vid stängning (minskar Chrome-varning)
+
+PATCH v1.4.0 (PP-SC-009 / “Frågepärm” i modalen – bättre överblick):
+- P0: Binder-läge i modal: vänster “pärm” (lista) + höger “papper” (1 item i taget)
+- P1: Föreg/Nästa + Item X/Y + klick i pärm-lista
+- P2: Robust: om renderns DOM-struktur skiljer sig (saknar .itemCard) → binder kör ändå (visar allt)
 ============================================================ */
 (function () {
   "use strict";
@@ -189,6 +194,12 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
     // modal
     modalOpen: false,
     lastFocusEl: null, // PP-SC-008 P2 (a11y)
+
+    // PP-SC-009: binder view (UI-only, no storage)
+    modalBinder: {
+      enabled: true,
+      itemIndex: 0, // 0..n-1
+    },
   };
 
   // ---------- utils ----------
@@ -472,6 +483,248 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
     DOM.pbModalOverlay.setAttribute("aria-hidden", hidden ? "true" : "false");
   }
 
+  // PP-SC-009: binder DOM (created once, reused)
+  function ensureBinderShell() {
+    if (!modalAvailable() || !DOM.pbModalBody) return null;
+
+    let root = DOM.pbModalBody.querySelector("[data-pb-binder-root='1']");
+    if (root) return root;
+
+    root = document.createElement("div");
+    root.setAttribute("data-pb-binder-root", "1");
+    root.style.display = "grid";
+    root.style.gridTemplateColumns = "280px 1fr";
+    root.style.gap = "12px";
+    root.style.alignItems = "stretch";
+    root.style.minHeight = "200px";
+
+    const left = document.createElement("div");
+    left.setAttribute("data-pb-binder-left", "1");
+    left.style.border = "1px solid var(--line)";
+    left.style.borderRadius = "12px";
+    left.style.background = "rgba(250,250,250,.92)";
+    left.style.overflow = "auto";
+    left.style.maxHeight = "calc(82vh - 160px)";
+    left.style.padding = "10px";
+
+    const right = document.createElement("div");
+    right.setAttribute("data-pb-binder-right", "1");
+    right.style.minWidth = "0";
+
+    root.appendChild(left);
+    root.appendChild(right);
+
+    // If body currently has something, replace it
+    try {
+      while (DOM.pbModalBody.firstChild) DOM.pbModalBody.removeChild(DOM.pbModalBody.firstChild);
+      DOM.pbModalBody.appendChild(root);
+    } catch (_) {}
+
+    return root;
+  }
+
+  function getBinderLeft(root) {
+    try { return root ? root.querySelector("[data-pb-binder-left='1']") : null; } catch (_) { return null; }
+  }
+  function getBinderRight(root) {
+    try { return root ? root.querySelector("[data-pb-binder-right='1']") : null; } catch (_) { return null; }
+  }
+
+  function binderIconFor(kind) {
+    const k = String(kind || "document");
+    if (k === "question") return "❓";
+    if (k === "task") return "✅";
+    return "📄";
+  }
+
+  function binderLabelForItem(it) {
+    const kind = String(it && it.kind ? it.kind : "document");
+    const txt = normStr(it && (it.text || it.instruction || ""));
+    const first = txt ? txt.split("\n")[0].slice(0, 70) : "(tomt)";
+    const tag = kind === "question" ? "Fråga" : kind === "task" ? "Uppgift" : "Dokument";
+    return `${binderIconFor(kind)} ${tag}: ${first}${txt.length > 70 ? "…" : ""}`;
+  }
+
+  function clampBinderIndex() {
+    const items = Array.isArray(STATE.edited && STATE.edited.items) ? STATE.edited.items : [];
+    if (!items.length) { STATE.modalBinder.itemIndex = 0; return; }
+    let i = Number(STATE.modalBinder.itemIndex || 0);
+    if (!Number.isFinite(i)) i = 0;
+    if (i < 0) i = 0;
+    if (i >= items.length) i = items.length - 1;
+    STATE.modalBinder.itemIndex = i;
+  }
+
+  function hideAllButActiveItemCard() {
+    // Robust attempt: rely on .itemCard produced by 05-render.js
+    if (!SEL_PANEL) return;
+
+    const cards = SEL_PANEL.querySelectorAll(".itemCard");
+    if (!cards || !cards.length) return; // P2: structure differs -> do nothing (shows all)
+
+    clampBinderIndex();
+    const idx = STATE.modalBinder.itemIndex;
+
+    for (let i = 0; i < cards.length; i++) {
+      cards[i].style.display = (i === idx) ? "block" : "none";
+    }
+
+    // Make active textarea feel more “word-document”
+    try {
+      const active = cards[idx];
+      if (!active) return;
+      const tas = active.querySelectorAll("textarea");
+      for (let j = 0; j < tas.length; j++) {
+        tas[j].style.minHeight = "240px";
+      }
+    } catch (_) {}
+  }
+
+  function buildBinderLeftList() {
+    if (!STATE.modalOpen || !STATE.modalBinder.enabled) return;
+    if (!STATE.edited || !modalAvailable()) return;
+
+    const root = ensureBinderShell();
+    const left = getBinderLeft(root);
+    if (!left) return;
+
+    const items = Array.isArray(STATE.edited.items) ? STATE.edited.items : [];
+    clampBinderIndex();
+
+    clearChildren(left);
+
+    // Header + nav
+    const h = document.createElement("div");
+    h.style.display = "flex";
+    h.style.justifyContent = "space-between";
+    h.style.alignItems = "center";
+    h.style.gap = "10px";
+    h.style.flexWrap = "wrap";
+
+    const ht = document.createElement("div");
+    ht.style.fontWeight = "950";
+    ht.textContent = "Pärm";
+
+    const pos = document.createElement("div");
+    pos.style.fontSize = ".86rem";
+    pos.style.color = "var(--muted)";
+    pos.textContent = items.length ? `Item ${STATE.modalBinder.itemIndex + 1}/${items.length}` : "Inga items";
+
+    h.appendChild(ht);
+    h.appendChild(pos);
+    left.appendChild(h);
+
+    const nav = document.createElement("div");
+    nav.style.display = "flex";
+    nav.style.gap = "8px";
+    nav.style.marginTop = "10px";
+
+    const btnPrev = document.createElement("button");
+    btnPrev.type = "button";
+    btnPrev.className = "miniBtn";
+    btnPrev.textContent = "Föreg";
+    btnPrev.disabled = !(items.length && STATE.modalBinder.itemIndex > 0);
+    btnPrev.addEventListener("click", function () {
+      if (!items.length) return;
+      STATE.modalBinder.itemIndex = Math.max(0, STATE.modalBinder.itemIndex - 1);
+      updateRightPanel();
+      applyBinderMode();
+    });
+
+    const btnNext = document.createElement("button");
+    btnNext.type = "button";
+    btnNext.className = "miniBtn";
+    btnNext.textContent = "Nästa";
+    btnNext.disabled = !(items.length && STATE.modalBinder.itemIndex < items.length - 1);
+    btnNext.addEventListener("click", function () {
+      if (!items.length) return;
+      STATE.modalBinder.itemIndex = Math.min(items.length - 1, STATE.modalBinder.itemIndex + 1);
+      updateRightPanel();
+      applyBinderMode();
+    });
+
+    nav.appendChild(btnPrev);
+    nav.appendChild(btnNext);
+    left.appendChild(nav);
+
+    const hr = document.createElement("div");
+    hr.style.borderTop = "1px dashed var(--line)";
+    hr.style.margin = "12px 0";
+    left.appendChild(hr);
+
+    // List
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "miniBtn";
+      row.style.width = "100%";
+      row.style.textAlign = "left";
+      row.style.whiteSpace = "normal";
+      row.style.lineHeight = "1.25";
+      row.style.padding = "8px 10px";
+      row.style.borderRadius = "12px";
+      row.style.border = "1px solid var(--line)";
+      row.style.background = (i === STATE.modalBinder.itemIndex) ? "rgba(219,234,254,.55)" : "#fff";
+      row.style.color = "var(--ink)";
+      row.textContent = binderLabelForItem(it);
+
+      row.addEventListener("click", function () {
+        STATE.modalBinder.itemIndex = i;
+        updateRightPanel();
+        applyBinderMode();
+      });
+
+      left.appendChild(row);
+      const sp = document.createElement("div");
+      sp.style.height = "8px";
+      left.appendChild(sp);
+    }
+
+    // Hint
+    const hint = document.createElement("div");
+    hint.style.marginTop = "8px";
+    hint.style.fontSize = ".86rem";
+    hint.style.color = "var(--muted)";
+    hint.textContent = "Tips: klicka i listan för att byta “papper”.";
+    left.appendChild(hint);
+  }
+
+  function applyBinderMode() {
+    if (!STATE.modalOpen) return;
+    if (!STATE.modalBinder.enabled) return;
+    if (!modalAvailable()) return;
+
+    const root = ensureBinderShell();
+    const right = getBinderRight(root);
+    if (!right) return;
+
+    // Ensure SEL_PANEL is in right pane
+    if (SEL_PANEL) {
+      try {
+        if (SEL_PANEL.parentNode !== right) {
+          right.appendChild(SEL_PANEL);
+        }
+      } catch (_) {}
+    }
+
+    // Build left list + hide everything except active card
+    buildBinderLeftList();
+    hideAllButActiveItemCard();
+
+    // Update modal subtitle with meta (module/area/title/step) for quick scan
+    try {
+      if (DOM.pbModalSub && STATE.edited) {
+        const t = normStr(STATE.edited.title) || "—";
+        const m = normStr(STATE.edited.module) || "—";
+        const a = normStr(STATE.edited.area) || "—";
+        const s = normStr(STATE.edited.step) || "—";
+        const items = Array.isArray(STATE.edited.items) ? STATE.edited.items.length : 0;
+        DOM.pbModalSub.textContent = `${m} • ${a} • ${t} • Steg ${s} • ${STATE.edited.blockId || STATE.selectedId || "—"} • Item ${items ? (STATE.modalBinder.itemIndex + 1) : 0}/${items}`;
+      }
+    } catch (_) {}
+  }
+
   function openModal() {
     if (!modalAvailable()) return;
     if (STATE.modalOpen) return;
@@ -484,12 +737,13 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
       STATE.lastFocusEl = null;
     }
 
+    // PP-SC-009: binder shell in body
+    const root = ensureBinderShell();
+    const right = getBinderRight(root);
+
     // Move the existing selection panel into modal body (keeps listeners)
-    if (SEL_PANEL && DOM.pbModalBody) {
-      try {
-        while (DOM.pbModalBody.firstChild) DOM.pbModalBody.removeChild(DOM.pbModalBody.firstChild);
-        DOM.pbModalBody.appendChild(SEL_PANEL);
-      } catch (_) {}
+    if (SEL_PANEL && right) {
+      try { right.appendChild(SEL_PANEL); } catch (_) {}
     }
 
     // Title/sub
@@ -503,11 +757,17 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
     setModalHidden(false);
     STATE.modalOpen = true;
 
+    // Clamp binder index at open
+    clampBinderIndex();
+
     // Focus
     try { DOM.pbModalBody && DOM.pbModalBody.focus && DOM.pbModalBody.focus(); } catch (_) {}
 
     // Update save enabled state
     if (DOM.pbModalSave) DOM.pbModalSave.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
+
+    // Apply binder view
+    applyBinderMode();
   }
 
   function closeModal(restorePanel) {
@@ -552,6 +812,8 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
   function revertEditsToSelected() {
     if (!STATE.selected) return;
     STATE.edited = deepClone(STATE.selected);
+    // PP-SC-009: reset binder index safe
+    STATE.modalBinder.itemIndex = 0;
     setDirty(false);
     updateRightPanel();
   }
@@ -655,6 +917,12 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
 
             items.splice(pos, 0, ni);
             draft.items = items;
+
+            // PP-SC-009: om vi lägger till item före/vid vald index, håll “papper” stabilt
+            if (STATE.modalBinder && STATE.modalBinder.enabled) {
+              if (STATE.modalBinder.itemIndex >= pos) STATE.modalBinder.itemIndex += 1;
+            }
+
             return draft;
           });
         },
@@ -666,6 +934,10 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
             const i = Number(idx);
             if (i >= 0 && i < items.length) items.splice(i, 1);
             draft.items = items;
+
+            // PP-SC-009: clamp binder index after remove
+            clampBinderIndex();
+
             return draft;
           });
         },
@@ -690,6 +962,18 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
             }
 
             draft.items = items;
+
+            // PP-SC-009: om vi flyttar ett item som är aktivt i binder, följ med
+            try {
+              if (STATE.modalBinder && STATE.modalBinder.enabled) {
+                const bi = Number(STATE.modalBinder.itemIndex || 0);
+                if (Number.isFinite(bi)) {
+                  if (bi === i) STATE.modalBinder.itemIndex = j;
+                  else if (bi === j) STATE.modalBinder.itemIndex = i;
+                }
+              }
+            } catch (_) {}
+
             return draft;
           });
         },
@@ -702,6 +986,11 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
         ? `${STATE.selected.title || "—"} • ${STATE.selected.blockId || STATE.selectedId || "—"}`
         : "—";
     }
+
+    // PP-SC-009: apply binder after each render
+    if (STATE.modalOpen) {
+      applyBinderMode();
+    }
   }
 
   function onSelectBlockId(id) {
@@ -712,6 +1001,9 @@ PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerb
     // PP-SC-008: säkerställ att vald block alltid är normaliserad (legacy → fix)
     STATE.selected = found ? normalizeBlock(found) : null;
     STATE.edited = STATE.selected ? deepClone(STATE.selected) : null;
+
+    // PP-SC-009: reset binder to first item on new selection
+    STATE.modalBinder.itemIndex = 0;
 
     setDirty(false);
     applySelectionPills();
