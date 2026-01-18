@@ -21,11 +21,11 @@ PATCH v1.1.3 (PP-SC-006 – Mindre brus efter val i export):
 - P1: Dölj Items-count i exportlistan när vald (visa “Vald”)
 - P1: Dölj/Collapse preview-panel när en export-rad är vald (UI-detektion av .exportRow.active)
 
-PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga rå-preview i inkorg):
-- P0: Fråga: visa fråga + 3–5 alternativ + radio (exakt 1 rätt), allt synligt samtidigt
-- P0: Stöd både nya frågor (options+answerKey) och legacy (choices+answerKeyObj.correctChoiceId) utan datatapp
-- P1: Meta-rad överst i modalen: Modul • Område • Titel • Steg • blockId
-- P1: Inkorg: renderExportPreview gör ingen rå-preview (döljer trainPreviewDetail) som standard
+PATCH v1.1.4 (PP-SC-007 – Fråge-editor “word-känsla”):
+- P1: Fråga + 3–5 alternativ i ett block (radio för “rätt”)
+- P1: Add/Remove alternativ begränsas till 3–5
+- P1: Dokument-text fallback: text || instruction (så äldre data inte blir “tom”)
+- P2: __VERSION exponeras för enkel Console-check
 ============================================================ */
 (function () {
   "use strict";
@@ -187,12 +187,10 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
     const hasNew = !!m.hasNew;
     const countNew = Number(m.countNew || 0) || 0;
 
-    // Don’t fight 06’s open/close text too hard; just add hint+title.
     try {
       DOM.btnToggleExport.title = hasNew ? (`Det finns ${countNew} nya/ej verifierade block.`) : "Visa export";
     } catch (_) {}
 
-    // Small class hint if your CSS supports it (safe no-op otherwise)
     try {
       DOM.btnToggleExport.className = "miniBtn" + (hasNew ? " ok" : "");
     } catch (_) {}
@@ -293,7 +291,6 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
       return;
     }
     if (!hits.length) {
-      // PP-SC-004/005: ingen “sök” här längre → copy matchar modulfilter
       DOM.trainPreview.appendChild(el("div", { class: "muted2", text: "Inga utbildningar att visa för valt modulfilter." }));
       return;
     }
@@ -315,7 +312,6 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
       left.appendChild(el("div", { class: "t", text: title }));
       left.appendChild(el("div", { class: "tiny muted2 s", text: `${module || "—"} • ${area || "—"} • ${step || "—"}` }));
 
-      // PP-SC-006: när vald → visa inte Items-count (mindre brus)
       const rightText = active ? "Vald" : `Items: ${itemsCount}`;
       const right = el("div", { class: "tiny muted2", text: rightText });
 
@@ -333,15 +329,48 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
     }
   }
 
-  // PP-SC-007: Inkorg ska inte visa rå preview/JSON.
-  // Vi döljer trainPreviewDetail som standard (06 kan fortfarande kalla funktionen).
   function renderExportPreview(payload) {
-    (void payload); // keep signature stable
+    const p = payload && typeof payload === "object" ? payload : {};
+    const items = Array.isArray(p.items) ? p.items : [];
+
     if (!DOM.trainPreviewDetail) return;
+    clear(DOM.trainPreviewDetail);
+
+    // PP-SC-006: om en export-rad är vald → dölj preview-panelen (mindre brus).
+    let hasActive = false;
     try {
-      clear(DOM.trainPreviewDetail);
+      hasActive = !!(DOM.trainPreview && DOM.trainPreview.querySelector && DOM.trainPreview.querySelector(".exportRow.active"));
+    } catch (_) {
+      hasActive = false;
+    }
+    if (hasActive) {
       DOM.trainPreviewDetail.style.display = "none";
-    } catch (_) {}
+      return;
+    }
+
+    if (!items.length) {
+      DOM.trainPreviewDetail.style.display = "none";
+      return;
+    }
+
+    DOM.trainPreviewDetail.style.display = "block";
+    DOM.trainPreviewDetail.appendChild(el("div", { class: "previewTitle", text: "Preview (export)" }));
+    DOM.trainPreviewDetail.appendChild(el("div", { class: "tiny muted2 previewMeta", text: `Items: ${items.length}` }));
+    DOM.trainPreviewDetail.appendChild(el("div", { class: "divider" }));
+
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i] && typeof items[i] === "object" ? items[i] : {};
+      const kind = String(it.kind || "document");
+      const box = el("div", { class: "exportItemRow" });
+
+      const k = kind === "question" ? "❓ Fråga" : kind === "task" ? "✅ Uppgift" : "📄 Dokument";
+      box.appendChild(el("div", { class: "tiny", text: `${i + 1}. ${k}` }));
+
+      const text = String(it.text || it.instruction || "");
+      box.appendChild(el("div", { class: "tiny muted2", text: text || "—" }));
+
+      DOM.trainPreviewDetail.appendChild(box);
+    }
   }
 
   function setTrainExportHint(text) {
@@ -356,7 +385,6 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
     const k = String(kind || "info");
     const t = String(text || "");
 
-    // Reset baseline first (fail-safe)
     try {
       DOM.trainExportHint.style.border = "";
       DOM.trainExportHint.style.background = "";
@@ -386,7 +414,6 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
       return;
     }
 
-    // info/default
     setText(DOM.trainExportHint, t);
   }
 
@@ -417,19 +444,18 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
 
     if (DOM.selHint) setText(DOM.selHint, canEdit ? "Redigera i modal/panelen. Spara som utkast." : "Read-only här. Endast ADMIN får redigera block.");
 
-    // --- "Word"-wrapper (CSS-agnostisk) ---
-    const docWrap = el("div", { class: "wordDoc" });
-
-    // --- Meta line (readable, one glance) ---
-    const metaLine = el("div", { class: "muted2", text: `Modul: ${block.module || "—"} • Område: ${block.area || "—"} • Titel: ${block.title || "—"} • Steg: ${block.step || "—"} • blockId: ${block.blockId || "—"}` });
-    docWrap.appendChild(metaLine);
-
-    // --- Meta edit section (kept) ---
+    // Meta section (top “doc header”)
     const meta = el("div", { class: "itemCard" });
-    meta.appendChild(el("div", { class: "fieldLbl", text: "Rubrik" }));
 
-    const inpTitle = el("input", { class: "input", type: "text" });
-    inpTitle.value = String(block.title || "");
+    const hdr = el("div", { class: "qaLine" });
+    hdr.appendChild(el("span", { class: "qaPill", text: `Modul: ${normStr(block.module) || "—"}` }));
+    hdr.appendChild(el("span", { class: "qaPill", text: `Område: ${normStr(block.area) || "—"}` }));
+    hdr.appendChild(el("span", { class: "qaPill", text: `Steg: ${normStr(block.step) || "—"}` }));
+    hdr.appendChild(el("span", { class: "qaPill", text: `ID: ${normStr(block.blockId) || "—"}` }));
+    meta.appendChild(hdr);
+
+    meta.appendChild(el("div", { class: "fieldLbl", text: "Rubrik" }));
+    const inpTitle = el("input", { class: "input", type: "text", value: String(block.title || "") });
     inpTitle.disabled = !canEdit;
     inpTitle.addEventListener("input", function () {
       if (!canEdit || !onPatchMeta) return;
@@ -439,8 +465,7 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
     meta.appendChild(inpTitle);
 
     meta.appendChild(el("div", { class: "fieldLbl", text: "Modul" }));
-    const inpModule = el("input", { class: "input", type: "text" });
-    inpModule.value = String(block.module || "");
+    const inpModule = el("input", { class: "input", type: "text", value: String(block.module || "") });
     inpModule.disabled = !canEdit;
     inpModule.addEventListener("input", function () {
       if (!canEdit || !onPatchMeta) return;
@@ -450,8 +475,7 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
     meta.appendChild(inpModule);
 
     meta.appendChild(el("div", { class: "fieldLbl", text: "Område" }));
-    const inpArea = el("input", { class: "input", type: "text" });
-    inpArea.value = String(block.area || "");
+    const inpArea = el("input", { class: "input", type: "text", value: String(block.area || "") });
     inpArea.disabled = !canEdit;
     inpArea.addEventListener("input", function () {
       if (!canEdit || !onPatchMeta) return;
@@ -461,8 +485,7 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
     meta.appendChild(inpArea);
 
     meta.appendChild(el("div", { class: "fieldLbl", text: "Steg" }));
-    const inpStep = el("input", { class: "input", type: "text" });
-    inpStep.value = String(block.step || "");
+    const inpStep = el("input", { class: "input", type: "text", value: String(block.step || "") });
     inpStep.disabled = !canEdit;
     inpStep.addEventListener("input", function () {
       if (!canEdit || !onPatchMeta) return;
@@ -471,7 +494,7 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
     });
     meta.appendChild(inpStep);
 
-    docWrap.appendChild(meta);
+    DOM.selDetail.appendChild(meta);
 
     // Add item controls (optional)
     if (canEdit && onAddItem) {
@@ -485,44 +508,13 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
       addRow.appendChild(addDoc);
       addRow.appendChild(addQ);
       addRow.appendChild(addT);
-      docWrap.appendChild(addRow);
+      DOM.selDetail.appendChild(addRow);
     }
 
     // Items section
     const items = Array.isArray(block.items) ? block.items : [];
     if (!items.length) {
-      docWrap.appendChild(el("div", { class: "muted2", text: "Blocket har inga items ännu." }));
-    }
-
-    // Helper: compute question source + correct selection
-    function analyzeQuestionItem(it) {
-      const q = it && typeof it === "object" ? it : {};
-      const hasChoices = Array.isArray(q.choices) && q.choices.length > 0;
-      const answerKey = normStr(q.answerKey);
-      const correctChoiceId = normStr(q.answerKeyObj && q.answerKeyObj.correctChoiceId);
-
-      if (hasChoices) {
-        const choices = q.choices.slice();
-        let correctIdx = -1;
-
-        if (correctChoiceId) {
-          correctIdx = choices.findIndex((c) => normStr(c && c.id) === correctChoiceId);
-        }
-        if (correctIdx < 0 && answerKey) {
-          // fallback: match by text
-          correctIdx = choices.findIndex((c) => normStr(c && c.text) === answerKey);
-        }
-
-        return { mode: "choices", choices, correctIdx };
-      }
-
-      // options mode
-      const opts = Array.isArray(q.options) ? q.options.map((x) => String(x ?? "")) : [];
-      let correctIdx2 = -1;
-      if (answerKey) {
-        correctIdx2 = opts.findIndex((o) => normStr(o) === answerKey);
-      }
-      return { mode: "options", options: opts, correctIdx: correctIdx2 };
+      DOM.selDetail.appendChild(el("div", { class: "muted2", text: "Blocket har inga items ännu." }));
     }
 
     for (let i = 0; i < items.length; i++) {
@@ -571,10 +563,28 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
 
       // Fields per kind
       if (kind === "question") {
-        // --- Question text ---
+        // PP-SC-007: Word-känsla: fråga överst, alternativ under, radio för “rätt”
+        const qText = normStr(it.text);
+        const optsRaw = Array.isArray(it.options) ? it.options : [];
+        const opts = optsRaw.map((x) => normStr(x));
+
+        // enforce visible count 3–5 (UI-only; state enforcement happens via callbacks)
+        const MIN_OPTS = 3;
+        const MAX_OPTS = 5;
+        const visibleCount = Math.max(MIN_OPTS, Math.min(MAX_OPTS, Math.max(opts.length, MIN_OPTS)));
+
+        // resolve current “correct”
+        const answerKey = normStr(it.answerKey);
+        let correctIdx = -1;
+        if (answerKey) {
+          for (let oi = 0; oi < opts.length; oi++) {
+            if (normStr(opts[oi]) && normStr(opts[oi]) === answerKey) { correctIdx = oi; break; }
+          }
+        }
+
         card.appendChild(el("div", { class: "fieldLbl", text: "Fråga" }));
         const taQ = el("textarea");
-        taQ.value = String(it.text || "");
+        taQ.value = qText;
         taQ.disabled = !canEdit;
         taQ.addEventListener("input", function () {
           if (!canEdit || !onPatchItem) return;
@@ -583,262 +593,108 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
         });
         card.appendChild(taQ);
 
-        // --- Options/Choices + correct radio (3–5) ---
-        const an = analyzeQuestionItem(it);
+        card.appendChild(el("div", { class: "fieldLbl", text: "Svarsalternativ (3–5) – markera ett rätt" }));
+        card.appendChild(el("div", { class: "tiny muted2", text: "Tips: klicka i cirkeln för att välja rätt svar. Endast ett ska vara rätt." }));
 
-        card.appendChild(el("div", { class: "fieldLbl", text: "Svarsalternativ (3–5) • Markera exakt 1 rätt" }));
+        const radioName = `pb_q_correct_${i}`;
 
-        const groupName = `pb_q_${block.blockId || "x"}_${i}`;
-
-        // helper to render one row
-        function renderAltRow(labelText, valueText, checked, onTextChange, onPickCorrect, disableDel) {
+        // render option rows (up to 5)
+        for (let oi = 0; oi < visibleCount; oi++) {
           const row = el("div", { class: "optRow" });
-          row.style.display = "flex";
-          row.style.gap = "8px";
-          row.style.alignItems = "center";
 
-          const radio = el("input", { type: "radio", name: groupName });
-          radio.checked = !!checked;
-          radio.disabled = !canEdit;
-          radio.addEventListener("change", function () {
-            if (!canEdit) return;
-            onPickCorrect && onPickCorrect();
+          const rb = el("input", { type: "radio", name: radioName });
+          rb.disabled = !canEdit;
+          rb.checked = (oi === correctIdx);
+          rb.addEventListener("change", function () {
+            if (!canEdit || !onPatchItem) return;
+            onPatchItem(i, function (draftIt) {
+              const a = Array.isArray(draftIt.options) ? draftIt.options.map((x) => normStr(x)) : [];
+              while (a.length < MIN_OPTS) a.push("");
+              if (a.length > MAX_OPTS) a.length = MAX_OPTS;
+
+              const picked = normStr(a[oi]) || "";
+              // Lagrar som text-baserad answerKey (kontraktet kan validera detta)
+              draftIt.answerKey = picked;
+              draftIt.options = a;
+              return draftIt;
+            });
           });
+          row.appendChild(rb);
 
-          const inp = el("input", { class: "input", type: "text", value: String(valueText || "") });
+          const inp = el("input", { class: "input", type: "text", value: String(opts[oi] || "") });
           inp.disabled = !canEdit;
-          inp.setAttribute("aria-label", labelText);
           inp.addEventListener("input", function () {
-            if (!canEdit) return;
-            onTextChange && onTextChange(inp.value);
-          });
+            if (!canEdit || !onPatchItem) return;
+            const v = inp.value;
+            onPatchItem(i, function (draftIt) {
+              const a = Array.isArray(draftIt.options) ? draftIt.options.map((x) => normStr(x)) : [];
+              while (a.length < MIN_OPTS) a.push("");
+              if (a.length > MAX_OPTS) a.length = MAX_OPTS;
 
-          row.appendChild(radio);
+              a[oi] = v;
+              // Om answerKey matchade tidigare option-text, håll den i sync
+              if (normStr(draftIt.answerKey) === normStr(opts[oi])) {
+                draftIt.answerKey = normStr(v);
+              }
+              draftIt.options = a;
+              return draftIt;
+            });
+          });
           row.appendChild(inp);
 
-          // minimal +/- controls (no innerHTML)
-          if (canEdit) {
-            const delBtn = el("button", { class: "optBtn", type: "button", text: "−" });
-            delBtn.disabled = !!disableDel;
-            delBtn.title = disableDel ? "Minst 3 alternativ krävs." : "Ta bort alternativ";
-            delBtn.addEventListener("click", function () {
-              if (!canEdit) return;
-              if (delBtn.disabled) return;
-              // delete is handled by caller via onTextChange(null) pattern is not safe here; do explicit remove via onPatchItem
-            });
-            // caller may choose to not append delBtn and instead show global buttons; keep UI simple:
-            // We will not attach per-row delete to avoid inconsistent indices.
-            // (Del-knappen finns som global under listan.)
-          }
-
-          return row;
+          card.appendChild(row);
         }
 
-        // Build visible list (do not destroy data if >5; show but lock add)
-        if (an.mode === "choices") {
-          const choices = Array.isArray(an.choices) ? an.choices.slice() : [];
+        // controls add/remove (3–5)
+        const ctl = el("div", { class: "qaLine" });
+        const btnAdd = el("button", { class: "optBtn", type: "button", text: "➕ Lägg till alternativ" });
+        const btnDel = el("button", { class: "optBtn", type: "button", text: "➖ Ta bort sista" });
 
-          // ensure at least 3 choices (without inventing ids out of thin air unless user edits)
-          // We'll render 3–max(choices.length,3) rows, but cap editing "add" to 5.
-          const renderCount = Math.max(choices.length, 3);
+        btnAdd.disabled = !canEdit || (opts.length >= MAX_OPTS);
+        btnDel.disabled = !canEdit || (opts.length <= MIN_OPTS);
 
-          for (let oi = 0; oi < renderCount; oi++) {
-            const c = choices[oi] && typeof choices[oi] === "object" ? choices[oi] : { id: `c${oi + 1}`, text: "" };
-            const txt = String(c.text || "");
-            const isCorrect = (an.correctIdx === oi);
+        btnAdd.addEventListener("click", function () {
+          if (!canEdit || !onPatchItem) return;
+          onPatchItem(i, function (draftIt) {
+            const a = Array.isArray(draftIt.options) ? draftIt.options.map((x) => normStr(x)) : [];
+            while (a.length < MIN_OPTS) a.push("");
+            if (a.length < MAX_OPTS) a.push(`Alternativ ${a.length + 1}`);
+            draftIt.options = a;
+            return draftIt;
+          });
+        });
 
-            const row = el("div", { class: "optRow" });
-            row.style.display = "flex";
-            row.style.gap = "8px";
-            row.style.alignItems = "center";
+        btnDel.addEventListener("click", function () {
+          if (!canEdit || !onPatchItem) return;
+          onPatchItem(i, function (draftIt) {
+            const a = Array.isArray(draftIt.options) ? draftIt.options.map((x) => normStr(x)) : [];
+            while (a.length < MIN_OPTS) a.push("");
+            if (a.length > MIN_OPTS) {
+              const removed = normStr(a[a.length - 1]);
+              a.pop();
+              // Om man råkade ha den borttagna som facit → rensa
+              if (normStr(draftIt.answerKey) && normStr(draftIt.answerKey) === removed) draftIt.answerKey = "";
+            }
+            draftIt.options = a;
+            return draftIt;
+          });
+        });
 
-            const radio = el("input", { type: "radio", name: groupName });
-            radio.checked = !!isCorrect;
-            radio.disabled = !canEdit;
-            radio.addEventListener("change", function () {
-              if (!canEdit || !onPatchItem) return;
-              const pickedId = normStr(c.id) || `c${oi + 1}`;
-              onPatchItem(i, function (draftIt) {
-                draftIt.answerKeyObj = draftIt.answerKeyObj && typeof draftIt.answerKeyObj === "object" ? draftIt.answerKeyObj : {};
-                draftIt.answerKeyObj.correctChoiceId = pickedId;
-                // compatibility: also set answerKey to text (if present)
-                draftIt.answerKey = normStr(txt) || draftIt.answerKey || "";
-                return draftIt;
-              });
-            });
+        ctl.appendChild(btnAdd);
+        ctl.appendChild(btnDel);
+        card.appendChild(ctl);
 
-            const inp = el("input", { class: "input", type: "text", value: txt });
-            inp.disabled = !canEdit;
-            inp.setAttribute("aria-label", `Alternativ ${oi + 1}`);
-            inp.addEventListener("input", function () {
-              if (!canEdit || !onPatchItem) return;
-              const v = inp.value;
-              onPatchItem(i, function (draftIt) {
-                const arr = Array.isArray(draftIt.choices) ? draftIt.choices.slice() : [];
-                while (arr.length < renderCount) arr.push({ id: `c${arr.length + 1}`, text: "" });
-                const cur = arr[oi] && typeof arr[oi] === "object" ? arr[oi] : { id: `c${oi + 1}`, text: "" };
-                cur.id = normStr(cur.id) || `c${oi + 1}`;
-                cur.text = v;
-                arr[oi] = cur;
+        card.appendChild(el("div", { class: "fieldLbl", text: "Rätt svar (answerKey)" }));
+        const inpKey = el("input", { class: "input", type: "text", value: String(it.answerKey || "") });
+        inpKey.disabled = !canEdit;
+        inpKey.addEventListener("input", function () {
+          if (!canEdit || !onPatchItem) return;
+          const v = inpKey.value;
+          onPatchItem(i, function (draftIt) { draftIt.answerKey = v; return draftIt; });
+        });
+        card.appendChild(inpKey);
 
-                // if this option is currently correct, keep answerKey in sync
-                const cid = normStr(draftIt.answerKeyObj && draftIt.answerKeyObj.correctChoiceId);
-                if (cid && cid === cur.id) draftIt.answerKey = normStr(v);
-
-                draftIt.choices = arr;
-                return draftIt;
-              });
-            });
-
-            row.appendChild(radio);
-            row.appendChild(inp);
-            card.appendChild(row);
-          }
-
-          // Controls: add/remove to keep within 3–5 for editing (but never auto-delete extras)
-          const ctl = el("div", { class: "qaLine" });
-          const info = el("div", { class: "tiny muted2", text: choices.length > 5 ? "Obs: Denna fråga har fler än 5 alternativ (legacy). Vi visar dem, men nya bör hållas 3–5." : "Tips: 3–5 alternativ rekommenderas." });
-          ctl.appendChild(info);
-
-          if (canEdit && onPatchItem) {
-            const btnAdd = el("button", { class: "optBtn", type: "button", text: "➕ Lägg till alternativ" });
-            btnAdd.disabled = (choices.length >= 5);
-            btnAdd.addEventListener("click", function () {
-              if (!canEdit || !onPatchItem) return;
-              onPatchItem(i, function (draftIt) {
-                const arr = Array.isArray(draftIt.choices) ? draftIt.choices.slice() : [];
-                if (arr.length >= 5) return draftIt;
-                arr.push({ id: `c${arr.length + 1}`, text: "" });
-                draftIt.choices = arr;
-                return draftIt;
-              });
-            });
-
-            const btnDel = el("button", { class: "optBtn", type: "button", text: "➖ Ta bort sista" });
-            btnDel.disabled = (choices.length <= 3);
-            btnDel.addEventListener("click", function () {
-              if (!canEdit || !onPatchItem) return;
-              onPatchItem(i, function (draftIt) {
-                const arr = Array.isArray(draftIt.choices) ? draftIt.choices.slice() : [];
-                if (arr.length <= 3) return draftIt;
-                const removed = arr.pop();
-                // If removed was correct, clear correctChoiceId (contract will catch)
-                const cid = normStr(draftIt.answerKeyObj && draftIt.answerKeyObj.correctChoiceId);
-                if (cid && removed && normStr(removed.id) === cid) {
-                  draftIt.answerKeyObj = draftIt.answerKeyObj && typeof draftIt.answerKeyObj === "object" ? draftIt.answerKeyObj : {};
-                  draftIt.answerKeyObj.correctChoiceId = "";
-                  draftIt.answerKey = "";
-                }
-                draftIt.choices = arr;
-                return draftIt;
-              });
-            });
-
-            ctl.appendChild(btnAdd);
-            ctl.appendChild(btnDel);
-          }
-
-          card.appendChild(ctl);
-        } else {
-          // options + answerKey
-          const opts = Array.isArray(an.options) ? an.options.slice() : [];
-
-          // ensure at least 3 display rows
-          const renderCount = Math.max(opts.length, 3);
-
-          for (let oi = 0; oi < renderCount; oi++) {
-            const txt = String(opts[oi] ?? "");
-            const isCorrect = (an.correctIdx === oi);
-
-            const row = el("div", { class: "optRow" });
-            row.style.display = "flex";
-            row.style.gap = "8px";
-            row.style.alignItems = "center";
-
-            const radio = el("input", { type: "radio", name: groupName });
-            radio.checked = !!isCorrect;
-            radio.disabled = !canEdit;
-            radio.addEventListener("change", function () {
-              if (!canEdit || !onPatchItem) return;
-              onPatchItem(i, function (draftIt) {
-                const arr = Array.isArray(draftIt.options) ? draftIt.options.slice() : [];
-                while (arr.length < renderCount) arr.push("");
-                const pickedText = normStr(arr[oi] ?? "");
-                // Set answerKey to picked option text (exactly 1 right)
-                draftIt.answerKey = pickedText;
-                draftIt.options = arr;
-                return draftIt;
-              });
-            });
-
-            const inp = el("input", { class: "input", type: "text", value: txt });
-            inp.disabled = !canEdit;
-            inp.setAttribute("aria-label", `Alternativ ${oi + 1}`);
-            inp.addEventListener("input", function () {
-              if (!canEdit || !onPatchItem) return;
-              const v = inp.value;
-              onPatchItem(i, function (draftIt) {
-                const arr = Array.isArray(draftIt.options) ? draftIt.options.slice() : [];
-                while (arr.length < renderCount) arr.push("");
-                arr[oi] = v;
-                draftIt.options = arr;
-
-                // keep answerKey consistent if this option is currently correct
-                if (normStr(draftIt.answerKey) && normStr(draftIt.answerKey) === normStr(txt)) {
-                  draftIt.answerKey = normStr(v);
-                }
-                return draftIt;
-              });
-            });
-
-            row.appendChild(radio);
-            row.appendChild(inp);
-            card.appendChild(row);
-          }
-
-          const ctl = el("div", { class: "qaLine" });
-          ctl.appendChild(el("div", { class: "tiny muted2", text: "Tips: Markera ett rätt svar (radio). Kontraktet kräver exakt 1 rätt." }));
-
-          if (canEdit && onPatchItem) {
-            const btnAdd = el("button", { class: "optBtn", type: "button", text: "➕ Lägg till alternativ" });
-            btnAdd.disabled = (opts.length >= 5);
-            btnAdd.addEventListener("click", function () {
-              if (!canEdit || !onPatchItem) return;
-              onPatchItem(i, function (draftIt) {
-                const arr = Array.isArray(draftIt.options) ? draftIt.options.slice() : [];
-                if (arr.length >= 5) return draftIt;
-                arr.push("");
-                draftIt.options = arr;
-                return draftIt;
-              });
-            });
-
-            const btnDel = el("button", { class: "optBtn", type: "button", text: "➖ Ta bort sista" });
-            btnDel.disabled = (opts.length <= 3);
-            btnDel.addEventListener("click", function () {
-              if (!canEdit || !onPatchItem) return;
-              onPatchItem(i, function (draftIt) {
-                const arr = Array.isArray(draftIt.options) ? draftIt.options.slice() : [];
-                if (arr.length <= 3) return draftIt;
-                const removed = String(arr.pop() ?? "");
-                // if removed was selected answerKey, clear answerKey (contract will catch)
-                if (normStr(draftIt.answerKey) && normStr(draftIt.answerKey) === normStr(removed)) {
-                  draftIt.answerKey = "";
-                }
-                draftIt.options = arr;
-                return draftIt;
-              });
-            });
-
-            ctl.appendChild(btnAdd);
-            ctl.appendChild(btnDel);
-          }
-
-          card.appendChild(ctl);
-        }
-
-        // Small hint about legacy compatibility
-        card.appendChild(el("div", { class: "tiny muted2", text: "Facit sparas som exakt 1 rätt svar. Systemet stöder både nya (options+answerKey) och legacy (choices+answerKeyObj) utan datatapp." }));
+        card.appendChild(el("div", { class: "tiny muted2", text: "Facit kan vara exakt alternativ-text. (Om ni kör annan facitstandard kan den fortfarande skrivas här.)" }));
       } else if (kind === "task") {
         card.appendChild(el("div", { class: "fieldLbl", text: "Uppgiftstext" }));
         const taT = el("textarea");
@@ -872,10 +728,10 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
         });
         card.appendChild(inpD);
       } else {
-        // document
+        // document (PP-SC-007: fallback text||instruction)
         card.appendChild(el("div", { class: "fieldLbl", text: "Text" }));
         const taD = el("textarea");
-        taD.value = String(it.text || "");
+        taD.value = String(it.text || it.instruction || "");
         taD.disabled = !canEdit;
         taD.addEventListener("input", function () {
           if (!canEdit || !onPatchItem) return;
@@ -883,31 +739,27 @@ PATCH v1.2.0 (PP-SC-007 – Modal “Word”-redigering för Fråga/Svar + inga 
           onPatchItem(i, function (draftIt) { draftIt.text = v; return draftIt; });
         });
         card.appendChild(taD);
-
-        card.appendChild(el("div", { class: "tiny muted2", text: "Dokument ska ha text. Kontraktet stoppar verifiera/publicera om text saknas." }));
       }
 
-      docWrap.appendChild(card);
+      DOM.selDetail.appendChild(card);
     }
 
     // Validation reasons
     if (reasons.length) {
       const box = el("div", { class: "errList" });
-      box.appendChild(el("div", { class: "h", text: "Problem (kontrakt):" }));
+      box.appendChild(el("div", { class: "h", text: "Kontraktet stoppar verifiera/publicera:" }));
       const ul = el("ul");
       for (const r of reasons) ul.appendChild(el("li", { text: String(r) }));
       box.appendChild(ul);
-      docWrap.appendChild(box);
+      DOM.selDetail.appendChild(box);
     }
-
-    DOM.selDetail.appendChild(docWrap);
   }
 
   // -------------------------
   // export
   // -------------------------
   NS.render = {
-    __VERSION: "v1.2.0 (PP-SC-007)",
+    __VERSION: "v1.1.4-PP-SC-007",
 
     // pills/top
     setStatePill,
