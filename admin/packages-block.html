@@ -14,18 +14,17 @@
   - Denna HTML är nu “tunn” och laddar logiken från:
     ../UI/pages/packages-block/01-dom.js … 06-page.js
 
+  PATCH v1.0.3 (MODAL-SHELL-01, UI-only):
+  - Lägger till ett tillgängligt modal-skal (overlay + dialog + container) för redigering av block.
+  - Ingen logik ändrad här (06-page/05-render kopplas i nästa steg).
+  - Behåller alla befintliga DOM-id/hooks.
+
   POLICY (LÅST):
   - UI-only • Fail-closed
   - sessionStorage först (auth) • fallback localStorage via CORE (HRApp)
   - XSS-safe rendering (textContent, inga osäkra innerHTML)
   - Inga nya storage-keys (endast AO-0XX_BLOCKS_V1 skrivs här; AO-057_TRAININGS_V1 läses)
   - SYSTEM_ADMIN = steward-läge (read-only)
-
-  PATCH v1.0.2 (MASTER-inkorg-läge, ingen redesign):
-  - Vänsterlista är nu “Inkorg”: visar som standard endast “Ej verifierade”
-    (så när du verifierar försvinner blocket från vänster).
-  - Text/notis uppdaterad så den matchar P0-fix i 06-page.js:
-    “Spara ändringar sparar som utkast.”
   ============================================================ -->
 
   <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
@@ -257,14 +256,69 @@
     .errList .h{ font-weight:950; color:#7f1d1d; }
     .errList ul{ margin:8px 0 0 18px; color:#7f1d1d; }
 
-    /* Inkorg-lås: gör det tydligt att vänster är “Nyinkomna” */
-    .inboxNote{
-      border:1px dashed rgba(245,158,11,.35);
-      background: rgba(254,243,199,.35);
-      border-radius:12px;
-      padding:10px;
-      margin-top:10px;
+    /* ------------------------------
+       MODAL (skal) – endast markup+CSS
+       Kopplas i JS i nästa steg (05-render/06-page)
+    -------------------------------- */
+    .pbModalOverlay{
+      position:fixed;
+      inset:0;
+      display:none; /* JS togglar */
+      align-items:center;
+      justify-content:center;
+      padding:16px;
+      background: rgba(17,17,17,.45);
+      z-index: 9999;
     }
+    .pbModalOverlay[aria-hidden="false"]{ display:flex; }
+
+    .pbModalDialog{
+      width: min(980px, 100%);
+      max-height: min(82vh, 900px);
+      overflow:hidden;
+      border:1px solid var(--line);
+      border-radius: 16px;
+      background:#fff;
+      box-shadow: 0 18px 50px rgba(17,17,17,.25);
+      display:flex;
+      flex-direction:column;
+    }
+    .pbModalTop{
+      display:flex;
+      gap:10px;
+      align-items:flex-start;
+      justify-content:space-between;
+      padding:12px 12px 10px;
+      border-bottom:1px solid var(--line);
+      background: rgba(250,250,250,.92);
+    }
+    .pbModalTop .t{ font-weight:950; }
+    .pbModalTop .s{ margin-top:4px; }
+    .pbModalBody{
+      padding:12px;
+      overflow:auto;
+      background: rgba(255,255,255,.96);
+    }
+    .pbModalFoot{
+      padding:10px 12px;
+      border-top:1px solid var(--line);
+      background: rgba(250,250,250,.92);
+      display:flex;
+      gap:10px;
+      justify-content:flex-end;
+      flex-wrap:wrap;
+    }
+    .pbModalClose{
+      border:1px solid var(--line);
+      background:#fff;
+      border-radius:999px;
+      padding:6px 10px;
+      cursor:pointer;
+      font-size:.9rem;
+      line-height:1;
+      white-space:nowrap;
+    }
+    .pbModalClose:active{ transform: translateY(1px); }
   </style>
 </head>
 
@@ -330,27 +384,22 @@
     <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
 
     <div class="grid2" style="margin-top:12px;">
-      <section class="card sideCard" aria-label="Nyinkomna block (Inkorg)">
+      <section class="card sideCard" aria-label="Blocklista">
         <div style="padding:10px; border-bottom:1px solid var(--line); background: rgba(250,250,250,.92);">
           <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
             <div>
-              <div style="font-weight:950;">Nyinkomna block (Inkorg)</div>
+              <div style="font-weight:950;">Block</div>
               <div class="tiny"><span id="countBlocks">—</span></div>
             </div>
-          </div>
-
-          <div class="inboxNote tiny">
-            <strong>Inkorg-läge:</strong> Vänsterlistan visar som standard endast <strong>Ej verifierade</strong>.
-            När du trycker <strong>Verifiera</strong> försvinner blocket från inkorgen.
           </div>
 
           <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px;">
             <div style="display:flex; gap:10px; align-items:flex-end;">
               <label class="tiny" style="margin:0; font-weight:900; flex:1;">
-                Sök i inkorg
+                Sök block
                 <input id="qBlocks" type="text" placeholder="Rubrik, modul, område…" autocomplete="off" />
               </label>
-              <button class="miniBtn" id="btnShowAllBlocks" type="button" aria-pressed="false" title="Visa hela inkorgen utan sök">Visa alla</button>
+              <button class="miniBtn" id="btnShowAllBlocks" type="button" aria-pressed="false" title="Visa hela listan utan sök">Visa alla</button>
             </div>
 
             <label class="tiny" style="margin:0; font-weight:900;">
@@ -367,12 +416,7 @@
               <label><input type="checkbox" id="fHasQ"> Har frågor</label>
               <label><input type="checkbox" id="fHasD"> Har dokument</label>
               <label><input type="checkbox" id="fNoKey"> Saknar facit</label>
-
-              <!-- Inkorg: default ON -->
-              <label title="Inkorg visar bara nyinkomna block (ej verifierade)">
-                <input type="checkbox" id="fUnverified" checked>
-                Ej verifierade
-              </label>
+              <label><input type="checkbox" id="fUnverified"> Ej verifierade</label>
             </div>
           </div>
         </div>
@@ -391,7 +435,7 @@
           <div class="row space-between wrap" style="align-items:center; margin:0;">
             <div>
               <div style="font-weight:950;">Hämta från utbildningar</div>
-              <div class="tiny muted2">Skapar 1 nytt block (utkast) i block-banken som du kan granska i inkorgen till vänster.</div>
+              <div class="tiny muted2">Skapar 1 nytt block (utkast) i block-banken som du kan granska i listan till vänster.</div>
             </div>
             <div class="tiny muted2"><strong>Nycklar:</strong> <span class="mono">AO-057_TRAININGS_V1</span> → <span class="mono">AO-0XX_BLOCKS_V1</span></div>
           </div>
@@ -470,16 +514,50 @@
           <div id="selDetail" style="margin-top:10px;"></div>
 
           <div class="tiny muted2" style="margin-top:10px;">
-            <strong>Not:</strong> Verifiera/Publicera använder strikt kontrakt (fail-closed). Spara ändringar sparar som utkast.
+            <strong>Not:</strong> Verifiera/Publicera använder strikt kontrakt (fail-closed). Spara ändringar sparar som utkast (behåller status).
           </div>
         </div>
 
         <div class="tiny" style="padding:0 10px 10px;">
-          <strong>Tips:</strong> Efter export kan du söka/filtrera i inkorgen för att hitta nya blocket.
+          <strong>Tips:</strong> Efter export kan du söka/filtrera i vänsterlistan för att hitta nya blocket.
         </div>
       </section>
     </div>
   </main>
+
+  <!-- ============================================================
+       MODAL (skal) – kopplas via JS i nästa steg
+       - XSS-safe: innehåll renderas via 05-render.js (textContent)
+       - Fail-closed: döljs default
+       ============================================================ -->
+  <div id="pbModalOverlay"
+       class="pbModalOverlay"
+       aria-hidden="true">
+    <div id="pbModalDialog"
+         class="pbModalDialog"
+         role="dialog"
+         aria-modal="true"
+         aria-labelledby="pbModalTitle"
+         aria-describedby="pbModalSub">
+      <div class="pbModalTop">
+        <div style="min-width:0;">
+          <div class="t" id="pbModalTitle">Redigera block</div>
+          <div class="tiny muted2 s" id="pbModalSub">—</div>
+        </div>
+        <button type="button" class="pbModalClose" id="pbModalClose" aria-label="Stäng">Stäng</button>
+      </div>
+
+      <div class="pbModalBody" id="pbModalBody" tabindex="-1">
+        <!-- JS renderar redigeringsinnehåll här -->
+        <div class="muted2">Laddar…</div>
+      </div>
+
+      <div class="pbModalFoot" id="pbModalFoot">
+        <button class="miniBtn" type="button" id="pbModalCancel">Avbryt</button>
+        <button class="miniBtn" type="button" id="pbModalSave" disabled>Spara</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Liten fail-closed banner så sidan inte blir “tyst svart” om JS saknas -->
   <script>
