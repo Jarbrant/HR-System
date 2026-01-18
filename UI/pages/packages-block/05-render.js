@@ -16,6 +16,10 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – kontrakt, modal-stöd, ADMIN-only i 06):
 PATCH v1.1.2 (PP-SC-005 – Inkorg-export: kvittens + rätt copy):
 - P1: Tar bort “sök”-copy i inkorgen (no hits) → matchar förenklad inkorg (endast modulfilter)
 - P1: Lägger till render.setTrainExportNotice(kind,text) för grön/röd kvittens direkt i inkorgen
+
+PATCH v1.1.3 (PP-SC-006 – Mindre brus efter val i export):
+- P1: Dölj Items-count i exportlistan när vald (visa “Vald”)
+- P1: Dölj/Collapse preview-panel när en export-rad är vald (UI-detektion av .exportRow.active)
 ============================================================ */
 (function () {
   "use strict";
@@ -303,7 +307,9 @@ PATCH v1.1.2 (PP-SC-005 – Inkorg-export: kvittens + rätt copy):
       left.appendChild(el("div", { class: "t", text: title }));
       left.appendChild(el("div", { class: "tiny muted2 s", text: `${module || "—"} • ${area || "—"} • ${step || "—"}` }));
 
-      const right = el("div", { class: "tiny muted2", text: `${itemsCount} item(s)` });
+      // PP-SC-006: när vald → visa inte Items-count (mindre brus)
+      const rightText = active ? "Vald" : `Items: ${itemsCount}`;
+      const right = el("div", { class: "tiny muted2", text: rightText });
 
       row.appendChild(left);
       row.appendChild(right);
@@ -325,6 +331,19 @@ PATCH v1.1.2 (PP-SC-005 – Inkorg-export: kvittens + rätt copy):
 
     if (!DOM.trainPreviewDetail) return;
     clear(DOM.trainPreviewDetail);
+
+    // PP-SC-006: om en export-rad är vald → dölj preview-panelen (mindre brus).
+    // Fail-safe: om DOM saknas eller query failar, fall tillbaka till gammalt beteende.
+    let hasActive = false;
+    try {
+      hasActive = !!(DOM.trainPreview && DOM.trainPreview.querySelector && DOM.trainPreview.querySelector(".exportRow.active"));
+    } catch (_) {
+      hasActive = false;
+    }
+    if (hasActive) {
+      DOM.trainPreviewDetail.style.display = "none";
+      return;
+    }
 
     if (!items.length) {
       DOM.trainPreviewDetail.style.display = "none";
