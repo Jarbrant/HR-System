@@ -40,9 +40,9 @@ Policy (LÅST):
   };
 
   // ---------- Helpers ----------
-  function clear(el) {
-    if (!el) return;
-    while (el.firstChild) el.removeChild(el.firstChild);
+  function clear(node) {
+    if (!node) return;
+    while (node.firstChild) node.removeChild(node.firstChild);
   }
 
   function el(tag, cls, text) {
@@ -124,6 +124,31 @@ Policy (LÅST):
     wrap.appendChild(el("div", "fieldLbl", lblText));
     wrap.appendChild(node);
     return wrap;
+  }
+
+  // Minimal inline card-styles (för att UI blir läsbart även utan CSS-klasser)
+  function applyCardStyle(node) {
+    if (!node) return;
+    node.style.border = "1px solid rgba(0,0,0,0.08)";
+    node.style.borderRadius = "14px";
+    node.style.padding = "12px";
+    node.style.margin = "10px 0";
+    node.style.background = "#fff";
+  }
+  function applyRowTopStyle(node) {
+    if (!node) return;
+    node.style.display = "flex";
+    node.style.alignItems = "flex-start";
+    node.style.justifyContent = "space-between";
+    node.style.gap = "10px";
+    node.style.marginBottom = "8px";
+  }
+  function applyTinyStyle(node) {
+    if (!node) return;
+    node.style.whiteSpace = "pre-wrap";
+    node.style.fontSize = "12px";
+    node.style.opacity = "0.85";
+    node.style.lineHeight = "1.35";
   }
 
   // ---------- Message / Lock ----------
@@ -337,22 +362,81 @@ Policy (LÅST):
     }
   }
 
+  function kindPillText(kind) {
+    const k = String(kind || "document");
+    if (k === "question") return "❓ Fråga";
+    if (k === "task") return "✅ Uppgift";
+    return "📄 Dokument";
+  }
+
+  function describeItemCompact(it) {
+    const k = String(it && it.kind ? it.kind : "document");
+    if (k === "question") {
+      const text = safeSnippet(it.text, 140);
+      const options = Array.isArray(it.options) ? it.options.filter(Boolean) : [];
+      const choices = Array.isArray(it.choices) ? it.choices : [];
+      const nOpts = options.length || choices.length || 0;
+      const ak1 = normStr(it.answerKey);
+      const ak2 = normStr(it.answerKeyObj && it.answerKeyObj.correctChoiceId);
+      const hasKey = !!(ak1 || ak2);
+      return `${text}\nAlternativ: ${nOpts} • Facit: ${hasKey ? "ja" : "NEJ"}`;
+    }
+    if (k === "task") {
+      const instr = safeSnippet(it.instruction || it.text, 160);
+      const d = safeSnippet(it.deliverable, 120);
+      return `${instr}${d && d !== "(utan text)" ? `\nLeverans: ${d}` : ""}`;
+    }
+    // document
+    const tx = safeSnippet(it.text, 200);
+    return `${tx}\nSignering: ${it.requiresSign ? "ja" : "nej"}`;
+  }
+
   function renderExportPreview(opts) {
     const o = opts || {};
     if (!DOM.trainPreviewDetail) return;
+
     clear(DOM.trainPreviewDetail);
 
     const items = Array.isArray(o.items) ? o.items : [];
     if (!items.length) { DOM.trainPreviewDetail.style.display = "none"; return; }
 
     DOM.trainPreviewDetail.style.display = "block";
-    DOM.trainPreviewDetail.appendChild(el("div", "tiny", `Export-preview: ${items.length} item(s)`));
 
-    for (const it of items.slice(0, 30)) {
-      const row = el("div", "exportItemRow");
-      row.appendChild(pill("pill warn", String(it.kind || "document")));
-      row.appendChild(el("span", "tiny", safeSnippet(it.text, 120)));
-      DOM.trainPreviewDetail.appendChild(row);
+    // Header
+    const head = el("div", "");
+    head.appendChild(el("div", "previewTitle", "Preview (items)"));
+    const tiny = el("div", "tiny", `Visar ${items.length} item(s). (Detta är preview – export skapar ett nytt block.)`);
+    applyTinyStyle(tiny);
+    head.appendChild(tiny);
+    DOM.trainPreviewDetail.appendChild(head);
+
+    // List
+    for (let i = 0; i < Math.min(items.length, 40); i++) {
+      const it = items[i] || {};
+      const card = el("div", "itemCard");
+      applyCardStyle(card);
+
+      const top = el("div", "itemRowTop");
+      applyRowTopStyle(top);
+
+      const left = el("div", "");
+      const k = el("div", "fieldLbl", `${kindPillText(it.kind)}  •  #${i + 1}`);
+      left.appendChild(k);
+
+      const desc = el("div", "tiny", describeItemCompact(it));
+      applyTinyStyle(desc);
+      left.appendChild(desc);
+
+      top.appendChild(left);
+      card.appendChild(top);
+
+      DOM.trainPreviewDetail.appendChild(card);
+    }
+
+    if (items.length > 40) {
+      const more = el("div", "tiny muted2", `… visar första 40 items (av ${items.length}).`);
+      applyTinyStyle(more);
+      DOM.trainPreviewDetail.appendChild(more);
     }
   }
 
@@ -372,6 +456,7 @@ Policy (LÅST):
     if (!arr.length) return null;
 
     const box = el("div", "errList");
+    applyCardStyle(box);
     box.appendChild(el("div", "h", "Verifiering blockerad"));
     const ul = document.createElement("ul");
     for (const r of arr.slice(0, 30)) {
@@ -392,7 +477,10 @@ Policy (LÅST):
 
   function renderQuestionEditor(it, idx, canEdit, onPatchItem) {
     const card = el("div", "itemCard");
+    applyCardStyle(card);
+
     const top = el("div", "itemRowTop");
+    applyRowTopStyle(top);
     top.appendChild(el("div", "tiny", itemKindLabel("question") + (it.questionId ? ` • ${it.questionId}` : "")));
 
     const right = el("div", "");
@@ -426,6 +514,10 @@ Policy (LÅST):
       for (let i = 0; i < choices.length; i++) {
         const c = choices[i] || {};
         const row = el("div", "optRow");
+        row.style.display = "flex";
+        row.style.gap = "8px";
+        row.style.alignItems = "center";
+
         const inp = inputText(c.text || "", `Alternativ ${i + 1}`);
         inp.disabled = !canEdit;
         inp.addEventListener("input", function () {
@@ -533,6 +625,10 @@ Policy (LÅST):
 
       for (let i = 0; i < safeOpts.length; i++) {
         const row = el("div", "optRow");
+        row.style.display = "flex";
+        row.style.gap = "8px";
+        row.style.alignItems = "center";
+
         const inp = inputText(safeOpts[i] || "", `Alternativ ${i + 1}`);
         inp.disabled = !canEdit;
 
@@ -621,7 +717,10 @@ Policy (LÅST):
 
   function renderTaskEditor(it, idx, canEdit, onPatchItem) {
     const card = el("div", "itemCard");
+    applyCardStyle(card);
+
     const top = el("div", "itemRowTop");
+    applyRowTopStyle(top);
     top.appendChild(el("div", "tiny", itemKindLabel("task") + (it.taskId ? ` • ${it.taskId}` : "")));
 
     const right = el("div", "");
@@ -674,6 +773,9 @@ Policy (LÅST):
     });
 
     const reqRow = el("div", "optRow");
+    reqRow.style.display = "flex";
+    reqRow.style.gap = "10px";
+    reqRow.style.alignItems = "center";
     reqRow.appendChild(req);
     reqRow.appendChild(el("div", "tiny", "Kräver att eleven markerar klar"));
     card.appendChild(reqRow);
@@ -683,7 +785,10 @@ Policy (LÅST):
 
   function renderDocumentEditor(it, idx, canEdit, onPatchItem) {
     const card = el("div", "itemCard");
+    applyCardStyle(card);
+
     const top = el("div", "itemRowTop");
+    applyRowTopStyle(top);
     top.appendChild(el("div", "tiny", itemKindLabel("document")));
 
     const right = el("div", "");
@@ -721,6 +826,9 @@ Policy (LÅST):
     });
 
     const signRow = el("div", "optRow");
+    signRow.style.display = "flex";
+    signRow.style.gap = "10px";
+    signRow.style.alignItems = "center";
     signRow.appendChild(sign);
     signRow.appendChild(el("div", "tiny", "Kräver signering (valfritt)"));
     card.appendChild(signRow);
@@ -748,7 +856,10 @@ Policy (LÅST):
 
     // Header/meta
     const head = el("div", "previewCard");
-    head.appendChild(el("div", "previewTitle", b.title || "(utan rubrik)"));
+    applyCardStyle(head);
+
+    const title = el("div", "previewTitle", b.title || "(utan rubrik)");
+    head.appendChild(title);
 
     const meta = el("div", "tiny previewMeta",
       `BlockID: ${b.blockId || "—"}\n` +
@@ -757,6 +868,7 @@ Policy (LÅST):
       `Steg: ${b.step || "—"}\n` +
       `Status: ${String(b.status || "draft").toLowerCase() === "published" ? "Publicerad" : "Utkast"}`
     );
+    applyTinyStyle(meta);
     head.appendChild(meta);
 
     const items = Array.isArray(b.items) ? b.items : [];
@@ -768,19 +880,17 @@ Policy (LÅST):
       else counts.d++;
     }
 
-    const pills = el("div", "icoRow");
-    pills.appendChild(pill("icoPill", `❓ ${counts.q}`));
-    pills.appendChild(pill("icoPill", `📄 ${counts.d}`));
-    pills.appendChild(pill("icoPill", `✅ ${counts.t}`));
-    head.appendChild(pills);
+    const pillsRow = el("div", "icoRow");
+    pillsRow.appendChild(pill("icoPill", `❓ ${counts.q}`));
+    pillsRow.appendChild(pill("icoPill", `📄 ${counts.d}`));
+    pillsRow.appendChild(pill("icoPill", `✅ ${counts.t}`));
+    head.appendChild(pillsRow);
 
     DOM.selDetail.appendChild(head);
 
     // Validation reasons (contract)
     const vbox = renderValidationReasons(reasons);
     if (vbox) DOM.selDetail.appendChild(vbox);
-
-    DOM.selDetail.appendChild(el("div", "divider"));
 
     // Items list
     if (!items.length) {
@@ -790,7 +900,9 @@ Policy (LÅST):
 
     const listWrap = el("div", "");
     listWrap.appendChild(el("div", "fieldLbl", `Items (${items.length})`));
-    listWrap.appendChild(el("div", "tiny muted2", "Redigera rad för rad. All rendering är XSS-säker (textContent)."));
+    const tip = el("div", "tiny muted2", "Redigera rad för rad. (XSS-safe: textContent)");
+    applyTinyStyle(tip);
+    listWrap.appendChild(tip);
 
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {};
