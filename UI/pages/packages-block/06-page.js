@@ -12,6 +12,11 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
 - P0: Export-kortets container (.exportBox) döljs helt när "Visa" är stängt (inte bara #exportBody)
 - P1: Vid stängning städas export-UI (preview + knappar) för att undvika "halvöppet" läge
 - P2: Robust: om .exportBox saknas fortsätter fallback-toggling av #exportBody ändå
+
+PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
+- P0: Döljer “Valt block”-panelen helt när inget block är valt (minskar tomma containers).
+- P1: När modal används: panelen är bara synlig i modal (inte som tom ruta i layout).
+- P2: Använder #exportBox och #selPanel som primära hooks (fallback till .exportBox/.selPanel).
 ============================================================ */
 (function () {
   "use strict";
@@ -85,11 +90,11 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
     pbModalSave: byId("pbModalSave"),
   };
 
-  // PP-SC-002: export container (no new DOM-id, selector only)
-  const EXPORT_BOX = document.querySelector(".exportBox") || null;
+  // PP-SC-003: stable hooks first, fallback to legacy selectors
+  const EXPORT_BOX = byId("exportBox") || document.querySelector(".exportBox") || null;
 
   // We move this panel into modal (no cloning) to keep listeners intact
-  const SEL_PANEL = document.querySelector(".selPanel") || null;
+  const SEL_PANEL = byId("selPanel") || document.querySelector(".selPanel") || null;
   const SEL_PANEL_HOME = (function () {
     if (!SEL_PANEL) return null;
     const ph = document.createElement("div");
@@ -315,6 +320,27 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
     }
   }
 
+  // PP-SC-003: hide “Valt block”-panelen när inget block är valt (och när modal används: bara synlig i modal)
+  function modalAvailable() {
+    return !!(DOM.pbModalOverlay && DOM.pbModalDialog && DOM.pbModalBody);
+  }
+
+  function applySelPanelVisibility() {
+    if (!SEL_PANEL) return;
+
+    const hasSel = !!STATE.selectedId;
+
+    // När modal finns vill vi inte ha en “tom ruta” i layout.
+    // Panelen lever i modal när den är öppen.
+    if (modalAvailable()) {
+      SEL_PANEL.style.display = STATE.modalOpen ? "block" : "none";
+      return;
+    }
+
+    // Ingen modal => visa panel bara när något är valt
+    SEL_PANEL.style.display = hasSel ? "block" : "none";
+  }
+
   function buildVisibleBlocks() {
     const q = normStr(DOM.qBlocks && DOM.qBlocks.value).toLowerCase();
     const st = DOM.filterStatus ? String(DOM.filterStatus.value || "all") : "all";
@@ -401,10 +427,6 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
   }
 
   // ---------- modal helpers (no innerHTML, move nodes) ----------
-  function modalAvailable() {
-    return !!(DOM.pbModalOverlay && DOM.pbModalDialog && DOM.pbModalBody);
-  }
-
   function setModalHidden(hidden) {
     if (!modalAvailable()) return;
     DOM.pbModalOverlay.setAttribute("aria-hidden", hidden ? "true" : "false");
@@ -418,6 +440,8 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
     if (SEL_PANEL && DOM.pbModalBody) {
       try {
         clearChildren(DOM.pbModalBody);
+        // show panel inside modal
+        SEL_PANEL.style.display = "block";
         DOM.pbModalBody.appendChild(SEL_PANEL);
       } catch (_) {}
     }
@@ -432,6 +456,9 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
 
     setModalHidden(false);
     STATE.modalOpen = true;
+
+    // After modalOpen: keep panel hidden in layout (only visible in modal)
+    applySelPanelVisibility();
 
     // Focus
     try { DOM.pbModalBody && DOM.pbModalBody.focus && DOM.pbModalBody.focus(); } catch (_) {}
@@ -453,6 +480,9 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
         SEL_PANEL_HOME.parentNode.insertBefore(SEL_PANEL, SEL_PANEL_HOME.nextSibling);
       } catch (_) {}
     }
+
+    // After close: panel ska inte ligga som tom ruta i layout
+    applySelPanelVisibility();
   }
 
   function confirmLoseEditsIfNeeded() {
@@ -603,6 +633,9 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
         ? `${STATE.selected.title || "—"} • ${STATE.selected.blockId || STATE.selectedId || "—"}`
         : "—";
     }
+
+    // ensure panel visibility matches current state
+    applySelPanelVisibility();
   }
 
   function onSelectBlockId(id) {
@@ -619,6 +652,9 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
     // v1.1: open modal on selection (if modal exists)
     if (STATE.selectedId && modalAvailable()) {
       openModal();
+    } else {
+      // no modal => show panel inline when selected
+      applySelPanelVisibility();
     }
   }
 
@@ -1029,6 +1065,13 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
     STATE.exportOpen = false;
     applyExportVisibility();
     applyExportIndicator();
+
+    // default selection: none => hide selPanel (PP-SC-003)
+    STATE.selectedId = "";
+    STATE.selected = null;
+    STATE.edited = null;
+    STATE.modalOpen = false;
+    applySelPanelVisibility();
 
     // trainings load
     loadTrainings();
