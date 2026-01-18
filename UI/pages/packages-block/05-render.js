@@ -12,6 +12,10 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – kontrakt, modal-stöd, ADMIN-only i 06):
 - P0: Inga syntaxrester/”skräprader”
 - Lägger till render.setExportIndicator({hasNew,countNew}) (06 har fallback om den saknas)
 - Robust rendering: blocklist, exportlist, preview, editor (meta + items) med callbacks
+
+PATCH v1.1.2 (PP-SC-005 – Inkorg-export: kvittens + rätt copy):
+- P1: Tar bort “sök”-copy i inkorgen (no hits) → matchar förenklad inkorg (endast modulfilter)
+- P1: Lägger till render.setTrainExportNotice(kind,text) för grön/röd kvittens direkt i inkorgen
 ============================================================ */
 (function () {
   "use strict";
@@ -88,7 +92,13 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – kontrakt, modal-stöd, ADMIN-only i 06):
     if (!n) return "—";
     try {
       const d = new Date(n);
-      return d.toLocaleString("sv-SE", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+      return d.toLocaleString("sv-SE", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      });
     } catch (_) {
       return String(n);
     }
@@ -271,7 +281,8 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – kontrakt, modal-stöd, ADMIN-only i 06):
       return;
     }
     if (!hits.length) {
-      DOM.trainPreview.appendChild(el("div", { class: "muted2", text: "Inga träffar. Justera filter eller sök." }));
+      // PP-SC-004/005: ingen “sök” här längre → copy matchar modulfilter
+      DOM.trainPreview.appendChild(el("div", { class: "muted2", text: "Inga utbildningar att visa för valt modulfilter." }));
       return;
     }
 
@@ -343,6 +354,47 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – kontrakt, modal-stöd, ADMIN-only i 06):
   function setTrainExportHint(text) {
     if (!DOM.trainExportHint) return;
     setText(DOM.trainExportHint, text || "");
+  }
+
+  // PP-SC-005: grön/röd kvittens i inkorgen (utan att kräva CSS-ändring)
+  function setTrainExportNotice(kind, text) {
+    if (!DOM.trainExportHint) return;
+
+    const k = String(kind || "info");
+    const t = String(text || "");
+
+    // Reset baseline first (fail-safe)
+    try {
+      DOM.trainExportHint.style.border = "";
+      DOM.trainExportHint.style.background = "";
+      DOM.trainExportHint.style.color = "";
+      DOM.trainExportHint.style.fontWeight = "";
+    } catch (_) {}
+
+    if (k === "ok") {
+      try {
+        DOM.trainExportHint.style.border = "1px solid rgba(16,185,129,.35)";
+        DOM.trainExportHint.style.background = "rgba(209,250,229,.55)";
+        DOM.trainExportHint.style.color = "#065f46";
+        DOM.trainExportHint.style.fontWeight = "700";
+      } catch (_) {}
+      setText(DOM.trainExportHint, t || "✅ Klart.");
+      return;
+    }
+
+    if (k === "bad") {
+      try {
+        DOM.trainExportHint.style.border = "1px solid rgba(239,68,68,.35)";
+        DOM.trainExportHint.style.background = "rgba(254,226,226,.55)";
+        DOM.trainExportHint.style.color = "#7f1d1d";
+        DOM.trainExportHint.style.fontWeight = "700";
+      } catch (_) {}
+      setText(DOM.trainExportHint, t || "❌ Kunde inte exportera.");
+      return;
+    }
+
+    // info/default
+    setText(DOM.trainExportHint, t);
   }
 
   // -------------------------
@@ -642,6 +694,7 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – kontrakt, modal-stöd, ADMIN-only i 06):
     renderTrainingHits,
     renderExportPreview,
     setTrainExportHint,
+    setTrainExportNotice, // PP-SC-005 helper
 
     // editor
     renderSelectedDetail,
