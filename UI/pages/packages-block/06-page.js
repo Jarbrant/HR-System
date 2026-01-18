@@ -2,17 +2,19 @@
 AO-PACKAGES-BLOCK-MODULAR-01 | FILE 06/06 | FIL-ID: UI/pages/packages-block/06-page.js
 Projekt: HR-System (GitHub Pages / UI-only)
 Syfte: Bootstrap + state + event wiring för Block-editor (packages-block)
+
 Policy (LÅST):
 - UI-only • Fail-closed
 - Inga nya storage-keys/datamodell
 - XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
 
-PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
-- Denna sida får endast användas av ADMIN.
-- Allt annat (SYSTEM_ADMIN/MANAGER/oklar auth) -> fail-closed deny/redirect via core.requireAdminOrRedirect().
-- canWrite = true endast för ADMIN (i linje med låst kontrakt).
-- Behåller befintlig logik i övrigt (inkorg default, P0 status-fix, export UI).
+PATCH v1.1.0 (INKORG + ADMIN-ONLY + NYTT-INDIKATOR):
+- ADMIN-only: endast ADMIN får write (export/spara/verifiera/publicera). MANAGER + SYSTEM_ADMIN = read-only.
+- Inkorg: “Ej verifierade” fail-safe på vid boot (som tidigare).
+- “Visa”-knapp (export toggle): grön indikator när det finns minst 1 “ny” utbildning att exportera
+  (fingerprint runtime; ingen lagring).
+- Efter export: auto-select nytt block (så du hamnar direkt i granska/redigera).
 ============================================================ */
 (function () {
   "use strict";
@@ -73,6 +75,16 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
     selDetail: byId("selDetail"),
     selDirtyPill: byId("selDirtyPill"),
     btnSaveEdits: byId("btnSaveEdits"),
+
+    // modal shell (valfritt; påverkar ej v1.1-flödet)
+    pbModalOverlay: byId("pbModalOverlay"),
+    pbModalDialog: byId("pbModalDialog"),
+    pbModalBody: byId("pbModalBody"),
+    pbModalTitle: byId("pbModalTitle"),
+    pbModalSub: byId("pbModalSub"),
+    pbModalClose: byId("pbModalClose"),
+    pbModalCancel: byId("pbModalCancel"),
+    pbModalSave: byId("pbModalSave"),
   };
 
   // ---------- deps ----------
@@ -108,7 +120,7 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
     discoveryActive: false, // search-first: startar false
     role: "SYSTEM_ADMIN",
     empNo: "",
-    canWrite: false,
+    canWrite: false, // ADMIN-only i v1.1
 
     allBlocks: [],
     visibleBlocks: [],
@@ -127,6 +139,9 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
     trainHits: [],
     exportOpen: false,
     infoOpen: false,
+
+    // export indicator (runtime)
+    hasNewTrainingToExport: false,
   };
 
   // ---------- utils ----------
@@ -222,6 +237,60 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
     return x;
   }
 
+  // -----------------------------
+  // “NYTT”-fingerprint (runtime)
+  // Inga storage-keys, ingen lagring.
+  // -----------------------------
+  function fpNorm(s) { return String(s ?? "").trim().toLowerCase(); }
+
+  function trainingFingerprint(meta) {
+    // SCOPE: tillräckligt för “nytt”-indikator utan att bli för strikt
+    const title = fpNorm(meta && meta.title);
+    const module = fpNorm(meta && meta.module);
+    const area = fpNorm(meta && meta.area);
+    const step = fpNorm(meta && meta.step);
+    const cnt = Number(meta && meta.itemsCount) || 0;
+    return `${title}|${module}|${area}|${step}|${cnt}`;
+  }
+
+  function blockFingerprint(block) {
+    const title = fpNorm(block && block.title);
+    const module = fpNorm(block && block.module);
+    const area = fpNorm(block && block.area);
+    const step = fpNorm(block && block.step);
+    const cnt = (block && block.__comp && Number(block.__comp.items)) ? Number(block.__comp.items) : (Array.isArray(block && block.items) ? block.items.length : 0);
+    return `${title}|${module}|${area}|${step}|${Number(cnt) || 0}`;
+  }
+
+  function computeBlockFpSet() {
+    const set = new Set();
+    for (const b of (STATE.allBlocks || [])) {
+      try { set.add(blockFingerprint(b)); } catch (_) {}
+    }
+    return set;
+  }
+
+  function applyExportToggleIndicator() {
+    // UI-only: style knappen utan att kräva CSS-ändring
+    if (!DOM.btnToggleExport) return;
+    const on = !!STATE.hasNewTrainingToExport;
+
+    // Text / badge
+    const base = STATE.exportOpen ? "Dölj" : "Visa";
+    DOM.btnToggleExport.textContent = on ? (base + " •") : base;
+
+    // Grön indikator (fail-safe inline)
+    // (Ingen redesign – bara signal)
+    if (on) {
+      DOM.btnToggleExport.style.borderColor = "rgba(16,185,129,.45)";
+      DOM.btnToggleExport.style.boxShadow = "0 0 0 3px rgba(16,185,129,.18)";
+    } else {
+      DOM.btnToggleExport.style.borderColor = "";
+      DOM.btnToggleExport.style.boxShadow = "";
+    }
+    DOM.btnToggleExport.setAttribute("aria-label", on ? "Visa (nytt finns)" : base);
+  }
+
   function buildVisibleBlocks() {
     const q = normStr(DOM.qBlocks && DOM.qBlocks.value).toLowerCase();
     const st = DOM.filterStatus ? String(DOM.filterStatus.value || "all") : "all";
@@ -272,6 +341,7 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
       DOM.selDirtyPill.textContent = STATE.dirty ? "Ändringar: osparade" : "";
     }
     if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
+    if (DOM.pbModalSave) DOM.pbModalSave.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
   }
 
   function applySelectionPills() {
@@ -339,7 +409,7 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
       }
     } catch (_) {}
 
-    // enable buttons
+    // enable buttons (ADMIN-only)
     if (DOM.btnPrint) DOM.btnPrint.disabled = !STATE.selectedId;
     if (DOM.btnVerify) DOM.btnVerify.disabled = !(STATE.selectedId && STATE.canWrite && ok);
     if (DOM.btnPublish) DOM.btnPublish.disabled = !(STATE.selectedId && STATE.canWrite && ok);
@@ -351,7 +421,6 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
         canEdit: STATE.canWrite,
         validationReasons: reasons,
 
-        // item patch (befintlig)
         onPatchItem: function (idx, mutFn) {
           if (!STATE.canWrite) return;
           const cur = STATE.edited;
@@ -367,7 +436,6 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
           });
         },
 
-        // meta patch
         onPatchMeta: function (mutFn) {
           if (!STATE.canWrite) return;
           applyEditedBlockChange(function (draft) {
@@ -380,7 +448,6 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
           });
         },
 
-        // add/remove/move item (valfritt för render att använda)
         onAddItem: function (kind, afterIdx) {
           if (!STATE.canWrite) return;
           const k = String(kind || "document");
@@ -432,6 +499,9 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
         },
       });
     }
+
+    if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
+    if (DOM.pbModalSave) DOM.pbModalSave.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
   }
 
   function onSelectBlockId(id) {
@@ -452,7 +522,7 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
     const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
     if (idx < 0) return { ok: false, err: "Block hittades inte i listan." };
 
-    // spara exakt som STATE.edited säger (status/verified etc)
+    // Spara exakt som STATE.edited säger (status/verified etc)
     const next = deepClone(STATE.edited);
     next.updatedAt = nowTs();
     next.__comp = countComposition(next);
@@ -588,6 +658,20 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
     }
     STATE.trainHits = hits;
 
+    // “NYTT”-indikator: finns det minst 1 training-hit som inte matchar blockbankens fingerprints?
+    try {
+      const fpSet = computeBlockFpSet();
+      let hasNew = false;
+      for (const h of hits) {
+        const fp = trainingFingerprint(h);
+        if (!fpSet.has(fp)) { hasNew = true; break; }
+      }
+      STATE.hasNewTrainingToExport = hasNew;
+    } catch (_) {
+      STATE.hasNewTrainingToExport = false;
+    }
+    applyExportToggleIndicator();
+
     if (render && typeof render.renderTrainingHits === "function") {
       render.renderTrainingHits({
         hits: hits,
@@ -610,7 +694,7 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
       render.setTrainExportHint(
         STATE.canWrite
           ? "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)."
-          : "Åtkomst nekad: endast ADMIN kan exportera."
+          : "Read-only: endast ADMIN kan exportera."
       );
     }
 
@@ -623,12 +707,13 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
   function exportSelectedTraining() {
     const hit = STATE.trainHits.find((h) => h.index === STATE.trainSelIndex);
     if (!hit) { setMsgSafe("Välj en utbildning först."); return; }
-    if (!STATE.canWrite) { setMsgSafe("Åtkomst nekad: endast ADMIN kan exportera."); return; }
+    if (!STATE.canWrite) { setMsgSafe("Read-only: endast ADMIN kan exportera."); return; }
     if (!hit.items || !hit.items.length) { setMsgSafe("Utbildningen saknar items att exportera."); return; }
 
     const ts = nowTs();
+    const newId = `b_${ts}`;
     const newBlock = normalizeBlock({
-      blockId: `b_${ts}`,
+      blockId: newId,
       title: hit.title,
       module: hit.module,
       area: hit.area,
@@ -645,9 +730,17 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
     const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
     if (!save.ok) { setMsgSafe(`Kunde inte exportera: ${save.err || "okänt fel"}`); return; }
 
-    STATE.discoveryActive = true; // så användaren ser blocket
+    // så användaren ser blocket direkt (inkorg-läge + lista)
+    STATE.discoveryActive = true;
     refreshLeftList();
-    setMsgSafe("Export klar. Sök eller tryck “Visa alla” och välj det nya blocket.");
+
+    // P1: auto-select ny-exporterat block
+    onSelectBlockId(newId);
+
+    // uppdatera indikator (nu kan “nytt” ha minskat)
+    refreshTrainingUI();
+
+    setMsgSafe("Export klar. Nytt block är valt i vänsterlistan.");
   }
 
   // ---------- print ----------
@@ -699,7 +792,8 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
 
     if (DOM.btnSaveEdits) {
       DOM.btnSaveEdits.addEventListener("click", function () {
-        // "Spara ändringar" = spara som utkast (men förstör inte publish/verify-flödet)
+        if (!STATE.canWrite) { setMsgSafe("Read-only: endast ADMIN kan spara."); return; }
+        // "Spara ändringar" = spara som utkast
         if (STATE.edited) STATE.edited.status = "draft";
         const r = persistEditedBlock();
         setMsgSafe(r.ok ? "Sparat. (Som utkast)" : (`Kunde inte spara: ${r.err || "okänt fel"}`));
@@ -708,6 +802,7 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
 
     if (DOM.btnVerify) {
       DOM.btnVerify.addEventListener("click", function () {
+        if (!STATE.canWrite) { setMsgSafe("Read-only: endast ADMIN kan verifiera."); return; }
         const r = setVerifiedAndPersist();
         setMsgSafe(r.ok ? "Verifierat och sparat." : (`Verifiering stoppad: ${r.err || "okänt fel"}`));
       });
@@ -715,6 +810,7 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
 
     if (DOM.btnPublish) {
       DOM.btnPublish.addEventListener("click", function () {
+        if (!STATE.canWrite) { setMsgSafe("Read-only: endast ADMIN kan publicera."); return; }
         const r = setPublishedAndPersist();
         setMsgSafe(r.ok ? "Publicerat och sparat." : (`Publicering stoppad: ${r.err || "okänt fel"}`));
       });
@@ -730,7 +826,7 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
         STATE.exportOpen = !STATE.exportOpen;
         DOM.exportBody.style.display = STATE.exportOpen ? "block" : "none";
         DOM.btnToggleExport.setAttribute("aria-expanded", STATE.exportOpen ? "true" : "false");
-        DOM.btnToggleExport.textContent = STATE.exportOpen ? "Dölj" : "Visa";
+        applyExportToggleIndicator();
       });
     }
 
@@ -769,23 +865,16 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
       return;
     }
 
-    // STRICT ADMIN GATE (fail-closed)
-    const gate = (core && typeof core.requireAdminOrRedirect === "function")
-      ? core.requireAdminOrRedirect()
-      : { ok: false, who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false, authOk: false } };
+    // role
+    const who = (core && typeof core.getRole === "function")
+      ? core.getRole()
+      : { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
 
-    if (!gate.ok) {
-      // core.requireAdminOrRedirect() redirectar normalt; vi stoppar allt.
-      showLock(["Åtkomst nekad: endast ADMIN får använda denna sida."]);
-      setMsgSafe("Åtkomst nekad.");
-      return;
-    }
-
-    // role (ADMIN only)
-    const who = gate.who || { role: "ADMIN", empNo: "", canWrite: true };
-    STATE.role = String(who.role || "ADMIN").toUpperCase();
+    STATE.role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
     STATE.empNo = String(who.empNo || "");
-    STATE.canWrite = true; // ADMIN gate => always true
+
+    // v1.1: ADMIN-only write
+    STATE.canWrite = (STATE.role === "ADMIN");
 
     // Inkorg default: fUnverified ska vara på (fail-safe)
     if (DOM.fUnverified) DOM.fUnverified.checked = (DOM.fUnverified.checked !== false);
@@ -793,7 +882,7 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
     // pills
     try {
       render.setWhoPill(`Inloggad: ${STATE.empNo || "—"} (${STATE.role})`);
-      render.setModePill("Edit: på", "pill ok");
+      render.setModePill(STATE.canWrite ? "Edit: på" : "Read-only", STATE.canWrite ? "pill ok" : "pill warn");
       render.setStatePill("Status: OK", "pill ok");
       render.setSelectionPill("Val: —");
       render.setVerifyPill("Verifiering: —", "verifyPill warn", false);
@@ -808,6 +897,7 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
       if (DOM.btnVerify) DOM.btnVerify.disabled = true;
       if (DOM.btnPublish) DOM.btnPublish.disabled = true;
       if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = true;
+      if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = true;
       return;
     }
 
@@ -821,6 +911,15 @@ PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
 
     // wire
     wireEvents();
+
+    // ADMIN-only: hård disable i UI (extra fail-safe)
+    if (!STATE.canWrite) {
+      if (DOM.btnVerify) DOM.btnVerify.disabled = true;
+      if (DOM.btnPublish) DOM.btnPublish.disabled = true;
+      if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = true;
+      if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = true;
+      if (DOM.pbModalSave) DOM.pbModalSave.disabled = true;
+    }
 
     setMsgSafe("Klart. Sök eller tryck “Visa alla”.");
     STATE.ready = true;
