@@ -8,15 +8,10 @@ Policy (LÅST):
 - XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
 
-PATCH v1.1.0 (PATCHPAKET v1.1 – kontrakt, modal, ADMIN-only):
-- Kontrakt: endast ADMIN får redigera block (MANAGER blir read-only här).
-- Inkorg-indikator: "Visa" (export) markerar grönt när det finns "nya" block.
-  Definition "nytt" (utan ny storage): block med verifiedAt <= 0 räknas som nya.
-- Modal: valt block visas i modal (flyttar befintliga noder, ingen innerHTML, behåller listeners).
-  - Öppnas automatiskt vid val av block
-  - ESC / overlay-klick / Stäng = stänger (fail-safe)
-  - Avbryt: återställ osparade ändringar (efter confirm om dirty)
-  - Spara: triggar samma save som "Spara ändringar" (utkast)
+PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikator):
+- P0: btnToggleExport-text sätts ENDAST via applyExportIndicator() (en källa → mindre missförstånd)
+- P0: “nytt”-indikator blir robust även om CSS saknar .ok (inline style + classList)
+- Behåller logik: exportBody togglas via samma DOM-id (#exportBody)
 ============================================================ */
 (function () {
   "use strict";
@@ -264,24 +259,37 @@ PATCH v1.1.0 (PATCHPAKET v1.1 – kontrakt, modal, ADMIN-only):
   }
 
   function applyExportIndicator() {
+    if (!DOM.btnToggleExport) return;
+
     const nNew = countNewBlocks(STATE.allBlocks);
     const hasNew = nNew > 0;
 
-    // Prefer render helper if it exists (added in 05-render v1.1.1), else do minimal DOM tweak here.
+    // 1) Text + aria (ONE SOURCE OF TRUTH)
+    const baseText = STATE.exportOpen ? "Dölj" : "Visa";
+    DOM.btnToggleExport.textContent = baseText;
+    DOM.btnToggleExport.setAttribute("aria-expanded", STATE.exportOpen ? "true" : "false");
+
+    // 2) Prefer render helper (optional), but we still apply robust cue below
     if (render && typeof render.setExportIndicator === "function") {
       try { render.setExportIndicator({ hasNew, countNew: nNew }); } catch (_) {}
-      return;
     }
 
-    // Fail-safe DOM-only indicator (no CSS dependency)
-    if (!DOM.btnToggleExport) return;
-    const baseText = STATE.exportOpen ? "Dölj" : "Visa";
-    DOM.btnToggleExport.textContent = hasNew ? (baseText + " (nytt)") : baseText;
-
-    // Very small visual cue using existing class names
+    // 3) Robust visual cue (does not rely on CSS existing)
+    //    - green-ish only when hasNew
+    //    - reset when not
     try {
-      DOM.btnToggleExport.className = "miniBtn" + (hasNew ? " ok" : "");
-      DOM.btnToggleExport.title = hasNew ? (`Det finns ${nNew} nya/ej verifierade block.`) : "Visa export";
+      // class hint (safe no-op if CSS missing)
+      DOM.btnToggleExport.classList.toggle("ok", hasNew);
+
+      if (hasNew) {
+        DOM.btnToggleExport.title = `Det finns ${nNew} nya/ej verifierade block (verifiedAt <= 0).`;
+        DOM.btnToggleExport.style.borderColor = "rgba(16,185,129,.45)";
+        DOM.btnToggleExport.style.background = "rgba(209,250,229,.70)";
+      } else {
+        DOM.btnToggleExport.title = "Visa export";
+        DOM.btnToggleExport.style.borderColor = "";
+        DOM.btnToggleExport.style.background = "";
+      }
     } catch (_) {}
   }
 
@@ -881,8 +889,7 @@ PATCH v1.1.0 (PATCHPAKET v1.1 – kontrakt, modal, ADMIN-only):
       DOM.btnToggleExport.addEventListener("click", function () {
         STATE.exportOpen = !STATE.exportOpen;
         DOM.exportBody.style.display = STATE.exportOpen ? "block" : "none";
-        DOM.btnToggleExport.setAttribute("aria-expanded", STATE.exportOpen ? "true" : "false");
-        DOM.btnToggleExport.textContent = STATE.exportOpen ? "Dölj" : "Visa";
+        // Text + aria + “nytt”-markering görs centralt här:
         applyExportIndicator();
       });
     }
@@ -942,7 +949,6 @@ PATCH v1.1.0 (PATCHPAKET v1.1 – kontrakt, modal, ADMIN-only):
           // reuse same save semantics as "Spara ändringar"
           if (!STATE.canWrite) { setMsgSafe("Read-only: bara ADMIN kan spara."); return; }
           if (DOM.btnSaveEdits) DOM.btnSaveEdits.click();
-          // keep modal open after save (så du kan fortsätta), men uppdatera indikator/text
           applyExportIndicator();
         });
       }
@@ -959,9 +965,14 @@ PATCH v1.1.0 (PATCHPAKET v1.1 – kontrakt, modal, ADMIN-only):
     if (!render) missing.push("05-render.js");
     if (!core) missing.push("02-core.js");
     if (!contract) missing.push("04-contract.js");
+
+    // P0: export DOM must exist for contract v1.1 behavior
+    if (!DOM.btnToggleExport) missing.push("DOM#btnToggleExport (HTML)");
+    if (!DOM.exportBody) missing.push("DOM#exportBody (HTML)");
+
     if (missing.length) {
       showLock([`JS saknar delar: ${missing.join(", ")}`]);
-      setMsgSafe("JS laddades delvis men saknar moduler. Kontrollera Console.");
+      setMsgSafe("JS laddades delvis men saknar moduler/DOM. Kontrollera Console/Network.");
       return;
     }
 
@@ -1003,6 +1014,10 @@ PATCH v1.1.0 (PATCHPAKET v1.1 – kontrakt, modal, ADMIN-only):
     STATE.allBlocks = (r.blocks || []).map(normalizeBlock);
     STATE.discoveryActive = false; // search-first
     refreshLeftList();
+
+    // default export closed (but set correct button state + “nytt” cue)
+    STATE.exportOpen = false;
+    if (DOM.exportBody) DOM.exportBody.style.display = "none";
     applyExportIndicator();
 
     // trainings load
