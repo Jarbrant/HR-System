@@ -8,10 +8,15 @@ Policy (LÅST):
 - XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
 
-PATCH v1.0.2 (P0-fix + Inkorg-läge, ingen redesign):
-- P0: publish/verify-status förstördes av persistEditedBlock() som alltid tvingade status=draft.
-      Nu: persist sparar "som det står", och "Spara ändringar" sätter draft explicit.
-- Inkorg: säkrar default att "Ej verifierade" är påslaget vid boot (fail-safe även om HTML missar checked).
+PATCH v1.0.3 (P0 inkorg-default + P1 export-id härdning, minimal patch):
+- P0: Inkorg-default var trasig: checked=(checked!==false) gav ingen effekt när checkbox var false.
+      Nu: tvingar "Ej verifierade" ON vid boot (fail-safe) och sätter discoveryActive=true så inkorg syns direkt.
+- P1: Export blockId kunde krocka (b_${ts}). Nu: b_${ts}_${rand4}.
+
+Ändringslogg:
+- Fix: boot() sätter DOM.fUnverified.checked=true (om finns).
+- Fix: boot() sätter STATE.discoveryActive=true när inkorg-default tvingas (så listan visas direkt).
+- Fix: exportSelectedTraining() använder robust blockId med random-suffix.
 ============================================================ */
 (function () {
   "use strict";
@@ -626,8 +631,9 @@ PATCH v1.0.2 (P0-fix + Inkorg-läge, ingen redesign):
     if (!hit.items || !hit.items.length) { setMsgSafe("Utbildningen saknar items att exportera."); return; }
 
     const ts = nowTs();
+    const rand4 = Math.random().toString(16).slice(2, 6);
     const newBlock = normalizeBlock({
-      blockId: `b_${ts}`,
+      blockId: `b_${ts}_${rand4}`,
       title: hit.title,
       module: hit.module,
       area: hit.area,
@@ -777,8 +783,8 @@ PATCH v1.0.2 (P0-fix + Inkorg-läge, ingen redesign):
     STATE.empNo = String(who.empNo || "");
     STATE.canWrite = !!who.canWrite;
 
-    // Inkorg default: fUnverified ska vara på (fail-safe)
-    if (DOM.fUnverified) DOM.fUnverified.checked = (DOM.fUnverified.checked !== false);
+    // Inkorg default: tvinga fUnverified ON (fail-safe)
+    if (DOM.fUnverified) DOM.fUnverified.checked = true;
 
     // pills
     try {
@@ -802,7 +808,10 @@ PATCH v1.0.2 (P0-fix + Inkorg-läge, ingen redesign):
     }
 
     STATE.allBlocks = (r.blocks || []).map(normalizeBlock);
-    STATE.discoveryActive = false; // search-first
+
+    // Inkorg-läge: visa listan direkt (ej verifierade-filter är redan on)
+    STATE.discoveryActive = true;
+
     refreshLeftList();
 
     // trainings load
@@ -812,7 +821,7 @@ PATCH v1.0.2 (P0-fix + Inkorg-läge, ingen redesign):
     // wire
     wireEvents();
 
-    setMsgSafe("Klart. Sök eller tryck “Visa alla”.");
+    setMsgSafe("Klart. Inkorg: ej verifierade block visas.");
     STATE.ready = true;
   }
 
