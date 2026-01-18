@@ -8,9 +8,10 @@ Policy (LÅST):
 - XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
 
-PATCH v1.0.1 (UI-wire förbättringar, ingen redesign):
-- Lägger till säkra callbacks till renderSelectedDetail: onPatchMeta, onAddItem, onRemoveItem, onMoveItem
-- Centraliserar “applyEditedBlockChange” så list + validering uppdateras stabilt
+PATCH v1.0.2 (P0-fix: Publish/Verify + status-hantering, ingen redesign):
+- P0: persistEditedBlock() tvingade alltid status="draft" → Publicera kunde aldrig “fastna”.
+- Nytt: persistEditedBlock({forceDraft:true}) används bara av “Spara ändringar”.
+- Verifiera/Publicera bevarar status (publicerad stannar publicerad).
 ============================================================ */
 (function () {
   "use strict";
@@ -446,13 +447,27 @@ PATCH v1.0.1 (UI-wire förbättringar, ingen redesign):
   }
 
   // ---------- persistence ----------
-  function persistEditedBlock() {
+  function normalizeStatus(v) {
+    const s = String(v || "draft").toLowerCase();
+    return s === "published" ? "published" : "draft";
+  }
+
+  function persistEditedBlock(opts) {
+    const o = opts && typeof opts === "object" ? opts : {};
+    const forceDraft = !!o.forceDraft;
+
     if (!STATE.edited || !STATE.selectedId) return { ok: false, err: "Inget block valt." };
     const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
     if (idx < 0) return { ok: false, err: "Block hittades inte i listan." };
 
     const next = deepClone(STATE.edited);
-    next.status = "draft"; // spara ändringar -> draft
+
+    // P0-fix:
+    // - “Spara ändringar” kan tvinga draft
+    // - Verifiera/Publicera ska bevara status (publicerad ska stanna publicerad)
+    if (forceDraft) next.status = "draft";
+    next.status = normalizeStatus(next.status);
+
     next.updatedAt = nowTs();
     next.__comp = countComposition(next);
 
@@ -481,7 +496,8 @@ PATCH v1.0.1 (UI-wire förbättringar, ingen redesign):
     next.__comp = countComposition(next);
 
     STATE.edited = next;
-    return persistEditedBlock();
+    // bevara status (draft/published)
+    return persistEditedBlock({ forceDraft: false });
   }
 
   function setPublishedAndPersist() {
@@ -495,7 +511,8 @@ PATCH v1.0.1 (UI-wire förbättringar, ingen redesign):
     next.__comp = countComposition(next);
 
     STATE.edited = next;
-    return persistEditedBlock();
+    // bevara published
+    return persistEditedBlock({ forceDraft: false });
   }
 
   // ---------- trainings (export) - tolerant ----------
@@ -698,7 +715,8 @@ PATCH v1.0.1 (UI-wire förbättringar, ingen redesign):
 
     if (DOM.btnSaveEdits) {
       DOM.btnSaveEdits.addEventListener("click", function () {
-        const r = persistEditedBlock();
+        // “Spara ändringar” -> tvinga draft (endast här)
+        const r = persistEditedBlock({ forceDraft: true });
         setMsgSafe(r.ok ? "Sparat. (Som utkast)" : (`Kunde inte spara: ${r.err || "okänt fel"}`));
       });
     }
