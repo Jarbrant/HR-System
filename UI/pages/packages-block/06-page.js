@@ -18,6 +18,11 @@ PATCH v1.3.1 (PP-SC-004 / Inkorg-export förenkling – Bild 2):
 - Behåller endast modul-filter (valfritt) + lista + export-knapp
 - Städning: vid stängning reset modulfilter + preview + disable export
 - Ingen ändring i storage-keys/datamodell. Inga nya DOM-id/hooks.
+
+PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
+- P1: “Uppdatera”-knappen (btnReloadTrainings) repurposed → “Stäng” (stänger export med städning)
+- P1: Grön kvittens “flyttad/skapat” via render.setTrainExportNotice(ok) (fallback setTrainExportHint)
+- P1: Efter export: stänger exportbox + städar + auto-väljer nya blocket
 ============================================================ */
 (function () {
   "use strict";
@@ -127,6 +132,26 @@ PATCH v1.3.1 (PP-SC-004 / Inkorg-export förenkling – Bild 2):
         DOM.lockBox.textContent = arr.join("\n");
       }
     } catch (_) {}
+  }
+
+  // PP-SC-005: grön/röd/export-notice i inkorgen (05-render har helper; fallback till hint)
+  function setExportNotice(kind, text) {
+    const k = String(kind || "info");
+    const t = String(text || "");
+    try {
+      if (render && typeof render.setTrainExportNotice === "function") {
+        render.setTrainExportNotice(k, t);
+        return;
+      }
+    } catch (_) {}
+    try {
+      if (render && typeof render.setTrainExportHint === "function") {
+        render.setTrainExportHint(t);
+        return;
+      }
+    } catch (_) {}
+    // last resort: direct text
+    if (DOM.trainExportHint) DOM.trainExportHint.textContent = t;
   }
 
   // ---------- state ----------
@@ -770,13 +795,13 @@ PATCH v1.3.1 (PP-SC-004 / Inkorg-export förenkling – Bild 2):
       });
     }
 
-    if (render && typeof render.setTrainExportHint === "function") {
-      render.setTrainExportHint(
-        STATE.canWrite
-          ? "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)."
-          : "Read-only: du kan inte exportera i detta läge."
-      );
-    }
+    // PP-SC-005: fokus “markera + export”
+    setExportNotice(
+      "info",
+      STATE.canWrite
+        ? "Markera en utbildning i listan och tryck “Exportera vald utbildning”."
+        : "Read-only: du kan inte exportera i detta läge."
+    );
 
     if (DOM.btnExportTraining) {
       const found = hits.find((h) => h.index === STATE.trainSelIndex);
@@ -786,13 +811,14 @@ PATCH v1.3.1 (PP-SC-004 / Inkorg-export förenkling – Bild 2):
 
   function exportSelectedTraining() {
     const hit = STATE.trainHits.find((h) => h.index === STATE.trainSelIndex);
-    if (!hit) { setMsgSafe("Välj en utbildning först."); return; }
+    if (!hit) { setMsgSafe("Markera en utbildning först."); return; }
     if (!STATE.canWrite) { setMsgSafe("Read-only: bara ADMIN kan exportera."); return; }
     if (!hit.items || !hit.items.length) { setMsgSafe("Utbildningen saknar items att exportera."); return; }
 
     const ts = nowTs();
+    const newBlockId = `b_${ts}`;
     const newBlock = normalizeBlock({
-      blockId: `b_${ts}`,
+      blockId: newBlockId,
       title: hit.title,
       module: hit.module,
       area: hit.area,
@@ -807,12 +833,27 @@ PATCH v1.3.1 (PP-SC-004 / Inkorg-export förenkling – Bild 2):
 
     STATE.allBlocks.unshift(newBlock);
     const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
-    if (!save.ok) { setMsgSafe(`Kunde inte exportera: ${save.err || "okänt fel"}`); return; }
+    if (!save.ok) {
+      setExportNotice("bad", `❌ Kunde inte exportera: ${save.err || "okänt fel"}`);
+      setMsgSafe(`Kunde inte exportera: ${save.err || "okänt fel"}`);
+      return;
+    }
 
+    // PP-SC-005: grön kvittens “flyttad” i inkorgen + städning + stäng export
+    setExportNotice("ok", `✅ Flyttad: “${hit.title}” → nytt block (utkast) skapat.`);
+
+    // välj nya blocket direkt (snabbt resultat)
     STATE.discoveryActive = true;
     refreshLeftList();
     applyExportIndicator();
-    setMsgSafe("Export klar. Sök eller tryck “Visa alla” och välj det nya blocket.");
+    onSelectBlockId(newBlockId);
+
+    // stäng exportboxen (städning sker i applyExportVisibility)
+    STATE.exportOpen = false;
+    applyExportVisibility();
+    applyExportIndicator();
+
+    setMsgSafe("Export klar. Nytt block är valt.");
   }
 
   // ---------- print ----------
@@ -910,11 +951,14 @@ PATCH v1.3.1 (PP-SC-004 / Inkorg-export förenkling – Bild 2):
       el.addEventListener("change", refreshTrainingUI);
     });
 
+    // PP-SC-005: btnReloadTrainings används som “Stäng” (ingen reload)
     if (DOM.btnReloadTrainings) {
       DOM.btnReloadTrainings.addEventListener("click", function () {
-        loadTrainings();
-        refreshTrainingUI();
-        setMsgSafe("Utbildningar uppdaterade.");
+        // stäng export + städning
+        STATE.exportOpen = false;
+        applyExportVisibility();
+        applyExportIndicator();
+        setMsgSafe("Stängd.");
       });
     }
 
@@ -979,6 +1023,13 @@ PATCH v1.3.1 (PP-SC-004 / Inkorg-export förenkling – Bild 2):
       showLock([`JS saknar delar: ${missing.join(", ")}`]);
       setMsgSafe("JS laddades delvis men saknar moduler/DOM. Kontrollera Console/Network.");
       return;
+    }
+
+    // PP-SC-005: repurpose reload button label to “Stäng” (om den finns)
+    if (DOM.btnReloadTrainings) {
+      DOM.btnReloadTrainings.textContent = "Stäng";
+      DOM.btnReloadTrainings.setAttribute("aria-label", "Stäng export");
+      DOM.btnReloadTrainings.title = "Stäng export";
     }
 
     // role
