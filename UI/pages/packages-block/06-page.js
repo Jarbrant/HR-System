@@ -8,10 +8,10 @@ Policy (LÅST):
 - XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
 
-PATCH v1.0.2 (P0-fix: Publish/Verify + status-hantering, ingen redesign):
-- P0: persistEditedBlock() tvingade alltid status="draft" → Publicera kunde aldrig “fastna”.
-- Nytt: persistEditedBlock({forceDraft:true}) används bara av “Spara ändringar”.
-- Verifiera/Publicera bevarar status (publicerad stannar publicerad).
+PATCH v1.0.2 (P0-fix + Inkorg-läge, ingen redesign):
+- P0: publish/verify-status förstördes av persistEditedBlock() som alltid tvingade status=draft.
+      Nu: persist sparar "som det står", och "Spara ändringar" sätter draft explicit.
+- Inkorg: säkrar default att "Ej verifierade" är påslaget vid boot (fail-safe även om HTML missar checked).
 ============================================================ */
 (function () {
   "use strict";
@@ -371,7 +371,6 @@ PATCH v1.0.2 (P0-fix: Publish/Verify + status-hantering, ingen redesign):
           if (!STATE.canWrite) return;
           applyEditedBlockChange(function (draft) {
             const next = mutFn ? mutFn(draft) : draft;
-            // fail-safe: normalisera strängar
             next.title = normStr(next.title) || "(utan rubrik)";
             next.module = normStr(next.module || "");
             next.area = normStr(next.area || "");
@@ -447,27 +446,13 @@ PATCH v1.0.2 (P0-fix: Publish/Verify + status-hantering, ingen redesign):
   }
 
   // ---------- persistence ----------
-  function normalizeStatus(v) {
-    const s = String(v || "draft").toLowerCase();
-    return s === "published" ? "published" : "draft";
-  }
-
-  function persistEditedBlock(opts) {
-    const o = opts && typeof opts === "object" ? opts : {};
-    const forceDraft = !!o.forceDraft;
-
+  function persistEditedBlock() {
     if (!STATE.edited || !STATE.selectedId) return { ok: false, err: "Inget block valt." };
     const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
     if (idx < 0) return { ok: false, err: "Block hittades inte i listan." };
 
+    // P0: spara exakt som STATE.edited säger (status/verified etc)
     const next = deepClone(STATE.edited);
-
-    // P0-fix:
-    // - “Spara ändringar” kan tvinga draft
-    // - Verifiera/Publicera ska bevara status (publicerad ska stanna publicerad)
-    if (forceDraft) next.status = "draft";
-    next.status = normalizeStatus(next.status);
-
     next.updatedAt = nowTs();
     next.__comp = countComposition(next);
 
@@ -496,8 +481,7 @@ PATCH v1.0.2 (P0-fix: Publish/Verify + status-hantering, ingen redesign):
     next.__comp = countComposition(next);
 
     STATE.edited = next;
-    // bevara status (draft/published)
-    return persistEditedBlock({ forceDraft: false });
+    return persistEditedBlock();
   }
 
   function setPublishedAndPersist() {
@@ -511,8 +495,7 @@ PATCH v1.0.2 (P0-fix: Publish/Verify + status-hantering, ingen redesign):
     next.__comp = countComposition(next);
 
     STATE.edited = next;
-    // bevara published
-    return persistEditedBlock({ forceDraft: false });
+    return persistEditedBlock();
   }
 
   // ---------- trainings (export) - tolerant ----------
@@ -715,8 +698,9 @@ PATCH v1.0.2 (P0-fix: Publish/Verify + status-hantering, ingen redesign):
 
     if (DOM.btnSaveEdits) {
       DOM.btnSaveEdits.addEventListener("click", function () {
-        // “Spara ändringar” -> tvinga draft (endast här)
-        const r = persistEditedBlock({ forceDraft: true });
+        // "Spara ändringar" = spara som utkast (men förstör inte publish/verify-flödet)
+        if (STATE.edited) STATE.edited.status = "draft";
+        const r = persistEditedBlock();
         setMsgSafe(r.ok ? "Sparat. (Som utkast)" : (`Kunde inte spara: ${r.err || "okänt fel"}`));
       });
     }
@@ -792,6 +776,9 @@ PATCH v1.0.2 (P0-fix: Publish/Verify + status-hantering, ingen redesign):
     STATE.role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
     STATE.empNo = String(who.empNo || "");
     STATE.canWrite = !!who.canWrite;
+
+    // Inkorg default: fUnverified ska vara på (fail-safe)
+    if (DOM.fUnverified) DOM.fUnverified.checked = (DOM.fUnverified.checked !== false);
 
     // pills
     try {
