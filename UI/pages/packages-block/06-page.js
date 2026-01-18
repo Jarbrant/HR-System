@@ -8,15 +8,11 @@ Policy (LÅST):
 - XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
 
-PATCH v1.0.3 (P0 inkorg-default + P1 export-id härdning, minimal patch):
-- P0: Inkorg-default var trasig: checked=(checked!==false) gav ingen effekt när checkbox var false.
-      Nu: tvingar "Ej verifierade" ON vid boot (fail-safe) och sätter discoveryActive=true så inkorg syns direkt.
-- P1: Export blockId kunde krocka (b_${ts}). Nu: b_${ts}_${rand4}.
-
-Ändringslogg:
-- Fix: boot() sätter DOM.fUnverified.checked=true (om finns).
-- Fix: boot() sätter STATE.discoveryActive=true när inkorg-default tvingas (så listan visas direkt).
-- Fix: exportSelectedTraining() använder robust blockId med random-suffix.
+PATCH v1.0.3 (P0 – STRICT ADMIN GATE + tydlig deny):
+- Denna sida får endast användas av ADMIN.
+- Allt annat (SYSTEM_ADMIN/MANAGER/oklar auth) -> fail-closed deny/redirect via core.requireAdminOrRedirect().
+- canWrite = true endast för ADMIN (i linje med låst kontrakt).
+- Behåller befintlig logik i övrigt (inkorg default, P0 status-fix, export UI).
 ============================================================ */
 (function () {
   "use strict";
@@ -371,7 +367,7 @@ PATCH v1.0.3 (P0 inkorg-default + P1 export-id härdning, minimal patch):
           });
         },
 
-        // meta patch (NY)
+        // meta patch
         onPatchMeta: function (mutFn) {
           if (!STATE.canWrite) return;
           applyEditedBlockChange(function (draft) {
@@ -384,7 +380,7 @@ PATCH v1.0.3 (P0 inkorg-default + P1 export-id härdning, minimal patch):
           });
         },
 
-        // add/remove/move item (NY – valfritt för render att använda)
+        // add/remove/move item (valfritt för render att använda)
         onAddItem: function (kind, afterIdx) {
           if (!STATE.canWrite) return;
           const k = String(kind || "document");
@@ -456,7 +452,7 @@ PATCH v1.0.3 (P0 inkorg-default + P1 export-id härdning, minimal patch):
     const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
     if (idx < 0) return { ok: false, err: "Block hittades inte i listan." };
 
-    // P0: spara exakt som STATE.edited säger (status/verified etc)
+    // spara exakt som STATE.edited säger (status/verified etc)
     const next = deepClone(STATE.edited);
     next.updatedAt = nowTs();
     next.__comp = countComposition(next);
@@ -614,7 +610,7 @@ PATCH v1.0.3 (P0 inkorg-default + P1 export-id härdning, minimal patch):
       render.setTrainExportHint(
         STATE.canWrite
           ? "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)."
-          : "Read-only: du kan inte exportera i SYSTEM_ADMIN-läge."
+          : "Åtkomst nekad: endast ADMIN kan exportera."
       );
     }
 
@@ -627,13 +623,12 @@ PATCH v1.0.3 (P0 inkorg-default + P1 export-id härdning, minimal patch):
   function exportSelectedTraining() {
     const hit = STATE.trainHits.find((h) => h.index === STATE.trainSelIndex);
     if (!hit) { setMsgSafe("Välj en utbildning först."); return; }
-    if (!STATE.canWrite) { setMsgSafe("Read-only: SYSTEM_ADMIN kan inte exportera."); return; }
+    if (!STATE.canWrite) { setMsgSafe("Åtkomst nekad: endast ADMIN kan exportera."); return; }
     if (!hit.items || !hit.items.length) { setMsgSafe("Utbildningen saknar items att exportera."); return; }
 
     const ts = nowTs();
-    const rand4 = Math.random().toString(16).slice(2, 6);
     const newBlock = normalizeBlock({
-      blockId: `b_${ts}_${rand4}`,
+      blockId: `b_${ts}`,
       title: hit.title,
       module: hit.module,
       area: hit.area,
@@ -774,22 +769,31 @@ PATCH v1.0.3 (P0 inkorg-default + P1 export-id härdning, minimal patch):
       return;
     }
 
-    // role
-    const who = (core && typeof core.getRole === "function")
-      ? core.getRole()
-      : { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
+    // STRICT ADMIN GATE (fail-closed)
+    const gate = (core && typeof core.requireAdminOrRedirect === "function")
+      ? core.requireAdminOrRedirect()
+      : { ok: false, who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false, authOk: false } };
 
-    STATE.role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
+    if (!gate.ok) {
+      // core.requireAdminOrRedirect() redirectar normalt; vi stoppar allt.
+      showLock(["Åtkomst nekad: endast ADMIN får använda denna sida."]);
+      setMsgSafe("Åtkomst nekad.");
+      return;
+    }
+
+    // role (ADMIN only)
+    const who = gate.who || { role: "ADMIN", empNo: "", canWrite: true };
+    STATE.role = String(who.role || "ADMIN").toUpperCase();
     STATE.empNo = String(who.empNo || "");
-    STATE.canWrite = !!who.canWrite;
+    STATE.canWrite = true; // ADMIN gate => always true
 
-    // Inkorg default: tvinga fUnverified ON (fail-safe)
-    if (DOM.fUnverified) DOM.fUnverified.checked = true;
+    // Inkorg default: fUnverified ska vara på (fail-safe)
+    if (DOM.fUnverified) DOM.fUnverified.checked = (DOM.fUnverified.checked !== false);
 
     // pills
     try {
       render.setWhoPill(`Inloggad: ${STATE.empNo || "—"} (${STATE.role})`);
-      render.setModePill(STATE.canWrite ? "Edit: på" : "Read-only", STATE.canWrite ? "pill ok" : "pill warn");
+      render.setModePill("Edit: på", "pill ok");
       render.setStatePill("Status: OK", "pill ok");
       render.setSelectionPill("Val: —");
       render.setVerifyPill("Verifiering: —", "verifyPill warn", false);
@@ -808,10 +812,7 @@ PATCH v1.0.3 (P0 inkorg-default + P1 export-id härdning, minimal patch):
     }
 
     STATE.allBlocks = (r.blocks || []).map(normalizeBlock);
-
-    // Inkorg-läge: visa listan direkt (ej verifierade-filter är redan on)
-    STATE.discoveryActive = true;
-
+    STATE.discoveryActive = false; // search-first
     refreshLeftList();
 
     // trainings load
@@ -821,7 +822,7 @@ PATCH v1.0.3 (P0 inkorg-default + P1 export-id härdning, minimal patch):
     // wire
     wireEvents();
 
-    setMsgSafe("Klart. Inkorg: ej verifierade block visas.");
+    setMsgSafe("Klart. Sök eller tryck “Visa alla”.");
     STATE.ready = true;
   }
 
