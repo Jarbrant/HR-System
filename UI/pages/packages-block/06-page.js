@@ -8,10 +8,10 @@ Policy (LÅST):
 - XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
 
-PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikator):
-- P0: btnToggleExport-text sätts ENDAST via applyExportIndicator() (en källa → mindre missförstånd)
-- P0: “nytt”-indikator blir robust även om CSS saknar .ok (inline style + classList)
-- Behåller logik: exportBody togglas via samma DOM-id (#exportBody)
+PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när stängd):
+- P0: Export-kortets container (.exportBox) döljs helt när "Visa" är stängt (inte bara #exportBody)
+- P1: Vid stängning städas export-UI (preview + knappar) för att undvika "halvöppet" läge
+- P2: Robust: om .exportBox saknas fortsätter fallback-toggling av #exportBody ändå
 ============================================================ */
 (function () {
   "use strict";
@@ -84,6 +84,9 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
     pbModalCancel: byId("pbModalCancel"),
     pbModalSave: byId("pbModalSave"),
   };
+
+  // PP-SC-002: export container (no new DOM-id, selector only)
+  const EXPORT_BOX = document.querySelector(".exportBox") || null;
 
   // We move this panel into modal (no cloning) to keep listeners intact
   const SEL_PANEL = document.querySelector(".selPanel") || null;
@@ -275,10 +278,7 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
     }
 
     // 3) Robust visual cue (does not rely on CSS existing)
-    //    - green-ish only when hasNew
-    //    - reset when not
     try {
-      // class hint (safe no-op if CSS missing)
       DOM.btnToggleExport.classList.toggle("ok", hasNew);
 
       if (hasNew) {
@@ -291,6 +291,28 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
         DOM.btnToggleExport.style.background = "";
       }
     } catch (_) {}
+  }
+
+  // PP-SC-002: central toggle for export container + body + cleanup
+  function applyExportVisibility() {
+    const open = !!STATE.exportOpen;
+
+    // container
+    if (EXPORT_BOX) {
+      EXPORT_BOX.style.display = open ? "block" : "none";
+    }
+
+    // body (fallback + keeps old behavior)
+    if (DOM.exportBody) {
+      DOM.exportBody.style.display = open ? "block" : "none";
+    }
+
+    // when closing: cleanup "half-open" UI
+    if (!open) {
+      STATE.trainSelIndex = -1;
+      if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = true;
+      if (DOM.trainPreviewDetail) DOM.trainPreviewDetail.style.display = "none";
+    }
   }
 
   function buildVisibleBlocks() {
@@ -395,7 +417,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
     // Move the existing selection panel into modal body (keeps listeners)
     if (SEL_PANEL && DOM.pbModalBody) {
       try {
-        // Clear placeholder text in modal body but keep body itself
         clearChildren(DOM.pbModalBody);
         DOM.pbModalBody.appendChild(SEL_PANEL);
       } catch (_) {}
@@ -497,7 +518,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
         canEdit: STATE.canWrite,
         validationReasons: reasons,
 
-        // item patch (befintlig)
         onPatchItem: function (idx, mutFn) {
           if (!STATE.canWrite) return;
           const cur = STATE.edited;
@@ -513,7 +533,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
           });
         },
 
-        // meta patch (NY)
         onPatchMeta: function (mutFn) {
           if (!STATE.canWrite) return;
           applyEditedBlockChange(function (draft) {
@@ -526,7 +545,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
           });
         },
 
-        // add/remove/move item (NY – valfritt för render att använda)
         onAddItem: function (kind, afterIdx) {
           if (!STATE.canWrite) return;
           const k = String(kind || "document");
@@ -610,7 +628,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
     const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
     if (idx < 0) return { ok: false, err: "Block hittades inte i listan." };
 
-    // P0: spara exakt som STATE.edited säger (status/verified etc)
     const next = deepClone(STATE.edited);
     next.updatedAt = nowTs();
     next.__comp = countComposition(next);
@@ -619,7 +636,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
     const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
     if (!save.ok) return save;
 
-    // refresh selection from source-of-truth array
     STATE.selected = STATE.allBlocks[idx];
     STATE.edited = deepClone(STATE.selected);
     setDirty(false);
@@ -668,7 +684,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
   }
 
   function extractTrainingItems(t) {
-    // Tolerant: items directly OR blocks[].items
     if (t && Array.isArray(t.items)) return t.items.map(normalizeItem);
     if (t && Array.isArray(t.blocks)) {
       const flat = [];
@@ -690,7 +705,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
   }
 
   function refreshTrainingUI() {
-    // build module dropdown
     if (DOM.qTrainModule) {
       const mods = new Set();
       for (const tr of STATE.trainings) {
@@ -715,7 +729,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
       DOM.qTrainModule.value = cur;
     }
 
-    // build area datalist
     if (DOM.dlTrainAreas) {
       clearChildren(DOM.dlTrainAreas);
       const areas = new Set();
@@ -730,7 +743,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
       });
     }
 
-    // hits
     const m = normStr(DOM.qTrainModule && DOM.qTrainModule.value);
     const a = normStr(DOM.qTrainArea && DOM.qTrainArea.value).toLowerCase();
     const f = normStr(DOM.qTrainFree && DOM.qTrainFree.value).toLowerCase();
@@ -764,7 +776,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
       });
     }
 
-    // hint
     if (render && typeof render.setTrainExportHint === "function") {
       render.setTrainExportHint(
         STATE.canWrite
@@ -804,7 +815,7 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
     const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
     if (!save.ok) { setMsgSafe(`Kunde inte exportera: ${save.err || "okänt fel"}`); return; }
 
-    STATE.discoveryActive = true; // så användaren ser blocket
+    STATE.discoveryActive = true;
     refreshLeftList();
     applyExportIndicator();
     setMsgSafe("Export klar. Sök eller tryck “Visa alla” och välj det nya blocket.");
@@ -859,7 +870,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
 
     if (DOM.btnSaveEdits) {
       DOM.btnSaveEdits.addEventListener("click", function () {
-        // "Spara ändringar" = spara som utkast (men förstör inte publish/verify-flödet)
         if (STATE.edited) STATE.edited.status = "draft";
         const r = persistEditedBlock();
         setMsgSafe(r.ok ? "Sparat. (Som utkast)" : (`Kunde inte spara: ${r.err || "okänt fel"}`));
@@ -888,9 +898,15 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
     if (DOM.btnToggleExport && DOM.exportBody) {
       DOM.btnToggleExport.addEventListener("click", function () {
         STATE.exportOpen = !STATE.exportOpen;
-        DOM.exportBody.style.display = STATE.exportOpen ? "block" : "none";
-        // Text + aria + “nytt”-markering görs centralt här:
+
+        // PP-SC-002: show/hide whole container (and cleanup on close)
+        applyExportVisibility();
+
+        // Text + aria + “nytt”-markering
         applyExportIndicator();
+
+        // When opening: refresh the UI so it's always current
+        if (STATE.exportOpen) refreshTrainingUI();
       });
     }
 
@@ -914,7 +930,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
 
     // Modal interactions (fail-safe if missing)
     if (modalAvailable()) {
-      // overlay click closes (only if click is on overlay, not inside dialog)
       DOM.pbModalOverlay.addEventListener("click", function (e) {
         if (!STATE.modalOpen) return;
         if (e && e.target === DOM.pbModalOverlay) {
@@ -924,7 +939,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
         }
       });
 
-      // ESC closes
       document.addEventListener("keydown", function (e) {
         if (!STATE.modalOpen) return;
         if (e && e.key === "Escape") {
@@ -946,7 +960,6 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
 
       if (DOM.pbModalSave) {
         DOM.pbModalSave.addEventListener("click", function () {
-          // reuse same save semantics as "Spara ändringar"
           if (!STATE.canWrite) { setMsgSafe("Read-only: bara ADMIN kan spara."); return; }
           if (DOM.btnSaveEdits) DOM.btnSaveEdits.click();
           applyExportIndicator();
@@ -956,17 +969,14 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
   }
 
   function boot() {
-    // Always set message quickly so HTML watchdog won't fire
     setMsgSafe("Startar kontrollrummet…");
 
-    // dependency sanity
     const missing = [];
     if (!store) missing.push("03-store.js");
     if (!render) missing.push("05-render.js");
     if (!core) missing.push("02-core.js");
     if (!contract) missing.push("04-contract.js");
 
-    // P0: export DOM must exist for contract v1.1 behavior
     if (!DOM.btnToggleExport) missing.push("DOM#btnToggleExport (HTML)");
     if (!DOM.exportBody) missing.push("DOM#exportBody (HTML)");
 
@@ -983,7 +993,7 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
 
     STATE.role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
     STATE.empNo = String(who.empNo || "");
-    // v1.1: ADMIN-only write (MANAGER read-only här)
+    // ADMIN-only write (MANAGER read-only här)
     STATE.canWrite = (STATE.role === "ADMIN");
 
     // Inkorg default: fUnverified ska vara på (fail-safe)
@@ -1015,9 +1025,9 @@ PATCH v1.1.1 (PATCHPAKET v1.1 – flyttad “Visa”-knapp + robust NYTT-indikat
     STATE.discoveryActive = false; // search-first
     refreshLeftList();
 
-    // default export closed (but set correct button state + “nytt” cue)
+    // default export closed + PP-SC-002: hide whole export container
     STATE.exportOpen = false;
-    if (DOM.exportBody) DOM.exportBody.style.display = "none";
+    applyExportVisibility();
     applyExportIndicator();
 
     // trainings load
