@@ -8,32 +8,11 @@ Policy (LÅST):
 - XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
 - SYSTEM_ADMIN = steward/read-only
 
-PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när stängd):
-- P0: Export-kortets container (.exportBox) döljs helt när "Visa" är stängt (inte bara #exportBody)
-- P1: Vid stängning städas export-UI (preview + knappar) för att undvika "halvöppet" läge
-- P2: Robust: om .exportBox saknas fortsätter fallback-toggling av #exportBody ändå
-
-PATCH v1.3.1 (PP-SC-004 / Inkorg-export förenkling – Bild 2):
-- Tar bort stöd för qTrainArea/qTrainFree/dlTrainAreas (fält borttagna i HTML)
-- Behåller endast modul-filter (valfritt) + lista + export-knapp
-- Städning: vid stängning reset modulfilter + preview + disable export
-- Ingen ändring i storage-keys/datamodell. Inga nya DOM-id/hooks.
-
-PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
-- P1: “Uppdatera”-knappen (btnReloadTrainings) repurposed → “Stäng” (stänger export med städning)
-- P1: Grön kvittens “flyttad/skapat” via render.setTrainExportNotice(ok) (fallback setTrainExportHint)
-- P1: Efter export: stänger exportbox + städar + auto-väljer nya blocket
-
-PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerbara):
-- P0: task: om text saknas men instruction finns → text = instruction (utan ny datamodell)
-- P0: task: om taskId saknas → auto-sätt stabilt id baserat på blockId + index
-- P0: document: om text saknas men instruction finns → text = instruction (legacy)
-- P2: Modal a11y: flytta/återställ fokus innan aria-hidden vid stängning (minskar Chrome-varning)
-
-PATCH v1.4.0 (PP-SC-009 / “Frågepärm” i modalen – bättre överblick):
-- P0: Binder-läge i modal: vänster “pärm” (lista) + höger “papper” (1 item i taget)
-- P1: Föreg/Nästa + Item X/Y + klick i pärm-lista
-- P2: Robust: om renderns DOM-struktur skiljer sig (saknar .itemCard) → binder kör ändå (visar allt)
+PATCH v1.5.0 (PP-SC-010 / Kontrakt: “Gå till problem” + klickbar problemlista + manuella snabbfixar):
+- P0: Tolkar kontraktets reasons → mappar till itemIndex (doc/task #N) eller fras-träff (best effort).
+- P0: Problem-sektion i vänsterpärm: “Gå till första problem” + klickbara problem som hoppar till rätt “papper”.
+- P1: Manuell Snabbfix (ADMIN-only): ersätter förbjudna fraser (utför uppgiften → lös uppgiften; beskriv hur du tänkte → tas bort).
+- P2: Efter hopp: scrollIntoView + fokus på första textarea i aktivt papper (snabb åtgärd).
 ============================================================ */
 (function () {
   "use strict";
@@ -199,6 +178,13 @@ PATCH v1.4.0 (PP-SC-009 / “Frågepärm” i modalen – bättre överblick):
     modalBinder: {
       enabled: true,
       itemIndex: 0, // 0..n-1
+    },
+
+    // PP-SC-010: problem routing (UI-only, no storage)
+    validation: {
+      reasons: [],
+      targets: [],   // [{ label, kind, itemIndex?, phrase?, raw }]
+      firstIndex: null,
     },
   };
 
@@ -473,6 +459,272 @@ PATCH v1.4.0 (PP-SC-009 / “Frågepärm” i modalen – bättre överblick):
     }
   }
 
+  // ---------- PP-SC-010: Problem mapping / routing ----------
+  function itemsArr() {
+    return Array.isArray(STATE.edited && STATE.edited.items) ? STATE.edited.items : [];
+  }
+
+  function docNthToItemIndex(n) {
+    // n is 1-based among documents
+    const items = itemsArr();
+    let d = 0;
+    for (let i = 0; i < items.length; i++) {
+      if (String(items[i] && items[i].kind) === "document") {
+        d++;
+        if (d === n) return i;
+      }
+    }
+    return null;
+  }
+
+  function taskNthToItemIndex(n) {
+    // n is 1-based among tasks
+    const items = itemsArr();
+    let t = 0;
+    for (let i = 0; i < items.length; i++) {
+      if (String(items[i] && items[i].kind) === "task") {
+        t++;
+        if (t === n) return i;
+      }
+    }
+    return null;
+  }
+
+  function findPhraseInItems(phrase) {
+    const p = normStr(phrase).toLowerCase();
+    if (!p) return null;
+
+    const items = itemsArr();
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i] || {};
+      const kind = String(it.kind || "document");
+
+      const fields = [];
+      if (typeof it.text === "string") fields.push(it.text);
+      if (typeof it.instruction === "string") fields.push(it.instruction);
+      if (typeof it.deliverable === "string") fields.push(it.deliverable);
+      if (kind === "question") {
+        if (Array.isArray(it.options)) fields.push(it.options.join("\n"));
+        if (Array.isArray(it.choices)) fields.push(it.choices.map((c) => `${c && c.text ? c.text : ""}`).join("\n"));
+      }
+
+      const hay = fields.join("\n").toLowerCase();
+      if (hay.includes(p)) return i;
+    }
+    return null;
+  }
+
+  function buildProblemTargetsFromReasons(reasons) {
+    const out = [];
+    const arr = Array.isArray(reasons) ? reasons : [];
+
+    for (let i = 0; i < arr.length; i++) {
+      const raw = String(arr[i] || "");
+      const r = raw.trim();
+      if (!r) continue;
+
+      // Dokument N
+      let m = r.match(/Dokument\s+(\d+)/i);
+      if (m) {
+        const n = Number(m[1]);
+        const ix = Number.isFinite(n) ? docNthToItemIndex(n) : null;
+        out.push({ label: r, kind: "document", itemIndex: ix, raw: r });
+        continue;
+      }
+
+      // Uppgift N (om kontraktet skulle använda det)
+      m = r.match(/Uppgift\s+(\d+)/i);
+      if (m) {
+        const n2 = Number(m[1]);
+        const ix2 = Number.isFinite(n2) ? taskNthToItemIndex(n2) : null;
+        out.push({ label: r, kind: "task", itemIndex: ix2, raw: r });
+        continue;
+      }
+
+      // Förbjudna fraser: ... (komma-separerat)
+      m = r.match(/Förbjudna\s+fraser\s+hittades:\s*(.+)$/i);
+      if (m) {
+        const list = String(m[1] || "").split(",").map((x) => normStr(x)).filter(Boolean);
+        if (list.length) {
+          for (const ph of list) {
+            const ix3 = findPhraseInItems(ph);
+            out.push({ label: `Fras: ${ph}`, kind: "phrase", phrase: ph, itemIndex: ix3, raw: r });
+          }
+        } else {
+          out.push({ label: r, kind: "phrase", itemIndex: null, raw: r });
+        }
+        continue;
+      }
+
+      // Generic “text saknas” (om doc/task ej nämns): försök hitta första tomma text
+      if (/text\s+s(a|ä)knas/i.test(r)) {
+        const items = itemsArr();
+        let found = null;
+        for (let j = 0; j < items.length; j++) {
+          const it = items[j] || {};
+          const k = String(it.kind || "document");
+          if (k === "question") continue;
+          const tx = normStr(it.text || it.instruction || "");
+          if (!tx) { found = j; break; }
+        }
+        out.push({ label: r, kind: "missingText", itemIndex: found, raw: r });
+        continue;
+      }
+
+      // fallback: no target
+      out.push({ label: r, kind: "unknown", itemIndex: null, raw: r });
+    }
+
+    // firstIndex = first target that has itemIndex
+    let first = null;
+    for (const t of out) {
+      if (Number.isFinite(t.itemIndex) && t.itemIndex >= 0) { first = t.itemIndex; break; }
+    }
+    return { targets: out, firstIndex: first };
+  }
+
+  function syncValidationState(reasons) {
+    const rr = Array.isArray(reasons) ? reasons : [];
+    STATE.validation.reasons = rr;
+
+    const mapped = buildProblemTargetsFromReasons(rr);
+    STATE.validation.targets = mapped.targets;
+    STATE.validation.firstIndex = mapped.firstIndex;
+  }
+
+  function jumpToItemIndex(ix, why) {
+    if (!Number.isFinite(ix) || ix < 0) {
+      setMsgSafe(why ? `Hittade ingen plats för: ${why}` : "Hittade ingen plats att hoppa till.");
+      return;
+    }
+    STATE.modalBinder.itemIndex = ix;
+    updateRightPanel();
+    applyBinderMode();
+    // P2: scroll + focus textarea
+    try {
+      if (!SEL_PANEL) return;
+      const cards = SEL_PANEL.querySelectorAll(".itemCard");
+      if (cards && cards.length && cards[ix]) {
+        cards[ix].scrollIntoView({ block: "start", behavior: "smooth" });
+        const ta = cards[ix].querySelector("textarea");
+        if (ta && ta.focus) ta.focus();
+      }
+    } catch (_) {}
+  }
+
+  function jumpToFirstProblem() {
+    if (!STATE.validation || !STATE.validation.targets) return;
+    const ix = STATE.validation.firstIndex;
+    if (Number.isFinite(ix) && ix >= 0) {
+      jumpToItemIndex(ix, "första problem");
+      return;
+    }
+    setMsgSafe("Inga hoppbara problem hittades (kanske globalt fel).");
+  }
+
+  function jumpToTarget(t) {
+    if (!t) return;
+    const ix = t.itemIndex;
+    if (Number.isFinite(ix) && ix >= 0) {
+      jumpToItemIndex(ix, t.label || "problem");
+      return;
+    }
+    setMsgSafe(`Kan inte hoppa: ${t.label || "problem"}`);
+  }
+
+  // ADMIN-only, manuellt: snabbfix för förbjudna fraser (best effort, minimal)
+  function applyQuickFixForbiddenPhrases() {
+    if (!STATE.canWrite) { setMsgSafe("Read-only: bara ADMIN kan snabbfixa."); return; }
+    const phrases = [
+      { from: /utför\s+uppgiften/gi, to: "lös uppgiften" },
+      { from: /beskriv\s+hur\s+du\s+tänkte/gi, to: "" }, // tas bort
+    ];
+
+    const touched = { count: 0 };
+
+    const res = applyEditedBlockChange(function (draft) {
+      const items = Array.isArray(draft.items) ? draft.items.slice() : [];
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i] || {};
+        const k = String(it.kind || "document");
+        const next = deepClone(it);
+
+        function rep(s) {
+          let out = String(s ?? "");
+          for (const p of phrases) out = out.replace(p.from, p.to);
+          // städa dubbelmellanslag + tomma rader runt
+          out = out.replace(/[ \t]{2,}/g, " ").replace(/\n{3,}/g, "\n\n");
+          return out.trim();
+        }
+
+        if (typeof next.text === "string") {
+          const before = next.text;
+          const after = rep(before);
+          if (after !== before) { next.text = after; touched.count++; }
+        }
+        if (typeof next.instruction === "string") {
+          const before2 = next.instruction;
+          const after2 = rep(before2);
+          if (after2 !== before2) { next.instruction = after2; touched.count++; }
+        }
+        if (typeof next.deliverable === "string") {
+          const before3 = next.deliverable;
+          const after3 = rep(before3);
+          if (after3 !== before3) { next.deliverable = after3; touched.count++; }
+        }
+
+        if (k === "question") {
+          if (typeof next.text === "string") {
+            const bq = next.text;
+            const aq = rep(bq);
+            if (aq !== bq) { next.text = aq; touched.count++; }
+          }
+          if (Array.isArray(next.options)) {
+            const opts = next.options.slice();
+            for (let j = 0; j < opts.length; j++) {
+              const bo = String(opts[j] ?? "");
+              const ao = rep(bo);
+              if (ao !== bo) { opts[j] = ao; touched.count++; }
+            }
+            next.options = opts;
+          }
+          if (Array.isArray(next.choices)) {
+            const ch = next.choices.map((c) => {
+              const cc = c && typeof c === "object" ? Object.assign({}, c) : c;
+              if (cc && typeof cc.text === "string") {
+                const bc = cc.text;
+                const ac = rep(bc);
+                if (ac !== bc) { cc.text = ac; touched.count++; }
+              }
+              return cc;
+            });
+            next.choices = ch;
+          }
+        }
+
+        // re-normalize with ctx (keeps taskId stable)
+        items[i] = normalizeItem(next, { blockId: normStr(draft.blockId), index: i });
+      }
+      draft.items = items;
+      return draft;
+    });
+
+    if (!res.ok) {
+      setMsgSafe(`Snabbfix misslyckades: ${res.err || "okänt fel"}`);
+      return;
+    }
+
+    setMsgSafe(touched.count ? "Snabbfix applicerad. Glöm inte spara." : "Snabbfix: inget att ändra.");
+    // hoppa till nästa problem (om kvar)
+    try {
+      const reasons = computeValidationReasonsForSelected();
+      syncValidationState(reasons);
+      if (STATE.validation.firstIndex !== null && STATE.validation.firstIndex !== undefined) {
+        jumpToFirstProblem();
+      }
+    } catch (_) {}
+  }
+
   // ---------- modal helpers (no innerHTML, move nodes) ----------
   function modalAvailable() {
     return !!(DOM.pbModalOverlay && DOM.pbModalDialog && DOM.pbModalBody);
@@ -618,6 +870,7 @@ PATCH v1.4.0 (PP-SC-009 / “Frågepärm” i modalen – bättre överblick):
     nav.style.display = "flex";
     nav.style.gap = "8px";
     nav.style.marginTop = "10px";
+    nav.style.flexWrap = "wrap";
 
     const btnPrev = document.createElement("button");
     btnPrev.type = "button";
@@ -645,7 +898,99 @@ PATCH v1.4.0 (PP-SC-009 / “Frågepärm” i modalen – bättre överblick):
 
     nav.appendChild(btnPrev);
     nav.appendChild(btnNext);
+
+    // PP-SC-010: Quick actions (ADMIN-only, manual)
+    if (STATE.canWrite) {
+      const btnGoProb = document.createElement("button");
+      btnGoProb.type = "button";
+      btnGoProb.className = "miniBtn";
+      btnGoProb.textContent = "Gå till första problem";
+      btnGoProb.disabled = !(STATE.validation && STATE.validation.firstIndex !== null && STATE.validation.firstIndex !== undefined);
+      btnGoProb.addEventListener("click", function () {
+        jumpToFirstProblem();
+      });
+
+      const btnFix = document.createElement("button");
+      btnFix.type = "button";
+      btnFix.className = "miniBtn";
+      btnFix.textContent = "Snabbfix: förbjudna fraser";
+      // enable only if we see forbidden phrases in reasons
+      const hasForbidden = (STATE.validation && Array.isArray(STATE.validation.reasons))
+        ? STATE.validation.reasons.some((x) => /Förbjudna\s+fraser/i.test(String(x || "")))
+        : false;
+      btnFix.disabled = !hasForbidden;
+      btnFix.addEventListener("click", function () {
+        applyQuickFixForbiddenPhrases();
+      });
+
+      nav.appendChild(btnGoProb);
+      nav.appendChild(btnFix);
+    }
+
     left.appendChild(nav);
+
+    // PP-SC-010: Problem list (clickable)
+    const probs = (STATE.validation && Array.isArray(STATE.validation.targets)) ? STATE.validation.targets : [];
+    if (probs.length) {
+      const pWrap = document.createElement("div");
+      pWrap.style.marginTop = "10px";
+      pWrap.style.border = "1px solid rgba(239,68,68,.25)";
+      pWrap.style.background = "rgba(254,226,226,.20)";
+      pWrap.style.borderRadius = "12px";
+      pWrap.style.padding = "10px";
+
+      const ph = document.createElement("div");
+      ph.style.fontWeight = "950";
+      ph.style.color = "#7f1d1d";
+      ph.textContent = `Problem (${probs.length})`;
+      pWrap.appendChild(ph);
+
+      const ps = document.createElement("div");
+      ps.style.marginTop = "8px";
+      ps.style.display = "flex";
+      ps.style.flexDirection = "column";
+      ps.style.gap = "8px";
+
+      for (let i = 0; i < probs.length; i++) {
+        const t = probs[i];
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "miniBtn";
+        b.style.width = "100%";
+        b.style.textAlign = "left";
+        b.style.whiteSpace = "normal";
+        b.style.lineHeight = "1.25";
+        b.style.padding = "8px 10px";
+        b.style.borderRadius = "12px";
+        b.style.border = "1px solid rgba(239,68,68,.25)";
+        b.style.background = "#fff";
+        b.textContent = String(t && t.label ? t.label : "Problem");
+
+        if (!(Number.isFinite(t.itemIndex) && t.itemIndex >= 0)) {
+          b.title = "Kan inte hitta exakt plats (globalt eller otydligt).";
+          b.style.opacity = ".85";
+        } else {
+          b.title = "Klicka för att hoppa till papperet.";
+        }
+
+        b.addEventListener("click", function () {
+          jumpToTarget(t);
+        });
+
+        ps.appendChild(b);
+      }
+
+      pWrap.appendChild(ps);
+
+      const hint = document.createElement("div");
+      hint.style.marginTop = "8px";
+      hint.style.fontSize = ".86rem";
+      hint.style.color = "#7f1d1d";
+      hint.textContent = "Klicka på ett problem för att hoppa till rätt papper.";
+      pWrap.appendChild(hint);
+
+      left.appendChild(pWrap);
+    }
 
     const hr = document.createElement("div");
     hr.style.borderTop = "1px dashed var(--line)";
@@ -682,12 +1027,12 @@ PATCH v1.4.0 (PP-SC-009 / “Frågepärm” i modalen – bättre överblick):
     }
 
     // Hint
-    const hint = document.createElement("div");
-    hint.style.marginTop = "8px";
-    hint.style.fontSize = ".86rem";
-    hint.style.color = "var(--muted)";
-    hint.textContent = "Tips: klicka i listan för att byta “papper”.";
-    left.appendChild(hint);
+    const hint2 = document.createElement("div");
+    hint2.style.marginTop = "8px";
+    hint2.style.fontSize = ".86rem";
+    hint2.style.color = "var(--muted)";
+    hint2.textContent = "Tips: klicka i listan för att byta “papper”.";
+    left.appendChild(hint2);
   }
 
   function applyBinderMode() {
@@ -843,6 +1188,9 @@ PATCH v1.4.0 (PP-SC-009 / “Frågepärm” i modalen – bättre överblick):
 
   function updateRightPanel() {
     const reasons = computeValidationReasonsForSelected();
+
+    // PP-SC-010: keep mapped targets in sync (no storage)
+    syncValidationState(reasons);
 
     // verify pill
     const ok = reasons.length === 0;
@@ -1463,5 +1811,8 @@ PATCH v1.4.0 (PP-SC-009 / “Frågepärm” i modalen – bättre överblick):
   NS.page = {
     boot: boot,
     state: STATE,
+    // PP-SC-010: expose helpers (debug only, no UI dependency)
+    jumpToFirstProblem: jumpToFirstProblem,
+    applyQuickFixForbiddenPhrases: applyQuickFixForbiddenPhrases,
   };
 })();
