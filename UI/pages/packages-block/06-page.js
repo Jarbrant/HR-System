@@ -24,12 +24,11 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
 - P1: Grön kvittens “flyttad/skapat” via render.setTrainExportNotice(ok) (fallback setTrainExportHint)
 - P1: Efter export: stänger exportbox + städar + auto-väljer nya blocket
 
-PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-brus i inkorg):
-- P0: Vid klick i inkorg (trainings-lista) ska endast "Vald" markeras + export-knapp aktiveras (ingen Preview(items))
-- P0: Robust städning: trainPreviewDetail töms/döljs vid val/stäng
-- P1: Heuristik i normalizeItem: om kind="document" men item ser ut som fråga/uppgift → normalisera rätt (fixar "Dokument 1: text saknas")
-- P1: Frågor: säkerställ 3–5 svarsalternativ i normaliserad data (pad/cap), 1 rätt via answerKey/answerKeyObj (kontrakt hanterar validering)
-- P1: onAddItem(question): default 4 alternativ (3–5 krav)
+PATCH v1.3.3 (PP-SC-008 / Legacy-normalisering – gamla blocks ska bli redigerbara):
+- P0: task: om text saknas men instruction finns → text = instruction (utan ny datamodell)
+- P0: task: om taskId saknas → auto-sätt stabilt id baserat på blockId + index
+- P0: document: om text saknas men instruction finns → text = instruction (legacy)
+- P2: Modal a11y: flytta/återställ fokus innan aria-hidden vid stängning (minskar Chrome-varning)
 ============================================================ */
 (function () {
   "use strict";
@@ -189,6 +188,7 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
 
     // modal
     modalOpen: false,
+    lastFocusEl: null, // PP-SC-008 P2 (a11y)
   };
 
   // ---------- utils ----------
@@ -221,106 +221,67 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
     return { q, d, t, missingKey, items: items.length };
   }
 
-  // PP-SC-007: heuristik för att tolka gamla/inkorrekt märkta items
-  function looksLikeQuestion(it) {
-    if (!it || typeof it !== "object") return false;
-    if (Array.isArray(it.options) && it.options.length) return true;
-    if (Array.isArray(it.choices) && it.choices.length) return true;
-    if (it.answerKey) return true;
-    if (it.answerKeyObj && typeof it.answerKeyObj === "object" && it.answerKeyObj.correctChoiceId) return true;
-    if (it.requiresAnswer !== undefined) return true;
-    if (String(it.answerType || "").toLowerCase() === "choice") return true;
-    if (it.questionId || it.questionID || it.qid) return true;
-    return false;
-  }
-
-  function looksLikeTask(it) {
-    if (!it || typeof it !== "object") return false;
-    if (it.deliverable) return true;
-    if (it.instruction) return true;
-    if (it.requiresDone !== undefined) return true;
-    if (String(it.answerType || "").toLowerCase() === "checkbox") return true;
-    if (it.taskId) return true;
-    return false;
-  }
-
-  function normalizeQuestionOptions(rawOptions) {
-    // Policy: ingen ny datamodell/keys – vi normaliserar bara item-shape för UI+kontrakt.
-    // Krav (PP-SC-007): 3–5 svarsalternativ.
-    const opts = Array.isArray(rawOptions) ? rawOptions.map((x) => normStr(x)) : [];
-    const cleaned = opts.filter((x) => x !== "");
-    const out = cleaned.slice(0, 5); // cap 5
-
-    // pad till minst 3 (tomma strängar så UI kan visa fält)
-    while (out.length < 3) out.push("");
-
-    return out;
-  }
-
-  function normalizeItem(raw) {
-    const it0 = raw && typeof raw === "object" ? raw : {};
-    const kindRaw = String(it0.kind || "").toLowerCase();
-
-    // PP-SC-007: om kind är tom/okänd eller "document" men ser ut som fråga/uppgift → korrigera
-    let kind = kindRaw;
-    if (kind !== "question" && kind !== "task" && kind !== "document") kind = "document";
-
-    if (kind === "document") {
-      const qish = looksLikeQuestion(it0);
-      const tish = looksLikeTask(it0);
-      if (qish && !tish) kind = "question";
-      else if (tish && !qish) kind = "task";
-      else if (qish && tish) kind = "question"; // prefer question om båda matchar (minskar "dokument text saknas")
-    }
+  // PP-SC-008: legacy-normalisering (utan ny datamodell):
+  // - task.text kan ligga i instruction (äldre)
+  // - document.text kan ligga i instruction (äldre)
+  // - taskId kan saknas (äldre) -> sätt stabilt id (blockId+index)
+  function normalizeItem(raw, ctx) {
+    const it = raw && typeof raw === "object" ? raw : {};
+    const kind = String(it.kind || "document");
+    const blockId = ctx && typeof ctx === "object" ? normStr(ctx.blockId) : "";
+    const index = ctx && typeof ctx === "object" ? Number(ctx.index) : NaN;
 
     if (kind === "question") {
       // Accept: {options:[...], answerKey:"..."} OR {choices:[{id,text}], answerKeyObj:{correctChoiceId,rationale}}
-      const options = (function () {
-        if (Array.isArray(it0.options)) return normalizeQuestionOptions(it0.options);
-        // legacy: choices -> options (text)
-        if (Array.isArray(it0.choices)) return normalizeQuestionOptions(it0.choices.map((c) => (c && c.text) ? c.text : ""));
-        return normalizeQuestionOptions([]);
-      })();
-
       return {
         kind: "question",
-        questionId: normStr(it0.questionId) || normStr(it0.id) || normStr(it0.qid) || "",
-        text: normStr(it0.text) || "",
-        requiresAnswer: it0.requiresAnswer !== false,
-        answerType: normStr(it0.answerType) || "choice",
-        options: options,
-        answerKey: normStr(it0.answerKey) || "",
+        questionId: normStr(it.questionId) || normStr(it.id) || "",
+        text: normStr(it.text) || "",
+        requiresAnswer: it.requiresAnswer !== false,
+        answerType: normStr(it.answerType) || "choice",
+        options: Array.isArray(it.options) ? it.options.map((x) => normStr(x)).filter(Boolean) : [],
+        answerKey: normStr(it.answerKey) || "",
         // legacy strict fields (if present)
-        choices: Array.isArray(it0.choices) ? it0.choices : undefined,
-        answerKeyObj: it0.answerKeyObj && typeof it0.answerKeyObj === "object" ? it0.answerKeyObj : undefined,
+        choices: Array.isArray(it.choices) ? it.choices : undefined,
+        answerKeyObj: it.answerKeyObj && typeof it.answerKeyObj === "object" ? it.answerKeyObj : undefined,
       };
     }
 
     if (kind === "task") {
+      const legacyInstr = normStr(it.instruction) || "";
+      const legacyText = normStr(it.text) || "";
+      const effectiveText = legacyText || legacyInstr; // P0
+
+      const stableIdx = Number.isFinite(index) && index >= 0 ? index + 1 : 0;
+      const stableTaskId = normStr(it.taskId) || (stableIdx ? `task_${blockId || "b"}_${stableIdx}` : "");
+
       return {
         kind: "task",
-        taskId: normStr(it0.taskId) || "",
-        text: normStr(it0.text) || "",
-        instruction: normStr(it0.instruction) || "",
-        deliverable: normStr(it0.deliverable) || "",
-        requiresDone: it0.requiresDone !== false,
-        answerType: normStr(it0.answerType) || "checkbox",
+        taskId: stableTaskId,
+        text: effectiveText,
+        instruction: legacyInstr || "", // behåll (kan vara bra i framtiden)
+        deliverable: normStr(it.deliverable) || "",
+        requiresDone: it.requiresDone !== false,
+        answerType: normStr(it.answerType) || "checkbox",
       };
     }
 
-    // document
+    // document (legacy: text kan ligga i instruction)
+    const legacyInstrDoc = normStr(it.instruction) || "";
     return {
       kind: "document",
-      text: normStr(it0.text) || "",
-      requiresSign: !!it0.requiresSign,
+      text: normStr(it.text) || legacyInstrDoc || "",
+      requiresSign: !!it.requiresSign,
     };
   }
 
   function normalizeBlock(raw) {
     const b = raw && typeof raw === "object" ? raw : {};
     const items = Array.isArray(b.items) ? b.items : [];
+    const blockId = normStr(b.blockId);
+
     const out = {
-      blockId: normStr(b.blockId),
+      blockId: blockId,
       title: normStr(b.title) || "(utan rubrik)",
       module: normStr(b.module) || "",
       area: normStr(b.area) || "",
@@ -330,7 +291,7 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
       updatedAt: Number(b.updatedAt || 0) || 0,
       verifiedAt: Number(b.verifiedAt || 0) || 0,
       verifiedBy: normStr(b.verifiedBy) || "",
-      items: items.map((it) => normalizeItem(it)),
+      items: items.map((it, idx) => normalizeItem(it, { blockId, index: idx })), // PP-SC-008
     };
     out.__comp = countComposition(out);
     return out;
@@ -386,24 +347,6 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
     } catch (_) {}
   }
 
-  // PP-SC-007: robust städning av preview-pane (inkorg ska inte visa Preview(items))
-  function clearExportPreviewPane() {
-    try {
-      if (DOM.trainPreviewDetail) {
-        DOM.trainPreviewDetail.style.display = "none";
-        // extra: töm noden om render inte gör det
-        while (DOM.trainPreviewDetail.firstChild) DOM.trainPreviewDetail.removeChild(DOM.trainPreviewDetail.firstChild);
-      }
-    } catch (_) {}
-
-    // Om 05-render har renderExportPreview: kalla med tom array som "soft reset"
-    try {
-      if (render && typeof render.renderExportPreview === "function") {
-        render.renderExportPreview({ items: [] });
-      }
-    } catch (_) {}
-  }
-
   // PP-SC-002: central toggle for export container + body + cleanup
   function applyExportVisibility() {
     const open = !!STATE.exportOpen;
@@ -426,9 +369,7 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
       try { if (DOM.qTrainModule) DOM.qTrainModule.value = ""; } catch (_) {}
 
       if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = true;
-
-      // PP-SC-007: inkorg ska inte visa preview alls
-      clearExportPreviewPane();
+      if (DOM.trainPreviewDetail) DOM.trainPreviewDetail.style.display = "none";
 
       // refresh list state to match cleared filter
       try { refreshTrainingUI(); } catch (_) {}
@@ -513,6 +454,7 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
     };
 
     try {
+      // NOTE: contract får normalizeItem-fn (PP-SC-008 tillåter extra arg, men contract kommer kalla med 1 arg)
       const chk = contract.validateForVerify(STATE.edited, normalizeItem, emojiForKind);
       return chk && Array.isArray(chk.reasons) ? chk.reasons : [];
     } catch (e) {
@@ -534,6 +476,14 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
     if (!modalAvailable()) return;
     if (STATE.modalOpen) return;
 
+    // PP-SC-008 P2: spara fokus före modal
+    try {
+      const ae = document.activeElement;
+      STATE.lastFocusEl = (ae && ae instanceof HTMLElement) ? ae : null;
+    } catch (_) {
+      STATE.lastFocusEl = null;
+    }
+
     // Move the existing selection panel into modal body (keeps listeners)
     if (SEL_PANEL && DOM.pbModalBody) {
       try {
@@ -546,7 +496,7 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
     if (DOM.pbModalTitle) DOM.pbModalTitle.textContent = "Redigera block";
     if (DOM.pbModalSub) {
       DOM.pbModalSub.textContent = STATE.selected
-        ? `${STATE.selected.module || "—"} • ${STATE.selected.area || "—"} • ${STATE.selected.title || "—"} • ${STATE.selected.step || "—"}`
+        ? `${STATE.selected.title || "—"} • ${STATE.selected.blockId || STATE.selectedId || "—"}`
         : "—";
     }
 
@@ -563,6 +513,21 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
   function closeModal(restorePanel) {
     if (!modalAvailable()) return;
     if (!STATE.modalOpen) return;
+
+    // PP-SC-008 P2: flytta fokus UT ur overlay innan aria-hidden
+    try {
+      const ae = document.activeElement;
+      if (ae && DOM.pbModalOverlay && DOM.pbModalOverlay.contains(ae)) {
+        if (STATE.lastFocusEl && document.contains(STATE.lastFocusEl)) {
+          STATE.lastFocusEl.focus();
+        } else if (DOM.btnToggleExport && DOM.btnToggleExport.focus) {
+          DOM.btnToggleExport.focus();
+        } else {
+          // sista utväg
+          (document.body && document.body.focus) && document.body.focus();
+        }
+      }
+    } catch (_) {}
 
     setModalHidden(true);
     STATE.modalOpen = false;
@@ -600,7 +565,10 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
       const cur = STATE.edited;
       const nextDraft = deepClone(cur);
       const mutated = mutatorFn ? mutatorFn(nextDraft) : nextDraft;
+
+      // PP-SC-008: normalisera på vägen (inkl legacy)
       const next = normalizeBlock(Object.assign({}, mutated, { updatedAt: nowTs() }));
+
       STATE.edited = next;
       setDirty(true);
       refreshLeftList();
@@ -647,7 +615,10 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
           applyEditedBlockChange(function (draft) {
             const items = Array.isArray(draft.items) ? draft.items.slice() : [];
             const nextIt = mutFn ? mutFn(items[idx]) : items[idx];
-            items[idx] = normalizeItem(nextIt);
+
+            // PP-SC-008: normalisera item med ctx (blockId+index) för taskId/text legacy
+            items[idx] = normalizeItem(nextIt, { blockId: normStr(draft.blockId), index: idx });
+
             draft.items = items;
             return draft;
           });
@@ -671,16 +642,16 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
           applyEditedBlockChange(function (draft) {
             const items = Array.isArray(draft.items) ? draft.items.slice() : [];
             const base =
-              // PP-SC-007: default 4 alternativ (uppfyller 3–5)
-              k === "question" ? { kind: "question", text: "", options: ["Alternativ 1", "Alternativ 2", "Alternativ 3", "Alternativ 4"], answerKey: "" } :
+              k === "question" ? { kind: "question", text: "", options: ["Alternativ 1", "Alternativ 2"], answerKey: "" } :
               k === "task" ? { kind: "task", text: "", instruction: "", deliverable: "" } :
               { kind: "document", text: "" };
-
-            const ni = normalizeItem(base);
 
             let pos = Number.isFinite(afterIdx) ? Number(afterIdx) + 1 : items.length;
             if (pos < 0) pos = 0;
             if (pos > items.length) pos = items.length;
+
+            // PP-SC-008: normalisera med ctx
+            const ni = normalizeItem(base, { blockId: normStr(draft.blockId), index: pos });
 
             items.splice(pos, 0, ni);
             draft.items = items;
@@ -711,6 +682,13 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
               items[i] = items[j];
               items[j] = tmp;
             }
+
+            // PP-SC-008: efter flytt – re-normalisera tasks så index-baserade taskId blir stabila
+            const bid = normStr(draft.blockId);
+            for (let k = 0; k < items.length; k++) {
+              if (items[k] && items[k].kind === "task") items[k] = normalizeItem(items[k], { blockId: bid, index: k });
+            }
+
             draft.items = items;
             return draft;
           });
@@ -718,10 +696,10 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
       });
     }
 
-    // keep modal subtitle fresh (include meta)
+    // keep modal subtitle fresh
     if (STATE.modalOpen && DOM.pbModalSub) {
-      DOM.pbModalSub.textContent = STATE.edited
-        ? `${STATE.edited.module || "—"} • ${STATE.edited.area || "—"} • ${STATE.edited.title || "—"} • ${STATE.edited.step || "—"}`
+      DOM.pbModalSub.textContent = STATE.selected
+        ? `${STATE.selected.title || "—"} • ${STATE.selected.blockId || STATE.selectedId || "—"}`
         : "—";
     }
   }
@@ -730,8 +708,11 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
     const bid = normStr(id);
     STATE.selectedId = bid;
     const found = STATE.allBlocks.find((b) => b.blockId === bid) || null;
-    STATE.selected = found;
-    STATE.edited = found ? deepClone(found) : null;
+
+    // PP-SC-008: säkerställ att vald block alltid är normaliserad (legacy → fix)
+    STATE.selected = found ? normalizeBlock(found) : null;
+    STATE.edited = STATE.selected ? deepClone(STATE.selected) : null;
+
     setDirty(false);
     applySelectionPills();
     updateRightPanel();
@@ -749,11 +730,11 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
     const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
     if (idx < 0) return { ok: false, err: "Block hittades inte i listan." };
 
-    const next = deepClone(STATE.edited);
-    next.updatedAt = nowTs();
+    // PP-SC-008: normalisera innan save (inkl legacy fält)
+    const next = normalizeBlock(Object.assign({}, deepClone(STATE.edited), { updatedAt: nowTs() }));
     next.__comp = countComposition(next);
 
-    STATE.allBlocks[idx] = normalizeBlock(next);
+    STATE.allBlocks[idx] = next;
     const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
     if (!save.ok) return save;
 
@@ -805,13 +786,13 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
   }
 
   function extractTrainingItems(t) {
-    if (t && Array.isArray(t.items)) return t.items.map(normalizeItem);
+    if (t && Array.isArray(t.items)) return t.items.map((x, idx) => normalizeItem(x, { blockId: "", index: idx }));
     if (t && Array.isArray(t.blocks)) {
       const flat = [];
       for (const b of t.blocks) {
         if (b && Array.isArray(b.items)) flat.push(...b.items);
       }
-      return flat.map(normalizeItem);
+      return flat.map((x, idx) => normalizeItem(x, { blockId: "", index: idx }));
     }
     return [];
   }
@@ -870,18 +851,13 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
         corrupt: STATE.trainingsCorrupt,
         missing: STATE.trainingsMissing,
         onPickTraining: function (index) {
-          // PP-SC-007: endast markera vald + aktivera export. Ingen Preview(items).
           STATE.trainSelIndex = Number(index);
           refreshTrainingUI();
-
-          const found = hits.find((h) => h.index === STATE.trainSelIndex) || null;
-
-          // säkerställ att preview-panelen inte "spökar" fram
-          clearExportPreviewPane();
-
-          if (DOM.btnExportTraining) {
-            DOM.btnExportTraining.disabled = !(STATE.canWrite && found && found.itemsCount > 0);
+          const found = hits.find((h) => h.index === STATE.trainSelIndex);
+          if (found && render && typeof render.renderExportPreview === "function") {
+            render.renderExportPreview({ items: found.items });
           }
+          if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = !(STATE.canWrite && found && found.itemsCount > 0);
         },
       });
     }
@@ -898,9 +874,6 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
       const found = hits.find((h) => h.index === STATE.trainSelIndex);
       DOM.btnExportTraining.disabled = !(STATE.canWrite && found && found.itemsCount > 0);
     }
-
-    // PP-SC-007: inkorg ska aldrig visa preview-pane
-    clearExportPreviewPane();
   }
 
   function exportSelectedTraining() {
@@ -911,6 +884,8 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
 
     const ts = nowTs();
     const newBlockId = `b_${ts}`;
+
+    // PP-SC-008: skapa nytt block genom normalizeBlock så taskId/text legacy blir korrekt med ctx (blockId+index)
     const newBlock = normalizeBlock({
       blockId: newBlockId,
       title: hit.title,
@@ -922,7 +897,7 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
       updatedAt: ts,
       verifiedAt: 0,
       verifiedBy: "",
-      items: hit.items.map(normalizeItem),
+      items: hit.items, // normalizeBlock re-normaliserar och sätter ctx
     });
 
     STATE.allBlocks.unshift(newBlock);
@@ -1161,6 +1136,7 @@ PATCH v1.3.3 (PP-SC-007 / Fokus: redigera Fråga+Svar i modal + ingen preview-br
       return;
     }
 
+    // PP-SC-008: normalisera allt vid load (legacy → fix)
     STATE.allBlocks = (r.blocks || []).map(normalizeBlock);
     STATE.discoveryActive = false; // search-first
     refreshLeftList();
