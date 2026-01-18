@@ -6,12 +6,17 @@ Policy (LÅST):
 - UI-only • Fail-closed
 - XSS-safe: textContent, inga osäkra innerHTML
 - Ingen storage här (bara UI)
+PATCH (MODAL 3/3):
+- Renderar vald block-editor i modal (om modal finns) istället för inline-panel.
+- Sätter upp modalens Save/Cancel/Close via NS.dom.modal.open(...)
+- Behåller fallback: om modal saknas -> render i #selDetail som tidigare.
 ============================================================ */
 (function () {
   "use strict";
 
   const NS = (window.PackagesBlock = window.PackagesBlock || {});
-  if (NS.render) return; // idempotent
+  // Om redan laddad – återanvänd inte (idempotent)
+  if (NS.render) return;
 
   // ---------- DOM ----------
   function $id(id) { return document.getElementById(id); }
@@ -36,8 +41,12 @@ Policy (LÅST):
     trainExportHint: $id("trainExportHint"),
 
     selDetail: $id("selDetail"),
-    selHint: $id("selHint"),
+    selHint: $id("selHint")
   };
+
+  // Pull modal hooks from 01-dom if available
+  const DOMNS = NS.dom && typeof NS.dom === "object" ? NS.dom : null;
+  const MODAL = DOMNS && DOMNS.modal ? DOMNS.modal : null;
 
   // ---------- Helpers ----------
   function clear(node) {
@@ -475,6 +484,44 @@ Policy (LÅST):
     return "📄 Dokument";
   }
 
+  // ======== Modal target resolution ========
+  function getEditorMount() {
+    // If modal exists and is ready, render editor inside it.
+    if (MODAL && typeof MODAL.isReady === "function" && MODAL.isReady()) {
+      return MODAL.body || null;
+    }
+    return DOM.selDetail || null;
+  }
+
+  // ======== Modal open/close API for page.js ========
+  function openEditorModal(meta, hooks) {
+    if (!(MODAL && typeof MODAL.open === "function" && typeof MODAL.isReady === "function" && MODAL.isReady())) {
+      return { ok: false, err: "MODAL_NOT_READY" };
+    }
+    const m = meta && typeof meta === "object" ? meta : {};
+    const h = hooks && typeof hooks === "object" ? hooks : {};
+
+    // Wire modal callbacks: save uses provided handler, cancel/close just close.
+    return MODAL.open({
+      title: m.title || "Redigera block",
+      sub: m.sub || "",
+      onSave: function () {
+        if (typeof h.onSave === "function") h.onSave();
+      },
+      onClose: function (info) {
+        if (typeof h.onClose === "function") h.onClose(info || {});
+      }
+    });
+  }
+
+  function closeEditorModal(meta) {
+    if (!(MODAL && typeof MODAL.close === "function" && typeof MODAL.isReady === "function" && MODAL.isReady())) {
+      return { ok: false, err: "MODAL_NOT_READY" };
+    }
+    return MODAL.close(meta || {});
+  }
+
+  // ======== Editors ========
   function renderQuestionEditor(it, idx, canEdit, onPatchItem) {
     const card = el("div", "itemCard");
     applyCardStyle(card);
@@ -547,7 +594,7 @@ Policy (LÅST):
             next.choices = arr;
 
             const ak = next.answerKeyObj && next.answerKeyObj.correctChoiceId ? String(next.answerKeyObj.correctChoiceId) : "";
-            const ids = arr.map((x) => String(x && x.id || ""));
+            const ids = arr.map((x) => String((x && x.id) || ""));
             if (ak && ids.indexOf(ak) === -1) {
               next.answerKeyObj = next.answerKeyObj && typeof next.answerKeyObj === "object" ? next.answerKeyObj : {};
               next.answerKeyObj.correctChoiceId = "";
@@ -583,8 +630,8 @@ Policy (LÅST):
 
       const values = [{ value: "", label: "Välj facit…" }];
       for (const c of choices) {
-        const id = String(c && c.id || "");
-        const tx = String(c && c.text || "").trim();
+        const id = String((c && c.id) || "");
+        const tx = String((c && c.text) || "").trim();
         values.push({ value: id, label: tx ? tx : id || "(tomt alternativ)" });
       }
       const cur = it.answerKeyObj && it.answerKeyObj.correctChoiceId ? String(it.answerKeyObj.correctChoiceId) : "";
@@ -836,65 +883,151 @@ Policy (LÅST):
     return card;
   }
 
+  function renderMetaEditor(b, canEdit, onPatchMeta) {
+    const wrap = el("div", "");
+    wrap.appendChild(el("div", "fieldLbl", "Grundinfo"));
+
+    const t = inputText(b.title || "", "Rubrik");
+    t.disabled = !canEdit;
+    t.addEventListener("input", function () {
+      if (!canEdit || !isFn(onPatchMeta)) return;
+      const v = clampLen(t.value, 200);
+      onPatchMeta(function (cur) {
+        const next = deepClone(cur || {});
+        next.title = v;
+        return next;
+      });
+    });
+    wrap.appendChild(labelWrap("Rubrik", t));
+
+    const m = inputText(b.module || "", "Modul");
+    m.disabled = !canEdit;
+    m.addEventListener("input", function () {
+      if (!canEdit || !isFn(onPatchMeta)) return;
+      const v = clampLen(m.value, 120);
+      onPatchMeta(function (cur) {
+        const next = deepClone(cur || {});
+        next.module = v;
+        return next;
+      });
+    });
+    wrap.appendChild(labelWrap("Modul", m));
+
+    const a = inputText(b.area || "", "Område");
+    a.disabled = !canEdit;
+    a.addEventListener("input", function () {
+      if (!canEdit || !isFn(onPatchMeta)) return;
+      const v = clampLen(a.value, 120);
+      onPatchMeta(function (cur) {
+        const next = deepClone(cur || {});
+        next.area = v;
+        return next;
+      });
+    });
+    wrap.appendChild(labelWrap("Område", a));
+
+    const s = inputText(b.step || "", "Steg");
+    s.disabled = !canEdit;
+    s.addEventListener("input", function () {
+      if (!canEdit || !isFn(onPatchMeta)) return;
+      const v = clampLen(s.value, 60);
+      onPatchMeta(function (cur) {
+        const next = deepClone(cur || {});
+        next.step = v;
+        return next;
+      });
+    });
+    wrap.appendChild(labelWrap("Steg", s));
+
+    return wrap;
+  }
+
   function renderSelectedDetail(opts) {
     const o = opts || {};
     const b = o.block || null;
     const canEdit = !!o.canEdit;
     const reasons = Array.isArray(o.validationReasons) ? o.validationReasons : [];
     const onPatchItem = isFn(o.onPatchItem) ? o.onPatchItem : null;
+    const onPatchMeta = isFn(o.onPatchMeta) ? o.onPatchMeta : null;
 
-    if (!DOM.selDetail) return;
-    clear(DOM.selDetail);
+    // Mount target (modal or inline)
+    const mount = getEditorMount();
+    if (!mount) return;
 
-    if (!b) { renderSelectedEmpty(); return; }
+    clear(mount);
 
+    if (!b) {
+      // If modal is open, close it; otherwise show inline empty.
+      if (MODAL && typeof MODAL.isOpen === "function" && MODAL.isOpen() && typeof closeEditorModal === "function") {
+        try { closeEditorModal({ reason: "no-selection" }); } catch (_) {}
+      }
+      renderSelectedEmpty();
+      return;
+    }
+
+    // Update hint text (inline only)
     if (DOM.selHint) {
       DOM.selHint.textContent = canEdit
         ? "Valt block: redigera items. Frågor visar svarsalternativ + facit tydligt."
         : "Valt block (read-only): du kan granska items men inte ändra.";
     }
 
+    // If modal exists: open it (idempotent-ish). Title/sub reflects block.
+    if (MODAL && typeof MODAL.isReady === "function" && MODAL.isReady()) {
+      const title = b.title || "(utan rubrik)";
+      const sub =
+        `${b.module || "—"} • ${b.area || "—"} • Steg: ${b.step || "—"} • ${String(b.status || "draft").toLowerCase() === "published" ? "Publicerad" : "Utkast"}`;
+
+      // Open modal each renderSelectedDetail call, but only if not open.
+      if (!(typeof MODAL.isOpen === "function" && MODAL.isOpen())) {
+        openEditorModal(
+          { title: "Redigera: " + title, sub: sub },
+          {
+            onSave: function () {
+              // Delegate save to page layer if provided
+              if (isFn(o.onRequestSave)) o.onRequestSave();
+              // Close after save request
+              try { closeEditorModal({ reason: "save" }); } catch (_) {}
+            },
+            onClose: function () {
+              // If page wants to react, allow
+              if (isFn(o.onRequestClose)) o.onRequestClose();
+            }
+          }
+        );
+      } else {
+        // Keep modal header updated (if elements exist)
+        if (MODAL.title) MODAL.title.textContent = "Redigera: " + title;
+        if (MODAL.sub) MODAL.sub.textContent = sub;
+      }
+    }
+
     // Header/meta
     const head = el("div", "previewCard");
     applyCardStyle(head);
 
-    const title = el("div", "previewTitle", b.title || "(utan rubrik)");
-    head.appendChild(title);
-
     const meta = el("div", "tiny previewMeta",
       `BlockID: ${b.blockId || "—"}\n` +
-      `Modul: ${b.module || "—"}\n` +
-      `Område: ${b.area || "—"}\n` +
-      `Steg: ${b.step || "—"}\n` +
-      `Status: ${String(b.status || "draft").toLowerCase() === "published" ? "Publicerad" : "Utkast"}`
+      `Status: ${String(b.status || "draft").toLowerCase() === "published" ? "Publicerad" : "Utkast"}\n` +
+      `Verifierad: ${Number(b.verifiedAt || 0) > 0 ? "ja" : "nej"}`
     );
     applyTinyStyle(meta);
     head.appendChild(meta);
+    mount.appendChild(head);
 
-    const items = Array.isArray(b.items) ? b.items : [];
-    const counts = { q: 0, d: 0, t: 0 };
-    for (const it of items) {
-      const k = String(it && it.kind ? it.kind : "document");
-      if (k === "question") counts.q++;
-      else if (k === "task") counts.t++;
-      else counts.d++;
-    }
-
-    const pillsRow = el("div", "icoRow");
-    pillsRow.appendChild(pill("icoPill", `❓ ${counts.q}`));
-    pillsRow.appendChild(pill("icoPill", `📄 ${counts.d}`));
-    pillsRow.appendChild(pill("icoPill", `✅ ${counts.t}`));
-    head.appendChild(pillsRow);
-
-    DOM.selDetail.appendChild(head);
+    // Meta editor (title/module/area/step)
+    const metaEd = renderMetaEditor(b, canEdit, onPatchMeta);
+    applyCardStyle(metaEd);
+    mount.appendChild(metaEd);
 
     // Validation reasons (contract)
     const vbox = renderValidationReasons(reasons);
-    if (vbox) DOM.selDetail.appendChild(vbox);
+    if (vbox) mount.appendChild(vbox);
 
     // Items list
+    const items = Array.isArray(b.items) ? b.items : [];
     if (!items.length) {
-      DOM.selDetail.appendChild(el("div", "muted2", "Det här blocket har inga items ännu."));
+      mount.appendChild(el("div", "muted2", "Det här blocket har inga items ännu."));
       return;
     }
 
@@ -916,7 +1049,7 @@ Policy (LÅST):
       listWrap.appendChild(card);
     }
 
-    DOM.selDetail.appendChild(listWrap);
+    mount.appendChild(listWrap);
   }
 
   // ---------- export ----------
@@ -938,6 +1071,13 @@ Policy (LÅST):
 
     renderSelectedEmpty: renderSelectedEmpty,
     renderSelectedDetail: renderSelectedDetail,
+
+    // Modal control (for 06-page to call explicitly if desired)
+    modal: {
+      isReady: function () { return !!(MODAL && typeof MODAL.isReady === "function" && MODAL.isReady()); },
+      open: openEditorModal,
+      close: closeEditorModal
+    },
 
     __dom: DOM
   };
