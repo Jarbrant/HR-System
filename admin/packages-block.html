@@ -1,494 +1,847 @@
-<!doctype html>
-<html lang="sv">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>HR-System – Block-editor</title>
+/* ============================================================
+AO-PACKAGES-BLOCK-MODULAR-01 | FILE 06/06 | FIL-ID: UI/pages/packages-block/06-page.js
+Projekt: HR-System (GitHub Pages / UI-only)
+Syfte: Bootstrap + state + event wiring för Block-editor (packages-block)
+Policy (LÅST):
+- UI-only • Fail-closed
+- Inga nya storage-keys/datamodell
+- XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
+- SYSTEM_ADMIN = steward/read-only
 
-  <!-- ============================================================
-  AO-BLOCK-PIPELINE-01 (MASTER) | BLOCK 2/5 | FIL-ID: admin/packages-block.html
-  Projekt: HR-System
-  Syfte: ADMIN/MANAGER – Block-editor (Block-bank) • Kontrollrum: Verifiera + Publicera + Skriv ut blocks (blockId) – UI-only
+PATCH v1.0.2 (P0-fix: Publish/Verify + status-hantering, ingen redesign):
+- P0: persistEditedBlock() tvingade alltid status="draft" → Publicera kunde aldrig “fastna”.
+- Nytt: persistEditedBlock({forceDraft:true}) används bara av “Spara ändringar”.
+- Verifiera/Publicera bevarar status (publicerad stannar publicerad).
+============================================================ */
+(function () {
+  "use strict";
 
-  NYTT: Split i småfiler (PROD-FIX):
-  - Denna HTML är nu “tunn” och laddar logiken från:
-    ../UI/pages/packages-block/01-dom.js … 06-page.js
+  const NS = (window.PackagesBlock = window.PackagesBlock || {});
+  if (NS.page) return; // idempotent
 
-  POLICY (LÅST):
-  - UI-only • Fail-closed
-  - sessionStorage först (auth) • fallback localStorage via CORE (HRApp)
-  - XSS-safe rendering (textContent, inga osäkra innerHTML)
-  - Inga nya storage-keys (endast AO-0XX_BLOCKS_V1 skrivs här; AO-057_TRAININGS_V1 läses)
-  - SYSTEM_ADMIN = steward-läge (read-only)
-  ============================================================ -->
+  function byId(id) { return document.getElementById(String(id || "")); }
 
-  <link rel="stylesheet" href="../UI/UI-02-STYLES.css" />
+  // ---------- DOM ids (måste finnas i HTML) ----------
+  const DOM = {
+    // pills / header
+    statePill: byId("statePill"),
+    selPill: byId("selPill"),
+    whoPill: byId("whoPill"),
+    modePill: byId("modePill"),
+    verifyPill: byId("verifyPill"),
+    topEditing: byId("topEditing"),
+    topEditingText: byId("topEditingText"),
 
-  <style>
-    :root{
-      --doc-bg: rgba(243,244,246,.9);
-      --doc-line: rgba(107,114,128,.35);
-      --doc-ink: #374151;
+    // messages / lock
+    msgBox: byId("msgBox"),
+    lockBox: byId("lockBox"),
+    introBox: byId("introBox"),
 
-      --q-bg: rgba(219,234,254,.75);
-      --q-line: rgba(59,130,246,.35);
-      --q-ink: #1e3a8a;
+    // left list controls
+    qBlocks: byId("qBlocks"),
+    btnShowAllBlocks: byId("btnShowAllBlocks"),
+    filterStatus: byId("filterStatus"),
+    fHasQ: byId("fHasQ"),
+    fHasD: byId("fHasD"),
+    fNoKey: byId("fNoKey"),
+    fUnverified: byId("fUnverified"),
+    blockList: byId("blockList"),
+    countBlocks: byId("countBlocks"),
 
-      --task-bg: rgba(209,250,229,.75);
-      --task-line: rgba(16,185,129,.35);
-      --task-ink: #065f46;
+    // actions
+    btnToggleInfo: byId("btnToggleInfo"),
+    btnVerify: byId("btnVerify"),
+    btnPrint: byId("btnPrint"),
+    btnPublish: byId("btnPublish"),
 
-      --r14:14px;
-      --shadow-soft: 0 8px 20px rgba(17,17,17,.06);
+    // export/training UI
+    btnToggleExport: byId("btnToggleExport"),
+    exportBody: byId("exportBody"),
+    qTrainModule: byId("qTrainModule"),
+    qTrainArea: byId("qTrainArea"),
+    dlTrainAreas: byId("dlTrainAreas"),
+    qTrainFree: byId("qTrainFree"),
+    trainPreview: byId("trainPreview"),
+    trainPreviewDetail: byId("trainPreviewDetail"),
+    btnExportTraining: byId("btnExportTraining"),
+    btnReloadTrainings: byId("btnReloadTrainings"),
+    trainExportHint: byId("trainExportHint"),
+
+    // selected block
+    selHint: byId("selHint"),
+    selDetail: byId("selDetail"),
+    selDirtyPill: byId("selDirtyPill"),
+    btnSaveEdits: byId("btnSaveEdits"),
+  };
+
+  // ---------- deps ----------
+  const core = NS.core;
+  const store = NS.store;
+  const render = NS.render;
+  const contract = NS.contract;
+
+  // ---------- fail-safe msg helpers (if render missing) ----------
+  function setMsgSafe(text) {
+    try {
+      if (render && typeof render.setMsg === "function") render.setMsg("", text);
+      else if (DOM.msgBox) { DOM.msgBox.textContent = String(text || ""); DOM.msgBox.style.display = text ? "block" : "none"; }
+    } catch (_) {
+      if (DOM.msgBox) { DOM.msgBox.textContent = String(text || ""); DOM.msgBox.style.display = text ? "block" : "none"; }
     }
+  }
 
-    .muted2{ color: var(--muted); font-size:.92rem; line-height:1.35; }
-
-    .grid2{
-      display:grid;
-      grid-template-columns: 420px 1fr;
-      gap:12px;
-      align-items:start;
-    }
-    @media (max-width: 980px){
-      .grid2{ grid-template-columns: 1fr; }
-    }
-
-    .ico{ display:inline-flex; align-items:center; gap:6px; }
-    .ico .k{ font-weight:900; }
-    .icoRow{ display:flex; gap:10px; flex-wrap:wrap; margin-top:6px; }
-    .icoPill{
-      display:inline-flex;
-      align-items:center;
-      gap:6px;
-      padding:3px 10px;
-      border-radius:999px;
-      border:1px solid var(--line);
-      background:#fff;
-      font-size:.86rem;
-    }
-
-    .rowItem{
-      border:1px solid var(--line);
-      border-radius:14px;
-      padding:10px;
-      background:#fff;
-      cursor:pointer;
-      box-shadow: var(--shadow-soft);
-      transition: box-shadow .15s ease, outline-color .15s ease, border-color .15s ease;
-      margin-bottom:10px;
-    }
-    .rowItem:hover{ box-shadow: 0 10px 26px rgba(17,17,17,.08); }
-    .rowItem.active{ outline:2px solid rgba(59,130,246,.35); }
-
-    .rowTop{ display:flex; gap:10px; justify-content:space-between; align-items:flex-start; }
-    .rowTitle{ font-weight:950; }
-    .tiny{ font-size:.86rem; white-space:pre-line; }
-
-    .qaLine{ display:flex; gap:10px; align-items:center; margin-top:10px; flex-wrap:wrap; }
-    .qaPill{ display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; border:1px solid var(--line); background:#fff; }
-    .qaPill.ok{ border-color: rgba(16,185,129,.35); background: rgba(209,250,229,.55); }
-    .qaPill.bad{ border-color: rgba(239,68,68,.35); background: rgba(254,226,226,.75); }
-    .qaPill.warn{ border-color: rgba(245,158,11,.35); background: rgba(254,243,199,.7); }
-
-    .lockbox{
-      border:1px solid rgba(239,68,68,.35);
-      background: rgba(254,226,226,.55);
-      border-radius:14px;
-      padding:10px;
-      color:#7f1d1d;
-    }
-    .lockbox ul{ margin:8px 0 0 18px; }
-    .mono{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
-
-    .exportRow{
-      border:1px solid var(--line);
-      border-radius:14px;
-      padding:10px;
-      background:#fff;
-      cursor:pointer;
-      box-shadow: var(--shadow-soft);
-      transition: box-shadow .15s ease, outline-color .15s ease, border-color .15s ease;
-      margin-bottom:10px;
-      display:flex;
-      justify-content:space-between;
-      gap:10px;
-    }
-    .exportRow:hover{ box-shadow: 0 10px 26px rgba(17,17,17,.08); }
-    .exportRow.active{ outline:2px solid rgba(16,185,129,.35); }
-    .exportRow .left{ min-width:0; }
-    .exportRow .t{ font-weight:950; }
-    .exportRow .s{ white-space:pre-line; }
-
-    .exportItemRow{
-      display:flex;
-      gap:10px;
-      align-items:flex-start;
-      padding:8px 10px;
-      border:1px dashed var(--line);
-      border-radius:12px;
-      margin-top:8px;
-      background: rgba(250,250,250,.9);
-    }
-
-    .previewCard{
-      border:1px solid var(--line);
-      border-radius:14px;
-      padding:10px;
-      background:#fff;
-      box-shadow: var(--shadow-soft);
-      margin-top:10px;
-    }
-    .previewTitle{ font-weight:950; }
-    .previewMeta{ margin-top:4px; }
-    .previewText{ margin-top:10px; white-space:pre-wrap; }
-    .divider{ border-top:1px dashed var(--line); margin:12px 0; }
-
-    .topEdit{
-      display:inline-flex;
-      align-items:center;
-      gap:8px;
-      margin-left:10px;
-      padding:4px 10px;
-      border-radius:999px;
-      border:1px solid var(--line);
-      background: rgba(255,255,255,.92);
-      font-size:.9rem;
-      color: var(--ink);
-    }
-    .topEdit .t{ font-weight:900; }
-    .topEdit .m{ color: var(--muted); }
-
-    .infoBox{
-      border:1px solid rgba(59,130,246,.18);
-      background: rgba(219,234,254,.35);
-      border-radius:14px;
-      padding:10px;
-      color:#1e3a8a;
-      margin-top:10px;
-    }
-    .infoBox ul{ margin:8px 0 0 18px; color:#1e3a8a; }
-
-    .verifyPill{
-      display:inline-flex;
-      align-items:center;
-      gap:6px;
-      padding:3px 10px;
-      border-radius:999px;
-      border:1px solid var(--line);
-      background:#fff;
-      font-size:.86rem;
-      white-space:nowrap;
-    }
-    .verifyPill.ok{ border-color: rgba(16,185,129,.35); background: rgba(209,250,229,.55); }
-    .verifyPill.warn{ border-color: rgba(245,158,11,.35); background: rgba(254,243,199,.7); }
-
-    .rightTop{
-      padding:10px;
-      border-bottom:1px solid var(--line);
-      background: rgba(250,250,250,.92);
-      border-radius: 14px 14px 0 0;
-    }
-
-    .selPanel{
-      margin:10px;
-      padding:10px;
-      border:1px solid var(--line);
-      border-radius: var(--r14);
-      background: rgba(255,255,255,.96);
-    }
-    .selHdr{
-      display:flex;
-      gap:10px;
-      align-items:flex-start;
-      justify-content:space-between;
-      flex-wrap:wrap;
-    }
-    .selHdr .t{ font-weight:950; }
-    .selHdr .s{ white-space:pre-line; }
-    .fieldLbl{ font-weight:900; margin:10px 0 4px; }
-    .input, textarea, select{
-      width:100%;
-      box-sizing:border-box;
-    }
-    textarea{
-      min-height:84px;
-      resize:vertical;
-    }
-    .itemCard{
-      border:1px dashed var(--line);
-      border-radius:12px;
-      padding:10px;
-      margin-top:10px;
-      background: rgba(250,250,250,.9);
-    }
-    .itemRowTop{
-      display:flex;
-      gap:10px;
-      justify-content:space-between;
-      align-items:center;
-      flex-wrap:wrap;
-    }
-    .optRow{ display:flex; gap:8px; align-items:center; margin-top:6px; }
-    .optRow input{ flex:1; }
-    .optBtn{
-      border:1px solid var(--line);
-      border-radius:10px;
-      padding:6px 10px;
-      background:#fff;
-      cursor:pointer;
-      font-size:.86rem;
-    }
-    .optBtn:disabled{ opacity:.6; cursor:not-allowed; }
-
-    .errList{
-      margin-top:10px;
-      border:1px solid rgba(239,68,68,.25);
-      background: rgba(254,226,226,.35);
-      border-radius:12px;
-      padding:10px;
-    }
-    .errList .h{ font-weight:950; color:#7f1d1d; }
-    .errList ul{ margin:8px 0 0 18px; color:#7f1d1d; }
-  </style>
-</head>
-
-<body>
-  <header class="top">
-    <div class="brand">
-      <strong>HR-System</strong>
-      <span class="muted">• Admin/Manager • Block-editor</span>
-      <span class="topEdit" id="topEditing" style="display:none;">
-        <span class="t">Valt block:</span>
-        <span class="m" id="topEditingText">—</span>
-      </span>
-    </div>
-
-    <nav class="nav" aria-label="Meny">
-      <a href="./home.html">Hem</a>
-      <a href="./packages-block.html" aria-current="page">Block-editor</a>
-      <a href="./onboard-plans.html">Onboard-planer</a>
-      <a href="./reports.html">Felrapporter</a>
-      <a href="./integrations.html">Integrationer</a>
-      <a href="#" id="navLogout" style="margin-left:auto;">Logga ut</a>
-    </nav>
-  </header>
-
-  <main class="container">
-    <div class="row space-between wrap" style="align-items:flex-start;">
-      <div style="margin-top:8px; display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-        <span class="pill" id="statePill" title="Översikt: items / frågor utan facit / dokument-only">Status: —</span>
-        <span class="pill" id="selPill">Val: —</span>
-        <span class="verifyPill warn" id="verifyPill" title="Verifiering gäller valt block" style="display:none;">Verifiering: —</span>
-        <span class="pill" id="whoPill" style="display:none;">Inloggad: —</span>
-        <span class="pill" id="modePill" style="display:none;">Läge: —</span>
-        <button class="miniBtn" id="btnToggleInfo" type="button">Visa info</button>
-      </div>
-
-      <div class="actionBar" aria-label="Åtgärder">
-        <button class="btn secondary" id="btnVerify" type="button" disabled title="Verifiera blockerad">Verifiera</button>
-        <button class="btn secondary" id="btnPrint" type="button" disabled title="Välj ett block för att skriva ut">Skriv ut</button>
-        <button class="btn secondary" id="btnPublish" type="button" disabled title="Publicering blockerad">Publicera</button>
-      </div>
-
-      <div id="lockBox" class="lockbox" style="display:none;"></div>
-    </div>
-
-    <div class="infoBox" id="introBox" style="display:none;">
-      <strong>Det här gör du här:</strong>
-      <div class="tiny" style="margin-top:6px;">
-        Denna sida används som <strong>kontrollrum</strong> för block: välj ett block → <strong>verifiera</strong>, <strong>publicera</strong> eller <strong>skriv ut</strong>.
-      </div>
-      <ul class="tiny">
-        <li>📄 Dokument (info)</li>
-        <li>❓ Fråga (fråga + facit)</li>
-        <li>✅ Uppgift (task)</li>
-      </ul>
-      <div class="tiny" style="margin-top:8px;">
-        <strong>Export:</strong> Hämta innehåll från <span class="mono">admin/trainings.html</span> → skapa 1 nytt block (utkast) i block-banken.
-      </div>
-      <div class="tiny" style="margin-top:8px;">
-        <strong>Kontrakt:</strong> Kontrollrummet kör <span class="mono">Kontrakt v1 (strikt)</span> vid verifiera/publicera (fail-closed).
-      </div>
-    </div>
-
-    <div id="msgBox" class="msg" role="status" aria-live="polite"></div>
-
-    <div class="grid2" style="margin-top:12px;">
-      <section class="card sideCard" aria-label="Blocklista">
-        <div style="padding:10px; border-bottom:1px solid var(--line); background: rgba(250,250,250,.92);">
-          <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap;">
-            <div>
-              <div style="font-weight:950;">Block</div>
-              <div class="tiny"><span id="countBlocks">—</span></div>
-            </div>
-          </div>
-
-          <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px;">
-            <div style="display:flex; gap:10px; align-items:flex-end;">
-              <label class="tiny" style="margin:0; font-weight:900; flex:1;">
-                Sök block
-                <input id="qBlocks" type="text" placeholder="Rubrik, modul, område…" autocomplete="off" />
-              </label>
-              <button class="miniBtn" id="btnShowAllBlocks" type="button" aria-pressed="false" title="Visa hela listan utan sök">Visa alla</button>
-            </div>
-
-            <label class="tiny" style="margin:0; font-weight:900;">
-              Visa
-              <select id="filterStatus">
-                <option value="all">Alla</option>
-                <option value="draft">Utkast</option>
-                <option value="published">Publicerade</option>
-              </select>
-            </label>
-
-            <div class="tiny" style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
-              <strong>Filter:</strong>
-              <label><input type="checkbox" id="fHasQ"> Har frågor</label>
-              <label><input type="checkbox" id="fHasD"> Har dokument</label>
-              <label><input type="checkbox" id="fNoKey"> Saknar facit</label>
-              <label><input type="checkbox" id="fUnverified"> Ej verifierade</label>
-            </div>
-          </div>
-        </div>
-
-        <div class="rows" id="blockList" style="padding:10px;">
-          <div class="muted2">Laddar…</div>
-        </div>
-
-        <div class="tiny" style="padding:0 10px 10px;">
-          <strong>Key:</strong> <span class="mono">AO-0XX_BLOCKS_V1</span> (read/write)
-        </div>
-      </section>
-
-      <section class="card" aria-label="Hämta från utbildningar + valt block">
-        <div class="rightTop">
-          <div class="row space-between wrap" style="align-items:center; margin:0;">
-            <div>
-              <div style="font-weight:950;">Hämta från utbildningar</div>
-              <div class="tiny muted2">Skapar 1 nytt block (utkast) i block-banken som du kan granska i listan till vänster.</div>
-            </div>
-            <div class="tiny muted2"><strong>Nycklar:</strong> <span class="mono">AO-057_TRAININGS_V1</span> → <span class="mono">AO-0XX_BLOCKS_V1</span></div>
-          </div>
-        </div>
-
-        <div class="exportBox" aria-label="Export-steg"
-             style="margin:10px; padding:10px; border:1px solid var(--line); border-radius: var(--r14); background: rgba(255,255,255,.96);">
-          <div class="exportTop" style="display:flex; gap:10px; justify-content:space-between; align-items:flex-start;">
-            <div style="min-width:0;">
-              <div class="exportTitle" style="font-weight:950;">Välj utbildning</div>
-              <div class="tiny">Filtrera och välj → exportera till block-banken.</div>
-            </div>
-            <button class="miniBtn" id="btnToggleExport" type="button" aria-expanded="false">Visa</button>
-          </div>
-
-          <div id="exportBody" style="display:none;">
-            <div class="exportMeta" style="margin-top:6px;">
-              Källa: <span class="mono">AO-057_TRAININGS_V1</span> (läsa) → Mål: <span class="mono">AO-0XX_BLOCKS_V1</span> (spara).
-            </div>
-
-            <div style="margin-top:10px; display:flex; flex-direction:column; gap:10px;" aria-label="Sök utbildning">
-              <div>
-                <label class="tiny" style="margin:0; font-weight:900;">
-                  1) Välj modul
-                  <select id="qTrainModule">
-                    <option value="">Alla moduler</option>
-                  </select>
-                </label>
-              </div>
-
-              <div>
-                <label class="tiny" style="margin:0; font-weight:900;">
-                  2) Välj område
-                  <input id="qTrainArea" type="text" placeholder="t.ex. Ergonomi" autocomplete="off" list="dlTrainAreas" />
-                </label>
-                <datalist id="dlTrainAreas"></datalist>
-              </div>
-
-              <div>
-                <label class="tiny" style="margin:0; font-weight:900;">
-                  3) Sök fritt (titel)
-                  <input id="qTrainFree" type="text" placeholder="Sök i titel…" autocomplete="off" />
-                </label>
-              </div>
-            </div>
-
-            <div class="exportList" id="trainPreview" aria-label="Träffar" style="margin-top:10px;">
-              <div class="muted2">Laddar utbildningar…</div>
-            </div>
-
-            <div id="trainPreviewDetail" class="previewCard" style="display:none;" aria-label="Export-preview"></div>
-
-            <div style="margin-top:10px; display:flex; gap:10px; flex-wrap:wrap; align-items:center; justify-content:space-between;">
-              <button class="miniBtn" id="btnExportTraining" type="button" disabled>Exportera vald utbildning</button>
-              <button class="miniBtn" id="btnReloadTrainings" type="button">Uppdatera</button>
-            </div>
-
-            <div class="softNote" id="trainExportHint" style="margin-top:10px;">
-              Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast).
-            </div>
-          </div>
-        </div>
-
-        <div class="selPanel" aria-label="Valt block (granska/redigera)">
-          <div class="selHdr">
-            <div style="min-width:0;">
-              <div class="t">Valt block (granska/redigera)</div>
-              <div class="tiny muted2" id="selHint">Välj ett block i vänsterlistan för att se frågor + facit.</div>
-            </div>
-            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
-              <span class="pill" id="selDirtyPill" style="display:none;">Ändringar: —</span>
-              <button class="miniBtn" id="btnSaveEdits" type="button" disabled title="Välj ett block och gör en ändring först">Spara ändringar</button>
-            </div>
-          </div>
-
-          <div id="selDetail" style="margin-top:10px;"></div>
-
-          <div class="tiny muted2" style="margin-top:10px;">
-            <strong>Not:</strong> Verifiera/Publicera använder strikt kontrakt (fail-closed). Spara ändringar sparar som utkast (behåller status).
-          </div>
-        </div>
-
-        <div class="tiny" style="padding:0 10px 10px;">
-          <strong>Tips:</strong> Efter export kan du söka/filtrera i vänsterlistan för att hitta nya blocket.
-        </div>
-      </section>
-    </div>
-  </main>
-
-  <!-- Liten fail-closed banner så sidan inte blir “tyst svart” om JS saknas -->
-  <script>
-    (function(){
-      var el = document.getElementById("msgBox");
-      if(el){
-        el.textContent = "Laddar kontrollrummet…";
-        el.style.display = "block";
+  function showLock(lines) {
+    const arr = Array.isArray(lines) ? lines.filter(Boolean) : [];
+    try {
+      if (render && typeof render.showLockBox === "function") render.showLockBox(arr);
+      else if (DOM.lockBox) {
+        DOM.lockBox.style.display = arr.length ? "block" : "none";
+        DOM.lockBox.textContent = arr.join("\n");
       }
-    })();
-  </script>
+    } catch (_) {}
+  }
 
-  <!-- CORE: CONFIG MÅSTE LADDAS FÖRST (P0) -->
-  <script src="../UI/UI-04-CONFIG.js"></script>
-  <script src="../UI/UI-03-APP.js"></script>
+  // ---------- state ----------
+  const STATE = {
+    ready: false,
+    discoveryActive: false, // search-first: startar false
+    role: "SYSTEM_ADMIN",
+    empNo: "",
+    canWrite: false,
 
-  <!-- PACKAGES-BLOCK (split i små filer) -->
-  <script src="../UI/pages/packages-block/01-dom.js"></script>
-  <script src="../UI/pages/packages-block/02-core.js"></script>
-  <script src="../UI/pages/packages-block/03-store.js"></script>
-  <script src="../UI/pages/packages-block/04-contract.js"></script>
-  <script src="../UI/pages/packages-block/05-render.js"></script>
-  <script src="../UI/pages/packages-block/06-page.js"></script>
+    allBlocks: [],
+    visibleBlocks: [],
+    selectedId: "",
+    selected: null,
 
-  <script>
-    (function(){
-      setTimeout(function(){
-        var el = document.getElementById("msgBox");
-        if(!el) return;
-        if(String(el.textContent || "").indexOf("Laddar kontrollrummet") !== -1){
-          el.textContent = "JS laddades inte klart. Öppna DevTools → Network: leta efter 404 på 01–06-page.js, eller Console-fel.";
-        }
-      }, 2000);
-    })();
-  </script>
-</body>
-</html>
+    // editing
+    dirty: false,
+    edited: null,
+
+    // trainings
+    trainings: [],
+    trainingsCorrupt: false,
+    trainingsMissing: false,
+    trainSelIndex: -1,
+    trainHits: [],
+    exportOpen: false,
+    infoOpen: false,
+  };
+
+  // ---------- utils ----------
+  function nowTs() { return Date.now(); }
+
+  function deepClone(obj) {
+    try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
+  }
+
+  function normStr(v) { return String(v ?? "").trim(); }
+
+  function clearChildren(node) {
+    if (!node) return;
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function countComposition(block) {
+    const items = Array.isArray(block && block.items) ? block.items : [];
+    let q = 0, d = 0, t = 0, missingKey = 0;
+    for (const it of items) {
+      const k = String(it && it.kind ? it.kind : "document");
+      if (k === "question") {
+        q++;
+        // "saknar facit" – tolerant: answerKey eller answerKeyObj.correctChoiceId
+        const ak = normStr(it && (it.answerKey || (it.answerKeyObj && it.answerKeyObj.correctChoiceId)));
+        if (!ak) missingKey++;
+      } else if (k === "task") t++;
+      else d++;
+    }
+    return { q, d, t, missingKey, items: items.length };
+  }
+
+  function normalizeItem(raw) {
+    const it = raw && typeof raw === "object" ? raw : {};
+    const kind = String(it.kind || "document");
+    if (kind === "question") {
+      // Accept: {options:[...], answerKey:"..."} OR {choices:[{id,text}], answerKeyObj:{correctChoiceId,rationale}}
+      return {
+        kind: "question",
+        questionId: normStr(it.questionId) || normStr(it.id) || "",
+        text: normStr(it.text) || "",
+        requiresAnswer: it.requiresAnswer !== false,
+        answerType: normStr(it.answerType) || "choice",
+        options: Array.isArray(it.options) ? it.options.map((x) => normStr(x)).filter(Boolean) : [],
+        answerKey: normStr(it.answerKey) || "",
+        // legacy strict fields (if present)
+        choices: Array.isArray(it.choices) ? it.choices : undefined,
+        answerKeyObj: it.answerKeyObj && typeof it.answerKeyObj === "object" ? it.answerKeyObj : undefined,
+      };
+    }
+    if (kind === "task") {
+      return {
+        kind: "task",
+        taskId: normStr(it.taskId) || "",
+        text: normStr(it.text) || "",
+        instruction: normStr(it.instruction) || "",
+        deliverable: normStr(it.deliverable) || "",
+        requiresDone: it.requiresDone !== false,
+        answerType: normStr(it.answerType) || "checkbox",
+      };
+    }
+    // document
+    return {
+      kind: "document",
+      text: normStr(it.text) || "",
+      requiresSign: !!it.requiresSign,
+    };
+  }
+
+  function normalizeBlock(raw) {
+    const b = raw && typeof raw === "object" ? raw : {};
+    const items = Array.isArray(b.items) ? b.items : [];
+    const out = {
+      blockId: normStr(b.blockId),
+      title: normStr(b.title) || "(utan rubrik)",
+      module: normStr(b.module) || "",
+      area: normStr(b.area) || "",
+      step: normStr(b.step) || "",
+      status: String(b.status || "draft").toLowerCase() === "published" ? "published" : "draft",
+      createdAt: Number(b.createdAt || 0) || 0,
+      updatedAt: Number(b.updatedAt || 0) || 0,
+      verifiedAt: Number(b.verifiedAt || 0) || 0,
+      verifiedBy: normStr(b.verifiedBy) || "",
+      items: items.map((it) => normalizeItem(it)),
+    };
+    out.__comp = countComposition(out);
+    return out;
+  }
+
+  function stripComp(b) {
+    const x = deepClone(b);
+    if (x && typeof x === "object") delete x.__comp;
+    return x;
+  }
+
+  function buildVisibleBlocks() {
+    const q = normStr(DOM.qBlocks && DOM.qBlocks.value).toLowerCase();
+    const st = DOM.filterStatus ? String(DOM.filterStatus.value || "all") : "all";
+    const hasQ = !!(DOM.fHasQ && DOM.fHasQ.checked);
+    const hasD = !!(DOM.fHasD && DOM.fHasD.checked);
+    const noKey = !!(DOM.fNoKey && DOM.fNoKey.checked);
+    const unv = !!(DOM.fUnverified && DOM.fUnverified.checked);
+
+    let arr = STATE.allBlocks.slice();
+
+    if (st !== "all") arr = arr.filter((b) => b.status === st);
+    if (hasQ) arr = arr.filter((b) => (b.__comp && b.__comp.q) > 0);
+    if (hasD) arr = arr.filter((b) => (b.__comp && b.__comp.d) > 0);
+    if (noKey) arr = arr.filter((b) => (b.__comp && b.__comp.missingKey) > 0);
+    if (unv) arr = arr.filter((b) => Number(b.verifiedAt || 0) <= 0);
+
+    if (q) {
+      STATE.discoveryActive = true;
+      arr = arr.filter((b) => {
+        const hay = `${b.title} ${b.module} ${b.area} ${b.step} ${b.blockId}`.toLowerCase();
+        return hay.includes(q);
+      });
+    }
+
+    // stable sort: updated desc
+    arr.sort((a, b) => (Number(b.updatedAt || 0) - Number(a.updatedAt || 0)));
+
+    STATE.visibleBlocks = arr;
+  }
+
+  function refreshLeftList() {
+    buildVisibleBlocks();
+    if (render && typeof render.renderBlockList === "function") {
+      render.renderBlockList({
+        discoveryActive: STATE.discoveryActive,
+        allCount: STATE.allBlocks.length,
+        visible: STATE.visibleBlocks,
+        selectedBlockId: STATE.selectedId,
+        onSelect: onSelectBlockId,
+      });
+    }
+  }
+
+  function setDirty(on) {
+    STATE.dirty = !!on;
+    if (DOM.selDirtyPill) {
+      DOM.selDirtyPill.style.display = STATE.dirty ? "inline-flex" : "none";
+      DOM.selDirtyPill.textContent = STATE.dirty ? "Ändringar: osparade" : "";
+    }
+    if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = !(STATE.dirty && STATE.canWrite && STATE.selectedId);
+  }
+
+  function applySelectionPills() {
+    try {
+      if (render && typeof render.setSelectionPill === "function") {
+        render.setSelectionPill(STATE.selectedId ? `Val: ${STATE.selectedId}` : "Val: —");
+      }
+      if (render && typeof render.setTopEditing === "function") {
+        render.setTopEditing(STATE.selected ? (STATE.selected.title || "—") : "—", !!STATE.selected);
+      }
+    } catch (_) {}
+  }
+
+  function computeValidationReasonsForSelected() {
+    if (!STATE.edited) return [];
+    if (!contract) return [];
+
+    const emojiForKind = function (k) {
+      const s = String(k || "");
+      if (s === "question") return "❓";
+      if (s === "task") return "✅";
+      return "📄";
+    };
+
+    try {
+      const chk = contract.validateForVerify(STATE.edited, normalizeItem, emojiForKind);
+      return chk && Array.isArray(chk.reasons) ? chk.reasons : [];
+    } catch (e) {
+      return [`Tekniskt fel i validering: ${String((e && e.message) || e)}`];
+    }
+  }
+
+  // ---------- central apply helper (stabil uppdatering) ----------
+  function applyEditedBlockChange(mutatorFn) {
+    if (!STATE.canWrite) return { ok: false, err: "Read-only." };
+    if (!STATE.edited) return { ok: false, err: "Inget block valt." };
+
+    try {
+      const cur = STATE.edited;
+      const nextDraft = deepClone(cur);
+      const mutated = mutatorFn ? mutatorFn(nextDraft) : nextDraft;
+      const next = normalizeBlock(Object.assign({}, mutated, { updatedAt: nowTs() }));
+      STATE.edited = next;
+      setDirty(true);
+      refreshLeftList();
+      updateRightPanel();
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, err: String((e && e.message) || e) };
+    }
+  }
+
+  function updateRightPanel() {
+    const reasons = computeValidationReasonsForSelected();
+
+    // verify pill
+    const ok = reasons.length === 0;
+    try {
+      if (render && typeof render.setVerifyPill === "function") {
+        render.setVerifyPill(
+          ok ? "Verifiering: OK" : `Verifiering: ${reasons.length} problem`,
+          ok ? "verifyPill ok" : "verifyPill warn",
+          !!STATE.selectedId
+        );
+      }
+    } catch (_) {}
+
+    // enable buttons
+    if (DOM.btnPrint) DOM.btnPrint.disabled = !STATE.selectedId;
+    if (DOM.btnVerify) DOM.btnVerify.disabled = !(STATE.selectedId && STATE.canWrite && ok);
+    if (DOM.btnPublish) DOM.btnPublish.disabled = !(STATE.selectedId && STATE.canWrite && ok);
+
+    // render selected (editor UI)
+    if (render && typeof render.renderSelectedDetail === "function") {
+      render.renderSelectedDetail({
+        block: STATE.edited,
+        canEdit: STATE.canWrite,
+        validationReasons: reasons,
+
+        // item patch (befintlig)
+        onPatchItem: function (idx, mutFn) {
+          if (!STATE.canWrite) return;
+          const cur = STATE.edited;
+          if (!cur || !Array.isArray(cur.items)) return;
+          if (idx < 0 || idx >= cur.items.length) return;
+
+          applyEditedBlockChange(function (draft) {
+            const items = Array.isArray(draft.items) ? draft.items.slice() : [];
+            const nextIt = mutFn ? mutFn(items[idx]) : items[idx];
+            items[idx] = normalizeItem(nextIt);
+            draft.items = items;
+            return draft;
+          });
+        },
+
+        // meta patch (NY)
+        onPatchMeta: function (mutFn) {
+          if (!STATE.canWrite) return;
+          applyEditedBlockChange(function (draft) {
+            const next = mutFn ? mutFn(draft) : draft;
+            // fail-safe: normalisera strängar
+            next.title = normStr(next.title) || "(utan rubrik)";
+            next.module = normStr(next.module || "");
+            next.area = normStr(next.area || "");
+            next.step = normStr(next.step || "");
+            return next;
+          });
+        },
+
+        // add/remove/move item (NY – valfritt för render att använda)
+        onAddItem: function (kind, afterIdx) {
+          if (!STATE.canWrite) return;
+          const k = String(kind || "document");
+          applyEditedBlockChange(function (draft) {
+            const items = Array.isArray(draft.items) ? draft.items.slice() : [];
+            const base =
+              k === "question" ? { kind: "question", text: "", options: ["Alternativ 1", "Alternativ 2"], answerKey: "" } :
+              k === "task" ? { kind: "task", text: "", instruction: "", deliverable: "" } :
+              { kind: "document", text: "" };
+
+            const ni = normalizeItem(base);
+
+            let pos = Number.isFinite(afterIdx) ? Number(afterIdx) + 1 : items.length;
+            if (pos < 0) pos = 0;
+            if (pos > items.length) pos = items.length;
+
+            items.splice(pos, 0, ni);
+            draft.items = items;
+            return draft;
+          });
+        },
+
+        onRemoveItem: function (idx) {
+          if (!STATE.canWrite) return;
+          applyEditedBlockChange(function (draft) {
+            const items = Array.isArray(draft.items) ? draft.items.slice() : [];
+            const i = Number(idx);
+            if (i >= 0 && i < items.length) items.splice(i, 1);
+            draft.items = items;
+            return draft;
+          });
+        },
+
+        onMoveItem: function (idx, dir) {
+          if (!STATE.canWrite) return;
+          applyEditedBlockChange(function (draft) {
+            const items = Array.isArray(draft.items) ? draft.items.slice() : [];
+            const i = Number(idx);
+            const d = String(dir || "");
+            const j = d === "up" ? (i - 1) : d === "down" ? (i + 1) : i;
+            if (i >= 0 && i < items.length && j >= 0 && j < items.length && i !== j) {
+              const tmp = items[i];
+              items[i] = items[j];
+              items[j] = tmp;
+            }
+            draft.items = items;
+            return draft;
+          });
+        },
+      });
+    }
+  }
+
+  function onSelectBlockId(id) {
+    const bid = normStr(id);
+    STATE.selectedId = bid;
+    const found = STATE.allBlocks.find((b) => b.blockId === bid) || null;
+    STATE.selected = found;
+    STATE.edited = found ? deepClone(found) : null;
+    setDirty(false);
+    applySelectionPills();
+    updateRightPanel();
+    setMsgSafe(STATE.selectedId ? "Klart. Valt block laddat." : "Klart. Välj ett block.");
+  }
+
+  // ---------- persistence ----------
+  function normalizeStatus(v) {
+    const s = String(v || "draft").toLowerCase();
+    return s === "published" ? "published" : "draft";
+  }
+
+  function persistEditedBlock(opts) {
+    const o = opts && typeof opts === "object" ? opts : {};
+    const forceDraft = !!o.forceDraft;
+
+    if (!STATE.edited || !STATE.selectedId) return { ok: false, err: "Inget block valt." };
+    const idx = STATE.allBlocks.findIndex((b) => b.blockId === STATE.selectedId);
+    if (idx < 0) return { ok: false, err: "Block hittades inte i listan." };
+
+    const next = deepClone(STATE.edited);
+
+    // P0-fix:
+    // - “Spara ändringar” kan tvinga draft
+    // - Verifiera/Publicera ska bevara status (publicerad ska stanna publicerad)
+    if (forceDraft) next.status = "draft";
+    next.status = normalizeStatus(next.status);
+
+    next.updatedAt = nowTs();
+    next.__comp = countComposition(next);
+
+    STATE.allBlocks[idx] = normalizeBlock(next);
+    const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
+    if (!save.ok) return save;
+
+    // refresh selection from source-of-truth array
+    STATE.selected = STATE.allBlocks[idx];
+    STATE.edited = deepClone(STATE.selected);
+    setDirty(false);
+    refreshLeftList();
+    updateRightPanel();
+    return { ok: true };
+  }
+
+  function setVerifiedAndPersist() {
+    if (!STATE.edited) return { ok: false, err: "Inget block valt." };
+    const reasons = computeValidationReasonsForSelected();
+    if (reasons.length) return { ok: false, err: "Verifiering stoppad av kontraktet." };
+
+    const next = deepClone(STATE.edited);
+    next.verifiedAt = nowTs();
+    next.verifiedBy = STATE.empNo || "—";
+    next.updatedAt = nowTs();
+    next.__comp = countComposition(next);
+
+    STATE.edited = next;
+    // bevara status (draft/published)
+    return persistEditedBlock({ forceDraft: false });
+  }
+
+  function setPublishedAndPersist() {
+    if (!STATE.edited) return { ok: false, err: "Inget block valt." };
+    const reasons = computeValidationReasonsForSelected();
+    if (reasons.length) return { ok: false, err: "Publicering stoppad av kontraktet." };
+
+    const next = deepClone(STATE.edited);
+    next.status = "published";
+    next.updatedAt = nowTs();
+    next.__comp = countComposition(next);
+
+    STATE.edited = next;
+    // bevara published
+    return persistEditedBlock({ forceDraft: false });
+  }
+
+  // ---------- trainings (export) - tolerant ----------
+  function loadTrainings() {
+    const r = store.loadTrainingsState();
+    STATE.trainingsCorrupt = !r.ok && !!r.corrupt;
+    STATE.trainingsMissing = !!r.missing;
+    STATE.trainings = r.ok ? (r.trainings || []) : [];
+    STATE.trainSelIndex = -1;
+  }
+
+  function extractTrainingItems(t) {
+    // Tolerant: items directly OR blocks[].items
+    if (t && Array.isArray(t.items)) return t.items.map(normalizeItem);
+    if (t && Array.isArray(t.blocks)) {
+      const flat = [];
+      for (const b of t.blocks) {
+        if (b && Array.isArray(b.items)) flat.push(...b.items);
+      }
+      return flat.map(normalizeItem);
+    }
+    return [];
+  }
+
+  function extractTrainingMeta(t, idx) {
+    const title = normStr(t && (t.title || t.name)) || `Utbildning ${idx + 1}`;
+    const module = normStr(t && t.module) || "";
+    const area = normStr(t && t.area) || "";
+    const step = normStr(t && (t.step || t.stepId)) || "";
+    const items = extractTrainingItems(t);
+    return { index: idx, title, module, area, step, itemsCount: items.length, items };
+  }
+
+  function refreshTrainingUI() {
+    // build module dropdown
+    if (DOM.qTrainModule) {
+      const mods = new Set();
+      for (const tr of STATE.trainings) {
+        const m = normStr(tr && tr.module);
+        if (m) mods.add(m);
+      }
+      const cur = DOM.qTrainModule.value || "";
+      clearChildren(DOM.qTrainModule);
+
+      const opt0 = document.createElement("option");
+      opt0.value = "";
+      opt0.textContent = "Alla moduler";
+      DOM.qTrainModule.appendChild(opt0);
+
+      Array.from(mods).sort().forEach((m) => {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent = m;
+        DOM.qTrainModule.appendChild(o);
+      });
+
+      DOM.qTrainModule.value = cur;
+    }
+
+    // build area datalist
+    if (DOM.dlTrainAreas) {
+      clearChildren(DOM.dlTrainAreas);
+      const areas = new Set();
+      for (const tr of STATE.trainings) {
+        const a = normStr(tr && tr.area);
+        if (a) areas.add(a);
+      }
+      Array.from(areas).sort().slice(0, 200).forEach((a) => {
+        const o = document.createElement("option");
+        o.value = a;
+        DOM.dlTrainAreas.appendChild(o);
+      });
+    }
+
+    // hits
+    const m = normStr(DOM.qTrainModule && DOM.qTrainModule.value);
+    const a = normStr(DOM.qTrainArea && DOM.qTrainArea.value).toLowerCase();
+    const f = normStr(DOM.qTrainFree && DOM.qTrainFree.value).toLowerCase();
+
+    const hits = [];
+    for (let i = 0; i < STATE.trainings.length; i++) {
+      const tr = STATE.trainings[i];
+      const meta = extractTrainingMeta(tr, i);
+      if (m && meta.module !== m) continue;
+      if (a && !meta.area.toLowerCase().includes(a)) continue;
+      if (f && !meta.title.toLowerCase().includes(f)) continue;
+      meta.active = (STATE.trainSelIndex === i);
+      hits.push(meta);
+    }
+    STATE.trainHits = hits;
+
+    if (render && typeof render.renderTrainingHits === "function") {
+      render.renderTrainingHits({
+        hits: hits,
+        corrupt: STATE.trainingsCorrupt,
+        missing: STATE.trainingsMissing,
+        onPickTraining: function (index) {
+          STATE.trainSelIndex = Number(index);
+          refreshTrainingUI();
+          const found = hits.find((h) => h.index === STATE.trainSelIndex);
+          if (found && render && typeof render.renderExportPreview === "function") {
+            render.renderExportPreview({ items: found.items });
+          }
+          if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = !(STATE.canWrite && found && found.itemsCount > 0);
+        },
+      });
+    }
+
+    // hint
+    if (render && typeof render.setTrainExportHint === "function") {
+      render.setTrainExportHint(
+        STATE.canWrite
+          ? "Välj en utbildning i listan ovan. Export skapar 1 nytt block (utkast)."
+          : "Read-only: du kan inte exportera i SYSTEM_ADMIN-läge."
+      );
+    }
+
+    if (DOM.btnExportTraining) {
+      const found = hits.find((h) => h.index === STATE.trainSelIndex);
+      DOM.btnExportTraining.disabled = !(STATE.canWrite && found && found.itemsCount > 0);
+    }
+  }
+
+  function exportSelectedTraining() {
+    const hit = STATE.trainHits.find((h) => h.index === STATE.trainSelIndex);
+    if (!hit) { setMsgSafe("Välj en utbildning först."); return; }
+    if (!STATE.canWrite) { setMsgSafe("Read-only: SYSTEM_ADMIN kan inte exportera."); return; }
+    if (!hit.items || !hit.items.length) { setMsgSafe("Utbildningen saknar items att exportera."); return; }
+
+    const ts = nowTs();
+    const newBlock = normalizeBlock({
+      blockId: `b_${ts}`,
+      title: hit.title,
+      module: hit.module,
+      area: hit.area,
+      step: hit.step,
+      status: "draft",
+      createdAt: ts,
+      updatedAt: ts,
+      verifiedAt: 0,
+      verifiedBy: "",
+      items: hit.items.map(normalizeItem),
+    });
+
+    STATE.allBlocks.unshift(newBlock);
+    const save = store.saveBlocks(STATE.allBlocks.map(stripComp));
+    if (!save.ok) { setMsgSafe(`Kunde inte exportera: ${save.err || "okänt fel"}`); return; }
+
+    STATE.discoveryActive = true; // så användaren ser blocket
+    refreshLeftList();
+    setMsgSafe("Export klar. Sök eller tryck “Visa alla” och välj det nya blocket.");
+  }
+
+  // ---------- print ----------
+  function printSelected() {
+    if (!STATE.selectedId || !STATE.edited) return;
+    const w = window.open("", "_blank");
+    if (!w) { setMsgSafe("Popup blockerad. Tillåt popups för att skriva ut."); return; }
+    const doc = w.document;
+    doc.open();
+    doc.write("<!doctype html><html><head><meta charset='utf-8'><title>Block</title></head><body></body></html>");
+    doc.close();
+
+    const pre = doc.createElement("pre");
+    pre.style.whiteSpace = "pre-wrap";
+    pre.textContent = JSON.stringify(stripComp(STATE.edited), null, 2);
+    doc.body.appendChild(pre);
+
+    w.focus();
+    w.print();
+  }
+
+  // ---------- wiring ----------
+  function wireEvents() {
+    if (DOM.btnToggleInfo) {
+      DOM.btnToggleInfo.addEventListener("click", function () {
+        STATE.infoOpen = !STATE.infoOpen;
+        if (DOM.introBox) DOM.introBox.style.display = STATE.infoOpen ? "block" : "none";
+        DOM.btnToggleInfo.textContent = STATE.infoOpen ? "Dölj info" : "Visa info";
+      });
+    }
+
+    if (DOM.qBlocks) {
+      DOM.qBlocks.addEventListener("input", function () {
+        STATE.discoveryActive = true;
+        refreshLeftList();
+      });
+    }
+
+    if (DOM.btnShowAllBlocks) {
+      DOM.btnShowAllBlocks.addEventListener("click", function () {
+        STATE.discoveryActive = true;
+        if (DOM.qBlocks) DOM.qBlocks.value = "";
+        refreshLeftList();
+      });
+    }
+
+    const filterEls = [DOM.filterStatus, DOM.fHasQ, DOM.fHasD, DOM.fNoKey, DOM.fUnverified].filter(Boolean);
+    filterEls.forEach((el) => el.addEventListener("change", refreshLeftList));
+
+    if (DOM.btnSaveEdits) {
+      DOM.btnSaveEdits.addEventListener("click", function () {
+        // “Spara ändringar” -> tvinga draft (endast här)
+        const r = persistEditedBlock({ forceDraft: true });
+        setMsgSafe(r.ok ? "Sparat. (Som utkast)" : (`Kunde inte spara: ${r.err || "okänt fel"}`));
+      });
+    }
+
+    if (DOM.btnVerify) {
+      DOM.btnVerify.addEventListener("click", function () {
+        const r = setVerifiedAndPersist();
+        setMsgSafe(r.ok ? "Verifierat och sparat." : (`Verifiering stoppad: ${r.err || "okänt fel"}`));
+      });
+    }
+
+    if (DOM.btnPublish) {
+      DOM.btnPublish.addEventListener("click", function () {
+        const r = setPublishedAndPersist();
+        setMsgSafe(r.ok ? "Publicerat och sparat." : (`Publicering stoppad: ${r.err || "okänt fel"}`));
+      });
+    }
+
+    if (DOM.btnPrint) {
+      DOM.btnPrint.addEventListener("click", printSelected);
+    }
+
+    // Export toggle
+    if (DOM.btnToggleExport && DOM.exportBody) {
+      DOM.btnToggleExport.addEventListener("click", function () {
+        STATE.exportOpen = !STATE.exportOpen;
+        DOM.exportBody.style.display = STATE.exportOpen ? "block" : "none";
+        DOM.btnToggleExport.setAttribute("aria-expanded", STATE.exportOpen ? "true" : "false");
+        DOM.btnToggleExport.textContent = STATE.exportOpen ? "Dölj" : "Visa";
+      });
+    }
+
+    // Export filters
+    [DOM.qTrainModule, DOM.qTrainArea, DOM.qTrainFree].filter(Boolean).forEach((el) => {
+      el.addEventListener("input", refreshTrainingUI);
+      el.addEventListener("change", refreshTrainingUI);
+    });
+
+    if (DOM.btnReloadTrainings) {
+      DOM.btnReloadTrainings.addEventListener("click", function () {
+        loadTrainings();
+        refreshTrainingUI();
+        setMsgSafe("Utbildningar uppdaterade.");
+      });
+    }
+
+    if (DOM.btnExportTraining) {
+      DOM.btnExportTraining.addEventListener("click", exportSelectedTraining);
+    }
+  }
+
+  function boot() {
+    // Always set message quickly so HTML watchdog won't fire
+    setMsgSafe("Startar kontrollrummet…");
+
+    // dependency sanity
+    const missing = [];
+    if (!store) missing.push("03-store.js");
+    if (!render) missing.push("05-render.js");
+    if (!core) missing.push("02-core.js");
+    if (!contract) missing.push("04-contract.js");
+    if (missing.length) {
+      showLock([`JS saknar delar: ${missing.join(", ")}`]);
+      setMsgSafe("JS laddades delvis men saknar moduler. Kontrollera Console.");
+      return;
+    }
+
+    // role
+    const who = (core && typeof core.getRole === "function")
+      ? core.getRole()
+      : { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
+
+    STATE.role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
+    STATE.empNo = String(who.empNo || "");
+    STATE.canWrite = !!who.canWrite;
+
+    // pills
+    try {
+      render.setWhoPill(`Inloggad: ${STATE.empNo || "—"} (${STATE.role})`);
+      render.setModePill(STATE.canWrite ? "Edit: på" : "Read-only", STATE.canWrite ? "pill ok" : "pill warn");
+      render.setStatePill("Status: OK", "pill ok");
+      render.setSelectionPill("Val: —");
+      render.setVerifyPill("Verifiering: —", "verifyPill warn", false);
+      render.setTopEditing("—", false);
+    } catch (_) {}
+
+    // load blocks
+    const r = store.loadBlocksState();
+    if (!r.ok && r.corrupt) {
+      showLock([store.lockReasonFor(store.BLOCKS_KEY), "Åtgärd: rensa/återställ AO-0XX_BLOCKS_V1 (korrupt JSON)."]);
+      setMsgSafe("Låst (fail-closed): Blockbank är trasig.");
+      if (DOM.btnVerify) DOM.btnVerify.disabled = true;
+      if (DOM.btnPublish) DOM.btnPublish.disabled = true;
+      if (DOM.btnSaveEdits) DOM.btnSaveEdits.disabled = true;
+      return;
+    }
+
+    STATE.allBlocks = (r.blocks || []).map(normalizeBlock);
+    STATE.discoveryActive = false; // search-first
+    refreshLeftList();
+
+    // trainings load
+    loadTrainings();
+    refreshTrainingUI();
+
+    // wire
+    wireEvents();
+
+    setMsgSafe("Klart. Sök eller tryck “Visa alla”.");
+    STATE.ready = true;
+  }
+
+  // Boot safely
+  try {
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", boot);
+    } else {
+      boot();
+    }
+  } catch (e) {
+    setMsgSafe(`JS-fel vid start: ${String((e && e.message) || e)}`);
+  }
+
+  NS.page = {
+    boot: boot,
+    state: STATE,
+  };
+})();
