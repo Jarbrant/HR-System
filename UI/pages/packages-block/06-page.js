@@ -13,10 +13,11 @@ PATCH v1.1.2 (PP-SC-002 fortsättning – döljer export-containern helt när st
 - P1: Vid stängning städas export-UI (preview + knappar) för att undvika "halvöppet" läge
 - P2: Robust: om .exportBox saknas fortsätter fallback-toggling av #exportBody ändå
 
-PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
-- P0: Döljer “Valt block”-panelen helt när inget block är valt (minskar tomma containers).
-- P1: När modal används: panelen är bara synlig i modal (inte som tom ruta i layout).
-- P2: Använder #exportBox och #selPanel som primära hooks (fallback till .exportBox/.selPanel).
+PATCH v1.3.1 (PP-SC-004 / Inkorg-export förenkling – Bild 2):
+- Tar bort stöd för qTrainArea/qTrainFree/dlTrainAreas (fält borttagna i HTML)
+- Behåller endast modul-filter (valfritt) + lista + export-knapp
+- Städning: vid stängning reset modulfilter + preview + disable export
+- Ingen ändring i storage-keys/datamodell. Inga nya DOM-id/hooks.
 ============================================================ */
 (function () {
   "use strict";
@@ -59,13 +60,10 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
     btnPrint: byId("btnPrint"),
     btnPublish: byId("btnPublish"),
 
-    // export/training UI
+    // export/training UI (PP-SC-004: endast modul-filter)
     btnToggleExport: byId("btnToggleExport"),
     exportBody: byId("exportBody"),
     qTrainModule: byId("qTrainModule"),
-    qTrainArea: byId("qTrainArea"),
-    dlTrainAreas: byId("dlTrainAreas"),
-    qTrainFree: byId("qTrainFree"),
     trainPreview: byId("trainPreview"),
     trainPreviewDetail: byId("trainPreviewDetail"),
     btnExportTraining: byId("btnExportTraining"),
@@ -90,11 +88,11 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
     pbModalSave: byId("pbModalSave"),
   };
 
-  // PP-SC-003: stable hooks first, fallback to legacy selectors
-  const EXPORT_BOX = byId("exportBox") || document.querySelector(".exportBox") || null;
+  // PP-SC-002: export container (no new DOM-id, selector only)
+  const EXPORT_BOX = document.querySelector(".exportBox") || null;
 
   // We move this panel into modal (no cloning) to keep listeners intact
-  const SEL_PANEL = byId("selPanel") || document.querySelector(".selPanel") || null;
+  const SEL_PANEL = document.querySelector(".selPanel") || null;
   const SEL_PANEL_HOME = (function () {
     if (!SEL_PANEL) return null;
     const ph = document.createElement("div");
@@ -312,33 +310,19 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
       DOM.exportBody.style.display = open ? "block" : "none";
     }
 
-    // when closing: cleanup "half-open" UI
+    // when closing: cleanup "half-open" UI (PP-SC-004: extra städning)
     if (!open) {
       STATE.trainSelIndex = -1;
+
+      // reset module filter to neutral inkorg-läge
+      try { if (DOM.qTrainModule) DOM.qTrainModule.value = ""; } catch (_) {}
+
       if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = true;
       if (DOM.trainPreviewDetail) DOM.trainPreviewDetail.style.display = "none";
+
+      // refresh list state to match cleared filter
+      try { refreshTrainingUI(); } catch (_) {}
     }
-  }
-
-  // PP-SC-003: hide “Valt block”-panelen när inget block är valt (och när modal används: bara synlig i modal)
-  function modalAvailable() {
-    return !!(DOM.pbModalOverlay && DOM.pbModalDialog && DOM.pbModalBody);
-  }
-
-  function applySelPanelVisibility() {
-    if (!SEL_PANEL) return;
-
-    const hasSel = !!STATE.selectedId;
-
-    // När modal finns vill vi inte ha en “tom ruta” i layout.
-    // Panelen lever i modal när den är öppen.
-    if (modalAvailable()) {
-      SEL_PANEL.style.display = STATE.modalOpen ? "block" : "none";
-      return;
-    }
-
-    // Ingen modal => visa panel bara när något är valt
-    SEL_PANEL.style.display = hasSel ? "block" : "none";
   }
 
   function buildVisibleBlocks() {
@@ -427,6 +411,10 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
   }
 
   // ---------- modal helpers (no innerHTML, move nodes) ----------
+  function modalAvailable() {
+    return !!(DOM.pbModalOverlay && DOM.pbModalDialog && DOM.pbModalBody);
+  }
+
   function setModalHidden(hidden) {
     if (!modalAvailable()) return;
     DOM.pbModalOverlay.setAttribute("aria-hidden", hidden ? "true" : "false");
@@ -439,9 +427,7 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
     // Move the existing selection panel into modal body (keeps listeners)
     if (SEL_PANEL && DOM.pbModalBody) {
       try {
-        clearChildren(DOM.pbModalBody);
-        // show panel inside modal
-        SEL_PANEL.style.display = "block";
+        while (DOM.pbModalBody.firstChild) DOM.pbModalBody.removeChild(DOM.pbModalBody.firstChild);
         DOM.pbModalBody.appendChild(SEL_PANEL);
       } catch (_) {}
     }
@@ -456,9 +442,6 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
 
     setModalHidden(false);
     STATE.modalOpen = true;
-
-    // After modalOpen: keep panel hidden in layout (only visible in modal)
-    applySelPanelVisibility();
 
     // Focus
     try { DOM.pbModalBody && DOM.pbModalBody.focus && DOM.pbModalBody.focus(); } catch (_) {}
@@ -480,9 +463,6 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
         SEL_PANEL_HOME.parentNode.insertBefore(SEL_PANEL, SEL_PANEL_HOME.nextSibling);
       } catch (_) {}
     }
-
-    // After close: panel ska inte ligga som tom ruta i layout
-    applySelPanelVisibility();
   }
 
   function confirmLoseEditsIfNeeded() {
@@ -633,9 +613,6 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
         ? `${STATE.selected.title || "—"} • ${STATE.selected.blockId || STATE.selectedId || "—"}`
         : "—";
     }
-
-    // ensure panel visibility matches current state
-    applySelPanelVisibility();
   }
 
   function onSelectBlockId(id) {
@@ -652,9 +629,6 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
     // v1.1: open modal on selection (if modal exists)
     if (STATE.selectedId && modalAvailable()) {
       openModal();
-    } else {
-      // no modal => show panel inline when selected
-      applySelPanelVisibility();
     }
   }
 
@@ -741,6 +715,7 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
   }
 
   function refreshTrainingUI() {
+    // modul-lista
     if (DOM.qTrainModule) {
       const mods = new Set();
       for (const tr of STATE.trainings) {
@@ -765,31 +740,14 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
       DOM.qTrainModule.value = cur;
     }
 
-    if (DOM.dlTrainAreas) {
-      clearChildren(DOM.dlTrainAreas);
-      const areas = new Set();
-      for (const tr of STATE.trainings) {
-        const a = normStr(tr && tr.area);
-        if (a) areas.add(a);
-      }
-      Array.from(areas).sort().slice(0, 200).forEach((a) => {
-        const o = document.createElement("option");
-        o.value = a;
-        DOM.dlTrainAreas.appendChild(o);
-      });
-    }
-
+    // PP-SC-004: endast modul-filter (valfritt)
     const m = normStr(DOM.qTrainModule && DOM.qTrainModule.value);
-    const a = normStr(DOM.qTrainArea && DOM.qTrainArea.value).toLowerCase();
-    const f = normStr(DOM.qTrainFree && DOM.qTrainFree.value).toLowerCase();
 
     const hits = [];
     for (let i = 0; i < STATE.trainings.length; i++) {
       const tr = STATE.trainings[i];
       const meta = extractTrainingMeta(tr, i);
       if (m && meta.module !== m) continue;
-      if (a && !meta.area.toLowerCase().includes(a)) continue;
-      if (f && !meta.title.toLowerCase().includes(f)) continue;
       meta.active = (STATE.trainSelIndex === i);
       hits.push(meta);
     }
@@ -935,7 +893,7 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
       DOM.btnToggleExport.addEventListener("click", function () {
         STATE.exportOpen = !STATE.exportOpen;
 
-        // PP-SC-002: show/hide whole container (and cleanup on close)
+        // PP-SC-002 + PP-SC-004: show/hide whole container (and cleanup on close)
         applyExportVisibility();
 
         // Text + aria + “nytt”-markering
@@ -946,8 +904,8 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
       });
     }
 
-    // Export filters
-    [DOM.qTrainModule, DOM.qTrainArea, DOM.qTrainFree].filter(Boolean).forEach((el) => {
+    // Export filters (PP-SC-004: endast modul)
+    [DOM.qTrainModule].filter(Boolean).forEach((el) => {
       el.addEventListener("input", refreshTrainingUI);
       el.addEventListener("change", refreshTrainingUI);
     });
@@ -1015,6 +973,7 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
 
     if (!DOM.btnToggleExport) missing.push("DOM#btnToggleExport (HTML)");
     if (!DOM.exportBody) missing.push("DOM#exportBody (HTML)");
+    if (!DOM.qTrainModule) missing.push("DOM#qTrainModule (HTML)");
 
     if (missing.length) {
       showLock([`JS saknar delar: ${missing.join(", ")}`]);
@@ -1065,13 +1024,6 @@ PATCH v1.2.0 (PP-SC-003 – städa tomma rutor + stabila hooks):
     STATE.exportOpen = false;
     applyExportVisibility();
     applyExportIndicator();
-
-    // default selection: none => hide selPanel (PP-SC-003)
-    STATE.selectedId = "";
-    STATE.selected = null;
-    STATE.edited = null;
-    STATE.modalOpen = false;
-    applySelPanelVisibility();
 
     // trainings load
     loadTrainings();
