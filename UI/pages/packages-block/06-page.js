@@ -23,6 +23,11 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
 - P1: “Uppdatera”-knappen (btnReloadTrainings) repurposed → “Stäng” (stänger export med städning)
 - P1: Grön kvittens “flyttad/skapat” via render.setTrainExportNotice(ok) (fallback setTrainExportHint)
 - P1: Efter export: stänger exportbox + städar + auto-väljer nya blocket
+
+PATCH v1.3.3 (PP-SC-006 HOTFIX – Preview får aldrig synas när vald):
+- P0: När en utbildningsrad markeras: städar + döljer preview direkt (ingen renderExportPreview på vald)
+- P0: Efter varje renderTrainingHits: om vald rad finns → hard-hide preview (call-order-säker)
+- P1: Vid filter/change + öppna/stäng: hard-hide preview och reset trainSelIndex vid behov
 ============================================================ */
 (function () {
   "use strict";
@@ -154,6 +159,34 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
     if (DOM.trainExportHint) DOM.trainExportHint.textContent = t;
   }
 
+  // ---------- P0: hard-hide preview helpers ----------
+  function clearChildren(node) {
+    if (!node) return;
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
+  function hardHideExportPreview() {
+    // P0: “det ska inte synas när man markerar rutan”
+    if (!DOM.trainPreviewDetail) return;
+    clearChildren(DOM.trainPreviewDetail);
+    DOM.trainPreviewDetail.style.display = "none";
+  }
+
+  function hasActiveExportRowDom() {
+    try {
+      return !!(DOM.trainPreview && DOM.trainPreview.querySelector && DOM.trainPreview.querySelector(".exportRow.active"));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function hardHidePreviewIfSelected() {
+    // Two sources of truth:
+    // 1) State says we have a selected training
+    // 2) DOM has an active export row
+    if (STATE.trainSelIndex >= 0 || hasActiveExportRowDom()) hardHideExportPreview();
+  }
+
   // ---------- state ----------
   const STATE = {
     ready: false,
@@ -192,11 +225,6 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
   }
 
   function normStr(v) { return String(v ?? "").trim(); }
-
-  function clearChildren(node) {
-    if (!node) return;
-    while (node.firstChild) node.removeChild(node.firstChild);
-  }
 
   function countComposition(block) {
     const items = Array.isArray(block && block.items) ? block.items : [];
@@ -343,10 +371,15 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
       try { if (DOM.qTrainModule) DOM.qTrainModule.value = ""; } catch (_) {}
 
       if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = true;
-      if (DOM.trainPreviewDetail) DOM.trainPreviewDetail.style.display = "none";
+
+      // P0: hard-hide preview alltid vid stängning
+      hardHideExportPreview();
 
       // refresh list state to match cleared filter
       try { refreshTrainingUI(); } catch (_) {}
+    } else {
+      // P0: när vi öppnar export ska preview starta städat
+      hardHideExportPreview();
     }
   }
 
@@ -740,12 +773,15 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
   }
 
   function refreshTrainingUI() {
+    // P0: om vi byter filter/lista → börja alltid med att städa preview
+    hardHideExportPreview();
+
     // modul-lista
     if (DOM.qTrainModule) {
       const mods = new Set();
       for (const tr of STATE.trainings) {
-        const m = normStr(tr && tr.module);
-        if (m) mods.add(m);
+        const mm = normStr(tr && tr.module);
+        if (mm) mods.add(mm);
       }
       const cur = DOM.qTrainModule.value || "";
       clearChildren(DOM.qTrainModule);
@@ -755,10 +791,10 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
       opt0.textContent = "Alla moduler";
       DOM.qTrainModule.appendChild(opt0);
 
-      Array.from(mods).sort().forEach((m) => {
+      Array.from(mods).sort().forEach((mm) => {
         const o = document.createElement("option");
-        o.value = m;
-        o.textContent = m;
+        o.value = mm;
+        o.textContent = mm;
         DOM.qTrainModule.appendChild(o);
       });
 
@@ -784,16 +820,26 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
         corrupt: STATE.trainingsCorrupt,
         missing: STATE.trainingsMissing,
         onPickTraining: function (index) {
+          // P0: när man markerar en utbildning ska preview INTE visas
           STATE.trainSelIndex = Number(index);
+
+          // Först: rendera listan med .active
           refreshTrainingUI();
+
+          // Sen: hard-hide preview (call-order säkert)
+          hardHidePreviewIfSelected();
+
+          // enable export
           const found = hits.find((h) => h.index === STATE.trainSelIndex);
-          if (found && render && typeof render.renderExportPreview === "function") {
-            render.renderExportPreview({ items: found.items });
-          }
           if (DOM.btnExportTraining) DOM.btnExportTraining.disabled = !(STATE.canWrite && found && found.itemsCount > 0);
+
+          // (medvetet) INGEN render.renderExportPreview här längre
         },
       });
     }
+
+    // P0: efter list-render → om något är valt: se till att preview är borta
+    hardHidePreviewIfSelected();
 
     // PP-SC-005: fokus “markera + export”
     setExportNotice(
@@ -852,6 +898,9 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
     STATE.exportOpen = false;
     applyExportVisibility();
     applyExportIndicator();
+
+    // P0: hard-hide preview efter export (för säkerhets skull)
+    hardHideExportPreview();
 
     setMsgSafe("Export klar. Nytt block är valt.");
   }
@@ -941,14 +990,27 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
         applyExportIndicator();
 
         // When opening: refresh the UI so it's always current
-        if (STATE.exportOpen) refreshTrainingUI();
+        if (STATE.exportOpen) {
+          refreshTrainingUI();
+          // P0: export-open ska alltid starta utan preview
+          hardHideExportPreview();
+        }
       });
     }
 
     // Export filters (PP-SC-004: endast modul)
     [DOM.qTrainModule].filter(Boolean).forEach((el) => {
-      el.addEventListener("input", refreshTrainingUI);
-      el.addEventListener("change", refreshTrainingUI);
+      el.addEventListener("input", function () {
+        // P0: filter-change ska alltid städa preview och reset selection
+        STATE.trainSelIndex = -1;
+        hardHideExportPreview();
+        refreshTrainingUI();
+      });
+      el.addEventListener("change", function () {
+        STATE.trainSelIndex = -1;
+        hardHideExportPreview();
+        refreshTrainingUI();
+      });
     });
 
     // PP-SC-005: btnReloadTrainings används som “Stäng” (ingen reload)
@@ -958,6 +1020,7 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
         STATE.exportOpen = false;
         applyExportVisibility();
         applyExportIndicator();
+        hardHideExportPreview();
         setMsgSafe("Stängd.");
       });
     }
@@ -1082,6 +1145,9 @@ PATCH v1.3.2 (PP-SC-005 / Inkorg-export: endast markera + export + stäng):
 
     // wire
     wireEvents();
+
+    // P0: boot ska alltid lämna preview städat
+    hardHideExportPreview();
 
     setMsgSafe("Klart. Sök eller tryck “Visa alla”.");
     STATE.ready = true;
