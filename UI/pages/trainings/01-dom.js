@@ -136,4 +136,3 @@ NOTE:
   // Exportera minimal version-info för felsökning
   NS.dom.__VERSION = "v1.0-PP-SC-010-02";
 })();
-
