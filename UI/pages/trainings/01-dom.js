@@ -1,138 +1,165 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-02) | FILE 01/06 | FIL-ID: UI/pages/trainings/01-dom.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-03) | FILE 01/06 | FIL-ID: UI/pages/trainings/01-dom.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Stabil DOM-karta + små helpers för trainings (ingen state/store/render här)
+Syfte: DOM-bindningar + små DOM-helpers för trainings-sidan.
 
 POLICY (LÅST):
-- UI-only • Fail-closed
-- XSS-safe: render i andra filer ska använda textContent (inte här)
-- Ingen storage här
-- Behåll stabila DOM-id/hooks (matchar admin/trainings.html)
+- UI-only • Inga storage-keys
+- XSS-safe rendering: setText använder textContent (ingen innerHTML)
+- Fail-closed: om kritiska DOM-noder saknas exponeras dom.missing[] (page avgör lock)
 
-NOTE:
-- Denna fil ska bara samla element och erbjuda minimala DOM-helpers.
 ============================================================ */
 (function () {
   "use strict";
 
   const NS = (window.Trainings = window.Trainings || {});
   const dom = (NS.dom = NS.dom || {});
+  dom.__VERSION = "v1.0-PP-SC-010-03";
 
-  const $ = (id) => document.getElementById(id);
-
-  // --- Root guards (fail-closed-ish för DOM) ---
-  function required(id) {
-    const el = $(id);
-    if (!el) {
-      // Fail-closed: vi kastar så att 06-page kan stoppa init och visa statusfel.
-      throw new Error("DOM_MISSING:" + id);
-    }
-    return el;
+  // -----------------------------
+  // Helpers
+  // -----------------------------
+  function byId(id) {
+    return document.getElementById(id);
   }
 
-  // --- Topbar / status ---
-  dom.contextPill = required("contextPill");
-  dom.contextText = required("contextText");
-  dom.statePill = required("statePill");
-  dom.stateText = required("stateText");
-  dom.whoPill = required("whoPill");
-  dom.whoText = required("whoText");
-  dom.btnLogout = required("btnLogout");
-
-  // --- Left list / search ---
-  dom.q = required("q");
-  dom.fStatus = required("fStatus");
-  dom.btnShowAll = required("btnShowAll");
-  dom.btnClear = required("btnClear");
-  dom.onlyProblems = required("onlyProblems");
-  dom.leftHint = required("leftHint");
-  dom.btnDelete = required("btnDelete");
-  dom.btnPurge = required("btnPurge");
-  dom.btnNew = required("btnNew");
-  dom.list = required("list");
-
-  // --- Editor: module/area ---
-  dom.btnModAll = required("btnModAll");
-  dom.btnModClear = required("btnModClear");
-  dom.subjectCallout = required("subjectCallout");
-  dom.subjectIdText = required("subjectIdText");
-  dom.mod = required("mod");
-  dom.area = required("area");
-  dom.modList = required("modList");
-  dom.areaList = required("areaList");
-
-  // --- Course plan: chapter/step + generated title ---
-  dom.courseTitle = required("courseTitle");
-  dom.courseStep = required("courseStep");
-  dom.titleDisplay = required("titleDisplay");
-  dom.courseTouchHint = required("courseTouchHint");
-
-  // --- Goals ---
-  dom.goalsLevel = required("goalsLevel");
-  dom.goals = required("goals");
-
-  // --- AI controls ---
-  dom.aiContent = required("aiContent");
-  dom.aiCount = required("aiCount");
-  dom.questionControls = required("questionControls");
-  dom.aiQuestionType = required("aiQuestionType");
-  dom.aiFeedbackEnabled = required("aiFeedbackEnabled");
-  dom.aiHint = required("aiHint");
-
-  // --- Blocks list container ---
-  dom.blocksList = required("blocksList");
-
-  // --- Footer actions ---
-  dom.btnRevert = required("btnRevert");
-  dom.btnTestAI = required("btnTestAI");
-  dom.btnGenAI = required("btnGenAI");
-  dom.revertHint = required("revertHint");
-  dom.btnSaveDraft = required("btnSaveDraft");
-  dom.btnSavePublish = required("btnSavePublish");
-
-  // --- Debug ---
-  dom.debugBox = required("debugBox");
-  dom.debugPre = required("debugPre");
-
-  // --- DOM helpers (små, utan affärslogik) ---
-  dom.setText = function (el, text) {
+  function setText(el, txt) {
     if (!el) return;
-    el.textContent = (text == null ? "" : String(text));
-  };
+    el.textContent = String(txt ?? "");
+  }
 
-  dom.setPill = function (pillEl, mode /* ok|warn|bad|"" */) {
-    if (!pillEl) return;
-    pillEl.classList.remove("ok", "warn", "bad");
-    if (mode === "ok" || mode === "warn" || mode === "bad") pillEl.classList.add(mode);
-  };
-
-  dom.show = function (el) {
+  function disable(el, on) {
     if (!el) return;
-    el.classList.remove("hide");
-  };
+    const v = !!on;
+    el.disabled = v;
+    // UI-konvention: "btn disabled"
+    if (v) el.classList.add("disabled");
+    else el.classList.remove("disabled");
+  }
 
-  dom.hide = function (el) {
+  function on(el, evt, fn, opts) {
+    if (!el || !evt || !fn) return;
+    el.addEventListener(evt, fn, opts || false);
+  }
+
+  function show(el) {
     if (!el) return;
-    el.classList.add("hide");
-  };
+    el.hidden = false;
+    el.style.display = "";
+    el.classList.remove("hidden");
+  }
 
-  dom.disable = function (btn, disabled) {
-    if (!btn) return;
-    btn.disabled = !!disabled;
-    if (disabled) btn.classList.add("disabled");
-    else btn.classList.remove("disabled");
-  };
+  function hide(el) {
+    if (!el) return;
+    el.hidden = true;
+    el.style.display = "none";
+    el.classList.add("hidden");
+  }
 
-  dom.on = function (el, ev, fn, opts) {
-    if (!el || !el.addEventListener) return;
-    el.addEventListener(ev, fn, opts || false);
-  };
+  // Exponera helpers (används av 06-page + 05-render)
+  dom.byId = byId;
+  dom.setText = setText;
+  dom.disable = disable;
+  dom.on = on;
+  dom.show = show;
+  dom.hide = hide;
 
-  // Marker: id-baserade fält som vi bevakar för "dirty" i core/page.
-  dom.getDirtyWatchEls = function () {
-    return Array.from(document.querySelectorAll("[data-watch-dirty='true']"));
-  };
+  // -----------------------------
+  // Bind DOM (IDs måste matcha trainings.html)
+  // -----------------------------
+  // Left/list controls
+  dom.q = byId("q");
+  dom.fStatus = byId("fStatus");
+  dom.onlyProblems = byId("onlyProblems");
 
-  // Exportera minimal version-info för felsökning
-  NS.dom.__VERSION = "v1.0-PP-SC-010-02";
+  dom.btnShowAll = byId("btnShowAll");
+  dom.btnClear = byId("btnClear");
+
+  dom.btnNew = byId("btnNew");
+  dom.btnDelete = byId("btnDelete");
+  dom.btnPurge = byId("btnPurge");
+
+  // Editor: module/area/course
+  dom.mod = byId("mod");
+  dom.area = byId("area");
+  dom.modList = byId("modList");
+  dom.areaList = byId("areaList");
+
+  dom.btnModAll = byId("btnModAll");
+  dom.btnModClear = byId("btnModClear");
+
+  dom.courseTitle = byId("courseTitle");
+  dom.courseStep = byId("courseStep");
+
+  dom.titleDisplay = byId("titleDisplay");
+  dom.subjectIdText = byId("subjectIdText");
+
+  // Goals
+  dom.goalsLevel = byId("goalsLevel");
+  dom.goals = byId("goals");
+
+  // Footer/buttons
+  dom.revertHint = byId("revertHint");
+  dom.btnRevert = byId("btnRevert");
+  dom.btnSaveDraft = byId("btnSaveDraft");
+  dom.btnSavePublish = byId("btnSavePublish");
+
+  // AI
+  dom.aiContent = byId("aiContent");
+  dom.aiCount = byId("aiCount");
+  dom.btnTestAI = byId("btnTestAI");
+  dom.btnGenAI = byId("btnGenAI");
+
+  dom.questionControls = byId("questionControls");
+  dom.aiQuestionType = byId("aiQuestionType");
+  dom.aiFeedbackEnabled = byId("aiFeedbackEnabled");
+
+  // Topbar
+  dom.btnLogout = byId("btnLogout");
+
+  // -----------------------------
+  // Missing map (för tydlig fail-closed)
+  // -----------------------------
+  const required = [
+    ["q", dom.q],
+    ["fStatus", dom.fStatus],
+    ["onlyProblems", dom.onlyProblems],
+    ["btnShowAll", dom.btnShowAll],
+    ["btnClear", dom.btnClear],
+    ["btnNew", dom.btnNew],
+    ["btnDelete", dom.btnDelete],
+    ["btnPurge", dom.btnPurge],
+
+    ["mod", dom.mod],
+    ["area", dom.area],
+    ["modList", dom.modList],
+    ["areaList", dom.areaList],
+    ["btnModAll", dom.btnModAll],
+    ["btnModClear", dom.btnModClear],
+
+    ["courseTitle", dom.courseTitle],
+    ["courseStep", dom.courseStep],
+    ["titleDisplay", dom.titleDisplay],
+    ["subjectIdText", dom.subjectIdText],
+
+    ["goalsLevel", dom.goalsLevel],
+    ["goals", dom.goals],
+
+    ["revertHint", dom.revertHint],
+    ["btnRevert", dom.btnRevert],
+    ["btnSaveDraft", dom.btnSaveDraft],
+    ["btnSavePublish", dom.btnSavePublish],
+
+    ["aiContent", dom.aiContent],
+    ["aiCount", dom.aiCount],
+    ["btnTestAI", dom.btnTestAI],
+    ["btnGenAI", dom.btnGenAI],
+    ["questionControls", dom.questionControls],
+    ["aiQuestionType", dom.aiQuestionType],
+    ["aiFeedbackEnabled", dom.aiFeedbackEnabled],
+
+    ["btnLogout", dom.btnLogout],
+  ];
+
+  dom.missing = required.filter((x) => !x[1]).map((x) => x[0]);
 })();
