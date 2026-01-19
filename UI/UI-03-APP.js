@@ -25,6 +25,9 @@ TILLÄGG (AO-ONBOARD-PLANS-01 | 1/5):
 TILLÄGG (MASTER-AO-WORKER-STACK-01 | 1/2):
 - Runtime-only Worker Config Banner (SYSTEM_ADMIN-only)
 - Ingen storage, ingen token, init av HRWorkerSDK om den är laddad
+
+PATCH (COMPAT):
+- ADD: HRApp.getSession() + HRApp.getRole() (bakåtkompat för äldre sidor)
 ============================================================ */
 
 (function () {
@@ -354,6 +357,44 @@ TILLÄGG (MASTER-AO-WORKER-STACK-01 | 1/2):
   }
 
   // ============================================================
+  // BACKCOMPAT (VÄG A) — äldre sidor förväntar getSession/getRole
+  // ============================================================
+
+  // Fail-closed: returnerar session eller null (kastar aldrig)
+  function getSession() {
+    try {
+      return mustGetSession();
+    } catch {
+      return null;
+    }
+  }
+
+  // Fail-closed: normaliserad rollvy som äldre UI kan använda
+  // OBS: SYSTEM_ADMIN = steward/read-only enligt policy.
+  function getRole() {
+    try {
+      const session = getSession();
+      const auth = session ? getAuth(session) : null;
+
+      const role = (auth && auth.role) ? String(auth.role) : "SYSTEM_ADMIN";
+      const empNo = (auth && typeof auth.empNo === "string") ? auth.empNo : "";
+      const scopeId = (auth && typeof auth.scopeId === "string") ? auth.scopeId : "";
+
+      const canWrite = role !== "SYSTEM_ADMIN";
+      return {
+        role: role,
+        roleId: role,          // alias (många sidor använder roleId)
+        empNo: empNo,
+        scopeId: scopeId,
+        canWrite: canWrite,
+        isReadOnly: !canWrite
+      };
+    } catch {
+      return { role: "SYSTEM_ADMIN", roleId: "SYSTEM_ADMIN", empNo: "", scopeId: "", canWrite: false, isReadOnly: true };
+    }
+  }
+
+  // ============================================================
   // PUBLIC ROUTES (explicit)
   // ============================================================
 
@@ -379,7 +420,7 @@ TILLÄGG (MASTER-AO-WORKER-STACK-01 | 1/2):
   function isHtmlLikeRoute(appRelPath) {
     const p = String(appRelPath || "").toLowerCase();
     if (!p) return false;
-    return p === "/" || p.endsWith(".html") || p.endsWith("/");
+    return p === "/" || p.endsWith(".html") || p.endsWith("/") ;
   }
 
   function normalizeRelPathForCheck(inputPath) {
@@ -603,7 +644,7 @@ TILLÄGG (MASTER-AO-WORKER-STACK-01 | 1/2):
     if (isLockedOutNow()) return { ok: false, error: "AUTH_LOCKED" };
 
     const rec = pol.PIN_HASHES_BY_ROLE[r];
-    if (!rec || typeof rec !== "object") return { ok: false, error: "AUTH_ROLE_NO_HASH" };
+    if (!rec || typeof rec === "object" === false) return { ok: false, error: "AUTH_ROLE_NO_HASH" };
 
     const salt = String(rec.salt || "");
     const expected = String(rec.hashHex || "").toLowerCase();
@@ -1324,6 +1365,11 @@ TILLÄGG (MASTER-AO-WORKER-STACK-01 | 1/2):
     safeJsonParse,
     readStorage,
     mustGetSession,
+
+    // BACKCOMPAT
+    getSession,
+    getRole,
+
     clearSession,
     getAuth,
     requireAuth,
