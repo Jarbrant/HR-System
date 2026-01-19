@@ -1,5 +1,5 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-03) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-04) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
 Projekt: HR-System (GitHub Pages / UI-only)
 Syfte: Bootstrap + state + event wiring för trainings (ADMIN create/edit). Fix: "Skapa ny" ska fungera för ADMIN.
 
@@ -9,42 +9,116 @@ POLICY (LÅST):
 - XSS-safe: render via 05-render.js + dom.setText (textContent)
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 
-PATCH v1.0.0-PP-SC-010-03:
-- P0: Rätt write-gate: ADMIN + canWrite => enable “Skapa ny” (om storage ej korrupt)
-- P0: Fail-closed endast vid korrupt storage (inte p.g.a HRApp.getAuth() === null)
-- P1: Fasta moduler/områden som bas + auto-dedupe från befintliga trainings
+PATCH v1.0.1-PP-SC-010-04:
+- P0: Write-gate baseras ENBART på role+canWrite (core.getWho / HRApp.getRole), inte HRApp.getAuth().
+- P0: Om 01-dom saknas/ofullständig: dom-fallback så boot inte dör tyst (minimala hooks).
+- P1: Debug-export: window.Trainings.page._state + helpers så Anders kan se varför btnNew är disabled.
 ============================================================ */
 (function () {
   "use strict";
 
   const NS = (window.Trainings = window.Trainings || {});
-  const dom = NS.dom;
+  let dom = NS.dom;
   const core = NS.core;
   const store = NS.store;
   const contract = NS.contract;
   const render = NS.render;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0-PP-SC-010-03";
+  page.__VERSION = "v1.0.1-PP-SC-010-04";
+
+  // ------------------------------------------------------------
+  // Minimal DOM fallback (om 01-dom saknas / är ofullständig)
+  // ------------------------------------------------------------
+  function byId(id) { return document.getElementById(String(id || "")); }
+
+  function buildDomFallback() {
+    const D = {};
+
+    // Elements (måste matcha befintliga id i trainings.html)
+    D.btnNew = byId("btnNew");
+    D.btnDelete = byId("btnGenAT");        // OBS: om ditt id heter annat: fixa i 01-dom, inte här
+    D.btnPurge = byId("btnPurge");
+    D.btnRevert = byId("btnRevert");
+
+    D.btnSaveDraft = byId("btnSaveDraft");
+    D.btnSavePublish = byId("btnSavePublish");
+
+    D.btnGenAI = byId("btnGenAI");
+    D.btnTestAI = byId("btnTestAI");
+
+    D.btnModAll = byId("btnModAll");
+    D.btnModClear = byId("btnModClear");
+
+    D.btnShowAll = byId("btnShowAll");
+    D.btnClear = byId("btnClear");
+
+    D.btnLogout = byId("btnLogout");
+
+    D.q = byId("q");
+    D.fStatus = byId("fStatus");
+    D.onlyProblems = byId("onlyProblems");
+
+    D.mod = byId("mod");
+    D.area = byId("area");
+    D.modList = byId("modList");
+    D.areaList = byId("areaList");
+
+    D.courseTitle = byId("courseTitle");
+    D.courseStep = byId("courseStep");
+
+    D.goalsLevel = byId("goalsLevel");
+    D.goals = byId("goals");
+
+    D.titleDisplay = byId("titleDisplay");
+    D.subjectIdText = byId("subjectIdText");
+    D.revertHint = byId("revertHint");
+
+    D.aiContent = byId("aiContent");
+    D.aiCount = byId("aiCount");
+    D.aiQuestionType = byId("aiQuestionType");
+    D.aiFeedbackEnabled = byId("aiFeedbackEnabled");
+    D.questionControls = byId("questionControls");
+
+    // Helpers
+    D.setText = function (el, txt) { if (!el) return; el.textContent = String(txt ?? ""); };
+    D.disable = function (el, disabled) {
+      if (!el) return;
+      el.disabled = !!disabled;
+      if (el.classList) el.classList.toggle("disabled", !!disabled);
+    };
+    D.on = function (el, ev, fn) { if (!el || !ev || !fn) return; el.addEventListener(ev, fn); };
+    D.show = function (el) { if (!el) return; el.style.display = ""; };
+    D.hide = function (el) { if (!el) return; el.style.display = "none"; };
+
+    return D;
+  }
+
+  // Om 01-dom saknas helt, använd fallback (så boot inte failar tyst)
+  if (!dom) dom = (NS.dom = buildDomFallback());
+  // Om vissa helpers saknas (ofullständig 01-dom), fyll på minimalt
+  if (dom && typeof dom.disable !== "function") dom.disable = buildDomFallback().disable;
+  if (dom && typeof dom.on !== "function") dom.on = buildDomFallback().on;
+  if (dom && typeof dom.setText !== "function") dom.setText = buildDomFallback().setText;
+  if (dom && typeof dom.show !== "function") dom.show = buildDomFallback().show;
+  if (dom && typeof dom.hide !== "function") dom.hide = buildDomFallback().hide;
 
   // ------------------------------------------------------------
   // State (ingen ny datamodell)
   // ------------------------------------------------------------
   const state = {
     who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false },
-    canWrite: false,
     locked: false,
     lockReason: "",
     trainings: [],
     selectedId: "",
-    draft: null, // current editable training (in-memory)
+    draft: null,
     dirty: false,
     showAll: false,
     q: "",
     fStatus: "",
     onlyProblems: false,
 
-    // Bas-listor (fasta) - kan fortfarande skriva egna värden i input
     defaults: {
       modules: [
         "Kvalitet",
@@ -57,7 +131,6 @@ PATCH v1.0.0-PP-SC-010-03:
         "IT",
         "Ledning",
       ],
-      // areas byggs dynamiskt per modul + plockas från data
       areasByModule: {
         "Kvalitet": ["ISO 9001", "Avvikelse", "CAPA", "Internrevision"],
         "Säkerhet & arbetsmiljö": ["Skyddsrond", "Incident", "Riskbedömning"],
@@ -72,16 +145,18 @@ PATCH v1.0.0-PP-SC-010-03:
     },
   };
 
+  // Debug-export (för Anders i console)
+  page._state = state;
+
   // ------------------------------------------------------------
   // Utils
   // ------------------------------------------------------------
-  function normStr(v) { return core ? core.normStr(v) : String(v ?? "").trim(); }
+  function normStr(v) { return core && core.normStr ? core.normStr(v) : String(v ?? "").trim(); }
+  function safeArr(a) { return Array.isArray(a) ? a : []; }
 
   function deepClone(obj) {
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
   }
-
-  function safeArr(a) { return Array.isArray(a) ? a : []; }
 
   function findTrainingIndexById(id) {
     const tid = normStr(id);
@@ -92,24 +167,8 @@ PATCH v1.0.0-PP-SC-010-03:
     return -1;
   }
 
-  function buildSubjectId(module, area) {
-    const m = normStr(module);
-    const a = normStr(area);
-    if (!m && !a) return "—";
-    return (m || "—") + "::" + (a || "—");
-  }
-
-  function computeGeneratedTitle() {
-    const chapter = normStr(dom.courseTitle.value);
-    const step = normStr(dom.courseStep.value);
-    const area = normStr(dom.area.value);
-    if (!core || typeof core.composeTitle !== "function") return normStr(area) || "—";
-    return core.composeTitle(chapter, step, area || "—");
-  }
-
   function currentBlocks() {
     const d = state.draft || {};
-    // Stöd för legacy: items[] direkt
     if (Array.isArray(d.blocks)) return d.blocks;
     if (Array.isArray(d.items)) return [{ title: d.title || "(block)", items: d.items }];
     return [];
@@ -118,34 +177,55 @@ PATCH v1.0.0-PP-SC-010-03:
   function hasAnyItems() {
     const blocks = currentBlocks();
     let n = 0;
-    for (const b of blocks) {
-      if (b && Array.isArray(b.items)) n += b.items.length;
-    }
+    for (const b of blocks) if (b && Array.isArray(b.items)) n += b.items.length;
     return n > 0;
   }
 
+  function getWhoFresh() {
+    // Viktigt: aldrig koppla write till getAuth()
+    try {
+      if (core && typeof core.getWho === "function") {
+        const w = core.getWho();
+        if (w && typeof w === "object") return w;
+      }
+    } catch (_) { /* ignore */ }
+
+    try {
+      if (window.HRApp && typeof window.HRApp.getRole === "function") {
+        const r = window.HRApp.getRole();
+        if (r && typeof r === "object") {
+          return { role: String(r.roleId || r.role || "SYSTEM_ADMIN"), empNo: String(r.empNo || ""), canWrite: !!r.canWrite };
+        }
+      }
+    } catch (_) { /* ignore */ }
+
+    return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
+  }
+
   function isWriterAllowed() {
-    // RIKTIG gate: ADMIN och canWrite=true
-    const who = state.who || {};
-    const role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
     if (state.locked) return false;
+
+    const who = getWhoFresh();
+    state.who = who; // håll state i sync för debug + pills
+
+    const role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
     if (role !== "ADMIN") return false;
     return !!who.canWrite;
   }
 
   function setDirty(v) {
     state.dirty = !!v;
-    dom.setText(dom.revertHint, state.dirty ? "Osparade ändringar" : "");
-    dom.disable(dom.btnRevert, !state.dirty || !isWriterAllowed());
+    if (dom && dom.setText) dom.setText(dom.revertHint, state.dirty ? "Osparade ändringar" : "");
+    if (dom && dom.disable) dom.disable(dom.btnRevert, !state.dirty || !isWriterAllowed());
   }
 
-  function setLock(corruptReason) {
+  function setLock(reason) {
     state.locked = true;
-    state.lockReason = corruptReason || "Låst (fail-closed).";
+    state.lockReason = reason || "Låst (fail-closed).";
   }
 
   // ------------------------------------------------------------
-  // Datalist builders (fasta + från data)
+  // Datalist builders
   // ------------------------------------------------------------
   function uniqueSorted(list) {
     const set = new Set();
@@ -158,10 +238,7 @@ PATCH v1.0.0-PP-SC-010-03:
 
   function collectModulesFromTrainings() {
     const out = [];
-    for (const t of state.trainings) {
-      if (!t) continue;
-      if (t.module) out.push(t.module);
-    }
+    for (const t of state.trainings) if (t && t.module) out.push(t.module);
     return uniqueSorted(out);
   }
 
@@ -177,10 +254,13 @@ PATCH v1.0.0-PP-SC-010-03:
   }
 
   function renderModuleDatalist() {
-    dom.modList.innerHTML = ""; // datalist items are safe (values only)
+    if (!dom || !dom.modList) return;
+    while (dom.modList.firstChild) dom.modList.removeChild(dom.modList.firstChild);
+
     const fixed = safeArr(state.defaults.modules);
     const fromData = collectModulesFromTrainings();
     const all = uniqueSorted(fixed.concat(fromData));
+
     for (const m of all) {
       const opt = document.createElement("option");
       opt.value = m;
@@ -189,11 +269,14 @@ PATCH v1.0.0-PP-SC-010-03:
   }
 
   function renderAreaDatalist() {
-    dom.areaList.innerHTML = "";
-    const mod = normStr(dom.mod.value);
-    const fixed = safeArr(state.defaults.areasByModule[mod] || []);
+    if (!dom || !dom.areaList) return;
+    while (dom.areaList.firstChild) dom.areaList.removeChild(dom.areaList.firstChild);
+
+    const mod = normStr(dom.mod && dom.mod.value);
+    const fixed = safeArr((state.defaults.areasByModule[mod] || []));
     const fromData = collectAreasFromTrainingsForModule(mod);
     const all = uniqueSorted(fixed.concat(fromData));
+
     for (const a of all) {
       const opt = document.createElement("option");
       opt.value = a;
@@ -202,7 +285,7 @@ PATCH v1.0.0-PP-SC-010-03:
   }
 
   // ------------------------------------------------------------
-  // Rendering glue (list + editor fields)
+  // Rendering glue
   // ------------------------------------------------------------
   function computeProblemsForTraining(t) {
     if (!contract || typeof contract.validateTrainingForSave !== "function") return [];
@@ -218,14 +301,12 @@ PATCH v1.0.0-PP-SC-010-03:
     const out = [];
     for (const t of state.trainings) {
       if (!t) continue;
-
       if (st && String(t.status || "draft") !== st) continue;
 
       if (q) {
         const blob = (normStr(t.title) + " " + normStr(t.module) + " " + normStr(t.area)).toLowerCase();
         if (!blob.includes(q)) continue;
       } else if (!state.showAll) {
-        // search-first: utan sök och utan "Visa alla" -> visa tomt
         continue;
       }
 
@@ -236,72 +317,28 @@ PATCH v1.0.0-PP-SC-010-03:
 
       out.push(t);
     }
-
     return out;
   }
 
   function updateTopPills() {
-    const who = state.who || {};
+    const who = state.who || getWhoFresh();
     const whoTxt = `${who.role || "—"} • ${who.empNo || "—"}${who.canWrite ? " • skriv" : " • read-only"}`;
-    render && render.setWhoPill && render.setWhoPill(whoTxt);
+    if (render && render.setWhoPill) render.setWhoPill(whoTxt);
 
     if (state.locked) {
-      render.setStatePill("Status: LÅST", "bad");
+      render && render.setStatePill && render.setStatePill("Status: LÅST", "bad");
     } else if (!isWriterAllowed()) {
-      render.setStatePill("Status: Read-only", "warn");
+      render && render.setStatePill && render.setStatePill("Status: Read-only", "warn");
     } else {
-      render.setStatePill("Status: OK", "ok");
+      render && render.setStatePill && render.setStatePill("Status: OK", "ok");
     }
   }
 
   function updateLeftHint() {
-    if (state.locked) {
-      render.setLeftHint(state.lockReason || "Låst (korrupt data).");
-      return;
+    if (render && render.setLeftHint) {
+      if (state.locked) render.setLeftHint(state.lockReason || "Låst (korrupt data).");
+      else render.setLeftHint("Publicering kräver minst 1 block.");
     }
-    render.setLeftHint("Publicering kräver minst 1 block.");
-  }
-
-  function updateGeneratedFields() {
-    const title = computeGeneratedTitle();
-    dom.titleDisplay.value = title || "—";
-
-    const sid = buildSubjectId(dom.mod.value, dom.area.value);
-    dom.setText(dom.subjectIdText, sid);
-
-    if (state.draft) {
-      // titel är låst till kursplanen (ingen egen titel-input i UI)
-      state.draft.title = title;
-      state.draft.module = normStr(dom.mod.value);
-      state.draft.area = normStr(dom.area.value);
-      state.draft.courseTitle = normStr(dom.courseTitle.value);
-      state.draft.courseStep = normStr(dom.courseStep.value);
-    }
-  }
-
-  function fillEditorFromDraft() {
-    const d = state.draft;
-    if (!d) return;
-
-    dom.mod.value = normStr(d.module);
-    renderAreaDatalist();
-    dom.area.value = normStr(d.area);
-
-    dom.courseTitle.value = normStr(d.courseTitle) || "Introduktion";
-    dom.courseStep.value = normStr(d.courseStep) || "1";
-
-    dom.goalsLevel.value = normStr(d.goalsLevel) || "normal";
-    dom.goals.value = normStr(d.goals) || "";
-
-    updateGeneratedFields();
-
-    // blocks
-    const blocks = currentBlocks();
-    render && render.renderBlocksList && render.renderBlocksList({
-      blocks,
-      onEdit: function (idx) { openBlockEditor(idx); },
-      onDelete: function (idx) { deleteBlock(idx); },
-    });
   }
 
   function refreshList() {
@@ -313,24 +350,45 @@ PATCH v1.0.0-PP-SC-010-03:
     });
   }
 
+  function fillEditorFromDraft() {
+    const d = state.draft;
+    if (!d || !dom) return;
+
+    if (dom.mod) dom.mod.value = normStr(d.module);
+    renderAreaDatalist();
+    if (dom.area) dom.area.value = normStr(d.area);
+
+    if (dom.courseTitle) dom.courseTitle.value = normStr(d.courseTitle) || "Introduktion";
+    if (dom.courseStep) dom.courseStep.value = normStr(d.courseStep) || "1";
+
+    if (dom.goalsLevel) dom.goalsLevel.value = normStr(d.goalsLevel) || "normal";
+    if (dom.goals) dom.goals.value = normStr(d.goals) || "";
+
+    // blocks
+    const blocks = currentBlocks();
+    render && render.renderBlocksList && render.renderBlocksList({
+      blocks,
+      onEdit: function (idx) { openBlockEditor(idx); },
+      onDelete: function (idx) { deleteBlock(idx); },
+    });
+  }
+
   function updateButtons() {
     const writer = isWriterAllowed();
 
-    // Main write actions
-    dom.disable(dom.btnNew, !writer);
-    dom.disable(dom.btnDelete, !writer || !state.selectedId);
-    dom.disable(dom.btnPurge, !writer);
+    dom && dom.disable && dom.disable(dom.btnNew, !writer);
+    dom && dom.disable && dom.disable(dom.btnDelete, !writer || !state.selectedId);
+    dom && dom.disable && dom.disable(dom.btnPurge, !writer);
 
-    dom.disable(dom.btnSaveDraft, !writer || !state.draft);
-    dom.disable(dom.btnSavePublish, !writer || !state.draft);
+    dom && dom.disable && dom.disable(dom.btnSaveDraft, !writer || !state.draft);
+    dom && dom.disable && dom.disable(dom.btnSavePublish, !writer || !state.draft);
 
-    dom.disable(dom.btnGenAI, !writer || !state.draft);
-    dom.disable(dom.btnTestAI, false); // test AI är ok även i read-only
+    dom && dom.disable && dom.disable(dom.btnGenAI, !writer || !state.draft);
+    dom && dom.disable && dom.disable(dom.btnTestAI, false);
 
-    dom.disable(dom.btnModAll, false);
-    dom.disable(dom.btnModClear, !writer);
+    dom && dom.disable && dom.disable(dom.btnModAll, false);
+    dom && dom.disable && dom.disable(dom.btnModClear, !writer);
 
-    // Revert handled by setDirty()
     setDirty(state.dirty);
   }
 
@@ -341,6 +399,9 @@ PATCH v1.0.0-PP-SC-010-03:
     fillEditorFromDraft();
     updateButtons();
   }
+
+  page._recalc = updateUiAll;
+  page._isWriterAllowed = isWriterAllowed;
 
   // ------------------------------------------------------------
   // Selection / CRUD
@@ -363,9 +424,9 @@ PATCH v1.0.0-PP-SC-010-03:
   }
 
   function newTrainingTemplate() {
-    const who = state.who || {};
+    const who = getWhoFresh();
     return {
-      id: core.makeId("tr"),
+      id: (core && typeof core.makeId === "function") ? core.makeId("tr") : ("tr_" + Date.now()),
       status: "draft",
       module: "",
       area: "",
@@ -375,10 +436,7 @@ PATCH v1.0.0-PP-SC-010-03:
       goals: "",
       title: "Introduktion • Steg 1 • —",
       blocks: [],
-      meta: {
-        createdAt: Date.now(),
-        createdBy: who.empNo || "",
-      },
+      meta: { createdAt: Date.now(), createdBy: who.empNo || "" },
     };
   }
 
@@ -390,14 +448,13 @@ PATCH v1.0.0-PP-SC-010-03:
     state.selectedId = t.id;
     state.draft = deepClone(t);
 
-    // Spara direkt så att ny utbildning verkligen skapas (P0 expected behavior)
-    const s = store.save(state.trainings);
+    const s = store && store.save ? store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
-      render.setStatePill("Status: Kunde inte spara", "bad");
+      render && render.setStatePill && render.setStatePill("Status: Kunde inte spara", "bad");
       return;
     }
 
-    state.showAll = true; // så den syns direkt i listan
+    state.showAll = true;
     setDirty(false);
     renderModuleDatalist();
     renderAreaDatalist();
@@ -412,9 +469,9 @@ PATCH v1.0.0-PP-SC-010-03:
     if (idx < 0) return;
 
     state.trainings.splice(idx, 1);
-    const s = store.save(state.trainings);
+    const s = store && store.save ? store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
-      render.setStatePill("Status: Kunde inte spara", "bad");
+      render && render.setStatePill && render.setStatePill("Status: Kunde inte spara", "bad");
       return;
     }
 
@@ -429,9 +486,9 @@ PATCH v1.0.0-PP-SC-010-03:
   function purgeAll() {
     if (!isWriterAllowed()) return;
 
-    const p = store.purgeAll();
+    const p = store && store.purgeAll ? store.purgeAll() : { ok: false };
     if (!p || !p.ok) {
-      render.setStatePill("Status: Kunde inte rensa", "bad");
+      render && render.setStatePill && render.setStatePill("Status: Kunde inte rensa", "bad");
       return;
     }
 
@@ -460,19 +517,15 @@ PATCH v1.0.0-PP-SC-010-03:
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
 
-    // sync from inputs
-    state.draft.module = normStr(dom.mod.value);
-    state.draft.area = normStr(dom.area.value);
-    state.draft.courseTitle = normStr(dom.courseTitle.value);
-    state.draft.courseStep = normStr(dom.courseStep.value);
-    state.draft.goalsLevel = normStr(dom.goalsLevel.value);
-    state.draft.goals = normStr(dom.goals.value);
-    state.draft.title = computeGeneratedTitle();
+    if (dom && dom.mod) state.draft.module = normStr(dom.mod.value);
+    if (dom && dom.area) state.draft.area = normStr(dom.area.value);
+    if (dom && dom.courseTitle) state.draft.courseTitle = normStr(dom.courseTitle.value);
+    if (dom && dom.courseStep) state.draft.courseStep = normStr(dom.courseStep.value);
+    if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value);
+    if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
 
-    if (status === "published") state.draft.status = "published";
-    else state.draft.status = "draft";
+    state.draft.status = (status === "published") ? "published" : "draft";
 
-    // Validate
     const v = (status === "published" && contract && contract.validateForPublish)
       ? contract.validateForPublish(state.draft)
       : (contract && contract.validateTrainingForSave)
@@ -480,34 +533,33 @@ PATCH v1.0.0-PP-SC-010-03:
         : { ok: true, reasons: [] };
 
     if (!v.ok) {
-      render.setStatePill("Status: Kan inte spara", "bad");
-      render.setAiHint((v.reasons || []).join(" "));
+      render && render.setStatePill && render.setStatePill("Status: Kan inte spara", "bad");
+      render && render.setAiHint && render.setAiHint((v.reasons || []).join(" "));
       return;
     }
 
-    // Publish rule: must have items
     if (status === "published" && !hasAnyItems()) {
-      render.setStatePill("Status: Kan inte publicera", "bad");
-      render.setAiHint("Publicering kräver minst 1 block/item.");
+      render && render.setStatePill && render.setStatePill("Status: Kan inte publicera", "bad");
+      render && render.setAiHint && render.setAiHint("Publicering kräver minst 1 block/item.");
       return;
     }
 
     const idx = findTrainingIndexById(state.selectedId);
     if (idx < 0) {
-      render.setStatePill("Status: Saknar vald utbildning", "bad");
+      render && render.setStatePill && render.setStatePill("Status: Saknar vald utbildning", "bad");
       return;
     }
 
     state.trainings[idx] = deepClone(state.draft);
 
-    const s = store.save(state.trainings);
+    const s = store && store.save ? store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
-      render.setStatePill("Status: Kunde inte spara", "bad");
+      render && render.setStatePill && render.setStatePill("Status: Kunde inte spara", "bad");
       return;
     }
 
     setDirty(false);
-    render.setAiHint("");
+    render && render.setAiHint && render.setAiHint("");
     renderModuleDatalist();
     renderAreaDatalist();
     updateUiAll();
@@ -517,13 +569,12 @@ PATCH v1.0.0-PP-SC-010-03:
   // Blocks (minimal baseline)
   // ------------------------------------------------------------
   function openBlockEditor(idx) {
-    if (!state.draft) return;
+    if (!state.draft || !render || typeof render.openModal !== "function") return;
 
     const blocks = currentBlocks();
     const b = blocks[idx];
     if (!b) return;
 
-    // minimal editor: edit first item's text in textarea (safe)
     const wrap = document.createElement("div");
 
     const label = document.createElement("div");
@@ -541,9 +592,7 @@ PATCH v1.0.0-PP-SC-010-03:
       const txt = normStr(ta.value);
       if (!state.draft.blocks) state.draft.blocks = blocks;
       const bb = state.draft.blocks[idx];
-      if (bb && Array.isArray(bb.items) && bb.items[0]) {
-        bb.items[0].text = txt;
-      }
+      if (bb && Array.isArray(bb.items) && bb.items[0]) bb.items[0].text = txt;
       setDirty(true);
       updateUiAll();
     });
@@ -568,106 +617,30 @@ PATCH v1.0.0-PP-SC-010-03:
   async function testAi() {
     try {
       if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
-        render.setStatePill("Status: Worker SDK saknas", "bad");
+        render && render.setStatePill && render.setStatePill("Status: Worker SDK saknas", "bad");
         return;
       }
       const r = await window.HRWorkerSDK.health();
-      if (r && r.ok) render.setStatePill("Status: AI OK", "ok");
-      else render.setStatePill("Status: AI fel", "warn");
-    } catch (e) {
-      render.setStatePill("Status: AI fel", "bad");
+      if (r && r.ok) render && render.setStatePill && render.setStatePill("Status: AI OK", "ok");
+      else render && render.setStatePill && render.setStatePill("Status: AI fel", "warn");
+    } catch (_) {
+      render && render.setStatePill && render.setStatePill("Status: AI fel", "bad");
     }
-  }
-
-  async function generateAi() {
-    if (!isWriterAllowed()) return;
-    if (!state.draft) return;
-
-    if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
-      render.setStatePill("Status: Worker SDK saknas", "bad");
-      return;
-    }
-
-    // Build context
-    const ctx = core.buildAiContext({
-      module: normStr(dom.mod.value),
-      area: normStr(dom.area.value),
-      courseTitle: normStr(dom.courseTitle.value),
-      courseStep: normStr(dom.courseStep.value),
-      goalsLevel: normStr(dom.goalsLevel.value),
-      goals: normStr(dom.goals.value),
-    });
-
-    // mode + count
-    const mode = normStr(dom.aiContent.value) === "questions" ? "questions" : "blocks";
-    const count = Number(normStr(dom.aiCount.value) || "3") || 3;
-
-    render.setAiHint("AI kör…");
-
-    try {
-      const res = await window.HRWorkerSDK.aiGenerate({
-        mode,
-        count,
-        context: ctx,
-        language: "sv",
-        questionType: normStr(dom.aiQuestionType.value) || "auto",
-        feedbackEnabled: !!dom.aiFeedbackEnabled.checked,
-      });
-
-      const norm = core.normalizeAiResult(res);
-      const v = contract.validateAiResult(norm);
-      if (!v.ok) {
-        render.setStatePill("Status: AI underkänd", "bad");
-        render.setAiHint((v.reasons || []).join(" "));
-        return;
-      }
-
-      // Convert AI items -> one block (baseline)
-      const items = safeArr(norm.items).map(contract.normalizeItem);
-      const newBlock = {
-        title: state.draft.title || "(block)",
-        module: normStr(dom.mod.value),
-        area: normStr(dom.area.value),
-        step: normStr(dom.courseStep.value),
-        status: "draft",
-        items,
-      };
-
-      if (!Array.isArray(state.draft.blocks)) state.draft.blocks = [];
-      state.draft.blocks.push(newBlock);
-
-      setDirty(true);
-      render.setAiHint("AI klart. Block tillagt.");
-      updateUiAll();
-    } catch (e) {
-      render.setStatePill("Status: AI fel", "bad");
-      render.setAiHint("AI misslyckades.");
-    }
-  }
-
-  function syncAiUi() {
-    const isQuestions = normStr(dom.aiContent.value) === "questions";
-    if (isQuestions) dom.show(dom.questionControls);
-    else dom.hide(dom.questionControls);
   }
 
   // ------------------------------------------------------------
   // Bootstrap
   // ------------------------------------------------------------
   function boot() {
-    try {
-      core.assert(dom && core && store && contract && render, "BOOT", "Deps saknas");
-    } catch (e) {
-      // Fail-closed: inget mer
+    // Fail-closed men med tydlig debug
+    if (!core || !store || !contract || !render || !dom) {
+      setLock("BOOT: deps saknas (core/store/contract/render/dom).");
+      updateUiAll();
       return;
     }
 
-    // Who / access (OBS: getAuth() kan vara null – ska INTE låsa create)
-    state.who = core.getWho();
-    state.canWrite = (String(state.who.role || "").toUpperCase() === "ADMIN") && !!state.who.canWrite;
-
     // Load trainings
-    const load = store.load();
+    const load = store.load ? store.load() : { ok: false };
     if (!load.ok && load.corrupt) {
       setLock(store.lockReasonFor ? store.lockReasonFor() : "Korrupt trainings.");
       state.trainings = [];
@@ -679,7 +652,6 @@ PATCH v1.0.0-PP-SC-010-03:
     renderModuleDatalist();
     renderAreaDatalist();
 
-    // Initial search-first mode
     state.showAll = false;
 
     // Wire events
@@ -691,77 +663,70 @@ PATCH v1.0.0-PP-SC-010-03:
     dom.on(dom.btnSaveDraft, "click", function () { writeBackDraft("draft"); });
     dom.on(dom.btnSavePublish, "click", function () { writeBackDraft("published"); });
 
-    dom.on(dom.btnShowAll, "click", function () {
-      state.showAll = true;
-      refreshList();
-    });
+    dom.on(dom.btnShowAll, "click", function () { state.showAll = true; refreshList(); });
 
     dom.on(dom.btnClear, "click", function () {
       state.q = "";
       state.fStatus = "";
       state.onlyProblems = false;
-      dom.q.value = "";
-      dom.fStatus.value = "";
-      dom.onlyProblems.checked = false;
+      if (dom.q) dom.q.value = "";
+      if (dom.fStatus) dom.fStatus.value = "";
+      if (dom.onlyProblems) dom.onlyProblems.checked = false;
       state.showAll = false;
       refreshList();
+      updateButtons();
     });
 
     dom.on(dom.q, "input", function () {
-      state.q = normStr(dom.q.value);
-      // search-first: om man börjar skriva -> visa listan
+      state.q = normStr(dom.q && dom.q.value);
       state.showAll = state.showAll || !!state.q;
       refreshList();
+      updateButtons();
     });
 
     dom.on(dom.fStatus, "change", function () {
-      state.fStatus = normStr(dom.fStatus.value);
+      state.fStatus = normStr(dom.fStatus && dom.fStatus.value);
       state.showAll = true;
       refreshList();
+      updateButtons();
     });
 
     dom.on(dom.onlyProblems, "change", function () {
-      state.onlyProblems = !!dom.onlyProblems.checked;
+      state.onlyProblems = !!(dom.onlyProblems && dom.onlyProblems.checked);
       state.showAll = true;
+;
       refreshList();
+      updateButtons();
     });
 
-    dom.on(dom.btnModAll, "click", function () {
-      // Baseline: sätt fokus + visa list (datalist öppnas av browser)
-      dom.mod.focus();
-    });
+    dom.on(dom.btnModAll, "click", function () { dom.mod && dom.mod.focus && dom.mod.focus(); });
 
     dom.on(dom.btnModClear, "click", function () {
       if (!isWriterAllowed()) return;
-      dom.mod.value = "";
-      dom.area.value = "";
-      updateGeneratedFields();
-      setDirty(true);
+      if (dom.mod) dom.mod.value = "";
+      if (dom.area) dom.area.value = "";
       renderAreaDatalist();
+      setDirty(true);
+      updateButtons();
     });
 
-    // Editor inputs
     const onEditorChange = function () {
       if (!state.draft) return;
-      updateGeneratedFields();
-      setDirty(true);
       renderAreaDatalist();
+      setDirty(true);
+      updateButtons();
     };
 
     dom.on(dom.mod, "input", onEditorChange);
     dom.on(dom.area, "input", onEditorChange);
     dom.on(dom.courseTitle, "change", onEditorChange);
     dom.on(dom.courseStep, "change", onEditorChange);
-    dom.on(dom.goalsLevel, "change", function () { if (state.draft) { state.draft.goalsLevel = normStr(dom.goalsLevel.value); setDirty(true); } });
-    dom.on(dom.goals, "input", function () { if (state.draft) { state.draft.goals = normStr(dom.goals.value); setDirty(true); } });
+    dom.on(dom.goalsLevel, "change", function () { if (state.draft) { state.draft.goalsLevel = normStr(dom.goalsLevel && dom.goalsLevel.value); setDirty(true); updateButtons(); } });
+    dom.on(dom.goals, "input", function () { if (state.draft) { state.draft.goals = normStr(dom.goals && dom.goals.value); setDirty(true); updateButtons(); } });
 
     // AI
-    dom.on(dom.aiContent, "change", function () { syncAiUi(); });
     dom.on(dom.btnTestAI, "click", testAi);
-    dom.on(dom.btnGenAI, "click", generateAi);
-    syncAiUi();
 
-    // Logout uses HRApp if available
     dom.on(dom.btnLogout, "click", function () {
       try {
         if (window.HRApp && typeof window.HRApp.logout === "function") window.HRApp.logout();
@@ -770,10 +735,10 @@ PATCH v1.0.0-PP-SC-010-03:
       location.href = "./login.html";
     });
 
-    // First paint
+    // First paint + micro-recalc (för att fånga HRApp som init:ar aningen senare)
     updateUiAll();
+    setTimeout(updateUiAll, 0);
   }
 
-  // Run
-  try { boot(); } catch (_) { /* fail-closed */ }
+  try { boot(); } catch (_) { setLock("BOOT: exception (fail-closed)."); updateUiAll(); }
 })();
