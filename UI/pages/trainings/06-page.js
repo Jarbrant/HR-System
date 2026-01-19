@@ -9,10 +9,11 @@ POLICY (LÅST):
 - XSS-safe: render via 05-render.js + dom.setText (textContent)
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 
-PATCH v1.0.2-PP-SC-010-04 (AUTOPATCH):
-- P0: ADMIN ska bli writer även om HRApp.getRole()/getWho saknar canWrite (men respektera canWrite===false).
-- P0: Fallback-DOM: btnDelete-id var fel (btnGenAT) -> btnDelete.
-- P1: Micro-recalc (50/300ms) för att fånga HRApp-session som initieras strax efter boot.
+PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
+- P0: Validera core.getWho() (ignorera placeholder-roll "_" / "—" / tom) och fall back till HRApp.getRole().
+      Orsak: annars blir ADMIN writer felaktigt read-only trots korrekt HRApp-session.
+- P0: Behåller fail-closed: om canWrite===false uttryckligen => read-only även för ADMIN.
+- (Behåller tidigare fixar: btnDelete-id, micro-recalc)
 ============================================================ */
 (function () {
   "use strict";
@@ -25,7 +26,7 @@ PATCH v1.0.2-PP-SC-010-04 (AUTOPATCH):
   const render = NS.render;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0.2-PP-SC-010-04";
+  page.__VERSION = "v1.0.3-PP-SC-010-04";
 
   // ------------------------------------------------------------
   // Minimal DOM fallback (om 01-dom saknas / är ofullständig)
@@ -183,12 +184,40 @@ PATCH v1.0.2-PP-SC-010-04 (AUTOPATCH):
 
   function upper(v) { return String(v ?? "").toUpperCase(); }
 
+  // P0: skydd mot placeholder/ogiltiga roller från core.getWho()
+  function isBadRoleToken(roleLike) {
+    const r = String(roleLike ?? "").trim();
+    if (!r) return true;
+    if (r === "_" || r === "—" || r === "-" || r.toLowerCase() === "unknown") return true;
+    return false;
+  }
+
+  function normalizeWhoObject(w) {
+    if (!w || typeof w !== "object") return null;
+
+    const role = upper(w.roleId || w.role || "");
+    const empNo = String(w.empNo || w.emp || w.employeeNo || "");
+    const hasCanWrite = Object.prototype.hasOwnProperty.call(w, "canWrite");
+    const canWrite = hasCanWrite ? !!w.canWrite : undefined;
+
+    if (isBadRoleToken(role)) return null;
+
+    // Fail-closed: om canWrite är uttryckligen false ska det respekteras.
+    return { role, empNo, canWrite };
+  }
+
   function getWhoFresh() {
     // Viktigt: writer kopplas till ADMIN (tolerant), men fail-closed om explicit canWrite===false.
+    // P0: core.getWho kan ge placeholder "_" => ignorera och fall back till HRApp.getRole.
     try {
       if (core && typeof core.getWho === "function") {
         const w = core.getWho();
-        if (w && typeof w === "object") return w;
+        const n = normalizeWhoObject(w);
+        if (n) {
+          // Om canWrite saknas -> ADMIN är writer
+          const cw = (typeof n.canWrite === "boolean") ? n.canWrite : (n.role === "ADMIN");
+          return { role: n.role, empNo: n.empNo, canWrite: cw };
+        }
       }
     } catch (_) { /* ignore */ }
 
@@ -199,13 +228,16 @@ PATCH v1.0.2-PP-SC-010-04 (AUTOPATCH):
         // r kan vara string eller object, vi är toleranta
         if (typeof r === "string") {
           const role = upper(r);
+          if (isBadRoleToken(role)) return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
           return { role, empNo: "", canWrite: role === "ADMIN" };
         }
 
         if (r && typeof r === "object") {
           const role = upper(r.roleId || r.role || "SYSTEM_ADMIN");
           const empNo = String(r.empNo || r.emp || r.employeeNo || "");
-          // P0 FIX: om canWrite saknas -> ADMIN är writer
+          if (isBadRoleToken(role)) return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
+
+          // om canWrite saknas -> ADMIN är writer
           const hasCanWrite = Object.prototype.hasOwnProperty.call(r, "canWrite");
           const canWrite = hasCanWrite ? !!r.canWrite : (role === "ADMIN");
           return { role, empNo, canWrite };
@@ -755,7 +787,7 @@ PATCH v1.0.2-PP-SC-010-04 (AUTOPATCH):
       location.href = "./login.html";
     });
 
-    // First paint + micro-recalc (för att fånga HRApp som init:ar aningen senare)
+    // First paint + micro-recalc (för att fånga HRApp-session som initieras strax efter boot)
     updateUiAll();
     setTimeout(updateUiAll, 0);
     setTimeout(updateUiAll, 50);
