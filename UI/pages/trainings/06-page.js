@@ -10,23 +10,35 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 
 PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
-- P0: Validera core.getWho() (ignorera placeholder-roll "_" / "—" / tom) och fall back till HRApp.getRole().
-      Orsak: annars blir ADMIN writer felaktigt read-only trots korrekt HRApp-session.
-- P0: Behåller fail-closed: om canWrite===false uttryckligen => read-only även för ADMIN.
-- (Behåller tidigare fixar: btnDelete-id, micro-recalc)
+- P0: Fixar "const-capture" av deps: 06-page kan laddas före 02/03/04/05 utan att låsa permanent.
+- P0: Fail-closed kvar: writes är avstängda tills deps finns, men sidan bootar så fort deps laddat.
+- P0: Boot retry-loop + unlock när deps är redo.
+- P1: Skydd mot dubbel-boot (wire events bara en gång).
 ============================================================ */
 (function () {
   "use strict";
 
   const NS = (window.Trainings = window.Trainings || {});
   let dom = NS.dom;
-  const core = NS.core;
-  const store = NS.store;
-  const contract = NS.contract;
-  const render = NS.render;
 
   const page = (NS.page = NS.page || {});
   page.__VERSION = "v1.0.3-PP-SC-010-04";
+
+  // ------------------------------------------------------------
+  // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
+  // ------------------------------------------------------------
+  const DEPS = { core: null, store: null, contract: null, render: null };
+  function refreshDeps() {
+    DEPS.core = NS.core || null;
+    DEPS.store = NS.store || null;
+    DEPS.contract = NS.contract || null;
+    DEPS.render = NS.render || null;
+    return DEPS;
+  }
+  function depsReady() {
+    refreshDeps();
+    return !!(DEPS.core && DEPS.store && DEPS.contract && DEPS.render && dom);
+  }
 
   // ------------------------------------------------------------
   // Minimal DOM fallback (om 01-dom saknas / är ofullständig)
@@ -38,7 +50,7 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
 
     // Elements (måste matcha befintliga id i trainings.html)
     D.btnNew = byId("btnNew");
-    D.btnDelete = byId("btnDelete"); // FIX: var fel id tidigare
+    D.btnDelete = byId("btnDelete");
     D.btnPurge = byId("btnPurge");
     D.btnRevert = byId("btnRevert");
 
@@ -95,9 +107,7 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     return D;
   }
 
-  // Om 01-dom saknas helt, använd fallback (så boot inte failar tyst)
   if (!dom) dom = (NS.dom = buildDomFallback());
-  // Om vissa helpers saknas (ofullständig 01-dom), fyll på minimalt
   if (dom && typeof dom.disable !== "function") dom.disable = buildDomFallback().disable;
   if (dom && typeof dom.on !== "function") dom.on = buildDomFallback().on;
   if (dom && typeof dom.setText !== "function") dom.setText = buildDomFallback().setText;
@@ -105,12 +115,12 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   if (dom && typeof dom.hide !== "function") dom.hide = buildDomFallback().hide;
 
   // ------------------------------------------------------------
-  // State (ingen ny datamodell)
+  // State
   // ------------------------------------------------------------
   const state = {
     who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false },
-    locked: false,
-    lockReason: "",
+    locked: true,
+    lockReason: "BOOT: väntar på moduler…",
     trainings: [],
     selectedId: "",
     draft: null,
@@ -146,13 +156,14 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     },
   };
 
-  // Debug-export (för Anders i console)
   page._state = state;
 
   // ------------------------------------------------------------
   // Utils
   // ------------------------------------------------------------
-  function normStr(v) { return core && core.normStr ? core.normStr(v) : String(v ?? "").trim(); }
+  function normStr(v) {
+    return (DEPS.core && DEPS.core.normStr) ? DEPS.core.normStr(v) : String(v ?? "").trim();
+  }
   function safeArr(a) { return Array.isArray(a) ? a : []; }
 
   function deepClone(obj) {
@@ -184,60 +195,25 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
 
   function upper(v) { return String(v ?? "").toUpperCase(); }
 
-  // P0: skydd mot placeholder/ogiltiga roller från core.getWho()
-  function isBadRoleToken(roleLike) {
-    const r = String(roleLike ?? "").trim();
-    if (!r) return true;
-    if (r === "_" || r === "—" || r === "-" || r.toLowerCase() === "unknown") return true;
-    return false;
-  }
-
-  function normalizeWhoObject(w) {
-    if (!w || typeof w !== "object") return null;
-
-    const role = upper(w.roleId || w.role || "");
-    const empNo = String(w.empNo || w.emp || w.employeeNo || "");
-    const hasCanWrite = Object.prototype.hasOwnProperty.call(w, "canWrite");
-    const canWrite = hasCanWrite ? !!w.canWrite : undefined;
-
-    if (isBadRoleToken(role)) return null;
-
-    // Fail-closed: om canWrite är uttryckligen false ska det respekteras.
-    return { role, empNo, canWrite };
-  }
-
   function getWhoFresh() {
-    // Viktigt: writer kopplas till ADMIN (tolerant), men fail-closed om explicit canWrite===false.
-    // P0: core.getWho kan ge placeholder "_" => ignorera och fall back till HRApp.getRole.
+    // Fail-closed: om locked/bootPending, behåll SYSTEM_ADMIN.
     try {
-      if (core && typeof core.getWho === "function") {
-        const w = core.getWho();
-        const n = normalizeWhoObject(w);
-        if (n) {
-          // Om canWrite saknas -> ADMIN är writer
-          const cw = (typeof n.canWrite === "boolean") ? n.canWrite : (n.role === "ADMIN");
-          return { role: n.role, empNo: n.empNo, canWrite: cw };
-        }
+      if (DEPS.core && typeof DEPS.core.getWho === "function") {
+        const w = DEPS.core.getWho();
+        if (w && typeof w === "object") return w;
       }
     } catch (_) { /* ignore */ }
 
     try {
       if (window.HRApp && typeof window.HRApp.getRole === "function") {
         const r = window.HRApp.getRole();
-
-        // r kan vara string eller object, vi är toleranta
         if (typeof r === "string") {
           const role = upper(r);
-          if (isBadRoleToken(role)) return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
           return { role, empNo: "", canWrite: role === "ADMIN" };
         }
-
         if (r && typeof r === "object") {
           const role = upper(r.roleId || r.role || "SYSTEM_ADMIN");
           const empNo = String(r.empNo || r.emp || r.employeeNo || "");
-          if (isBadRoleToken(role)) return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
-
-          // om canWrite saknas -> ADMIN är writer
           const hasCanWrite = Object.prototype.hasOwnProperty.call(r, "canWrite");
           const canWrite = hasCanWrite ? !!r.canWrite : (role === "ADMIN");
           return { role, empNo, canWrite };
@@ -252,16 +228,12 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     if (state.locked) return false;
 
     const who = getWhoFresh();
-    state.who = who; // håll state i sync för debug + pills
+    state.who = who;
 
     const role = upper(who.role || "SYSTEM_ADMIN");
-
     if (role !== "ADMIN") return false;
 
-    // Respektera uttrycklig spärr: canWrite===false => read-only även om ADMIN
     if (who.canWrite === false) return false;
-
-    // Tolerant: undefined/null => tillåt för ADMIN
     return true;
   }
 
@@ -274,6 +246,10 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   function setLock(reason) {
     state.locked = true;
     state.lockReason = reason || "Låst (fail-closed).";
+  }
+  function clearLock() {
+    state.locked = false;
+    state.lockReason = "";
   }
 
   // ------------------------------------------------------------
@@ -340,8 +316,8 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   // Rendering glue
   // ------------------------------------------------------------
   function computeProblemsForTraining(t) {
-    if (!contract || typeof contract.validateTrainingForSave !== "function") return [];
-    const res = contract.validateTrainingForSave(t);
+    if (!DEPS.contract || typeof DEPS.contract.validateTrainingForSave !== "function") return [];
+    const res = DEPS.contract.validateTrainingForSave(t);
     return res && Array.isArray(res.reasons) ? res.reasons : [];
   }
 
@@ -376,27 +352,27 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     const who = state.who || getWhoFresh();
     const writer = isWriterAllowed();
     const whoTxt = `${who.role || "—"} • ${who.empNo || "—"}${writer ? " • skriv" : " • read-only"}`;
-    if (render && render.setWhoPill) render.setWhoPill(whoTxt);
+    if (DEPS.render && DEPS.render.setWhoPill) DEPS.render.setWhoPill(whoTxt);
 
     if (state.locked) {
-      render && render.setStatePill && render.setStatePill("Status: LÅST", "bad");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: LÅST", "bad");
     } else if (!writer) {
-      render && render.setStatePill && render.setStatePill("Status: Read-only", "warn");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Read-only", "warn");
     } else {
-      render && render.setStatePill && render.setStatePill("Status: OK", "ok");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: OK", "ok");
     }
   }
 
   function updateLeftHint() {
-    if (render && render.setLeftHint) {
-      if (state.locked) render.setLeftHint(state.lockReason || "Låst (korrupt data).");
-      else render.setLeftHint("Publicering kräver minst 1 block.");
+    if (DEPS.render && DEPS.render.setLeftHint) {
+      if (state.locked) DEPS.render.setLeftHint(state.lockReason || "Låst (korrupt data).");
+      else DEPS.render.setLeftHint("Publicering kräver minst 1 block.");
     }
   }
 
   function refreshList() {
     const items = visibleTrainings();
-    render && render.renderTrainingList && render.renderTrainingList({
+    DEPS.render && DEPS.render.renderTrainingList && DEPS.render.renderTrainingList({
       items,
       selectedId: state.selectedId,
       onPick: function (id) { selectTraining(id); },
@@ -417,9 +393,8 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     if (dom.goalsLevel) dom.goalsLevel.value = normStr(d.goalsLevel) || "normal";
     if (dom.goals) dom.goals.value = normStr(d.goals) || "";
 
-    // blocks
     const blocks = currentBlocks();
-    render && render.renderBlocksList && render.renderBlocksList({
+    DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
       blocks,
       onEdit: function (idx) { openBlockEditor(idx); },
       onDelete: function (idx) { deleteBlock(idx); },
@@ -479,7 +454,7 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   function newTrainingTemplate() {
     const who = getWhoFresh();
     return {
-      id: (core && typeof core.makeId === "function") ? core.makeId("tr") : ("tr_" + Date.now()),
+      id: (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now()),
       status: "draft",
       module: "",
       area: "",
@@ -501,9 +476,9 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     state.selectedId = t.id;
     state.draft = deepClone(t);
 
-    const s = store && store.save ? store.save(state.trainings) : { ok: false };
+    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
-      render && render.setStatePill && render.setStatePill("Status: Kunde inte spara", "bad");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
       return;
     }
 
@@ -522,9 +497,9 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     if (idx < 0) return;
 
     state.trainings.splice(idx, 1);
-    const s = store && store.save ? store.save(state.trainings) : { ok: false };
+    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
-      render && render.setStatePill && render.setStatePill("Status: Kunde inte spara", "bad");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
       return;
     }
 
@@ -539,9 +514,9 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   function purgeAll() {
     if (!isWriterAllowed()) return;
 
-    const p = store && store.purgeAll ? store.purgeAll() : { ok: false };
+    const p = DEPS.store && DEPS.store.purgeAll ? DEPS.store.purgeAll() : { ok: false };
     if (!p || !p.ok) {
-      render && render.setStatePill && render.setStatePill("Status: Kunde inte rensa", "bad");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte rensa", "bad");
       return;
     }
 
@@ -579,40 +554,40 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
 
     state.draft.status = (status === "published") ? "published" : "draft";
 
-    const v = (status === "published" && contract && contract.validateForPublish)
-      ? contract.validateForPublish(state.draft)
-      : (contract && contract.validateTrainingForSave)
-        ? contract.validateTrainingForSave(state.draft)
+    const v = (status === "published" && DEPS.contract && DEPS.contract.validateForPublish)
+      ? DEPS.contract.validateForPublish(state.draft)
+      : (DEPS.contract && DEPS.contract.validateTrainingForSave)
+        ? DEPS.contract.validateTrainingForSave(state.draft)
         : { ok: true, reasons: [] };
 
     if (!v.ok) {
-      render && render.setStatePill && render.setStatePill("Status: Kan inte spara", "bad");
-      render && render.setAiHint && render.setAiHint((v.reasons || []).join(" "));
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint((v.reasons || []).join(" "));
       return;
     }
 
     if (status === "published" && !hasAnyItems()) {
-      render && render.setStatePill && render.setStatePill("Status: Kan inte publicera", "bad");
-      render && render.setAiHint && render.setAiHint("Publicering kräver minst 1 block/item.");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte publicera", "bad");
+      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Publicering kräver minst 1 block/item.");
       return;
     }
 
     const idx = findTrainingIndexById(state.selectedId);
     if (idx < 0) {
-      render && render.setStatePill && render.setStatePill("Status: Saknar vald utbildning", "bad");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Saknar vald utbildning", "bad");
       return;
     }
 
     state.trainings[idx] = deepClone(state.draft);
 
-    const s = store && store.save ? store.save(state.trainings) : { ok: false };
+    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
-      render && render.setStatePill && render.setStatePill("Status: Kunde inte spara", "bad");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
       return;
     }
 
     setDirty(false);
-    render && render.setAiHint && render.setAiHint("");
+    DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
     renderModuleDatalist();
     renderAreaDatalist();
     updateUiAll();
@@ -622,7 +597,7 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   // Blocks (minimal baseline)
   // ------------------------------------------------------------
   function openBlockEditor(idx) {
-    if (!state.draft || !render || typeof render.openModal !== "function") return;
+    if (!state.draft || !DEPS.render || typeof DEPS.render.openModal !== "function") return;
 
     const blocks = currentBlocks();
     const b = blocks[idx];
@@ -641,7 +616,7 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     ta.value = (b.items && b.items[0] && (b.items[0].text || b.items[0].instruction)) ? String(b.items[0].text || b.items[0].instruction) : "";
     wrap.appendChild(ta);
 
-    render.openModal("Block " + (idx + 1), wrap, function () {
+    DEPS.render.openModal("Block " + (idx + 1), wrap, function () {
       const txt = normStr(ta.value);
       if (!state.draft.blocks) state.draft.blocks = blocks;
       const bb = state.draft.blocks[idx];
@@ -670,44 +645,24 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   async function testAi() {
     try {
       if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
-        render && render.setStatePill && render.setStatePill("Status: Worker SDK saknas", "bad");
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
         return;
       }
       const r = await window.HRWorkerSDK.health();
-      if (r && r.ok) render && render.setStatePill && render.setStatePill("Status: AI OK", "ok");
-      else render && render.setStatePill && render.setStatePill("Status: AI fel", "warn");
+      if (r && r.ok) DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI OK", "ok");
+      else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "warn");
     } catch (_) {
-      render && render.setStatePill && render.setStatePill("Status: AI fel", "bad");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
     }
   }
 
   // ------------------------------------------------------------
-  // Bootstrap
+  // Bootstrap (retry)
   // ------------------------------------------------------------
-  function boot() {
-    // Fail-closed men med tydlig debug
-    if (!core || !store || !contract || !render || !dom) {
-      setLock("BOOT: deps saknas (core/store/contract/render/dom).");
-      updateUiAll();
-      return;
-    }
+  function wireEventsOnce() {
+    if (page.__BOOTED === true) return;
+    page.__BOOTED = true;
 
-    // Load trainings
-    const load = store.load ? store.load() : { ok: false };
-    if (!load.ok && load.corrupt) {
-      setLock(store.lockReasonFor ? store.lockReasonFor() : "Korrupt trainings.");
-      state.trainings = [];
-    } else {
-      state.trainings = safeArr(load.trainings);
-    }
-
-    // Initial datalists
-    renderModuleDatalist();
-    renderAreaDatalist();
-
-    state.showAll = false;
-
-    // Wire events
     dom.on(dom.btnNew, "click", createNewTraining);
     dom.on(dom.btnDelete, "click", deleteSelected);
     dom.on(dom.btnPurge, "click", purgeAll);
@@ -776,7 +731,6 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     dom.on(dom.goalsLevel, "change", function () { if (state.draft) { state.draft.goalsLevel = normStr(dom.goalsLevel && dom.goalsLevel.value); setDirty(true); updateButtons(); } });
     dom.on(dom.goals, "input", function () { if (state.draft) { state.draft.goals = normStr(dom.goals && dom.goals.value); setDirty(true); updateButtons(); } });
 
-    // AI
     dom.on(dom.btnTestAI, "click", testAi);
 
     dom.on(dom.btnLogout, "click", function () {
@@ -786,13 +740,62 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
       } catch (_) { }
       location.href = "./login.html";
     });
+  }
 
-    // First paint + micro-recalc (för att fånga HRApp-session som initieras strax efter boot)
+  function bootWhenReady() {
+    // Fail-closed tills deps finns, men inte permanent lock pga load-order.
+    if (!depsReady()) {
+      setLock("BOOT: väntar på moduler (core/store/contract/render/dom)…");
+      updateUiAll();
+      return false;
+    }
+
+    clearLock();
+    refreshDeps();
+
+    // Load trainings
+    const load = (DEPS.store && DEPS.store.load) ? DEPS.store.load() : { ok: false };
+    if (!load.ok && load.corrupt) {
+      setLock(DEPS.store && DEPS.store.lockReasonFor ? DEPS.store.lockReasonFor() : "Korrupt trainings.");
+      state.trainings = [];
+    } else {
+      state.trainings = safeArr(load.trainings);
+      clearLock();
+    }
+
+    renderModuleDatalist();
+    renderAreaDatalist();
+
+    state.showAll = false;
+
+    wireEventsOnce();
+
     updateUiAll();
     setTimeout(updateUiAll, 0);
     setTimeout(updateUiAll, 50);
     setTimeout(updateUiAll, 300);
+
+    return true;
   }
 
-  try { boot(); } catch (_) { setLock("BOOT: exception (fail-closed)."); updateUiAll(); }
+  // Retry-loop (kort)
+  const RETRIES = [0, 50, 150, 300, 600, 1000];
+  let attempt = 0;
+
+  function tryBoot() {
+    const ok = bootWhenReady();
+    if (ok) return;
+
+    if (attempt >= RETRIES.length - 1) {
+      // Efter retries: permanent fail-closed (men med tydlig orsak)
+      setLock("BOOT: deps saknas (core/store/contract/render/dom).");
+      updateUiAll();
+      return;
+    }
+
+    attempt++;
+    setTimeout(tryBoot, RETRIES[attempt]);
+  }
+
+  try { tryBoot(); } catch (_) { setLock("BOOT: exception (fail-closed)."); updateUiAll(); }
 })();
