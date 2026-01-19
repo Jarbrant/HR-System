@@ -31,14 +31,25 @@ POLICY (LÅST):
 
   core.safeLower = function (v) { return core.normStr(v).toLowerCase(); };
 
+  core.collapseSpaces = function (v) {
+    return core.normStr(v).replace(/\s+/g, " ");
+  };
+
   // ---------- role / auth ----------
-  // Rely on UI-03-APP.js if available. Fail-closed to SYSTEM_ADMIN.
+  // Rely on UI-03-APP.js (HRApp). Fail-closed to SYSTEM_ADMIN.
+  // NOTE: Vi har sett att HRApp saknar getRole/getWho i vissa versioner.
+  // Den säkra vägen är: mustGetSession() + getAuth().
   core.getWho = function () {
     try {
-      if (window.HRApp && typeof window.HRApp.getWho === "function") return window.HRApp.getWho();
-      if (window.HRApp && typeof window.HRApp.getRole === "function") {
-        const r = window.HRApp.getRole();
-        return { role: r.role, empNo: r.empNo, canWrite: !!r.canWrite };
+      if (window.HRApp && typeof window.HRApp.mustGetSession === "function" && typeof window.HRApp.getAuth === "function") {
+        const sess = window.HRApp.mustGetSession();
+        const auth = window.HRApp.getAuth(sess);
+        if (auth && auth.isAuthed === true) {
+          const role = String(auth.role || "SYSTEM_ADMIN").toUpperCase();
+          const empNo = core.normStr(auth.empNo || "");
+          const canWrite = role === "ADMIN"; // POLICY: ADMIN-only write
+          return { role, empNo, canWrite };
+        }
       }
     } catch (_) {}
     return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
@@ -56,6 +67,202 @@ POLICY (LÅST):
 
   core.ok = function (data) {
     return Object.assign({ ok: true }, data || {});
+  };
+
+  // ============================================================
+  // CATALOG (PP-SC-011) — fasta listor + kontrollerad “lägg till ny”
+  // POLICY:
+  // - Ingen storage här. 03-store sparar (om AO säger) i befintlig träningsdata.
+  // - Här endast: fasta defaults + validering + merge/suggest/add helpers.
+  //
+  // INPUT-KÄLLA (tillåtet):
+  // - window.HR_CONFIG.TRAININGS_CATALOG (runtime/config, ingen storage-key)
+  // - seed från 03-store (t.ex. extraherat ur AO-057_TRAININGS_V1)
+  // ============================================================
+
+  function isPlainObject(v) {
+    return !!v && typeof v === "object" && !Array.isArray(v);
+  }
+
+  function uniqStrings(arr) {
+    const out = [];
+    const seen = new Set();
+    const a = Array.isArray(arr) ? arr : [];
+    for (let i = 0; i < a.length; i++) {
+      const s = core.collapseSpaces(a[i]);
+      if (!s) continue;
+      const k = core.safeLower(s);
+      if (seen.has(k)) continue;
+      seen.add(k);
+      out.push(s);
+    }
+    return out;
+  }
+
+  function ensureAreasMap(obj) {
+    const out = {};
+    if (!isPlainObject(obj)) return out;
+    for (const k of Object.keys(obj)) {
+      const key = core.collapseSpaces(k);
+      if (!key) continue;
+      out[key] = uniqStrings(obj[k]);
+    }
+    return out;
+  }
+
+  function readFixedCatalogFromConfig() {
+    try {
+      const cfg = window.HR_CONFIG;
+      if (!cfg || typeof cfg !== "object") return null;
+
+      const cat = cfg.TRAININGS_CATALOG;
+      if (!cat || typeof cat !== "object") return null;
+
+      const fixedModules = uniqStrings(cat.modules);
+      const fixedAreasByModule = ensureAreasMap(cat.areasByModule);
+      const fixedTitlePresets = uniqStrings(cat.titlePresets);
+
+      return {
+        modules: fixedModules,
+        areasByModule: fixedAreasByModule,
+        titlePresets: fixedTitlePresets,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // Minimal fallback (vi gissar inte din riktiga katalog här).
+  // 03-store eller HR_CONFIG kan fylla detta.
+  function getFallbackFixedCatalog() {
+    return {
+      modules: [],
+      areasByModule: {},
+      titlePresets: [], // valfritt: fasta titel-mallar
+    };
+  }
+
+  core.getFixedCatalog = function () {
+    return readFixedCatalogFromConfig() || getFallbackFixedCatalog();
+  };
+
+  // Merge fixed + seed (seed kan vara discovery från befintliga utbildningar)
+  core.mergeCatalog = function (seed) {
+    const fixed = core.getFixedCatalog();
+    const s = isPlainObject(seed) ? seed : {};
+
+    const modules = uniqStrings([].concat(fixed.modules || [], s.modules || []));
+
+    // areasByModule: merge per modul
+    const fixedMap = ensureAreasMap(fixed.areasByModule);
+    const seedMap = ensureAreasMap(s.areasByModule);
+
+    const areasByModule = {};
+    const moduleKeys = uniqStrings([].concat(Object.keys(fixedMap), Object.keys(seedMap)));
+
+    for (let i = 0; i < moduleKeys.length; i++) {
+      const m = moduleKeys[i];
+      areasByModule[m] = uniqStrings([].concat(fixedMap[m] || [], seedMap[m] || []));
+    }
+
+    const titlePresets = uniqStrings([].concat(fixed.titlePresets || [], s.titlePresets || []));
+
+    return { modules, areasByModule, titlePresets };
+  };
+
+  core.isInList = function (value, list) {
+    const v = core.safeLower(value);
+    if (!v) return false;
+    const a = Array.isArray(list) ? list : [];
+    for (let i = 0; i < a.length; i++) {
+      if (core.safeLower(a[i]) === v) return true;
+    }
+    return false;
+  };
+
+  core.getAreasForModule = function (catalog, moduleName) {
+    const cat = isPlainObject(catalog) ? catalog : core.mergeCatalog(null);
+    const mod = core.collapseSpaces(moduleName);
+    if (!mod) return [];
+    // försök hitta exakt modulnyckel (case/space tolerant)
+    const keys = Object.keys(cat.areasByModule || {});
+    for (let i = 0; i < keys.length; i++) {
+      if (core.safeLower(keys[i]) === core.safeLower(mod)) return cat.areasByModule[keys[i]] || [];
+    }
+    return [];
+  };
+
+  // Kontrollerad “lägg till”
+  // Returnerar nytt catalog-objekt (immutable-ish) + flagga om den faktiskt ändrade något.
+  core.addToCatalog = function (catalog, moduleName, areaName) {
+    const cat = isPlainObject(catalog) ? catalog : core.mergeCatalog(null);
+
+    const mod = core.collapseSpaces(moduleName);
+    const area = core.collapseSpaces(areaName);
+
+    if (!mod) return core.ok({ changed: false, catalog: cat });
+
+    const next = {
+      modules: (Array.isArray(cat.modules) ? cat.modules.slice() : []),
+      areasByModule: isPlainObject(cat.areasByModule) ? Object.assign({}, cat.areasByModule) : {},
+      titlePresets: Array.isArray(cat.titlePresets) ? cat.titlePresets.slice() : [],
+    };
+
+    let changed = false;
+
+    if (!core.isInList(mod, next.modules)) {
+      next.modules.push(mod);
+      next.modules = uniqStrings(next.modules);
+      changed = true;
+    }
+
+    if (area) {
+      // hitta befintlig nyckel om den finns
+      let key = mod;
+      const keys = Object.keys(next.areasByModule);
+      for (let i = 0; i < keys.length; i++) {
+        if (core.safeLower(keys[i]) === core.safeLower(mod)) { key = keys[i]; break; }
+      }
+
+      const existingAreas = Array.isArray(next.areasByModule[key]) ? next.areasByModule[key].slice() : [];
+      if (!core.isInList(area, existingAreas)) {
+        existingAreas.push(area);
+        next.areasByModule[key] = uniqStrings(existingAreas);
+        changed = true;
+      }
+    }
+
+    return core.ok({ changed, catalog: next });
+  };
+
+  // Fail-closed validering av modul/område (används av 06-page för att låsa actions)
+  core.validateModuleArea = function (catalog, moduleName, areaName) {
+    const cat = isPlainObject(catalog) ? catalog : core.mergeCatalog(null);
+    const mod = core.collapseSpaces(moduleName);
+    const area = core.collapseSpaces(areaName);
+
+    if (!mod) return core.fail("SUBJECT_MODULE_MISSING", "Välj modul.");
+    if (!core.isInList(mod, cat.modules)) {
+      return core.fail("SUBJECT_MODULE_UNKNOWN", "Modul finns inte i listan. Lägg till den först.");
+    }
+
+    // Om modul finns: område krävs och måste finnas i modulens area-lista
+    const areas = core.getAreasForModule(cat, mod);
+    if (!area) return core.fail("SUBJECT_AREA_MISSING", "Välj område.");
+    if (!core.isInList(area, areas)) {
+      return core.fail("SUBJECT_AREA_UNKNOWN", "Område finns inte för vald modul. Lägg till det först.");
+    }
+
+    return core.ok();
+  };
+
+  // Deterministisk subjectId (för UI + worker ruleset selection)
+  // Format: "<module>::<area>" (lowercase, single-spaced)
+  core.buildSubjectId = function (moduleName, areaName) {
+    const m = core.safeLower(core.collapseSpaces(moduleName));
+    const a = core.safeLower(core.collapseSpaces(areaName));
+    if (!m || !a) return "";
+    return m + "::" + a;
   };
 
   // ---------- Kursplan / titel-motor ----------
@@ -108,18 +315,23 @@ POLICY (LÅST):
 
   // ---------- AI payload builder (utan fetch) ----------
   // Vi skickar strukturerad kontext till HRWorkerSDK.aiGenerate().
-  core.buildAiContext = function (state) {
+  core.buildAiContext = function (state, catalog) {
     const s = state || {};
     const module = core.normStr(s.module);
     const area = core.normStr(s.area);
+
     const chapter = core.normStr(s.courseTitle);
     const step = core.normStr(s.courseStep);
     const level = core.normStr(s.goalsLevel || "normal");
 
     const title = core.composeTitle(chapter, step, area);
+    const subjectId = core.buildSubjectId(module, area);
+
+    // Fail-closed hint: validering kan göras av 06-page innan generate/save.
+    const subjectValidation = core.validateModuleArea(catalog || core.mergeCatalog(null), module, area);
 
     return {
-      subject: { module, area },
+      subject: { module, area, subjectId, valid: subjectValidation.ok === true },
       course: {
         chapter,
         step,
@@ -174,6 +386,5 @@ POLICY (LÅST):
     if (!cond) throw new Error(String(code || "ASSERT") + ":" + String(msg || "assert"));
   };
 
-  core.__VERSION = "v1.0-PP-SC-010-02";
+  core.__VERSION = "v1.1-PP-SC-011";
 })();
-
