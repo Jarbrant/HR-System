@@ -9,10 +9,10 @@ POLICY (LÅST):
 - XSS-safe: render via 05-render.js + dom.setText (textContent)
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 
-PATCH v1.0.1-PP-SC-010-04:
-- P0: Write-gate baseras ENBART på role+canWrite (core.getWho / HRApp.getRole), inte HRApp.getAuth().
-- P0: Om 01-dom saknas/ofullständig: dom-fallback så boot inte dör tyst (minimala hooks).
-- P1: Debug-export: window.Trainings.page._state + helpers så Anders kan se varför btnNew är disabled.
+PATCH v1.0.2-PP-SC-010-04 (AUTOPATCH):
+- P0: ADMIN ska bli writer även om HRApp.getRole()/getWho saknar canWrite (men respektera canWrite===false).
+- P0: Fallback-DOM: btnDelete-id var fel (btnGenAT) -> btnDelete.
+- P1: Micro-recalc (50/300ms) för att fånga HRApp-session som initieras strax efter boot.
 ============================================================ */
 (function () {
   "use strict";
@@ -25,7 +25,7 @@ PATCH v1.0.1-PP-SC-010-04:
   const render = NS.render;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0.1-PP-SC-010-04";
+  page.__VERSION = "v1.0.2-PP-SC-010-04";
 
   // ------------------------------------------------------------
   // Minimal DOM fallback (om 01-dom saknas / är ofullständig)
@@ -37,7 +37,7 @@ PATCH v1.0.1-PP-SC-010-04:
 
     // Elements (måste matcha befintliga id i trainings.html)
     D.btnNew = byId("btnNew");
-    D.btnDelete = byId("btnGenAT");        // OBS: om ditt id heter annat: fixa i 01-dom, inte här
+    D.btnDelete = byId("btnDelete"); // FIX: var fel id tidigare
     D.btnPurge = byId("btnPurge");
     D.btnRevert = byId("btnRevert");
 
@@ -181,8 +181,10 @@ PATCH v1.0.1-PP-SC-010-04:
     return n > 0;
   }
 
+  function upper(v) { return String(v ?? "").toUpperCase(); }
+
   function getWhoFresh() {
-    // Viktigt: aldrig koppla write till getAuth()
+    // Viktigt: writer kopplas till ADMIN (tolerant), men fail-closed om explicit canWrite===false.
     try {
       if (core && typeof core.getWho === "function") {
         const w = core.getWho();
@@ -193,8 +195,20 @@ PATCH v1.0.1-PP-SC-010-04:
     try {
       if (window.HRApp && typeof window.HRApp.getRole === "function") {
         const r = window.HRApp.getRole();
+
+        // r kan vara string eller object, vi är toleranta
+        if (typeof r === "string") {
+          const role = upper(r);
+          return { role, empNo: "", canWrite: role === "ADMIN" };
+        }
+
         if (r && typeof r === "object") {
-          return { role: String(r.roleId || r.role || "SYSTEM_ADMIN"), empNo: String(r.empNo || ""), canWrite: !!r.canWrite };
+          const role = upper(r.roleId || r.role || "SYSTEM_ADMIN");
+          const empNo = String(r.empNo || r.emp || r.employeeNo || "");
+          // P0 FIX: om canWrite saknas -> ADMIN är writer
+          const hasCanWrite = Object.prototype.hasOwnProperty.call(r, "canWrite");
+          const canWrite = hasCanWrite ? !!r.canWrite : (role === "ADMIN");
+          return { role, empNo, canWrite };
         }
       }
     } catch (_) { /* ignore */ }
@@ -208,9 +222,15 @@ PATCH v1.0.1-PP-SC-010-04:
     const who = getWhoFresh();
     state.who = who; // håll state i sync för debug + pills
 
-    const role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
+    const role = upper(who.role || "SYSTEM_ADMIN");
+
     if (role !== "ADMIN") return false;
-    return !!who.canWrite;
+
+    // Respektera uttrycklig spärr: canWrite===false => read-only även om ADMIN
+    if (who.canWrite === false) return false;
+
+    // Tolerant: undefined/null => tillåt för ADMIN
+    return true;
   }
 
   function setDirty(v) {
@@ -322,12 +342,13 @@ PATCH v1.0.1-PP-SC-010-04:
 
   function updateTopPills() {
     const who = state.who || getWhoFresh();
-    const whoTxt = `${who.role || "—"} • ${who.empNo || "—"}${who.canWrite ? " • skriv" : " • read-only"}`;
+    const writer = isWriterAllowed();
+    const whoTxt = `${who.role || "—"} • ${who.empNo || "—"}${writer ? " • skriv" : " • read-only"}`;
     if (render && render.setWhoPill) render.setWhoPill(whoTxt);
 
     if (state.locked) {
       render && render.setStatePill && render.setStatePill("Status: LÅST", "bad");
-    } else if (!isWriterAllowed()) {
+    } else if (!writer) {
       render && render.setStatePill && render.setStatePill("Status: Read-only", "warn");
     } else {
       render && render.setStatePill && render.setStatePill("Status: OK", "ok");
@@ -694,7 +715,6 @@ PATCH v1.0.1-PP-SC-010-04:
     dom.on(dom.onlyProblems, "change", function () {
       state.onlyProblems = !!(dom.onlyProblems && dom.onlyProblems.checked);
       state.showAll = true;
-;
       refreshList();
       updateButtons();
     });
@@ -738,6 +758,8 @@ PATCH v1.0.1-PP-SC-010-04:
     // First paint + micro-recalc (för att fånga HRApp som init:ar aningen senare)
     updateUiAll();
     setTimeout(updateUiAll, 0);
+    setTimeout(updateUiAll, 50);
+    setTimeout(updateUiAll, 300);
   }
 
   try { boot(); } catch (_) { setLock("BOOT: exception (fail-closed)."); updateUiAll(); }
