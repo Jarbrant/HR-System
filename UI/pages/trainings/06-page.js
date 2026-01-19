@@ -1,21 +1,21 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-02) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-03) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Bootstrap + state + event wiring för trainings (ADMIN – skapa/redigera)
+Syfte: Bootstrap + state + event wiring för trainings (ADMIN editor)
 
 POLICY (LÅST):
 - UI-only • Fail-closed
-- Inga nya storage-keys/datamodell (AO-057_TRAININGS_V1)
-- localStorage-first (data), sessionStorage/auth via HRApp
-- XSS-safe rendering: textContent (render sker via 05-render.js)
+- localStorage-first (data), sessionStorage först (auth via HRApp)
+- XSS-safe rendering: all render via 05-render.js (textContent, inga osäkra innerHTML)
+- Inga nya storage-keys (AO-057_TRAININGS_V1)
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - Publish fail-closed: status=published kräver blocks/items > 0
-- Token får inte lagras i webbläsaren (SDK getToken() => "" i denna AO)
+- Token får inte lagras i webbläsaren (HRApp.getAuth() kan vara null och ska inte blocka ADMIN-write)
 
-PATCH v1.0 (PP-SC-010-02):
-- Fix: Writer-läge styrs ENDAST av core.getWho().canWrite (inte HRApp.getAuth()).
-- Fix: "Skapa ny" aktiveras för ADMIN writer.
-- Robust init: storage corrupt => read-only + tydlig status.
+Ändringslogg (≤8):
+- v1.0-PP-SC-010-03: Fix: skrivläge styrs av HRApp.getRole()/core.getWho (inte getAuth)
+- v1.0-PP-SC-010-03: "Skapa ny" och spara-knappar aktiveras för ADMIN + canWrite:true
+- v1.0-PP-SC-010-03: Fail-closed kvar: korrupt storage eller ej ADMIN => read-only
 ============================================================ */
 (function () {
   "use strict";
@@ -30,810 +30,699 @@ PATCH v1.0 (PP-SC-010-02):
   const render = NS.render;
 
   const page = (NS.page = {});
-  page.__VERSION = "v1.0-PP-SC-010-02";
+  page.__VERSION = "v1.0-PP-SC-010-03";
 
   // ---------------------------
-  // State (UI-only)
+  // State (ingen ny datamodell)
   // ---------------------------
-  const S = {
+  const state = {
     who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false },
-    canWrite: false,
-    locked: false,
+    readOnly: true,
     lockReason: "",
     trainings: [],
     selectedId: "",
-    selected: null,
-    // filters
+    selectedIndex: -1,
+    showList: false,
     q: "",
     fStatus: "",
     onlyProblems: false,
-    showAll: false,
-    // UI flags
     dirty: false,
-    courseTouched: false,
-    lastSavedSnapshot: "",
+    snapshotJson: "",
+
+    // editor fields
+    module: "",
+    area: "",
+    courseTitle: "Introduktion",
+    courseStep: "1",
+    goalsLevel: "normal",
+    goals: "",
+    titleDisplay: "—",
   };
 
   // ---------------------------
   // Helpers
   // ---------------------------
-  function safeClone(obj) {
-    try { return JSON.parse(JSON.stringify(obj || null)); } catch (_) { return null; }
+  function normStr(v) { return (core && core.normStr) ? core.normStr(v) : String(v ?? "").trim(); }
+  function safeLower(v) { return (core && core.safeLower) ? core.safeLower(v) : normStr(v).toLowerCase(); }
+
+  function setDirty(on) {
+    state.dirty = !!on;
+    if (dom && dom.setText) dom.setText(dom.revertHint, state.dirty ? "Osparade ändringar" : "");
+    // enable revert only when dirty + can write
+    if (dom && dom.disable) dom.disable(dom.btnRevert, !(state.dirty && !state.readOnly));
   }
 
-  function setDirty(v) {
-    S.dirty = !!v;
-    dom.setText(dom.revertHint, S.dirty ? "Osparade ändringar" : "");
-    dom.disable(dom.btnRevert, !S.dirty || !S.canWrite || S.locked);
+  function computeWhoAndMode() {
+    // Viktigt: getAuth() får vara null och ska inte styra skrivläge.
+    let who = { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
+    try {
+      if (core && typeof core.getWho === "function") who = core.getWho();
+      else if (window.HRApp && typeof window.HRApp.getRole === "function") {
+        const r = window.HRApp.getRole() || {};
+        who = { role: r.role || r.roleId || "SYSTEM_ADMIN", empNo: r.empNo || "", canWrite: !!r.canWrite };
+      }
+    } catch (_) {}
+
+    state.who = who;
+
+    const isAdmin = core && typeof core.isAdminWriter === "function"
+      ? core.isAdminWriter(who)
+      : String(who.role || "").toUpperCase() === "ADMIN";
+
+    // ADMIN-only write + canWrite:true
+    state.readOnly = !(isAdmin && !!who.canWrite);
   }
 
-  function snapshotSelected() {
-    try { return JSON.stringify(S.selected || null); } catch (_) { return ""; }
+  function setTopbar() {
+    const who = state.who || {};
+    const role = String(who.role || "SYSTEM_ADMIN").toUpperCase();
+    const empNo = normStr(who.empNo) || "—";
+    const whoText = `Inloggad: ${empNo} (${role})`;
+    render && render.setWhoPill && render.setWhoPill(whoText);
+
+    // context pill är statisk här
+    render && render.setContext && render.setContext("Redigerar: Utbildningar");
   }
 
-  function getSelectedIndex() {
-    const id = String(S.selectedId || "");
-    if (!id) return -1;
-    for (let i = 0; i < S.trainings.length; i++) {
-      if (String(S.trainings[i] && S.trainings[i].id) === id) return i;
-    }
-    return -1;
+  function setStatus(ok, txt) {
+    const t = normStr(txt) || (ok ? "Status: OK" : "Status: Fel");
+    render && render.setStatePill && render.setStatePill(t, ok ? "ok" : "bad");
   }
 
-  function countItems(training) {
-    const t = training || {};
-    const blocks = Array.isArray(t.blocks) ? t.blocks : Array.isArray(t.items) ? [{ items: t.items }] : [];
-    let n = 0;
-    for (const b of blocks) n += Array.isArray(b && b.items) ? b.items.length : 0;
-    return n;
-  }
+  function applyReadOnlyUI() {
+    if (!dom || !dom.disable) return;
 
-  function hasProblems(training) {
-    const t = training || {};
-    const v = contract && contract.validateTrainingForSave ? contract.validateTrainingForSave(t) : { ok: true, reasons: [] };
-    if (!v.ok) return true;
-    return false;
-  }
+    // buttons
+    dom.disable(dom.btnNew, state.readOnly);
+    dom.disable(dom.btnDelete, state.readOnly);
+    dom.disable(dom.btnPurge, state.readOnly);
 
-  function normalizeTraining(raw) {
-    const t = raw && typeof raw === "object" ? raw : {};
-    const out = safeClone(t) || {};
+    dom.disable(dom.btnSaveDraft, state.readOnly);
+    dom.disable(dom.btnSavePublish, state.readOnly);
+    dom.disable(dom.btnGenAI, state.readOnly);
+    dom.disable(dom.btnTestAI, false); // test AI får vara ok även read-only
 
-    // ensure id
-    if (!out.id) out.id = core.makeId("tr");
-
-    // status
-    const st = String(out.status || "draft").toLowerCase();
-    out.status = (st === "published") ? "published" : "draft";
-
-    // blocks: accept legacy items[] on root
-    if (!Array.isArray(out.blocks)) {
-      if (Array.isArray(out.items)) out.blocks = [{ title: "Block 1", items: out.items }];
-      else out.blocks = [];
-    }
-
-    // defaults for editor fields
-    if (!out.courseTitle) out.courseTitle = "Introduktion";
-    if (!out.courseStep) out.courseStep = "1";
-    if (!out.goalsLevel) out.goalsLevel = "normal";
-    if (out.goals == null) out.goals = "";
-    if (out.module == null) out.module = "";
-    if (out.area == null) out.area = "";
-
-    if (out.title == null) out.title = "";
-    return out;
-  }
-
-  function buildWhoText(who) {
-    const r = String((who && who.role) || "SYSTEM_ADMIN");
-    const emp = String((who && who.empNo) || "—");
-    return `Inloggad: ${emp} (${r})`;
-  }
-
-  function setStatusOk(msg) {
-    render.setStatePill(msg || "Status: OK", "ok");
-  }
-  function setStatusWarn(msg) {
-    render.setStatePill(msg || "Status: Varning", "warn");
-  }
-  function setStatusBad(msg) {
-    render.setStatePill(msg || "Status: FEL", "bad");
-  }
-
-  function setReadOnlyUi(readOnly, reason) {
-    const ro = !!readOnly;
-
-    // Left actions
-    dom.disable(dom.btnNew, ro);
-    dom.disable(dom.btnDelete, ro || !S.selectedId);
-    dom.disable(dom.btnPurge, ro);
-
-    // Editor inputs
+    // editor inputs
     const inputs = [
-      dom.mod, dom.area, dom.courseTitle, dom.courseStep, dom.goalsLevel, dom.goals
+      dom.mod, dom.area, dom.courseTitle, dom.courseStep,
+      dom.goalsLevel, dom.goals, dom.aiContent, dom.aiCount,
+      dom.aiQuestionType, dom.aiFeedbackEnabled
     ];
     for (const el of inputs) {
-      if (el) el.disabled = ro;
+      if (!el) continue;
+      el.disabled = !!state.readOnly;
+      if (state.readOnly) el.classList.add("disabled");
+      else el.classList.remove("disabled");
     }
 
-    // AI / save
-    dom.disable(dom.btnTestAI, ro); // testAI can be allowed, but keep simple: read-only => disabled
-    dom.disable(dom.btnGenAI, ro);
-    dom.disable(dom.btnSaveDraft, ro);
-    dom.disable(dom.btnSavePublish, ro);
-
-    // hint
-    if (ro) {
-      render.setLeftHint(reason || "Read-only: du kan titta men inte spara/generera.");
+    // left hint
+    if (state.lockReason) {
+      render && render.setLeftHint && render.setLeftHint(state.lockReason);
+    } else if (state.readOnly) {
+      render && render.setLeftHint && render.setLeftHint("Read-only: du kan titta men inte spara/generera.");
     } else {
-      render.setLeftHint("Publicering kräver minst 1 block.");
+      render && render.setLeftHint && render.setLeftHint("Publicering kräver minst 1 block.");
     }
+
+    // revert btn
+    dom.disable(dom.btnRevert, !(state.dirty && !state.readOnly));
   }
 
-  function refreshModuleAreaLists() {
-    // Fixed-but-extensible: datalist byggs från befintliga trainings + nuvarande fält.
-    const mods = new Set();
-    const areasByMod = new Map();
-
-    for (const t of S.trainings) {
-      const m = core.normStr(t && t.module);
-      const a = core.normStr(t && t.area);
-      if (m) mods.add(m);
-      if (m && a) {
-        if (!areasByMod.has(m)) areasByMod.set(m, new Set());
-        areasByMod.get(m).add(a);
-      }
-    }
-
-    // include current typed values
-    const curMod = core.normStr(dom.mod && dom.mod.value);
-    const curArea = core.normStr(dom.area && dom.area.value);
-    if (curMod) mods.add(curMod);
-    if (curMod && curArea) {
-      if (!areasByMod.has(curMod)) areasByMod.set(curMod, new Set());
-      areasByMod.get(curMod).add(curArea);
-    }
-
-    // render modList
-    if (dom.modList) {
-      while (dom.modList.firstChild) dom.modList.removeChild(dom.modList.firstChild);
-      Array.from(mods).sort().forEach((m) => {
-        const opt = document.createElement("option");
-        opt.value = m;
-        dom.modList.appendChild(opt);
-      });
-    }
-
-    // render areaList (filtered by selected/typed module)
-    if (dom.areaList) {
-      while (dom.areaList.firstChild) dom.areaList.removeChild(dom.areaList.firstChild);
-      const m = core.normStr(dom.mod && dom.mod.value);
-      const set = m && areasByMod.has(m) ? areasByMod.get(m) : new Set();
-      Array.from(set).sort().forEach((a) => {
-        const opt = document.createElement("option");
-        opt.value = a;
-        dom.areaList.appendChild(opt);
-      });
-    }
-
-    // subjectId display (stabilt, deterministiskt)
-    const sid = (core.normStr(dom.mod && dom.mod.value) && core.normStr(dom.area && dom.area.value))
-      ? (core.safeLower(dom.mod.value) + "::" + core.safeLower(dom.area.value))
-      : "—";
-    dom.setText(dom.subjectIdText, sid);
-  }
-
-  function applySelectedToForm() {
-    const t = S.selected || null;
-
-    if (!t) {
-      // clear editor
-      if (dom.mod) dom.mod.value = "";
-      if (dom.area) dom.area.value = "";
-      if (dom.courseTitle) dom.courseTitle.value = "Introduktion";
-      if (dom.courseStep) dom.courseStep.value = "1";
-      if (dom.goalsLevel) dom.goalsLevel.value = "normal";
-      if (dom.goals) dom.goals.value = "";
-      if (dom.titleDisplay) dom.titleDisplay.value = "—";
-      render.renderBlocksList({ blocks: [], onEdit: function(){}, onDelete: function(){} });
-      refreshModuleAreaLists();
+  function loadTrainingsOrLock() {
+    const res = store && store.load ? store.load() : { ok: false, err: "store.load saknas." };
+    if (!res.ok) {
+      state.lockReason = (res && res.corrupt) ? "Read-only (fail-closed): trainings är korrupt. " + (store.lockReasonFor ? store.lockReasonFor() : "")
+                                             : "Kunde inte läsa trainings.";
+      state.readOnly = true;
+      state.trainings = [];
       return;
     }
-
-    if (dom.mod) dom.mod.value = core.normStr(t.module);
-    if (dom.area) dom.area.value = core.normStr(t.area);
-    if (dom.courseTitle) dom.courseTitle.value = core.normStr(t.courseTitle) || "Introduktion";
-    if (dom.courseStep) dom.courseStep.value = core.normStr(t.courseStep) || "1";
-    if (dom.goalsLevel) dom.goalsLevel.value = core.normStr(t.goalsLevel) || "normal";
-    if (dom.goals) dom.goals.value = core.normStr(t.goals || "");
-
-    // title display (generated from course+step+area)
-    const genTitle = core.composeTitle(dom.courseTitle.value, dom.courseStep.value, dom.area.value);
-    if (dom.titleDisplay) dom.titleDisplay.value = genTitle;
-
-    refreshModuleAreaLists();
-
-    // blocks list
-    const blocks = Array.isArray(t.blocks) ? t.blocks : [];
-    render.renderBlocksList({
-      blocks,
-      onEdit: function (idx) { openEditBlock(idx); },
-      onDelete: function (idx) { deleteBlock(idx); }
-    });
+    state.trainings = Array.isArray(res.trainings) ? res.trainings : [];
   }
 
-  function syncFormToSelected() {
-    if (!S.selected) return;
+  function saveAllOrFail() {
+    if (state.readOnly) return { ok: false, err: "Read-only." };
+    if (!store || typeof store.save !== "function") return { ok: false, err: "store.save saknas." };
+    const res = store.save(state.trainings);
+    if (!res.ok) return res;
+    return { ok: true };
+  }
 
-    const t = S.selected;
-    t.module = core.normStr(dom.mod && dom.mod.value);
-    t.area = core.normStr(dom.area && dom.area.value);
+  function getSelected() {
+    if (state.selectedIndex < 0) return null;
+    return state.trainings[state.selectedIndex] || null;
+  }
 
-    t.courseTitle = core.normStr(dom.courseTitle && dom.courseTitle.value) || "Introduktion";
-    t.courseStep = core.normStr(dom.courseStep && dom.courseStep.value) || "1";
-    t.goalsLevel = core.normStr(dom.goalsLevel && dom.goalsLevel.value) || "normal";
-    t.goals = core.normStr(dom.goals && dom.goals.value);
+  function normalizeBlocksFromTraining(t) {
+    const tr = t && typeof t === "object" ? t : {};
+    if (Array.isArray(tr.blocks)) return tr.blocks;
+    // legacy: items[] utan block-wrapper
+    if (Array.isArray(tr.items)) return [{ title: tr.title || "Block 1", items: tr.items }];
+    return [];
+  }
 
-    // title logic: only (re)generate title after course touched, or if title empty
-    const genTitle = core.composeTitle(t.courseTitle, t.courseStep, t.area || "—");
-    if (dom.titleDisplay) dom.titleDisplay.value = genTitle;
+  function computeGeneratedTitle() {
+    state.titleDisplay = (core && core.composeTitle)
+      ? core.composeTitle(state.courseTitle, state.courseStep, state.area)
+      : `${state.courseTitle} • Steg ${state.courseStep} • ${state.area || "—"}`;
 
-    // store actual title in training (list uses it)
-    // Fail-closed: if no area yet, keep existing title if it exists; else set generated anyway.
-    if (!t.title || S.courseTouched) {
-      t.title = genTitle;
+    if (dom && dom.setText) dom.setText(dom.titleDisplay, state.titleDisplay);
+    if (dom && dom.titleDisplay) dom.titleDisplay.value = state.titleDisplay;
+  }
+
+  function syncEditorFromTraining(t) {
+    const tr = t && typeof t === "object" ? t : {};
+
+    state.module = normStr(tr.module);
+    state.area = normStr(tr.area);
+    state.courseTitle = normStr(tr.courseTitle) || "Introduktion";
+    state.courseStep = normStr(tr.courseStep) || "1";
+    state.goalsLevel = normStr(tr.goalsLevel) || "normal";
+    state.goals = normStr(tr.goals) || "";
+
+    if (dom) {
+      if (dom.mod) dom.mod.value = state.module;
+      if (dom.area) dom.area.value = state.area;
+      if (dom.courseTitle) dom.courseTitle.value = state.courseTitle;
+      if (dom.courseStep) dom.courseStep.value = state.courseStep;
+      if (dom.goalsLevel) dom.goalsLevel.value = state.goalsLevel;
+      if (dom.goals) dom.goals.value = state.goals;
     }
 
-    refreshModuleAreaLists();
+    computeGeneratedTitle();
+
+    // snapshot for revert
+    try { state.snapshotJson = JSON.stringify(tr || {}); } catch (_) { state.snapshotJson = ""; }
+    setDirty(false);
+  }
+
+  function syncTrainingFromEditor(t) {
+    const tr = t && typeof t === "object" ? t : {};
+    tr.module = normStr(dom && dom.mod ? dom.mod.value : state.module);
+    tr.area = normStr(dom && dom.area ? dom.area.value : state.area);
+    tr.courseTitle = normStr(dom && dom.courseTitle ? dom.courseTitle.value : state.courseTitle) || "Introduktion";
+    tr.courseStep = normStr(dom && dom.courseStep ? dom.courseStep.value : state.courseStep) || "1";
+    tr.goalsLevel = normStr(dom && dom.goalsLevel ? dom.goalsLevel.value : state.goalsLevel) || "normal";
+    tr.goals = normStr(dom && dom.goals ? dom.goals.value : state.goals);
+
+    // titleDisplay: vi använder den som "title" om title saknas (utan ny datamodell)
+    computeGeneratedTitle();
+    if (!normStr(tr.title)) tr.title = state.titleDisplay;
+
+    return tr;
+  }
+
+  function buildListItems() {
+    const q = safeLower(state.q);
+    const fs = normStr(state.fStatus);
+    const onlyProblems = !!state.onlyProblems;
+
+    let items = state.trainings.slice();
+
+    // filter status
+    if (fs) items = items.filter((t) => String(t.status || "draft") === fs);
+
+    // search title
+    if (q) items = items.filter((t) => safeLower(t && t.title).includes(q));
+
+    // problems (enkel baseline)
+    if (onlyProblems) {
+      items = items.filter((t) => {
+        const title = normStr(t && t.title);
+        if (!title) return true;
+        const blob = JSON.stringify(t || {});
+        if (core && core.containsForbidden && core.containsForbidden(blob)) return true;
+        return false;
+      });
+    }
+
+    return items;
   }
 
   function renderAll() {
-    // topbar pills
-    render.setWhoPill(buildWhoText(S.who));
-    render.setContext("Redigerar: Utbildningar");
-
     // list
-    const q = core.safeLower(S.q);
-    const st = core.normStr(S.fStatus);
-    let list = S.trainings.slice();
-
-    if (q) {
-      list = list.filter((t) => core.safeLower(t.title).includes(q));
-    }
-    if (st) {
-      list = list.filter((t) => String(t.status || "draft") === st);
-    }
-    if (S.onlyProblems) {
-      list = list.filter((t) => hasProblems(t));
-    }
-    if (!S.showAll && !q) {
-      // Search-first mode: hide list unless showAll or query
-      list = [];
-    }
-
-    render.renderTrainingList({
-      items: list,
-      selectedId: S.selectedId,
+    render && render.renderTrainingList && render.renderTrainingList({
+      items: buildListItems(),
+      selectedId: state.selectedId,
       onPick: function (id) { pickTraining(id); }
     });
 
-    // editor
-    applySelectedToForm();
+    // blocks
+    const t = getSelected();
+    const blocks = normalizeBlocksFromTraining(t);
+    render && render.renderBlocksList && render.renderBlocksList({
+      blocks,
+      onEdit: function (idx) { editBlock(idx); },
+      onDelete: function (idx) { deleteBlock(idx); }
+    });
 
-    // buttons state
-    dom.disable(dom.btnDelete, !S.canWrite || S.locked || !S.selectedId);
-    dom.disable(dom.btnNew, !S.canWrite || S.locked);
-    dom.disable(dom.btnPurge, !S.canWrite || S.locked);
+    // subjectId = module::area (enkel, stabil)
+    const subjectId = (normStr(state.module) || "—") + "::" + (normStr(state.area) || "—");
+    if (dom && dom.setText) dom.setText(dom.subjectIdText, subjectId);
 
-    dom.disable(dom.btnSaveDraft, !S.canWrite || S.locked || !S.selected);
-    dom.disable(dom.btnSavePublish, !S.canWrite || S.locked || !S.selected);
-
-    // gen/test AI depends on having selected + module/area
-    const readyAi = !!S.selected && core.normStr(dom.mod && dom.mod.value) && core.normStr(dom.area && dom.area.value);
-    dom.disable(dom.btnTestAI, !S.canWrite || S.locked || !readyAi);
-    dom.disable(dom.btnGenAI, !S.canWrite || S.locked || !readyAi);
-
-    // revert
-    dom.disable(dom.btnRevert, !S.canWrite || S.locked || !S.dirty);
-
-    // publish hint
-    if (S.selected) {
-      const n = countItems(S.selected);
-      render.setLeftHint(n > 0 ? `Items: ${n} (OK)` : "Publicering kräver minst 1 block.");
+    // AI hint
+    if (render && render.setAiHint) {
+      const chapterFocus = core && core.getChapterFocus ? core.getChapterFocus(state.courseTitle) : "";
+      const stepFocus = core && core.getStepFocus ? core.getStepFocus(state.courseStep) : "";
+      render.setAiHint(`${chapterFocus} ${stepFocus}`.trim());
     }
 
     // debug
-    if (dom.debugPre) {
-      try { dom.debugPre.textContent = JSON.stringify({ selected: S.selected, trainingsCount: S.trainings.length }, null, 2); }
-      catch (_) { dom.debugPre.textContent = "—"; }
-    }
+    updateDebug();
+  }
+
+  function updateDebug() {
+    if (!dom || !dom.debugPre) return;
+    const payload = {
+      version: page.__VERSION,
+      who: state.who,
+      readOnly: state.readOnly,
+      lockReason: state.lockReason,
+      trainingsCount: state.trainings.length,
+      selectedId: state.selectedId,
+      dirty: state.dirty,
+    };
+    try { dom.debugPre.textContent = JSON.stringify(payload, null, 2); }
+    catch (_) { dom.debugPre.textContent = String(payload); }
   }
 
   function pickTraining(id) {
-    const tid = String(id || "");
-    S.selectedId = tid;
+    const s = normStr(id);
+    const ix = state.trainings.findIndex((t) => normStr(t && t.id) === s);
+    state.selectedId = s;
+    state.selectedIndex = ix;
 
-    const idx = getSelectedIndex();
-    if (idx < 0) {
-      S.selected = null;
-      setDirty(false);
-      renderAll();
-      return;
-    }
-
-    S.selected = normalizeTraining(S.trainings[idx]);
-    S.courseTouched = false;
-    S.lastSavedSnapshot = snapshotSelected();
-    setDirty(false);
-
-    setStatusOk("Status: OK");
-    render.setAiHint("");
+    const t = getSelected();
+    if (t) syncEditorFromTraining(t);
     renderAll();
   }
 
-  function newTraining() {
-    if (!S.canWrite || S.locked) return;
+  function createNewTraining() {
+    if (state.readOnly) return;
 
-    const t = normalizeTraining({
-      id: core.makeId("tr"),
+    const t = {
+      id: core && core.makeId ? core.makeId("tr") : ("tr_" + Date.now()),
       title: "",
+      status: "draft",
       module: "",
       area: "",
       courseTitle: "Introduktion",
       courseStep: "1",
       goalsLevel: "normal",
       goals: "",
-      status: "draft",
       blocks: []
-    });
+    };
 
-    // add immediately to list and select
-    S.trainings.unshift(t);
-    S.selectedId = String(t.id);
-    S.selected = safeClone(t);
-    S.courseTouched = false;
-    S.lastSavedSnapshot = snapshotSelected();
-    setDirty(true);
+    // ta editor-värden direkt
+    syncEditorFromTraining(t);
+    t = syncTrainingFromEditor(t);
 
-    // persist immediately? (keep simple: require save buttons)
-    setStatusOk("Status: OK");
-    render.setAiHint("Ny utbildning skapad. Fyll modul/område och spara.");
+    state.trainings.unshift(t);
+    const save = saveAllOrFail();
+    if (!save.ok) {
+      setStatus(false, "Status: Fel (kunde inte spara)");
+      return;
+    }
+
+    setStatus(true, "Status: OK (skapad)");
+    pickTraining(t.id);
+  }
+
+  function deleteSelectedTraining() {
+    if (state.readOnly) return;
+    if (state.selectedIndex < 0) return;
+
+    const removed = state.trainings.splice(state.selectedIndex, 1);
+    state.selectedId = "";
+    state.selectedIndex = -1;
+
+    const save = saveAllOrFail();
+    if (!save.ok) {
+      // försöker återställa (best effort)
+      if (removed && removed.length) state.trainings.unshift(removed[0]);
+      setStatus(false, "Status: Fel (kunde inte ta bort)");
+      return;
+    }
+
+    setStatus(true, "Status: OK (borttagen)");
     renderAll();
   }
 
-  function deleteSelected() {
-    if (!S.canWrite || S.locked) return;
-    const idx = getSelectedIndex();
-    if (idx < 0) return;
+  function purgeAllTrainings() {
+    if (state.readOnly) return;
 
-    S.trainings.splice(idx, 1);
-    S.selectedId = "";
-    S.selected = null;
-    setDirty(false);
-
-    const s = store.save(S.trainings);
-    if (!s.ok) {
-      setStatusBad("Status: FEL");
-      render.setAiHint("Kunde inte spara efter borttagning: " + (s.err || "okänt fel"));
-    } else {
-      setStatusOk("Status: OK");
-      render.setAiHint("Borttagen.");
-    }
-    renderAll();
-  }
-
-  function purgeAll() {
-    if (!S.canWrite || S.locked) return;
-
-    const s = store.purgeAll();
-    if (!s.ok) {
-      setStatusBad("Status: FEL");
-      render.setAiHint(s.err || "Kunde inte rensa.");
-      renderAll();
+    if (!store || typeof store.purgeAll !== "function") {
+      setStatus(false, "Status: Fel (purge saknas)");
       return;
     }
 
-    S.trainings = [];
-    S.selectedId = "";
-    S.selected = null;
-    setDirty(false);
-
-    setStatusOk("Status: OK");
-    render.setAiHint("Alla utbildningar rensade.");
-    renderAll();
-  }
-
-  function saveDraft() {
-    if (!S.canWrite || S.locked || !S.selected) return;
-
-    syncFormToSelected();
-    S.selected.status = "draft";
-
-    const v = contract.validateTrainingForSave(S.selected);
-    if (!v.ok) {
-      setStatusWarn("Status: Varning");
-      render.setAiHint(v.reasons.join(" "));
-      renderAll();
+    const res = store.purgeAll();
+    if (!res.ok) {
+      setStatus(false, "Status: Fel (kunde inte rensa)");
       return;
     }
 
-    // write back into list
-    const idx = getSelectedIndex();
-    if (idx >= 0) S.trainings[idx] = safeClone(S.selected);
-
-    const s = store.save(S.trainings);
-    if (!s.ok) {
-      setStatusBad("Status: FEL");
-      render.setAiHint("Spara misslyckades: " + (s.err || "okänt fel"));
-      renderAll();
-      return;
-    }
-
-    S.lastSavedSnapshot = snapshotSelected();
-    setDirty(false);
-    setStatusOk("Status: OK");
-    render.setAiHint("Sparad som utkast.");
-    renderAll();
-  }
-
-  function savePublish() {
-    if (!S.canWrite || S.locked || !S.selected) return;
-
-    syncFormToSelected();
-    S.selected.status = "published";
-
-    const v = contract.validateForPublish(S.selected);
-    if (!v.ok) {
-      setStatusWarn("Status: Varning");
-      render.setAiHint(v.reasons.join(" "));
-      S.selected.status = "draft"; // fail-closed: do not keep published if invalid
-      renderAll();
-      return;
-    }
-
-    const idx = getSelectedIndex();
-    if (idx >= 0) S.trainings[idx] = safeClone(S.selected);
-
-    const s = store.save(S.trainings);
-    if (!s.ok) {
-      setStatusBad("Status: FEL");
-      render.setAiHint("Publicera misslyckades: " + (s.err || "okänt fel"));
-      renderAll();
-      return;
-    }
-
-    S.lastSavedSnapshot = snapshotSelected();
-    setDirty(false);
-    setStatusOk("Status: OK");
-    render.setAiHint("Publicerad.");
+    state.trainings = [];
+    state.selectedId = "";
+    state.selectedIndex = -1;
+    setStatus(true, "Status: OK (rensat)");
     renderAll();
   }
 
   function revertUnsaved() {
-    if (!S.canWrite || S.locked || !S.selected) return;
-    if (!S.lastSavedSnapshot) return;
+    if (state.readOnly) return;
+    const t = getSelected();
+    if (!t) return;
 
+    if (!state.snapshotJson) return;
     try {
-      const back = JSON.parse(S.lastSavedSnapshot);
-      S.selected = normalizeTraining(back);
-      setDirty(false);
-      setStatusOk("Status: OK");
-      render.setAiHint("Återställde osparade ändringar.");
+      const snap = JSON.parse(state.snapshotJson);
+      // ersätt objektet i arrayn
+      state.trainings[state.selectedIndex] = snap;
+      syncEditorFromTraining(snap);
+      setStatus(true, "Status: OK (återställd)");
+      renderAll();
     } catch (_) {
-      setStatusWarn("Status: Varning");
-      render.setAiHint("Kunde inte återställa snapshot.");
+      setStatus(false, "Status: Fel (kunde inte återställa)");
     }
+  }
+
+  function saveSelected(mode /* draft|published */) {
+    if (state.readOnly) return;
+
+    const t = getSelected();
+    if (!t) return;
+
+    syncTrainingFromEditor(t);
+
+    if (mode === "published") {
+      t.status = "published";
+      // publish validation
+      const v = contract && contract.validateForPublish ? contract.validateForPublish(t) : { ok: true, reasons: [] };
+      if (!v.ok) {
+        setStatus(false, "Status: Fel (kan inte publicera)");
+        render && render.setLeftHint && render.setLeftHint(v.reasons.join(" "));
+        applyReadOnlyUI(); // håller UI konsekvent
+        return;
+      }
+    } else {
+      t.status = "draft";
+      // save validation (mild)
+      const v = contract && contract.validateTrainingForSave ? contract.validateTrainingForSave(t) : { ok: true, reasons: [] };
+      if (!v.ok) {
+        setStatus(false, "Status: Fel (kan inte spara)");
+        render && render.setLeftHint && render.setLeftHint(v.reasons.join(" "));
+        applyReadOnlyUI();
+        return;
+      }
+    }
+
+    const res = saveAllOrFail();
+    if (!res.ok) {
+      setStatus(false, "Status: Fel (spara misslyckades)");
+      return;
+    }
+
+    // update snapshot
+    try { state.snapshotJson = JSON.stringify(t || {}); } catch (_) { state.snapshotJson = ""; }
+    setDirty(false);
+    setStatus(true, "Status: OK (sparad)");
     renderAll();
   }
 
-  function openEditBlock(idx) {
-    // Minimal editor: edit JSON of block/items (XSS-safe via textarea)
-    if (!S.canWrite || S.locked || !S.selected) return;
-    const blocks = Array.isArray(S.selected.blocks) ? S.selected.blocks : [];
+  // ---------------------------
+  // Blocks editor (baseline)
+  // ---------------------------
+  function editBlock(idx) {
+    if (state.readOnly) return;
+    const t = getSelected();
+    if (!t) return;
+    const blocks = normalizeBlocksFromTraining(t);
     const b = blocks[idx];
     if (!b) return;
 
-    const wrap = document.createElement("div");
-    const label = document.createElement("div");
-    label.className = "muted2";
-    label.style.textAlign = "left";
-    label.textContent = "Redigera block som JSON (items). XSS-säkert, ingen HTML.";
-    wrap.appendChild(label);
+    // simple textarea editor: edit block title + raw items text (first pass)
+    const host = document.createElement("div");
+    host.style.display = "grid";
+    host.style.gap = "10px";
+
+    const titleLabel = document.createElement("div");
+    titleLabel.className = "muted2";
+    titleLabel.style.textAlign = "left";
+    titleLabel.textContent = "Rubrik";
+
+    const titleInput = document.createElement("input");
+    titleInput.className = "input";
+    titleInput.value = normStr(b.title);
+
+    const itemsLabel = document.createElement("div");
+    itemsLabel.className = "muted2";
+    itemsLabel.style.textAlign = "left";
+    itemsLabel.textContent = "Items (en rad per item – text)";
 
     const ta = document.createElement("textarea");
     ta.className = "textarea";
-    ta.style.marginTop = "10px";
-    ta.value = JSON.stringify(b, null, 2);
-    wrap.appendChild(ta);
+    const lines = Array.isArray(b.items) ? b.items.map((it) => normStr(it && (it.text || it.instruction || ""))) : [];
+    ta.value = lines.join("\n");
 
-    render.openModal("Redigera block " + (idx + 1), wrap, function () {
-      try {
-        const parsed = JSON.parse(ta.value);
-        // keep it tolerant but normalized
-        S.selected.blocks[idx] = contract.normalizeBlock(parsed);
-        setDirty(true);
-        setStatusOk("Status: OK");
-        render.setAiHint("Block uppdaterat (osparat).");
-      } catch (e) {
-        setStatusWarn("Status: Varning");
-        render.setAiHint("Ogiltig JSON: " + String((e && e.message) || e));
-      }
+    host.appendChild(titleLabel);
+    host.appendChild(titleInput);
+    host.appendChild(itemsLabel);
+    host.appendChild(ta);
+
+    render.openModal("Redigera block", host, function () {
+      b.title = normStr(titleInput.value) || b.title;
+      const newLines = normStr(ta.value).split("\n").map((x) => normStr(x)).filter(Boolean);
+      b.items = newLines.map((txt) => ({ kind: "document", text: txt }));
+      t.blocks = blocks;
+      setDirty(true);
       renderAll();
     });
   }
 
   function deleteBlock(idx) {
-    if (!S.canWrite || S.locked || !S.selected) return;
-    const blocks = Array.isArray(S.selected.blocks) ? S.selected.blocks : [];
+    if (state.readOnly) return;
+    const t = getSelected();
+    if (!t) return;
+    const blocks = normalizeBlocksFromTraining(t);
     if (!blocks[idx]) return;
     blocks.splice(idx, 1);
-    S.selected.blocks = blocks;
+    t.blocks = blocks;
     setDirty(true);
-    setStatusOk("Status: OK");
-    render.setAiHint("Block borttaget (osparat).");
     renderAll();
   }
 
-  function testAI() {
-    if (!S.canWrite || S.locked) return;
+  // ---------------------------
+  // AI actions (baseline)
+  // ---------------------------
+  async function testAI() {
     if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
-      setStatusBad("Status: FEL");
-      render.setAiHint("Worker SDK saknas (HRWorkerSDK.health).");
-      renderAll();
+      setStatus(false, "Status: Fel (Worker SDK saknas)");
       return;
     }
-
-    render.setAiHint("Testar AI…");
-    renderAll();
-
-    window.HRWorkerSDK.health()
-      .then(function (res) {
-        const ok = !!(res && res.ok);
-        if (ok) {
-          setStatusOk("Status: OK");
-          render.setAiHint("AI/Worker: OK");
-        } else {
-          setStatusWarn("Status: Varning");
-          render.setAiHint("AI/Worker svarade men inte OK.");
-        }
-        renderAll();
-      })
-      .catch(function (e) {
-        setStatusBad("Status: FEL");
-        render.setAiHint("AI/Worker fel: " + String((e && e.message) || e));
-        renderAll();
-      });
+    try {
+      const res = await window.HRWorkerSDK.health();
+      if (res && res.ok) setStatus(true, "Status: OK (AI: health ok)");
+      else setStatus(false, "Status: Fel (AI health)");
+    } catch (e) {
+      setStatus(false, "Status: Fel (AI health)");
+    }
   }
 
-  function generateAI() {
-    if (!S.canWrite || S.locked || !S.selected) return;
+  async function generateAI() {
+    if (state.readOnly) return;
+
+    const t = getSelected();
+    if (!t) {
+      setStatus(false, "Status: Fel (välj utbildning)");
+      return;
+    }
 
     if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
-      setStatusBad("Status: FEL");
-      render.setAiHint("Worker SDK saknas (HRWorkerSDK.aiGenerate).");
-      renderAll();
+      setStatus(false, "Status: Fel (Worker SDK saknas)");
       return;
     }
 
-    syncFormToSelected();
+    // build context
+    const ctx = core && core.buildAiContext ? core.buildAiContext({
+      module: normStr(dom.mod.value),
+      area: normStr(dom.area.value),
+      courseTitle: normStr(dom.courseTitle.value),
+      courseStep: normStr(dom.courseStep.value),
+      goalsLevel: normStr(dom.goalsLevel.value),
+      goals: normStr(dom.goals.value),
+    }) : {};
 
-    const ctx = core.buildAiContext({
-      module: S.selected.module,
-      area: S.selected.area,
-      courseTitle: S.selected.courseTitle,
-      courseStep: S.selected.courseStep,
-      goalsLevel: S.selected.goalsLevel,
-      goals: S.selected.goals
-    });
+    const mode = normStr(dom.aiContent.value) || "blocks";
+    const count = Number(normStr(dom.aiCount.value) || "3");
+    const payload = { mode, count, context: ctx, language: "sv" };
 
-    const mode = String(dom.aiContent && dom.aiContent.value || "blocks");
-    const count = Number(dom.aiCount && dom.aiCount.value || 3);
-    const qType = String(dom.aiQuestionType && dom.aiQuestionType.value || "auto");
-    const feedbackEnabled = !!(dom.aiFeedbackEnabled && dom.aiFeedbackEnabled.checked);
+    setStatus(true, "Status: OK (AI kör…)");
 
-    const payload = {
-      mode,
-      count: Math.max(1, Math.min(12, isFinite(count) ? count : 3)),
-      context: ctx,
-      language: "sv",
-      // optional knobs for worker (safe, no new model)
-      question: { type: qType, feedbackEnabled: feedbackEnabled }
-    };
-
-    // Fail-closed: do not send forbidden phrases in prompt context
-    const blob = JSON.stringify(payload);
-    if (core.containsForbidden(blob)) {
-      setStatusWarn("Status: Varning");
-      render.setAiHint("Stoppar AI-call: kontext innehåller förbjudna fraser.");
-      renderAll();
-      return;
-    }
-
-    render.setAiHint("Genererar…");
-    renderAll();
-
-    window.HRWorkerSDK.aiGenerate(payload)
-      .then(function (res) {
-        const norm = core.normalizeAiResult(res);
-        const v = contract.validateAiResult(norm);
-        if (!v.ok) {
-          setStatusWarn("Status: Varning");
-          render.setAiHint(v.reasons.join(" "));
-          renderAll();
-          return;
-        }
-
-        // Build a single block from items (keep simple)
-        const items = (norm.items || []).map(contract.normalizeItem);
-        const b = contract.normalizeBlock({
-          title: "AI-block",
-          module: S.selected.module,
-          area: S.selected.area,
-          step: S.selected.courseStep,
-          status: "draft",
-          items: items
-        });
-
-        if (!Array.isArray(S.selected.blocks)) S.selected.blocks = [];
-        S.selected.blocks.push(b);
-
-        setDirty(true);
-        setStatusOk("Status: OK");
-        render.setAiHint("AI klar. Block tillagt (osparat).");
-        renderAll();
-      })
-      .catch(function (e) {
-        setStatusBad("Status: FEL");
-        render.setAiHint("AI fel: " + String((e && e.message) || e));
-        renderAll();
-      });
-  }
-
-  function onAnyEdit() {
-    if (!S.canWrite || S.locked || !S.selected) return;
-    syncFormToSelected();
-    setDirty(true);
-    renderAll();
-  }
-
-  function onCourseTouched() {
-    S.courseTouched = true;
-    onAnyEdit();
-  }
-
-  function onShowAll() {
-    S.showAll = true;
-    renderAll();
-  }
-
-  function onClearSearch() {
-    S.q = "";
-    S.fStatus = "";
-    S.onlyProblems = false;
-    S.showAll = false;
-
-    dom.q.value = "";
-    dom.fStatus.value = "";
-    dom.onlyProblems.checked = false;
-
-    render.setAiHint("");
-    setStatusOk("Status: OK");
-    renderAll();
-  }
-
-  function onModAll() {
-    // Show list by forcing showAll (search-first)
-    S.showAll = true;
-    dom.q.focus();
-    renderAll();
-  }
-
-  function onModClear() {
-    if (!S.canWrite || S.locked || !S.selected) return;
-    dom.mod.value = "";
-    dom.area.value = "";
-    refreshModuleAreaLists();
-    onAnyEdit();
-  }
-
-  function logout() {
     try {
-      if (window.HRApp && typeof window.HRApp.logout === "function") {
-        window.HRApp.logout();
+      const raw = await window.HRWorkerSDK.aiGenerate(payload);
+      const norm = core && core.normalizeAiResult ? core.normalizeAiResult(raw) : (raw || {});
+      const vr = contract && contract.validateAiResult ? contract.validateAiResult(norm) : { ok: true, reasons: [] };
+
+      if (!vr.ok) {
+        setStatus(false, "Status: Fel (AI-kontrakt)");
+        render && render.setAiHint && render.setAiHint(vr.reasons.join(" "));
         return;
       }
-      if (window.HRApp && typeof window.HRApp.clearSession === "function") {
-        window.HRApp.clearSession();
-      }
-    } catch (_) {}
-    // fallback: just reload to login route
-    try { window.location.href = "./login.html"; } catch (_) {}
+
+      // accept items => append as one block
+      const items = Array.isArray(norm.items) ? norm.items : [];
+      const nItems = items.map(contract.normalizeItem ? contract.normalizeItem : (x) => x);
+
+      const blocks = normalizeBlocksFromTraining(t);
+      blocks.push({
+        title: state.titleDisplay || ("Block " + (blocks.length + 1)),
+        items: nItems
+      });
+      t.blocks = blocks;
+
+      setDirty(true);
+      setStatus(true, "Status: OK (AI klar)");
+      renderAll();
+
+    } catch (e) {
+      setStatus(false, "Status: Fel (AI)");
+    }
+  }
+
+  // ---------------------------
+  // UI wiring
+  // ---------------------------
+  function wireEvents() {
+    if (!dom || !dom.on) return;
+
+    // logout
+    dom.on(dom.btnLogout, "click", function () {
+      try {
+        if (window.HRApp && typeof window.HRApp.logout === "function") window.HRApp.logout();
+      } catch (_) {}
+      // fallback: reload
+      try { window.location.href = "./home.html"; } catch (_) {}
+    });
+
+    // list filters
+    dom.on(dom.q, "input", function () { state.q = normStr(dom.q.value); renderAll(); });
+    dom.on(dom.fStatus, "change", function () { state.fStatus = normStr(dom.fStatus.value); renderAll(); });
+    dom.on(dom.onlyProblems, "change", function () { state.onlyProblems = !!dom.onlyProblems.checked; renderAll(); });
+
+    dom.on(dom.btnShowAll, "click", function () {
+      state.q = "";
+      if (dom.q) dom.q.value = "";
+      renderAll();
+    });
+
+    dom.on(dom.btnClear, "click", function () {
+      if (dom.q) dom.q.value = "";
+      if (dom.fStatus) dom.fStatus.value = "";
+      state.q = "";
+      state.fStatus = "";
+      renderAll();
+    });
+
+    // CRUD
+    dom.on(dom.btnNew, "click", createNewTraining);
+    dom.on(dom.btnDelete, "click", deleteSelectedTraining);
+    dom.on(dom.btnPurge, "click", purgeAllTrainings);
+
+    // module helpers
+    dom.on(dom.btnModAll, "click", function () {
+      if (dom.mod) dom.mod.focus();
+    });
+    dom.on(dom.btnModClear, "click", function () {
+      if (state.readOnly) return;
+      if (dom.mod) dom.mod.value = "";
+      if (dom.area) dom.area.value = "";
+      setDirty(true);
+      refreshEditorStateFromInputs();
+      renderAll();
+    });
+
+    // editor dirty watchers
+    const watch = dom.getDirtyWatchEls ? dom.getDirtyWatchEls() : [];
+    for (const el of watch) {
+      dom.on(el, "input", function () { if (!state.readOnly) { setDirty(true); refreshEditorStateFromInputs(); renderAll(); } });
+      dom.on(el, "change", function () { if (!state.readOnly) { setDirty(true); refreshEditorStateFromInputs(); renderAll(); } });
+    }
+    dom.on(dom.goals, "input", function () { if (!state.readOnly) { setDirty(true); refreshEditorStateFromInputs(); } });
+
+    // save/publish
+    dom.on(dom.btnRevert, "click", revertUnsaved);
+    dom.on(dom.btnSaveDraft, "click", function () { saveSelected("draft"); });
+    dom.on(dom.btnSavePublish, "click", function () { saveSelected("published"); });
+
+    // AI
+    dom.on(dom.btnTestAI, "click", testAI);
+    dom.on(dom.btnGenAI, "click", generateAI);
+
+    // question controls show/hide
+    dom.on(dom.aiContent, "change", function () {
+      const isQ = normStr(dom.aiContent.value) === "questions";
+      if (dom.questionControls) dom.questionControls.style.display = isQ ? "flex" : "none";
+    });
+  }
+
+  function refreshEditorStateFromInputs() {
+    state.module = normStr(dom && dom.mod ? dom.mod.value : state.module);
+    state.area = normStr(dom && dom.area ? dom.area.value : state.area);
+    state.courseTitle = normStr(dom && dom.courseTitle ? dom.courseTitle.value : state.courseTitle) || "Introduktion";
+    state.courseStep = normStr(dom && dom.courseStep ? dom.courseStep.value : state.courseStep) || "1";
+    state.goalsLevel = normStr(dom && dom.goalsLevel ? dom.goalsLevel.value : state.goalsLevel) || "normal";
+    state.goals = normStr(dom && dom.goals ? dom.goals.value : state.goals);
+    computeGeneratedTitle();
   }
 
   // ---------------------------
   // Boot
   // ---------------------------
   function init() {
-    // 1) WHO + writer mode
-    S.who = core.getWho();
-    S.canWrite = !!(S.who && S.who.canWrite) && core.isAdminWriter(S.who);
-
-    // 2) Storage load
-    const load = store.load();
-    if (!load.ok) {
-      S.locked = true;
-      S.lockReason = load.corrupt ? "Fail-closed: korrupt AO-057_TRAININGS_V1. " + store.lockReasonFor() : (load.err || "Kunde inte läsa storage.");
-      S.trainings = Array.isArray(load.trainings) ? load.trainings.map(normalizeTraining) : [];
-    } else {
-      S.locked = false;
-      S.lockReason = "";
-      S.trainings = Array.isArray(load.trainings) ? load.trainings.map(normalizeTraining) : [];
+    // DOM exists?
+    if (!dom) {
+      console.error("Trainings.dom saknas");
+      return;
     }
 
-    // 3) Final read-only gate
-    if (!S.canWrite || S.locked) {
-      setReadOnlyUi(true, S.locked ? S.lockReason : "Read-only: du kan titta men inte spara/generera.");
-      if (S.locked) setStatusBad("Status: FEL");
-      else setStatusOk("Status: OK");
-    } else {
-      setReadOnlyUi(false);
-      setStatusOk("Status: OK");
+    computeWhoAndMode();
+    loadTrainingsOrLock();
+    setTopbar();
+
+    // initial editor state (no selection)
+    refreshEditorStateFromInputs();
+
+    // show/hide question controls baseline
+    if (dom.aiContent && dom.questionControls) {
+      const isQ = normStr(dom.aiContent.value) === "questions";
+      dom.questionControls.style.display = isQ ? "flex" : "none";
     }
 
-    // 4) Wire events
-    dom.on(dom.btnLogout, "click", logout);
+    // apply lock rules
+    applyReadOnlyUI();
 
-    dom.on(dom.q, "input", function () { S.q = dom.q.value || ""; renderAll(); });
-    dom.on(dom.fStatus, "change", function () { S.fStatus = dom.fStatus.value || ""; renderAll(); });
-    dom.on(dom.onlyProblems, "change", function () { S.onlyProblems = !!dom.onlyProblems.checked; renderAll(); });
+    // status
+    if (state.lockReason) setStatus(false, "Status: Låst");
+    else setStatus(true, "Status: OK");
 
-    dom.on(dom.btnShowAll, "click", onShowAll);
-    dom.on(dom.btnClear, "click", onClearSearch);
-
-    dom.on(dom.btnNew, "click", newTraining);
-    dom.on(dom.btnDelete, "click", deleteSelected);
-    dom.on(dom.btnPurge, "click", purgeAll);
-
-    dom.on(dom.btnModAll, "click", onModAll);
-    dom.on(dom.btnModClear, "click", onModClear);
-
-    // dirty watchers
-    const dirtyEls = dom.getDirtyWatchEls();
-    dirtyEls.forEach(function (el) { dom.on(el, "input", onAnyEdit); dom.on(el, "change", onAnyEdit); });
-
-    // course touched => regenerate title on change
-    dom.on(dom.courseTitle, "change", onCourseTouched);
-    dom.on(dom.courseStep, "change", onCourseTouched);
-
-    // module affects area list
-    dom.on(dom.mod, "input", function () { refreshModuleAreaLists(); onAnyEdit(); });
-
-    dom.on(dom.area, "input", function () { refreshModuleAreaLists(); onAnyEdit(); });
-
-    // AI actions
-    dom.on(dom.btnTestAI, "click", testAI);
-    dom.on(dom.btnGenAI, "click", generateAI);
-
-    // save actions
-    dom.on(dom.btnSaveDraft, "click", saveDraft);
-    dom.on(dom.btnSavePublish, "click", savePublish);
-
-    dom.on(dom.btnRevert, "click", revertUnsaved);
-
-    // 5) initial UI
-    render.setWhoPill(buildWhoText(S.who));
-    refreshModuleAreaLists();
+    // initial render
     renderAll();
+
+    // events
+    wireEvents();
+
+    // if there is exactly one training, auto-pick
+    if (state.trainings.length === 1) {
+      const id = normStr(state.trainings[0].id);
+      if (id) pickTraining(id);
+    }
   }
 
-  // Safe init with DOM fail-closed reporting
   try {
-    core.assert(dom && core && store && contract && render, "INIT_MISSING", "modules saknas");
     init();
   } catch (e) {
-    try { render.setStatePill("Status: FEL", "bad"); } catch (_) {}
-    try { render.setAiHint("Init fel: " + String((e && e.message) || e)); } catch (_) {}
-    // eslint-disable-next-line no-console
-    console.error("Trainings init failed:", e);
+    try { console.error(e); } catch (_) {}
+    try { setStatus(false, "Status: Fel (init)"); } catch (_) {}
   }
 })();
