@@ -1,9 +1,8 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-04) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-05) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
 Projekt: HR-System (GitHub Pages / UI-only)
 Syfte: Bootstrap + state + event wiring för trainings (ADMIN create/edit).
-Fix: "Skapa ny" ska fungera för ADMIN.
-Fix: Ladda ai-rules/v1/modules.json så Modul/Område/Kapitel/Kurs styrs av rules.
+      Nu: Koppla in ai-rules/v1/modules.json → Modul/Område/Kapitel/Steg.
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -11,12 +10,11 @@ POLICY (LÅST):
 - XSS-safe: render via 05-render.js + dom.setText (textContent)
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 
-PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
-- P0: Boot retry-loop kvar (load-order tålig)
-- P0: Writer-check strikt: ADMIN + empNo krävs (via core.getWho)
-- P0: Triggar core.loadModulesCatalog() => modules.json syns i Network
-- P0: Datalists: modul/område hämtas från catalog när den finns, annars fallback
-- P1: Titel hålls konsekvent via core.composeTitle(chapter,step,area) vid ändringar
+PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
+- P0: Laddar ai-rules/v1/modules.json (same-origin) och bygger val-listor deterministiskt.
+- P0: Fixar "områden kommer inte fram" via robust matchning (trim + case-insensitive).
+- P0: Kapitel (7) + Steg (1–5) fylls i UI (select eller datalist) utan ny datamodell.
+- P1: Titel synkas vid ändring: "<Kapitel> • Steg <N> • <Område>" via core.composeTitle().
 ============================================================ */
 (function () {
   "use strict";
@@ -25,7 +23,7 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0.4-PP-SC-010-04";
+  page.__VERSION = "v1.0.4-PP-SC-010-05";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -96,12 +94,6 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     D.aiFeedbackEnabled = byId("aiFeedbackEnabled");
     D.questionControls = byId("questionControls");
 
-    // Optional (om de finns i HTML i senare versioner)
-    D.chapterList = byId("chapterList");          // datalist för kapitel
-    D.courseTitleList = byId("courseTitleList");  // datalist för kurs-titlar
-    D.levelList = byId("levelList");              // datalist för svårighetsgrad
-    D.outputMode = byId("outputMode");            // select/input för outputMode
-
     // Helpers
     D.setText = function (el, txt) { if (!el) return; el.textContent = String(txt ?? ""); };
     D.disable = function (el, disabled) {
@@ -127,7 +119,7 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
   // State
   // ------------------------------------------------------------
   const state = {
-    who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false, authOk: false },
+    who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false },
     locked: true,
     lockReason: "BOOT: väntar på moduler…",
     trainings: [],
@@ -139,34 +131,54 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     fStatus: "",
     onlyProblems: false,
 
-    // In-memory catalog (ingen storage)
-    catalog: { ok: false, data: null, err: "", url: "" },
+    // Catalog (ai-rules/v1/modules.json)
+    catalog: null,
+    catalogStatus: "pending", // pending|ok|missing|error
+    catalogErr: "",
 
-    // Fallback om catalog saknas (tills rules är igång)
     defaults: {
+      // Fallback (om catalog saknas) — minimal men fungerande
       modules: [
         "Kvalitet",
         "Säkerhet & arbetsmiljö",
         "Miljö",
         "Livsmedel",
-        "Inköp",
-        "Leverans",
-        "Kundservice",
-        "IT",
-        "Ledning",
+        "Informationssäkerhet",
+        "HR – vardag",
+        "Ledarskap",
+        "DISC-modellen",
+        "Matematik",
+        "Svenska"
       ],
       areasByModule: {
-        "Kvalitet": ["ISO 9001", "Avvikelse", "CAPA", "Internrevision"],
-        "Säkerhet & arbetsmiljö": ["Skyddsrond", "Incident", "Riskbedömning"],
-        "Miljö": ["ISO 14001", "Avfall", "Energi", "Transport"],
-        "Livsmedel": ["HACCP", "Kylkedja", "Hygien", "Allergen"],
-        "Inköp": ["Leverantör", "Beställning", "Mottagning"],
-        "Leverans": ["Plock", "Pack", "Rutt", "Temperatur"],
-        "Kundservice": ["Samtal", "Ärende", "Bemötande"],
-        "IT": ["Behörighet", "Support", "Säkerhet"],
-        "Ledning": ["Mål", "Uppföljning", "Policy"],
+        "Kvalitet": ["ISO 9001", "Avvikelsehantering", "CAPA (åtgärder)", "Internrevision", "Mål & KPI"],
+        "Säkerhet & arbetsmiljö": ["Skyddsrond", "Incident & tillbud", "Riskbedömning", "Ergonomi", "Psykosocial arbetsmiljö"],
+        "Miljö": ["ISO 14001", "Avfall", "Energi", "Transport", "Kemikalier"],
+        "Livsmedel": ["HACCP", "Kylkedja", "Hygien", "Allergen", "Spårbarhet"],
+        "Informationssäkerhet": ["Lösenord & konton", "Phishing & bedrägeri", "Behörighet & roller", "Enheter & arbetsdator", "Säkerhetsincident"],
+        "HR – vardag": ["Onboarding", "Policy & regler", "Feedback & samtal", "Konflikthantering", "Frånvaro & rutiner"],
+        "Ledarskap": ["Planering", "Delegering", "Uppföljning", "Coachning", "Förändringsledning"],
+        "DISC-modellen": ["D – Driv", "I – Inflytande", "S – Stabilitet", "C – Korrekthet", "Team & kommunikation"],
+        "Matematik": ["Procent", "Grundräkning", "Enheter & omvandling", "Diagram & tolkning", "Problemlösning"],
+        "Svenska": ["Läsförståelse", "Skriva tydligt", "Ton & bemötande", "Språkregler", "Sammanfatta"]
       },
-    },
+      chapterLabels: [
+        "Introduktion",
+        "Grundläggande",
+        "Rutiner & arbetssätt",
+        "Scenario & tillämpning",
+        "Avvikelser & risk",
+        "Fördjupning",
+        "Kontroll & test"
+      ],
+      steps: [
+        { id: "1", label: "Kurs 1" },
+        { id: "2", label: "Kurs 2" },
+        { id: "3", label: "Kurs 3" },
+        { id: "4", label: "Kurs 4" },
+        { id: "5", label: "Kurs 5" }
+      ]
+    }
   };
 
   page._state = state;
@@ -178,7 +190,7 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     return (DEPS.core && DEPS.core.normStr) ? DEPS.core.normStr(v) : String(v ?? "").trim();
   }
   function safeArr(a) { return Array.isArray(a) ? a : []; }
-  function upper(v) { return String(v ?? "").toUpperCase(); }
+  function lowerKey(v) { return normStr(v).toLowerCase(); }
 
   function deepClone(obj) {
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
@@ -207,32 +219,46 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     return n > 0;
   }
 
-  // ------------------------------------------------------------
-  // Auth/who (STRIKT via core.getWho)
-  // ------------------------------------------------------------
+  function upper(v) { return String(v ?? "").toUpperCase(); }
+
   function getWhoFresh() {
+    // Fail-closed: om locked/bootPending, behåll SYSTEM_ADMIN.
     try {
       if (DEPS.core && typeof DEPS.core.getWho === "function") {
         const w = DEPS.core.getWho();
         if (w && typeof w === "object") return w;
       }
-    } catch (_) {}
+    } catch (_) { /* ignore */ }
 
-    // sista fallback (fail-closed)
-    return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false, authOk: false };
+    try {
+      if (window.HRApp && typeof window.HRApp.getRole === "function") {
+        const r = window.HRApp.getRole();
+        if (typeof r === "string") {
+          const role = upper(r);
+          return { role, empNo: "", canWrite: role === "ADMIN" };
+        }
+        if (r && typeof r === "object") {
+          const role = upper(r.roleId || r.role || "SYSTEM_ADMIN");
+          const empNo = String(r.empNo || r.emp || r.employeeNo || "");
+          const hasCanWrite = Object.prototype.hasOwnProperty.call(r, "canWrite");
+          const canWrite = hasCanWrite ? !!r.canWrite : (role === "ADMIN");
+          return { role, empNo, canWrite };
+        }
+      }
+    } catch (_) { /* ignore */ }
+
+    return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
   }
 
   function isWriterAllowed() {
     if (state.locked) return false;
+
     const who = getWhoFresh();
     state.who = who;
 
     const role = upper(who.role || "SYSTEM_ADMIN");
-    const empNo = normStr(who.empNo || "");
     if (role !== "ADMIN") return false;
-    if (!empNo) return false;
 
-    // canWrite ska redan vara strict från core, men vi fail-closed här också
     if (who.canWrite === false) return false;
     return true;
   }
@@ -253,45 +279,107 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
   }
 
   // ------------------------------------------------------------
-  // Catalog load (ai-rules/v1/modules.json) — via core.loadModulesCatalog()
+  // Catalog loader (ai-rules/v1/modules.json)
   // ------------------------------------------------------------
-  function kickCatalogLoadOnce() {
-    if (!DEPS.core || typeof DEPS.core.loadModulesCatalog !== "function") return;
-    if (state.catalog && state.catalog._started) return;
-    state.catalog._started = true;
+  const CATALOG_URLS = [
+    "../ai-rules/v1/modules.json",
+    "./ai-rules/v1/modules.json"
+  ];
+  let _catalogPromise = null;
 
-    try {
-      // Gör att du ser modules.json i Network (no-store)
-      DEPS.core.loadModulesCatalog({ force: true }).then(function (res) {
-        if (res && res.ok) {
-          state.catalog.ok = true;
-          state.catalog.data = res.data || null;
-          state.catalog.err = "";
-          state.catalog.url = res.url || (DEPS.core.getCatalogUrl ? DEPS.core.getCatalogUrl() : "");
-        } else {
-          state.catalog.ok = false;
-          state.catalog.data = null;
-          state.catalog.err = (res && res.err) ? String(res.err) : "catalog load fail";
-          state.catalog.url = (DEPS.core.getCatalogUrl ? DEPS.core.getCatalogUrl() : "");
-        }
+  function isPlainObject(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
 
-        // Uppdatera datalists direkt när catalog kommer in
-        renderModuleDatalist();
-        renderAreaDatalist();
-        renderChapterDatalist();
-        renderCourseTitleDatalist();
-        renderLevelDatalist();
-        updateUiAll();
-      });
-    } catch (e) {
-      state.catalog.ok = false;
-      state.catalog.data = null;
-      state.catalog.err = String(e && e.message ? e.message : e);
+  function buildDefaultsFromCatalog(cat) {
+    // cat.modules[{label, areas[{label,chapterIds}]}], cat.catalogs.defaultChapterIds + catalogs.chapters
+    const out = {
+      modules: [],
+      areasByModule: {},
+      chapterLabels: [],
+      steps: safeArr(state.defaults.steps)
+    };
+
+    const mods = safeArr(cat && cat.modules);
+    out.modules = mods.map(m => normStr(m && m.label)).filter(Boolean);
+
+    for (const m of mods) {
+      const mLabel = normStr(m && m.label);
+      if (!mLabel) continue;
+      const areas = safeArr(m && m.areas).map(a => normStr(a && a.label)).filter(Boolean);
+      out.areasByModule[mLabel] = areas;
     }
+
+    // chapters
+    const catalogs = isPlainObject(cat && cat.catalogs) ? cat.catalogs : {};
+    const chapters = safeArr(catalogs.chapters);
+    const defaultIds = safeArr(catalogs.defaultChapterIds);
+
+    if (chapters.length && defaultIds.length) {
+      const map = {};
+      for (const ch of chapters) {
+        const id = normStr(ch && ch.id);
+        const label = normStr(ch && ch.label);
+        if (id && label) map[id] = label;
+      }
+      out.chapterLabels = defaultIds.map(id => normStr(map[id])).filter(Boolean);
+    } else {
+      out.chapterLabels = safeArr(state.defaults.chapterLabels);
+    }
+
+    // steps
+    const steps = safeArr(catalogs.steps);
+    if (steps.length) {
+      out.steps = steps
+        .map(s => ({ id: normStr(s && s.id), label: normStr(s && s.label) }))
+        .filter(x => x.id && x.label);
+    }
+
+    // Safety fallback
+    if (!out.modules.length) out.modules = safeArr(state.defaults.modules);
+    if (!Object.keys(out.areasByModule).length) out.areasByModule = state.defaults.areasByModule;
+    if (!out.chapterLabels.length) out.chapterLabels = safeArr(state.defaults.chapterLabels);
+    if (!out.steps.length) out.steps = safeArr(state.defaults.steps);
+
+    return out;
+  }
+
+  async function loadCatalogOnce() {
+    if (_catalogPromise) return _catalogPromise;
+
+    _catalogPromise = (async function () {
+      state.catalogStatus = "pending";
+      state.catalogErr = "";
+
+      for (const url of CATALOG_URLS) {
+        try {
+          const res = await fetch(url, { method: "GET", credentials: "same-origin", cache: "no-cache" });
+          if (!res || !res.ok) continue;
+
+          const json = await res.json();
+          if (!json || typeof json !== "object") continue;
+
+          // minimal validation
+          if (normStr(json.type) !== "catalog") continue;
+          if (!Array.isArray(json.modules)) continue;
+
+          state.catalog = json;
+          state.defaults = buildDefaultsFromCatalog(json);
+          state.catalogStatus = "ok";
+          return { ok: true, url };
+        } catch (_) {
+          // try next url
+        }
+      }
+
+      state.catalogStatus = "missing";
+      state.catalogErr = "modules.json saknas eller kunde inte laddas.";
+      return { ok: false, missing: true };
+    })();
+
+    return _catalogPromise;
   }
 
   // ------------------------------------------------------------
-  // Datalist builders
+  // Datalist / select builders (robust matchning)
   // ------------------------------------------------------------
   function uniqueSorted(list) {
     const set = new Set();
@@ -313,120 +401,164 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     const out = [];
     for (const t of state.trainings) {
       if (!t) continue;
-      if (m && normStr(t.module) !== m) continue;
+      if (m && lowerKey(t.module) !== lowerKey(m)) continue;
       if (t.area) out.push(t.area);
     }
     return uniqueSorted(out);
   }
 
-  function getCatalogData() {
-    return (state.catalog && state.catalog.ok && state.catalog.data) ? state.catalog.data : null;
-  }
+  function getAreasForModuleLoose(moduleVal) {
+    const mod = normStr(moduleVal);
+    if (!mod) return [];
 
-  function renderDatalist(el, values) {
-    if (!el) return;
-    while (el.firstChild) el.removeChild(el.firstChild);
-    for (const v of values) {
-      const opt = document.createElement("option");
-      opt.value = String(v || "");
-      el.appendChild(opt);
+    const map = state.defaults && state.defaults.areasByModule ? state.defaults.areasByModule : {};
+    if (!isPlainObject(map)) return [];
+
+    // 1) exact key
+    if (Array.isArray(map[mod])) return safeArr(map[mod]);
+
+    // 2) case-insensitive match (P0 fix: områden kommer inte fram)
+    const want = lowerKey(mod);
+    for (const k of Object.keys(map)) {
+      if (lowerKey(k) === want) return safeArr(map[k]);
     }
+
+    return [];
   }
 
   function renderModuleDatalist() {
     if (!dom || !dom.modList) return;
+    while (dom.modList.firstChild) dom.modList.removeChild(dom.modList.firstChild);
 
-    const data = getCatalogData();
-    if (data && DEPS.core && typeof DEPS.core.getModuleOptions === "function") {
-      const opts = DEPS.core.getModuleOptions(data);
-      renderDatalist(dom.modList, opts.map((o) => o.title).filter(Boolean));
-      return;
-    }
-
-    // fallback
     const fixed = safeArr(state.defaults.modules);
     const fromData = collectModulesFromTrainings();
-    renderDatalist(dom.modList, uniqueSorted(fixed.concat(fromData)));
+    const all = uniqueSorted(fixed.concat(fromData));
+
+    for (const m of all) {
+      const opt = document.createElement("option");
+      opt.value = m;
+      dom.modList.appendChild(opt);
+    }
   }
 
   function renderAreaDatalist() {
     if (!dom || !dom.areaList) return;
+    while (dom.areaList.firstChild) dom.areaList.removeChild(dom.areaList.firstChild);
 
-    const mod = normStr(dom.mod && dom.mod.value);
-    const data = getCatalogData();
+    const modVal = normStr(dom.mod && dom.mod.value);
+    const fixed = safeArr(getAreasForModuleLoose(modVal));
+    const fromData = collectAreasFromTrainingsForModule(modVal);
+    const all = uniqueSorted(fixed.concat(fromData));
 
-    if (data && DEPS.core && typeof DEPS.core.getAreaOptions === "function") {
-      const opts = DEPS.core.getAreaOptions(data, mod);
-      renderDatalist(dom.areaList, opts.map((o) => o.title).filter(Boolean));
-      return;
+    for (const a of all) {
+      const opt = document.createElement("option");
+      opt.value = a;
+      dom.areaList.appendChild(opt);
     }
-
-    // fallback
-    const fixed = safeArr((state.defaults.areasByModule[mod] || []));
-    const fromData = collectAreasFromTrainingsForModule(mod);
-    renderDatalist(dom.areaList, uniqueSorted(fixed.concat(fromData)));
   }
 
-  function renderChapterDatalist() {
-    // optional UI: om du har datalist/id för kapitel
-    if (!dom || !dom.chapterList) return;
+  // Kapitel (7) — fungerar för <select> eller <input list="...">
+  function ensureDatalistForInput(inputEl, listId) {
+    if (!inputEl) return null;
+    const tag = String(inputEl.tagName || "").toUpperCase();
+    if (tag === "SELECT") return null;
 
-    const data = getCatalogData();
-    const mod = normStr(dom.mod && dom.mod.value);
-    const area = normStr(dom.area && dom.area.value);
-
-    if (data && DEPS.core && typeof DEPS.core.getChapterOptions === "function") {
-      const opts = DEPS.core.getChapterOptions(data, mod, area);
-      renderDatalist(dom.chapterList, opts.map((o) => o.title).filter(Boolean));
-      return;
+    const id = String(listId || "dl_auto");
+    let dl = byId(id);
+    if (!dl) {
+      dl = document.createElement("datalist");
+      dl.id = id;
+      // attach near input to keep DOM simple
+      inputEl.parentNode && inputEl.parentNode.appendChild(dl);
     }
-
-    // fallback: inga kapitel utan catalog
-    renderDatalist(dom.chapterList, []);
+    inputEl.setAttribute("list", id);
+    return dl;
   }
 
-  function renderCourseTitleDatalist() {
-    if (!dom || !dom.courseTitleList) return;
+  function fillSelectOptions(selectEl, values, placeholder) {
+    if (!selectEl) return;
+    while (selectEl.firstChild) selectEl.removeChild(selectEl.firstChild);
 
-    const data = getCatalogData();
-    if (data && DEPS.core && typeof DEPS.core.getChapterOptions === "function") {
-      const mod = normStr(dom.mod && dom.mod.value);
-      const area = normStr(dom.area && dom.area.value);
-      const opts = DEPS.core.getChapterOptions(data, mod, area);
-      renderDatalist(dom.courseTitleList, opts.map((o) => o.title).filter(Boolean));
-      return;
+    if (placeholder) {
+      const o0 = document.createElement("option");
+      o0.value = "";
+      o0.textContent = placeholder;
+      selectEl.appendChild(o0);
     }
 
-    // fallback: ge några standardtitlar så du kan jobba även utan catalog
-    renderDatalist(dom.courseTitleList, ["Introduktion", "Grundläggande", "Tillämpning", "Analys", "Självständigt"]);
+    for (const v of values) {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = v;
+      selectEl.appendChild(o);
+    }
   }
 
-  function renderLevelDatalist() {
-    if (!dom || !dom.levelList) return;
+  function fillDatalistOptions(datalistEl, values) {
+    if (!datalistEl) return;
+    while (datalistEl.firstChild) datalistEl.removeChild(datalistEl.firstChild);
+    for (const v of values) {
+      const opt = document.createElement("option");
+      opt.value = v;
+      datalistEl.appendChild(opt);
+    }
+  }
 
-    const data = getCatalogData();
-    if (data && DEPS.core && typeof DEPS.core.getDifficultyOptions === "function") {
-      const opts = DEPS.core.getDifficultyOptions(data);
-      renderDatalist(dom.levelList, opts.map((o) => o.id).filter(Boolean));
-      return;
+  function renderChapterAndStepPickers() {
+    // Chapters
+    const chapters = safeArr(state.defaults.chapterLabels);
+    if (dom.courseTitle) {
+      const tag = String(dom.courseTitle.tagName || "").toUpperCase();
+      if (tag === "SELECT") {
+        fillSelectOptions(dom.courseTitle, chapters, "Välj kapitel…");
+      } else {
+        const dl = ensureDatalistForInput(dom.courseTitle, "courseTitleList");
+        fillDatalistOptions(dl, chapters);
+      }
     }
 
-    renderDatalist(dom.levelList, ["intro", "normal", "advanced"]);
+    // Steps
+    const steps = safeArr(state.defaults.steps);
+    const stepIds = steps.map(s => String(s && s.id)).filter(Boolean);
+    if (dom.courseStep) {
+      const tagS = String(dom.courseStep.tagName || "").toUpperCase();
+      if (tagS === "SELECT") {
+        // Visa "Kurs 1" men spara id (1..5) — men vi håller det enkelt: value = id, text = label
+        while (dom.courseStep.firstChild) dom.courseStep.removeChild(dom.courseStep.firstChild);
+        const ph = document.createElement("option");
+        ph.value = "";
+        ph.textContent = "Välj steg…";
+        dom.courseStep.appendChild(ph);
+
+        for (const s of steps) {
+          const o = document.createElement("option");
+          o.value = String(s.id);
+          o.textContent = String(s.label || ("Kurs " + s.id));
+          dom.courseStep.appendChild(o);
+        }
+      } else {
+        const dlS = ensureDatalistForInput(dom.courseStep, "courseStepList");
+        // input kan skriva "1" eller "Kurs 1" — vi erbjuder båda
+        const labels = steps.map(s => String(s.label || "")).filter(Boolean);
+        fillDatalistOptions(dlS, uniqueSorted(stepIds.concat(labels)));
+      }
+    }
   }
 
-  // ------------------------------------------------------------
-  // Title sync (konsekvent)
-  // ------------------------------------------------------------
-  function syncTitleFromFields() {
+  function syncDraftTitleFromFields() {
     if (!state.draft) return;
-    if (!DEPS.core || typeof DEPS.core.composeTitle !== "function") return;
 
     const chapter = normStr(dom.courseTitle && dom.courseTitle.value) || normStr(state.draft.courseTitle) || "Introduktion";
     const step = normStr(dom.courseStep && dom.courseStep.value) || normStr(state.draft.courseStep) || "1";
     const area = normStr(dom.area && dom.area.value) || normStr(state.draft.area) || "—";
 
-    state.draft.title = DEPS.core.composeTitle(chapter, step, area);
-    if (dom && dom.setText && dom.titleDisplay) dom.setText(dom.titleDisplay, state.draft.title);
+    if (DEPS.core && typeof DEPS.core.composeTitle === "function") {
+      state.draft.title = DEPS.core.composeTitle(chapter, step, area);
+    } else {
+      state.draft.title = `${chapter} • Steg ${step} • ${area}`;
+    }
+
+    if (dom.titleDisplay && dom.setText) dom.setText(dom.titleDisplay, state.draft.title);
   }
 
   // ------------------------------------------------------------
@@ -478,17 +610,12 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     } else {
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: OK", "ok");
     }
-
-    // Visar (tyst) om catalog är laddad
-    if (DEPS.render && DEPS.render.setRightHint) {
-      if (state.catalog && state.catalog.ok) DEPS.render.setRightHint("Rules: OK");
-      else if (state.catalog && state.catalog._started) DEPS.render.setRightHint("Rules: saknas");
-    }
   }
 
   function updateLeftHint() {
     if (DEPS.render && DEPS.render.setLeftHint) {
       if (state.locked) DEPS.render.setLeftHint(state.lockReason || "Låst (korrupt data).");
+      else if (state.catalogStatus !== "ok") DEPS.render.setLeftHint("Katalog: fallback-läge (modules.json ej laddad).");
       else DEPS.render.setLeftHint("Publicering kräver minst 1 block.");
     }
   }
@@ -498,7 +625,7 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     DEPS.render && DEPS.render.renderTrainingList && DEPS.render.renderTrainingList({
       items,
       selectedId: state.selectedId,
-      onPick: function (id) { selectTraining(id); },
+      onPick: function (id) { selectTraining(id); }
     });
   }
 
@@ -510,23 +637,21 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     renderAreaDatalist();
     if (dom.area) dom.area.value = normStr(d.area);
 
-    renderChapterDatalist();
-    renderCourseTitleDatalist();
-    renderLevelDatalist();
-
+    // pickers
+    renderChapterAndStepPickers();
     if (dom.courseTitle) dom.courseTitle.value = normStr(d.courseTitle) || "Introduktion";
     if (dom.courseStep) dom.courseStep.value = normStr(d.courseStep) || "1";
 
     if (dom.goalsLevel) dom.goalsLevel.value = normStr(d.goalsLevel) || "normal";
     if (dom.goals) dom.goals.value = normStr(d.goals) || "";
 
-    syncTitleFromFields();
+    syncDraftTitleFromFields();
 
     const blocks = currentBlocks();
     DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
       blocks,
       onEdit: function (idx) { openBlockEditor(idx); },
-      onDelete: function (idx) { deleteBlock(idx); },
+      onDelete: function (idx) { deleteBlock(idx); }
     });
   }
 
@@ -577,28 +702,30 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     state.draft = deepClone(state.trainings[idx]);
     setDirty(false);
     renderAreaDatalist();
-    renderChapterDatalist();
-    renderCourseTitleDatalist();
-    renderLevelDatalist();
-    syncTitleFromFields();
     updateUiAll();
   }
 
   function newTrainingTemplate() {
     const who = getWhoFresh();
-    const id = (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now());
+    const chapter = "Introduktion";
+    const step = "1";
+    const area = "—";
+    const title = (DEPS.core && typeof DEPS.core.composeTitle === "function")
+      ? DEPS.core.composeTitle(chapter, step, area)
+      : `${chapter} • Steg ${step} • ${area}`;
+
     return {
-      id: id,
+      id: (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now()),
       status: "draft",
       module: "",
       area: "",
-      courseTitle: "Introduktion",
-      courseStep: "1",
+      courseTitle: chapter,
+      courseStep: step,
       goalsLevel: "normal",
       goals: "",
-      title: "Introduktion • Steg 1 • —",
+      title: title,
       blocks: [],
-      meta: { createdAt: Date.now(), createdBy: who.empNo || "" },
+      meta: { createdAt: Date.now(), createdBy: who.empNo || "" }
     };
   }
 
@@ -610,8 +737,6 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     state.selectedId = t.id;
     state.draft = deepClone(t);
 
-    syncTitleFromFields();
-
     const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
@@ -622,9 +747,7 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     setDirty(false);
     renderModuleDatalist();
     renderAreaDatalist();
-    renderChapterDatalist();
-    renderCourseTitleDatalist();
-    renderLevelDatalist();
+    renderChapterAndStepPickers();
     updateUiAll();
   }
 
@@ -686,13 +809,18 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
 
     if (dom && dom.mod) state.draft.module = normStr(dom.mod.value);
     if (dom && dom.area) state.draft.area = normStr(dom.area.value);
-    if (dom && dom.courseTitle) state.draft.courseTitle = normStr(dom.courseTitle.value);
-    if (dom && dom.courseStep) state.draft.courseStep = normStr(dom.courseStep.value);
+    if (dom && dom.courseTitle) state.draft.courseTitle = normStr(dom.courseTitle.value) || "Introduktion";
+    if (dom && dom.courseStep) {
+      // accept "Kurs 1" in input, normalize to "1"
+      const raw = normStr(dom.courseStep.value);
+      const m = raw.match(/(\d+)/);
+      state.draft.courseStep = m ? String(m[1]) : (raw || "1");
+    }
     if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value);
     if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
 
-    // P1: Håll title konsekvent
-    syncTitleFromFields();
+    // Title sync (P1)
+    syncDraftTitleFromFields();
 
     state.draft.status = (status === "published") ? "published" : "draft";
 
@@ -782,7 +910,7 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
   }
 
   // ------------------------------------------------------------
-  // AI hooks (health)
+  // AI hooks (health + generate via SDK)
   // ------------------------------------------------------------
   async function testAi() {
     try {
@@ -855,22 +983,15 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
       if (dom.mod) dom.mod.value = "";
       if (dom.area) dom.area.value = "";
       renderAreaDatalist();
-      renderChapterDatalist();
-      renderCourseTitleDatalist();
-      syncTitleFromFields();
+      syncDraftTitleFromFields();
       setDirty(true);
       updateButtons();
     });
 
     const onEditorChange = function () {
       if (!state.draft) return;
-
-      // När modul/område ändras: uppdatera datalists beroende på val
       renderAreaDatalist();
-      renderChapterDatalist();
-      renderCourseTitleDatalist();
-
-      syncTitleFromFields();
+      syncDraftTitleFromFields();
       setDirty(true);
       updateButtons();
     };
@@ -887,7 +1008,6 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
         updateButtons();
       }
     });
-
     dom.on(dom.goals, "input", function () {
       if (state.draft) {
         state.draft.goals = normStr(dom.goals && dom.goals.value);
@@ -918,9 +1038,6 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     clearLock();
     refreshDeps();
 
-    // P0: kicka catalog-load så modules.json syns i Network
-    kickCatalogLoadOnce();
-
     // Load trainings
     const load = (DEPS.store && DEPS.store.load) ? DEPS.store.load() : { ok: false };
     if (!load.ok && load.corrupt) {
@@ -931,14 +1048,10 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
       clearLock();
     }
 
-    // init who
-    state.who = getWhoFresh();
-
+    // Baseline lists
     renderModuleDatalist();
     renderAreaDatalist();
-    renderChapterDatalist();
-    renderCourseTitleDatalist();
-    renderLevelDatalist();
+    renderChapterAndStepPickers();
 
     state.showAll = false;
 
@@ -948,6 +1061,25 @@ PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
     setTimeout(updateUiAll, 0);
     setTimeout(updateUiAll, 50);
     setTimeout(updateUiAll, 300);
+
+    // Async: load catalog and re-render lists (utan att bryta boot)
+    (async function () {
+      try {
+        const r = await loadCatalogOnce();
+        if (r && r.ok) {
+          renderModuleDatalist();
+          renderAreaDatalist();
+          renderChapterAndStepPickers();
+          updateUiAll();
+        } else {
+          updateUiAll();
+        }
+      } catch (_) {
+        state.catalogStatus = "error";
+        state.catalogErr = "Katalog exception.";
+        updateUiAll();
+      }
+    })();
 
     return true;
   }
