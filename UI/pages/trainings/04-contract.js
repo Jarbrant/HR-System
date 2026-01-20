@@ -149,39 +149,43 @@ POLICY (LÅST):
   };
 
   function hasForbiddenAnywhere(obj) {
+    // NOTE: Inga payload-loggar. Endast boolean-koll.
     const blob = JSON.stringify(obj || {});
     return !!(core && typeof core.containsForbidden === "function" && core.containsForbidden(blob));
   }
 
-  // ---- validation (publish fail-closed) ----
+  // ---- validation (draft-save should allow warnings; publish fail-closed) ----
   contract.validateTrainingForSave = function (training) {
-    const r = reasons();
+    const err = reasons();
+    const warn = reasons();
     const t = training && typeof training === "object" ? training : {};
 
     const title = normStr(t.title);
-    if (!title) pushUnique(r, "Saknar titel.");
+    if (!title) pushUnique(err, "Saknar titel.");
 
-    // no forbidden phrases anywhere
+    // POLICY: förbjudna fraser ska FLAGGAS men inte stoppa utkast i DEMO.
     if (hasForbiddenAnywhere(t)) {
-      pushUnique(r, "Innehåller förbjudna fraser (t.ex. “utför uppgiften”, “beskriv hur du tänkte”).");
+      pushUnique(warn, "Varning: Innehåller förbjudna fraser. Kan inte publiceras förrän det är åtgärdat.");
     }
 
-    return { ok: r.length === 0, reasons: stripSet(r) };
+    return { ok: err.length === 0, reasons: stripSet(err), warnings: stripSet(warn) };
   };
 
   contract.validateForPublish = function (training) {
     const base = contract.validateTrainingForSave(training);
-    const r = reasons();
+    const err = reasons();
+    const warn = reasons();
 
-    // copy base reasons uniquely
-    for (let i = 0; i < (base.reasons || []).length; i++) pushUnique(r, base.reasons[i]);
+    // Carry base
+    for (let i = 0; i < (base.reasons || []).length; i++) pushUnique(err, base.reasons[i]);
+    for (let i = 0; i < (base.warnings || []).length; i++) pushUnique(warn, base.warnings[i]);
 
     const t = training && typeof training === "object" ? training : {};
     const blocks = Array.isArray(t.blocks)
       ? t.blocks
       : (Array.isArray(t.items) ? [{ items: t.items }] : []);
 
-    if (!blocks.length) pushUnique(r, "Publicering kräver minst 1 block.");
+    if (!blocks.length) pushUnique(err, "Publicering kräver minst 1 block.");
 
     // Publish requires at least 1 item inside blocks
     let itemCount = 0;
@@ -189,18 +193,24 @@ POLICY (LÅST):
       const b = blocks[i];
       if (b && Array.isArray(b.items)) itemCount += b.items.length;
     }
-    if (itemCount <= 0) pushUnique(r, "Publicering kräver minst 1 block/item.");
+    if (itemCount <= 0) pushUnique(err, "Publicering kräver minst 1 block/item.");
 
-    return { ok: r.length === 0, reasons: stripSet(r) };
+    // FAIL-CLOSED: publish stoppas om förbjudna fraser finns kvar
+    if (hasForbiddenAnywhere(t)) {
+      pushUnique(err, "Kan inte publicera: Innehåller förbjudna fraser. Rensa/ändra texten och försök igen.");
+    }
+
+    return { ok: err.length === 0, reasons: stripSet(err), warnings: stripSet(warn) };
   };
 
   // ---- AI result acceptance ----
   contract.validateAiResult = function (aiNorm) {
-    const r = reasons();
+    const err = reasons();
+    const warn = reasons();
     const x = aiNorm && typeof aiNorm === "object" ? aiNorm : {};
     const items = Array.isArray(x.items) ? x.items : [];
 
-    if (!items.length) pushUnique(r, "AI gav inga items.");
+    if (!items.length) pushUnique(err, "AI gav inga items.");
 
     // If any question: must have 3–5 choices and exactly 1 correct (id must match a choice)
     for (let i = 0; i < items.length; i++) {
@@ -208,27 +218,29 @@ POLICY (LÅST):
 
       if (it.kind === "question") {
         const qText = normStr(it.text);
-        if (!qText) pushUnique(r, "Fråga saknar frågetext.");
+        if (!qText) pushUnique(err, "Fråga saknar frågetext.");
 
         const n = Array.isArray(it.choices) ? it.choices.length : 0;
-        if (n < 3 || n > 5) pushUnique(r, "Fråga måste ha 3–5 svarsalternativ.");
+        if (n < 3 || n > 5) pushUnique(err, "Fråga måste ha 3–5 svarsalternativ.");
 
         const cid = normStr(it.correctChoiceId);
         if (!cid) {
-          pushUnique(r, "Fråga saknar facit (correctChoiceId).");
+          pushUnique(err, "Fråga saknar facit (correctChoiceId).");
         } else {
           const okId = Array.isArray(it.choices) && it.choices.some((c) => normStr(c && c.id) === cid);
-          if (!okId) pushUnique(r, "Facit matchar inget svarsalternativ (correctChoiceId).");
+          if (!okId) pushUnique(err, "Facit matchar inget svarsalternativ (correctChoiceId).");
         }
       }
 
+      // POLICY: förbjudna fraser ska flaggas men INTE stoppa att block skapas i draft.
+      // Publish blockeras senare i validateForPublish (fail-closed).
       if (hasForbiddenAnywhere(it)) {
-        pushUnique(r, "AI-innehåll innehåller förbjudna fraser.");
+        pushUnique(warn, "AI-innehåll innehåller förbjudna fraser (måste åtgärdas innan publicering).");
       }
     }
 
-    return { ok: r.length === 0, reasons: stripSet(r) };
+    return { ok: err.length === 0, reasons: stripSet(err), warnings: stripSet(warn) };
   };
 
-  contract.__VERSION = "v1.1-PP-SC-012";
+  contract.__VERSION = "v1.2-PP-SC-012-AIWARN";
 })();
