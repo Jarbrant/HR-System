@@ -1,14 +1,14 @@
 /* ============================================================
 AO-TRAININGS-MODULAR-01 (PP-SC-010-05) | FILE 05/06 | FIL-ID: UI/pages/trainings/05-render.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Render-hjälpare (DOM-only): listor, piller, blocks, modal.
-      XSS-safe: all text via textContent. Ingen innerHTML.
+Syfte: Render/UI-hjälpare för trainings-sidan (listor, blockvy, pills, modal)
+      XSS-safe: textContent only. Ingen storage här.
 
 POLICY (LÅST):
 - UI-only • Fail-closed
 - Ingen storage här (03-store)
-- Ingen businesslogik här (06-page)
-- XSS-safe: textContent, createElement
+- Ingen domänlogik här (02-core/04-contract)
+- XSS-safe rendering: textContent, ingen osäker innerHTML
 ============================================================ */
 (function () {
   "use strict";
@@ -16,240 +16,284 @@ POLICY (LÅST):
   const NS = (window.Trainings = window.Trainings || {});
   if (NS.render) return;
 
+  const core = NS.core || null;
+  const dom = NS.dom || null;
   const render = (NS.render = {});
   render.__VERSION = "v1.0.5-PP-SC-010-05";
 
-  // ------------------------------------------------------------
-  // DOM helpers (XSS-safe)
-  // ------------------------------------------------------------
-  function byId(id) { return document.getElementById(String(id || "")); }
-  function normStr(v) { return String(v ?? "").trim(); }
-  function el(tag, cls) {
-    const e = document.createElement(String(tag || "div"));
-    if (cls) e.className = String(cls);
-    return e;
+  function normStr(v) {
+    return (core && core.normStr) ? core.normStr(v) : String(v ?? "").trim();
   }
-  function setText(node, txt) { if (node) node.textContent = String(txt ?? ""); }
-  function clear(node) { if (!node) return; while (node.firstChild) node.removeChild(node.firstChild); }
+
   function safeArr(a) { return Array.isArray(a) ? a : []; }
 
+  function el(tag, cls) {
+    const x = document.createElement(String(tag || "div"));
+    if (cls) x.className = String(cls);
+    return x;
+  }
+
+  function setText(node, text) {
+    if (!node) return;
+    node.textContent = String(text ?? "");
+  }
+
+  function clear(node) {
+    if (!node) return;
+    while (node.firstChild) node.removeChild(node.firstChild);
+  }
+
   // ------------------------------------------------------------
-  // Expected hooks (IDs) — must match trainings.html
+  // Top pills (om dom har hooks, annars no-op)
   // ------------------------------------------------------------
-  const HOOKS = {
-    list: "trainingsList",
-    blocks: "blocksList",
-    whoPill: "whoPill",
-    statePill: "statePill",
-    leftHint: "leftHint",
-    aiHint: "aiHint",
-    modal: "modal",
-    modalTitle: "modalTitle",
-    modalBody: "modalBody",
-    modalOk: "modalOk",
-    modalClose: "modalClose"
+  render.setWhoPill = function (text) {
+    // Förväntade id från trainings.html: "whoPill" eller "pillWho"
+    const n = document.getElementById("whoPill") || document.getElementById("pillWho");
+    if (n) setText(n, text);
   };
 
-  function getHook(id) { return byId(HOOKS[id] || id); }
-
-  // ------------------------------------------------------------
-  // Pills + hints
-  // ------------------------------------------------------------
-  render.setWhoPill = function (txt) {
-    const n = getHook("whoPill");
-    if (n) setText(n, txt);
+  render.setStatePill = function (text, tone) {
+    // Förväntade id: "statePill" eller "pillState"
+    const n = document.getElementById("statePill") || document.getElementById("pillState");
+    if (n) {
+      setText(n, text);
+      // tone: ok|warn|bad -> klass på pill om finns
+      try {
+        n.classList.remove("ok", "warn", "bad");
+        if (tone) n.classList.add(String(tone));
+      } catch (_) {}
+    }
   };
 
-  render.setStatePill = function (txt, tone) {
-    const n = getHook("statePill");
-    if (!n) return;
-    setText(n, txt);
-
-    // tone: ok|warn|bad
-    n.classList.remove("ok", "warn", "bad");
-    if (tone === "ok" || tone === "warn" || tone === "bad") n.classList.add(tone);
+  render.setLeftHint = function (text) {
+    // Förväntade id: "leftHint" eller "hintLeft"
+    const n = document.getElementById("leftHint") || document.getElementById("hintLeft");
+    if (n) setText(n, text);
   };
 
-  render.setLeftHint = function (txt) {
-    const n = getHook("leftHint");
-    if (n) setText(n, txt);
-  };
-
-  render.setAiHint = function (txt) {
-    const n = getHook("aiHint");
-    if (n) setText(n, txt);
+  render.setAiHint = function (text) {
+    // Förväntade id: "aiHint" (en rad under AI-sektionen)
+    const n = document.getElementById("aiHint");
+    if (n) setText(n, text);
   };
 
   // ------------------------------------------------------------
-  // Trainings list
+  // Training list
   // ------------------------------------------------------------
-  function makeRow(t, selected, onPick) {
-    const row = el("button", "rowBtn");
-    row.type = "button";
-    row.setAttribute("aria-pressed", selected ? "true" : "false");
-    if (selected) row.classList.add("selected");
-
-    const title = normStr(t && t.title) || "(utan titel)";
-    const meta = [normStr(t && t.module), normStr(t && t.area), normStr(t && (t.status || "draft"))]
-      .filter(Boolean)
-      .join(" • ");
-
-    const top = el("div", "rowTitle");
-    setText(top, title);
-
-    const sub = el("div", "rowMeta muted2");
-    setText(sub, meta);
-
-    row.appendChild(top);
-    row.appendChild(sub);
-
-    row.addEventListener("click", function () { if (typeof onPick === "function") onPick(String(t && t.id || "")); });
-    return row;
+  function getListRoot() {
+    // Förväntade id i trainings.html: "trainingsList" (eller legacy "list")
+    return document.getElementById("trainingsList") || document.getElementById("list");
   }
 
   render.renderTrainingList = function (opts) {
-    const o = (opts && typeof opts === "object") ? opts : {};
-    const list = getHook("list");
-    if (!list) return;
+    const root = getListRoot();
+    if (!root) return;
 
-    clear(list);
-
+    const o = opts && typeof opts === "object" ? opts : {};
     const items = safeArr(o.items);
+    const selectedId = normStr(o.selectedId);
+    const onPick = typeof o.onPick === "function" ? o.onPick : function () {};
+
+    clear(root);
+
     if (!items.length) {
       const empty = el("div", "muted2");
-      setText(empty, "Inga träffar. Skriv i sökfältet eller tryck “Visa alla”.");
-      list.appendChild(empty);
+      setText(empty, "Inget att visa ännu. Sök eller klicka “Visa alla”.");
+      root.appendChild(empty);
       return;
     }
 
     for (const t of items) {
-      const selected = String(o.selectedId || "") && String(t && t.id || "") === String(o.selectedId);
-      list.appendChild(makeRow(t, selected, o.onPick));
+      if (!t) continue;
+      const id = normStr(t.id);
+      const row = el("button", "rowItem");
+      row.type = "button";
+
+      const title = el("div", "rowTitle");
+      setText(title, normStr(t.title) || "(utan titel)");
+
+      const meta = el("div", "rowMeta");
+      const st = normStr(t.status || "draft");
+      const mod = normStr(t.module);
+      const area = normStr(t.area);
+      setText(meta, [st, mod, area].filter(Boolean).join(" • "));
+
+      row.appendChild(title);
+      row.appendChild(meta);
+
+      try {
+        if (id && id === selectedId) row.classList.add("active");
+      } catch (_) {}
+
+      row.addEventListener("click", function () {
+        onPick(id);
+      });
+
+      root.appendChild(row);
     }
   };
 
   // ------------------------------------------------------------
-  // Blocks list
+  // Blocks list (i editorn)
   // ------------------------------------------------------------
-  function countItems(block) {
-    const items = safeArr(block && block.items);
-    return items.length;
+  function getBlocksRoot() {
+    // Förväntade id: "blocksList"
+    return document.getElementById("blocksList");
   }
 
-  function makeBlockCard(block, idx, onEdit, onDelete) {
-    const card = el("div", "blockCard");
+  function summarizeBlock(b) {
+    const items = (b && Array.isArray(b.items)) ? b.items : [];
+    const n = items.length;
 
-    const head = el("div", "blockHead");
-    const h = el("div", "blockTitle");
-    setText(h, normStr(block && block.title) || ("Block " + (idx + 1)));
+    let kinds = { question: 0, task: 0, document: 0 };
+    for (const it of items) {
+      const k = normStr(it && (it.kind || it.type)).toLowerCase();
+      if (k === "question" || k === "quiz") kinds.question++;
+      else if (k === "task") kinds.task++;
+      else kinds.document++;
+    }
 
-    const meta = el("div", "muted2");
-    setText(meta, countItems(block) + " item");
-
-    head.appendChild(h);
-    head.appendChild(meta);
-
-    const actions = el("div", "blockActions");
-
-    const bEdit = el("button", "miniBtn");
-    bEdit.type = "button";
-    setText(bEdit, "Redigera");
-    bEdit.addEventListener("click", function () { if (typeof onEdit === "function") onEdit(idx); });
-
-    const bDel = el("button", "miniBtn danger");
-    bDel.type = "button";
-    setText(bDel, "Ta bort");
-    bDel.addEventListener("click", function () { if (typeof onDelete === "function") onDelete(idx); });
-
-    actions.appendChild(bEdit);
-    actions.appendChild(bDel);
-
-    card.appendChild(head);
-    card.appendChild(actions);
-
-    return card;
+    const parts = [];
+    if (kinds.document) parts.push(kinds.document + " info");
+    if (kinds.task) parts.push(kinds.task + " uppgift");
+    if (kinds.question) parts.push(kinds.question + " fråga");
+    const right = parts.length ? parts.join(", ") : (n + " item");
+    return right;
   }
 
   render.renderBlocksList = function (opts) {
-    const o = (opts && typeof opts === "object") ? opts : {};
-    const box = getHook("blocks");
-    if (!box) return;
+    const root = getBlocksRoot();
+    if (!root) return;
 
-    clear(box);
-
+    const o = opts && typeof opts === "object" ? opts : {};
     const blocks = safeArr(o.blocks);
+    const onEdit = typeof o.onEdit === "function" ? o.onEdit : function () {};
+    const onDelete = typeof o.onDelete === "function" ? o.onDelete : function () {};
+
+    clear(root);
+
     if (!blocks.length) {
       const empty = el("div", "muted2");
-      setText(empty, "Inga block ännu.");
-      box.appendChild(empty);
+      setText(empty, "Inga block ännu. Skapa via AI eller lägg till senare.");
+      root.appendChild(empty);
       return;
     }
 
-    for (let i = 0; i < blocks.length; i++) {
-      box.appendChild(makeBlockCard(blocks[i], i, o.onEdit, o.onDelete));
-    }
+    blocks.forEach((b, idx) => {
+      const card = el("div", "blockCard");
+
+      const top = el("div", "blockTop");
+      const h = el("div", "blockTitle");
+      setText(h, (idx + 1) + ". " + (normStr(b && b.title) || "(utan rubrik)"));
+
+      const sub = el("div", "muted2");
+      setText(sub, summarizeBlock(b));
+
+      top.appendChild(h);
+      top.appendChild(sub);
+
+      const actions = el("div", "rowActions");
+
+      const btnE = el("button", "miniBtn");
+      btnE.type = "button";
+      setText(btnE, "Redigera");
+      btnE.addEventListener("click", function () { onEdit(idx); });
+
+      const btnD = el("button", "miniBtn danger");
+      btnD.type = "button";
+      setText(btnD, "Ta bort");
+      btnD.addEventListener("click", function () { onDelete(idx); });
+
+      actions.appendChild(btnE);
+      actions.appendChild(btnD);
+
+      card.appendChild(top);
+      card.appendChild(actions);
+
+      root.appendChild(card);
+    });
   };
 
   // ------------------------------------------------------------
-  // Modal (simple)
+  // Simple modal (XSS-safe)
   // ------------------------------------------------------------
-  function modalEls() {
-    return {
-      wrap: getHook("modal"),
-      title: getHook("modalTitle"),
-      body: getHook("modalBody"),
-      ok: getHook("modalOk"),
-      close: getHook("modalClose")
-    };
+  function ensureModal() {
+    let overlay = document.getElementById("modalOverlay");
+    if (overlay) return overlay;
+
+    overlay = el("div", "modalOverlay");
+    overlay.id = "modalOverlay";
+    overlay.style.display = "none";
+
+    const box = el("div", "modalBox");
+    box.id = "modalBox";
+
+    const head = el("div", "modalHead");
+    const title = el("div", "modalTitle");
+    title.id = "modalTitle";
+    const close = el("button", "miniBtn");
+    close.type = "button";
+    setText(close, "Stäng");
+    close.addEventListener("click", function () { render.closeModal(); });
+
+    head.appendChild(title);
+    head.appendChild(close);
+
+    const body = el("div", "modalBody");
+    body.id = "modalBody";
+
+    const foot = el("div", "modalFoot");
+    const okBtn = el("button", "miniBtn ok");
+    okBtn.type = "button";
+    okBtn.id = "modalOk";
+    setText(okBtn, "Spara");
+    okBtn.addEventListener("click", function () {
+      const fn = render.__modalOnOk;
+      render.__modalOnOk = null;
+      render.closeModal();
+      try { if (typeof fn === "function") fn(); } catch (_) {}
+    });
+
+    foot.appendChild(okBtn);
+
+    box.appendChild(head);
+    box.appendChild(body);
+    box.appendChild(foot);
+
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    // click outside closes
+    overlay.addEventListener("click", function (e) {
+      if (e && e.target === overlay) render.closeModal();
+    });
+
+    return overlay;
   }
 
-  function showModal() {
-    const m = modalEls();
-    if (!m.wrap) return;
-    m.wrap.style.display = "";
-    m.wrap.setAttribute("aria-hidden", "false");
-  }
+  render.openModal = function (titleText, contentNode, onOk) {
+    const overlay = ensureModal();
+    const title = document.getElementById("modalTitle");
+    const body = document.getElementById("modalBody");
+    const okBtn = document.getElementById("modalOk");
 
-  function hideModal() {
-    const m = modalEls();
-    if (!m.wrap) return;
-    m.wrap.style.display = "none";
-    m.wrap.setAttribute("aria-hidden", "true");
-  }
-
-  render.openModal = function (title, bodyNode, onOk) {
-    const m = modalEls();
-    if (!m.wrap) return;
-
-    setText(m.title, normStr(title) || "Dialog");
-    clear(m.body);
-    if (bodyNode) m.body.appendChild(bodyNode);
-
-    // reset handlers (cheap)
-    const okBtn = m.ok;
-    const closeBtn = m.close;
-
-    if (okBtn) {
-      const newOk = okBtn.cloneNode(true);
-      okBtn.parentNode.replaceChild(newOk, okBtn);
-    }
-    if (closeBtn) {
-      const newClose = closeBtn.cloneNode(true);
-      closeBtn.parentNode.replaceChild(newClose, closeBtn);
+    if (title) setText(title, titleText || "Dialog");
+    if (body) {
+      clear(body);
+      if (contentNode) body.appendChild(contentNode);
     }
 
-    const mm = modalEls();
+    render.__modalOnOk = typeof onOk === "function" ? onOk : null;
 
-    if (mm.ok) {
-      mm.ok.addEventListener("click", function () {
-        try { if (typeof onOk === "function") onOk(); } catch (_) { }
-        hideModal();
-      });
-    }
-    if (mm.close) mm.close.addEventListener("click", hideModal);
+    // Om ingen onOk: byt “Spara” -> “OK” och låt den bara stänga
+    if (okBtn) setText(okBtn, render.__modalOnOk ? "Spara" : "OK");
 
-    showModal();
+    overlay.style.display = "";
   };
 
-  render.closeModal = hideModal;
+  render.closeModal = function () {
+    const overlay = document.getElementById("modalOverlay");
+    if (overlay) overlay.style.display = "none";
+    render.__modalOnOk = null;
+  };
 })();
