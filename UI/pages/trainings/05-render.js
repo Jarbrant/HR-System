@@ -9,17 +9,15 @@ POLICY (LÅST):
 - Inga nya storage-keys (AO-057_TRAININGS_V1 hanteras av 03-store)
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN = read-only, hanteras i 06-page/core)
 
-PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
-- P0 FIX: Självläkande modal — om modal DOM saknas skapas minimal modal-overlay i runtime (ingen storage).
-- P0 FIX: Redigera använder modal istället för window.confirm fallback när modal saknas.
-- P1: Block-listan visar XSS-säker “preview” av första item (fråga/alternativ/förklaring) för snabb visuell kontroll.
+PATCH v1.0.5-PP-SC-010-05 (AUTOPATCH):
+- P0 FIX: Modal overlay visas säkert även om CSS har display:none (!important) — använder style.setProperty(...,"important").
+- P0 FIX: Hide modal använder också "important" för att stänga deterministiskt.
+- (Behåller självläkande modal + XSS-safe preview från v1.0.4)
 ============================================================ */
 (function () {
   "use strict";
 
   const NS = (window.Trainings = window.Trainings || {});
-  // Render-modulen får ALDRIG binda sig till NS.page (det är page-controllerns domän).
-  // Skydda endast mot dubbel-laddning av render.
   if (NS.render && NS.render.__VERSION) return;
 
   const dom = NS.dom || {};
@@ -118,10 +116,8 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
     _armed: false
   };
 
-  // P0: skapa modal DOM om den saknas (runtime-only, ingen storage)
   function ensureModalScaffold() {
     try {
-      // Om modal redan finns: använd den.
       modal.wrap = modal.wrap || pickEl(dom.modal, byId("modal"), byId("modalWrap"), byId("modalOverlay"));
       modal.title = modal.title || pickEl(dom.modalTitle, byId("modalTitle"));
       modal.body = modal.body || pickEl(dom.modalBody, byId("modalBody"));
@@ -130,13 +126,10 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
 
       if (modal.wrap && modal.body) return true;
 
-      // Leta efter overlay-id först (stabilt)
       let overlay = byId("modalOverlay");
       if (!overlay) {
         overlay = document.createElement("div");
         overlay.id = "modalOverlay";
-
-        // Minimal inline-stil (fail-safe) — påverkar bara overlayn
         overlay.style.position = "fixed";
         overlay.style.inset = "0";
         overlay.style.background = "rgba(0,0,0,0.45)";
@@ -147,7 +140,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
         overlay.setAttribute("aria-hidden", "true");
       }
 
-      // Card
       let card = byId("modalCard");
       if (!card) {
         card = document.createElement("div");
@@ -213,8 +205,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
         btnCancel.style.cursor = "pointer";
       }
 
-      // Bygg struktur (utan innerHTML)
-      // Overlay kan redan vara i DOM, säkerställ children
       while (card.firstChild) card.removeChild(card.firstChild);
       card.appendChild(title);
       card.appendChild(body);
@@ -224,20 +214,17 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
       actions.appendChild(btnOk);
       card.appendChild(actions);
 
-      // Overlay tom? Lägg card
       while (overlay.firstChild) overlay.removeChild(overlay.firstChild);
       overlay.appendChild(card);
 
-      // Append overlay till body om den inte sitter där
       if (!overlay.parentNode) document.body.appendChild(overlay);
 
-      // Rebind
       modal.wrap = overlay;
       modal.title = title;
       modal.body = body;
       modal.btnOk = btnOk;
       modal.btnCancel = btnCancel;
-      modal._armed = false; // re-arm efter scaffold
+      modal._armed = false;
 
       return true;
     } catch (_) {
@@ -264,7 +251,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
       });
     }
     if (modal.wrap) {
-      // Klick på overlay kan stänga om det ser ut som overlay (fail-safe)
       modal.wrap.addEventListener("click", function (e) {
         try {
           if (e && e.target === modal.wrap && modal.btnCancel) modal.btnCancel.click();
@@ -274,11 +260,9 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
   }
 
   function showModal(title, contentEl, onOk) {
-    // P0: självläkning — bygg modal om den saknas
     ensureModalScaffold();
     armModalOnce();
 
-    // Om det fortfarande saknas: sista utväg confirm (fail-closed, ingen crash).
     if (!modal.wrap || !modal.body) {
       const ok = window.confirm(String(title || "Bekräfta") + "\n\n(Modal saknas, fallback)");
       if (ok && typeof onOk === "function") onOk();
@@ -297,9 +281,13 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
 
     modal._cb = (typeof onOk === "function") ? onOk : null;
 
-    // Visa
+    // P0: tvinga synlighet även om CSS har display:none (!important)
     try {
-      modal.wrap.style.display = "";
+      if (modal.wrap && modal.wrap.style && typeof modal.wrap.style.setProperty === "function") {
+        modal.wrap.style.setProperty("display", "block", "important");
+      } else if (modal.wrap) {
+        modal.wrap.style.display = "block";
+      }
       modal.wrap.setAttribute("aria-hidden", "false");
     } catch (_) { /* ignore */ }
   }
@@ -307,13 +295,18 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
   function hideModal() {
     try {
       if (!modal.wrap) return;
-      modal.wrap.style.display = "none";
+      // P0: tvinga stängning deterministiskt
+      if (modal.wrap.style && typeof modal.wrap.style.setProperty === "function") {
+        modal.wrap.style.setProperty("display", "none", "important");
+      } else {
+        modal.wrap.style.display = "none";
+      }
       modal.wrap.setAttribute("aria-hidden", "true");
     } catch (_) { /* ignore */ }
   }
 
   // -------------------------
-  // Preview helpers (P1) — XSS-safe
+  // Preview helpers (XSS-safe)
   // -------------------------
   function pickFirstNonEmpty() {
     for (let i = 0; i < arguments.length; i++) {
@@ -326,7 +319,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
   function isLikelyQuestion(it) {
     const t = normStr(it && it.type).toLowerCase();
     if (t === "question" || t === "quiz" || t === "mcq") return true;
-    // heuristik: har choices/options
     const ch = safeArr(it && (it.choices || it.options || it.answers));
     if (ch.length >= 2) return true;
     return false;
@@ -334,7 +326,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
 
   function extractChoices(it) {
     const raw = safeArr(it && (it.choices || it.options || it.answers));
-    // normalisera till { text }
     return raw.map(c => {
       if (c && typeof c === "object") return { text: pickFirstNonEmpty(c.text, c.label, c.value) };
       return { text: normStr(c) };
@@ -342,7 +333,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
   }
 
   function detectCorrectIndex(it, choices) {
-    // stöd för flera varianter
     const ci = (it && (it.correctIndex ?? it.answerIndex ?? it.correct_choice_index));
     if (Number.isFinite(ci)) {
       const n = Number(ci);
@@ -359,7 +349,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
       }
     }
 
-    // vissa format: it.correct = true/false per choice (array)
     const marks = safeArr(it && it.correctChoices);
     if (marks.length === choices.length) {
       for (let i = 0; i < marks.length; i++) if (marks[i] === true) return i;
@@ -374,18 +363,15 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
 
     const title = pickFirstNonEmpty(item.title, item.heading, "");
     const text = pickFirstNonEmpty(item.question, item.prompt, item.text, item.instruction, item.body);
-
     const explanation = pickFirstNonEmpty(item.explanation, item.feedback, item.rationale, item.reason);
 
     if (isLikelyQuestion(item)) {
-      // fråga
       const q = text || "(fråga saknas)";
       lines.push("Fråga: " + q);
 
       const choices = extractChoices(item);
       const correctIdx = detectCorrectIndex(item, choices);
 
-      // visa max 4 val (kompakt)
       const max = Math.min(4, choices.length);
       for (let i = 0; i < max; i++) {
         const mark = (i === correctIdx) ? "☑ " : "☐ ";
@@ -395,13 +381,11 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
 
       if (explanation) lines.push("Förklaring: " + explanation);
     } else {
-      // info/uppgift
       if (title) lines.push(title);
       if (text) lines.push(text);
       if (explanation) lines.push("Notis: " + explanation);
     }
 
-    // trimma längd
     const out = [];
     for (const s of lines) {
       if (out.length >= 6) break;
@@ -415,14 +399,11 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
   // Public render API (export)
   // -------------------------
   const render = {
-    __VERSION: "v1.0.4-PP-SC-010-05",
+    __VERSION: "v1.0.5-PP-SC-010-05",
 
-    setWhoPill: function (txt) {
-      setText(elWho, txt || "");
-    },
+    setWhoPill: function (txt) { setText(elWho, txt || ""); },
 
     setStatePill: function (txt, kind) {
-      // kind: "ok" | "warn" | "bad" (best-effort CSS)
       if (elState && elState.classList) {
         elState.classList.remove("ok", "warn", "bad");
         if (kind) elState.classList.add(String(kind));
@@ -430,13 +411,9 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
       setText(elState, txt || "");
     },
 
-    setLeftHint: function (txt) {
-      setText(elLeftHint, txt || "");
-    },
+    setLeftHint: function (txt) { setText(elLeftHint, txt || ""); },
 
-    setAiHint: function (txt) {
-      setText(elAiHint, txt || "");
-    },
+    setAiHint: function (txt) { setText(elAiHint, txt || ""); },
 
     renderTrainingList: function (opts) {
       const box = getTrainingListEl();
@@ -466,7 +443,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
         const row = mk("button", "rowBtn");
         row.type = "button";
 
-        // XSS-safe: textContent
         const top = mk("div", "rowTop");
         top.textContent = title;
 
@@ -478,9 +454,7 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
 
         if (id && id === selectedId) row.classList.add("active");
 
-        row.addEventListener("click", function () {
-          if (onPick) onPick(id);
-        });
+        row.addEventListener("click", function () { if (onPick) onPick(id); });
 
         box.appendChild(row);
       }
@@ -522,7 +496,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
         left.appendChild(h);
         left.appendChild(s);
 
-        // P1: preview av första item (XSS-safe)
         if (count > 0) {
           const pv = mk("div", "muted2");
           pv.style.textAlign = "left";
@@ -532,19 +505,11 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
 
           const lines = summarizeItem(items[0]);
           pv.textContent = lines.join("\n");
-
-          if (count > 1) {
-            const more = mk("div", "muted2");
-            more.style.marginTop = "4px";
-            more.textContent = "… +" + (count - 1) + " item";
-            left.appendChild(pv);
-            left.appendChild(more);
-          } else {
-            left.appendChild(pv);
-          }
+          left.appendChild(pv);
         }
 
         const right = mk("div", "blockRight");
+
         const btnE = mk("button", "miniBtn");
         btnE.type = "button";
         btnE.textContent = "Redigera";
@@ -564,15 +529,10 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
       }
     },
 
-    openModal: function (title, contentEl, onOk) {
-      showModal(title, contentEl, onOk);
-    },
+    openModal: function (title, contentEl, onOk) { showModal(title, contentEl, onOk); },
 
-    closeModal: function () {
-      hideModal();
-    }
+    closeModal: function () { hideModal(); }
   };
 
-  // Export (P0)
   NS.render = render;
 })();
