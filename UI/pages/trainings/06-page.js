@@ -13,9 +13,8 @@ POLICY (LÅST):
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
 PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
-- P0 FIX: Worker svarar med {blocks:[...]} men UI väntade {items:[...]} → “AI gav inga items.”
-         Nu: stöd för blocks[] (primärt) + items[] (fallback) och korrekt push in i draft.blocks.
-- P0: Behåller självläkande init + fail-closed felorsaker.
+- P0 FIX: SDK returnerar "blocks[]" (inte "items[]") → UI accepterar båda.
+- P0: Generera-knappen ska nu faktiskt lägga till block i draft.blocks.
 ============================================================ */
 (function () {
   "use strict";
@@ -457,7 +456,7 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     // 1) exact key
     if (Array.isArray(map[mod])) return safeArr(map[mod]);
 
-    // 2) case-insensitive match (P0 fix: områden kommer inte fram)
+    // 2) case-insensitive match
     const want = lowerKey(mod);
     for (const k of Object.keys(map)) {
       if (lowerKey(k) === want) return safeArr(map[k]);
@@ -544,7 +543,6 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
   }
 
   function renderChapterAndStepPickers() {
-    // Chapters
     const chapters = safeArr(state.defaults.chapterLabels);
     if (dom.courseTitle) {
       const tag = String(dom.courseTitle.tagName || "").toUpperCase();
@@ -556,7 +554,6 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
       }
     }
 
-    // Steps
     const steps = safeArr(state.defaults.steps);
     const stepIds = steps.map(s => String(s && s.id)).filter(Boolean);
     if (dom.courseStep) {
@@ -674,7 +671,6 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     renderAreaDatalist();
     if (dom.area) dom.area.value = normStr(d.area);
 
-    // pickers
     renderChapterAndStepPickers();
     if (dom.courseTitle) dom.courseTitle.value = normStr(d.courseTitle) || "Introduktion";
     if (dom.courseStep) dom.courseStep.value = normStr(d.courseStep) || "1";
@@ -1029,24 +1025,38 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     return { mode, count, questionType, feedbackEnabled };
   }
 
-  function normalizeIncomingBlocks(raw) {
-    // Worker/SKD format (din console): { ok:true, blocks:[{title,type,items:[...]}], ... }
-    // Fallback: norm.items (äldre/andra format).
-    const blocks = safeArr(raw && (raw.blocks || raw.data && raw.data.blocks));
-    const out = [];
+  // P0 helper: extrahera items ur både "items[]" och "blocks[]"
+  function extractItemsFromAi(raw, norm) {
+    // 1) norm.items (om core normalize redan gjort jobbet)
+    const nItems = norm && Array.isArray(norm.items) ? norm.items : [];
+    if (nItems.length) return { items: nItems, source: "norm.items" };
 
-    for (const b of blocks) {
-      if (!b || typeof b !== "object") continue;
-      const items = safeArr(b.items);
-      if (!items.length) continue;
+    // 2) raw.items
+    const rItems = raw && Array.isArray(raw.items) ? raw.items : [];
+    if (rItems.length) return { items: rItems, source: "raw.items" };
 
-      const title = normStr(b.title) || "AI-block";
-      out.push({
-        title,
-        items
-      });
+    // 3) raw.blocks[].items (det du ser i DevTools)
+    const blocks = raw && Array.isArray(raw.blocks) ? raw.blocks : [];
+    if (blocks.length) {
+      const out = [];
+      for (const b of blocks) {
+        if (b && Array.isArray(b.items)) out.push.apply(out, b.items);
+      }
+      if (out.length) return { items: out, source: "raw.blocks[].items" };
+      return { items: [], source: "raw.blocks(empty-items)" };
     }
-    return out;
+
+    // 4) raw.data.blocks?.items (best-effort)
+    const db = raw && raw.data && Array.isArray(raw.data.blocks) ? raw.data.blocks : [];
+    if (db.length) {
+      const out2 = [];
+      for (const b of db) {
+        if (b && Array.isArray(b.items)) out2.push.apply(out2, b.items);
+      }
+      if (out2.length) return { items: out2, source: "raw.data.blocks[].items" };
+    }
+
+    return { items: [], source: "none" };
   }
 
   async function generateAi() {
@@ -1079,6 +1089,7 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
         context: ctx,
         language: "sv"
       };
+
       if (ctl.questionType) req.questionType = ctl.questionType;
       if (ctl.feedbackEnabled) req.feedbackEnabled = true;
 
@@ -1087,72 +1098,47 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
 
       const raw = await window.HRWorkerSDK.aiGenerate(req);
 
-      // 1) Primärt: blocks[]
-      let blocksOut = normalizeIncomingBlocks(raw);
+      // Normalize (om core finns), annars baseline
+      const norm = (DEPS.core && typeof DEPS.core.normalizeAiResult === "function")
+        ? (DEPS.core.normalizeAiResult(raw) || {})
+        : (raw && typeof raw === "object" ? raw : {});
 
-      // 2) Fallback: äldre norm.items
-      if (!blocksOut.length) {
-        const norm = (DEPS.core && typeof DEPS.core.normalizeAiResult === "function")
-          ? DEPS.core.normalizeAiResult(raw)
-          : (raw && typeof raw === "object" ? raw : { items: [] });
+      // P0: ta items oavsett om svaret är items[] eller blocks[]
+      const pick = extractItemsFromAi(raw, norm);
+      const itemsIn = Array.isArray(pick.items) ? pick.items : [];
 
-        // Validera fail-closed (om contract kräver items-shape)
-        if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
-          const v = DEPS.contract.validateAiResult(norm);
-          if (!v || v.ok !== true) {
-            const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
-            DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
-            DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
-            return;
-          }
-        }
-
-        const itemsIn = Array.isArray(norm.items) ? norm.items : [];
-        if (!itemsIn.length) {
-          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items (varken blocks[] eller items[]).");
+      // Validera fail-closed (mot items-shape)
+      if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
+        const v = DEPS.contract.validateAiResult({ items: itemsIn });
+        if (!v || v.ok !== true) {
+          const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
+          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
           return;
         }
-
-        const itemsNorm = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
-          ? itemsIn.map(DEPS.contract.normalizeItem)
-          : itemsIn;
-
-        blocksOut = [{ title: "AI-block", items: itemsNorm }];
       }
 
-      // Normalize items inside blocks (fail-closed best-effort)
-      const finalBlocks = [];
-      for (const b of blocksOut) {
-        const items = safeArr(b.items);
-        if (!items.length) continue;
-
-        const itemsNorm = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
-          ? items.map(DEPS.contract.normalizeItem)
-          : items;
-
-        finalBlocks.push({
-          title: normStr(b.title) || "AI-block",
-          items: itemsNorm
-        });
-      }
-
-      if (!finalBlocks.length) {
+      if (!itemsIn.length) {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI-block saknade items efter normalisering.");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items (källa: " + pick.source + ").");
         return;
       }
 
-      // Push blocks into draft (inte auto-save)
+      const itemsNorm = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
+        ? itemsIn.map(DEPS.contract.normalizeItem)
+        : itemsIn;
+
       if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
 
-      const baseTitle = normStr(state.draft.title) || "(utan titel)";
-      for (const b of finalBlocks) {
-        state.draft.blocks.push({
-          title: (normStr(b.title) || "AI-block") + " • " + baseTitle,
-          items: b.items
-        });
-      }
+      // Titel: försök ta första block-title från SDK, annars fallback
+      let sdkTitle = "";
+      try {
+        const b0 = raw && Array.isArray(raw.blocks) ? raw.blocks[0] : null;
+        sdkTitle = b0 && b0.title ? normStr(b0.title) : "";
+      } catch (_) { /* ignore */ }
+
+      const title = (sdkTitle || ("AI-block • " + (normStr(state.draft.title) || "(utan titel)")));
+      state.draft.blocks.push({ title: title, items: itemsNorm });
 
       setDirty(true);
       updateUiAll();
@@ -1275,7 +1261,6 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     clearLock();
     refreshDeps();
 
-    // Load trainings
     const load = (DEPS.store && DEPS.store.load) ? DEPS.store.load() : { ok: false };
     if (!load.ok && load.corrupt) {
       setLock(DEPS.store && DEPS.store.lockReasonFor ? DEPS.store.lockReasonFor() : "Korrupt trainings.");
@@ -1285,7 +1270,6 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
       clearLock();
     }
 
-    // Baseline lists
     renderModuleDatalist();
     renderAreaDatalist();
     renderChapterAndStepPickers();
@@ -1299,12 +1283,10 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     setTimeout(updateUiAll, 50);
     setTimeout(updateUiAll, 300);
 
-    // P1: Trigger SDK init i bakgrunden (blockar inte UI)
     (async function () {
-      try { await ensureSdkReady(); } catch (_) { /* fail-closed */ }
+      try { await ensureSdkReady(); } catch (_) { }
     })();
 
-    // Async: load catalog and re-render lists (utan att bryta boot)
     (async function () {
       try {
         const r = await loadCatalogOnce();
@@ -1326,7 +1308,6 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     return true;
   }
 
-  // Retry-loop (kort)
   const RETRIES = [0, 50, 150, 300, 600, 1000];
   let attempt = 0;
 
