@@ -12,11 +12,23 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
-- P0: Auto-init HRWorkerSDK (once) via window.__HR_WORKER_BASE_URL
-- P0: Testa AI / Generera block självläker (init -> health/generate)
-- P0: Fail-closed och tydligare felorsak (SDK saknas / URL saknas / init misslyckas)
+PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
+- P0: Modul/Område fungerar oavsett om UI använder <select> eller <input list="...">
+- P0: Re-render område på både input+change (select triggar change, inte alltid input)
+- P0: Självläkning: saknas modList/areaList → skapa datalist vid behov (runtime-only)
+- P0: Auto-init HRWorkerSDK (once) via window.__HR_WORKER_BASE_URL (behåll)
 - P1: (best-effort) init triggas även vid boot utan att blockera UI
+Ändringslogg (≤8):
+1) Robust picker-render för mod/area: SELECT vs INPUT+DATAList
+2) Wire events: change+input för mod/area/kursplanfält
+3) Skapa datalist om saknas (ingen ny storage)
+4) Behåller fail-closed + goals:"" till AI
+Testnoteringar:
+- Välj modul → område-population ska uppdateras direkt (SELECT eller INPUT)
+- Ändra modul → område-lista byts + tidigare område kan bli tomt om ej matchar
+- Testa AI efter reload: ska självläka via init
+Risk/edge:
+- Om trainings.html har helt andra id än mod/area/modList/areaList krävs sidkontrakt-uppdatering
 ============================================================ */
 (function () {
   "use strict";
@@ -25,7 +37,7 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0.6-PP-SC-010-06";
+  page.__VERSION = "v1.0.7-PP-SC-010-06";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -193,6 +205,7 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
   }
   function safeArr(a) { return Array.isArray(a) ? a : []; }
   function lowerKey(v) { return normStr(v).toLowerCase(); }
+  function tagName(el) { return el ? String(el.tagName || "").toUpperCase() : ""; }
 
   function deepClone(obj) {
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
@@ -458,7 +471,7 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
     // 1) exact key
     if (Array.isArray(map[mod])) return safeArr(map[mod]);
 
-    // 2) case-insensitive match (P0 fix: områden kommer inte fram)
+    // 2) case-insensitive match
     const want = lowerKey(mod);
     for (const k of Object.keys(map)) {
       if (lowerKey(k) === want) return safeArr(map[k]);
@@ -467,41 +480,10 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
     return [];
   }
 
-  function renderModuleDatalist() {
-    if (!dom || !dom.modList) return;
-    while (dom.modList.firstChild) dom.modList.removeChild(dom.modList.firstChild);
-
-    const fixed = safeArr(state.defaults.modules);
-    const fromData = collectModulesFromTrainings();
-    const all = uniqueSorted(fixed.concat(fromData));
-
-    for (const m of all) {
-      const opt = document.createElement("option");
-      opt.value = m;
-      dom.modList.appendChild(opt);
-    }
-  }
-
-  function renderAreaDatalist() {
-    if (!dom || !dom.areaList) return;
-    while (dom.areaList.firstChild) dom.areaList.removeChild(dom.areaList.firstChild);
-
-    const modVal = normStr(dom.mod && dom.mod.value);
-    const fixed = safeArr(getAreasForModuleLoose(modVal));
-    const fromData = collectAreasFromTrainingsForModule(modVal);
-    const all = uniqueSorted(fixed.concat(fromData));
-
-    for (const a of all) {
-      const opt = document.createElement("option");
-      opt.value = a;
-      dom.areaList.appendChild(opt);
-    }
-  }
-
   // Kapitel (7) — fungerar för <select> eller <input list="...">
   function ensureDatalistForInput(inputEl, listId) {
     if (!inputEl) return null;
-    const tag = String(inputEl.tagName || "").toUpperCase();
+    const tag = tagName(inputEl);
     if (tag === "SELECT") return null;
 
     const id = String(listId || "dl_auto");
@@ -545,11 +527,53 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
     }
   }
 
+  // -------------------------
+  // MODUL / OMRÅDE render (P0)
+  // -------------------------
+  function renderModulePicker() {
+    if (!dom || !dom.mod) return;
+
+    const fixed = safeArr(state.defaults.modules);
+    const fromData = collectModulesFromTrainings();
+    const all = uniqueSorted(fixed.concat(fromData));
+
+    const tag = tagName(dom.mod);
+    if (tag === "SELECT") {
+      fillSelectOptions(dom.mod, all, "Välj modul…");
+      return;
+    }
+
+    // INPUT + datalist (prefer existing modList, annars skapa)
+    if (!dom.modList) dom.modList = byId("modList");
+    const dl = dom.modList || ensureDatalistForInput(dom.mod, "modList");
+    fillDatalistOptions(dl, all);
+  }
+
+  function renderAreaPicker() {
+    if (!dom || !dom.area) return;
+
+    const modVal = normStr(dom.mod && dom.mod.value);
+    const fixed = safeArr(getAreasForModuleLoose(modVal));
+    const fromData = collectAreasFromTrainingsForModule(modVal);
+    const all = uniqueSorted(fixed.concat(fromData));
+
+    const tag = tagName(dom.area);
+    if (tag === "SELECT") {
+      fillSelectOptions(dom.area, all, "Välj område…");
+      return;
+    }
+
+    // INPUT + datalist (prefer existing areaList, annars skapa)
+    if (!dom.areaList) dom.areaList = byId("areaList");
+    const dl = dom.areaList || ensureDatalistForInput(dom.area, "areaList");
+    fillDatalistOptions(dl, all);
+  }
+
   function renderChapterAndStepPickers() {
     // Chapters
     const chapters = safeArr(state.defaults.chapterLabels);
     if (dom.courseTitle) {
-      const tag = String(dom.courseTitle.tagName || "").toUpperCase();
+      const tag = tagName(dom.courseTitle);
       if (tag === "SELECT") {
         fillSelectOptions(dom.courseTitle, chapters, "Välj kapitel…");
       } else {
@@ -562,7 +586,7 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
     const steps = safeArr(state.defaults.steps);
     const stepIds = steps.map(s => String(s && s.id)).filter(Boolean);
     if (dom.courseStep) {
-      const tagS = String(dom.courseStep.tagName || "").toUpperCase();
+      const tagS = tagName(dom.courseStep);
       if (tagS === "SELECT") {
         while (dom.courseStep.firstChild) dom.courseStep.removeChild(dom.courseStep.firstChild);
         const ph = document.createElement("option");
@@ -673,7 +697,7 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
     if (!d || !dom) return;
 
     if (dom.mod) dom.mod.value = normStr(d.module);
-    renderAreaDatalist();
+    renderAreaPicker(); // P0: render korrekt för SELECT/INPUT
     if (dom.area) dom.area.value = normStr(d.area);
 
     // pickers
@@ -740,7 +764,7 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
     state.selectedId = normStr(id);
     state.draft = deepClone(state.trainings[idx]);
     setDirty(false);
-    renderAreaDatalist();
+    renderAreaPicker();
     updateUiAll();
   }
 
@@ -784,8 +808,8 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
 
     state.showAll = true;
     setDirty(false);
-    renderModuleDatalist();
-    renderAreaDatalist();
+    renderModulePicker();
+    renderAreaPicker();
     renderChapterAndStepPickers();
     updateUiAll();
   }
@@ -807,8 +831,8 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
     state.selectedId = "";
     state.draft = null;
     setDirty(false);
-    renderModuleDatalist();
-    renderAreaDatalist();
+    renderModulePicker();
+    renderAreaPicker();
     updateUiAll();
   }
 
@@ -826,8 +850,8 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
     state.draft = null;
     state.showAll = false;
     setDirty(false);
-    renderModuleDatalist();
-    renderAreaDatalist();
+    renderModulePicker();
+    renderAreaPicker();
     updateUiAll();
   }
 
@@ -897,8 +921,8 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
 
     setDirty(false);
     DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
-    renderModuleDatalist();
-    renderAreaDatalist();
+    renderModulePicker();
+    renderAreaPicker();
     updateUiAll();
   }
 
@@ -1008,7 +1032,7 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
     if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
       const ctx = DEPS.core.buildAiContext(s) || {};
       // Guard: även om core i framtiden ändras, nolla här också.
-      try { ctx.goals = ""; } catch (_) {}
+      try { ctx.goals = ""; } catch (_) { }
       return ctx;
     }
 
@@ -1175,24 +1199,38 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
       if (!isWriterAllowed()) return;
       if (dom.mod) dom.mod.value = "";
       if (dom.area) dom.area.value = "";
-      renderAreaDatalist();
+      renderAreaPicker();
       syncDraftTitleFromFields();
       setDirty(true);
       updateButtons();
     });
 
-    const onEditorChange = function () {
+    const onModuleChange = function () {
       if (!state.draft) return;
-      renderAreaDatalist();
+      renderAreaPicker();          // P0
       syncDraftTitleFromFields();
       setDirty(true);
       updateButtons();
     };
 
-    dom.on(dom.mod, "input", onEditorChange);
-    dom.on(dom.area, "input", onEditorChange);
-    dom.on(dom.courseTitle, "change", onEditorChange);
-    dom.on(dom.courseStep, "change", onEditorChange);
+    const onAreaChange = function () {
+      if (!state.draft) return;
+      syncDraftTitleFromFields();
+      setDirty(true);
+      updateButtons();
+    };
+
+    // P0: SELECT triggar change, INPUT triggar input (wire båda)
+    dom.on(dom.mod, "input", onModuleChange);
+    dom.on(dom.mod, "change", onModuleChange);
+
+    dom.on(dom.area, "input", onAreaChange);
+    dom.on(dom.area, "change", onAreaChange);
+
+    dom.on(dom.courseTitle, "change", onAreaChange);
+    dom.on(dom.courseStep, "change", onAreaChange);
+    dom.on(dom.courseTitle, "input", onAreaChange);
+    dom.on(dom.courseStep, "input", onAreaChange);
 
     dom.on(dom.goalsLevel, "change", function () {
       if (state.draft) {
@@ -1242,8 +1280,8 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
     }
 
     // Baseline lists
-    renderModuleDatalist();
-    renderAreaDatalist();
+    renderModulePicker();
+    renderAreaPicker();
     renderChapterAndStepPickers();
 
     state.showAll = false;
@@ -1265,8 +1303,8 @@ PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
       try {
         const r = await loadCatalogOnce();
         if (r && r.ok) {
-          renderModuleDatalist();
-          renderAreaDatalist();
+          renderModulePicker();
+          renderAreaPicker();
           renderChapterAndStepPickers();
           updateUiAll();
         } else {
