@@ -1,1 +1,201 @@
+{
+  "version": "ai-rules/v1",
+  "type": "format",
+  "name": "result",
+  "updatedAt": "2026-01-20",
+  "purpose": [
+    "Standardformat för elev/employee-svar och auto-rättning.",
+    "Manager/Teacher kan läsa status, poäng och vilka frågor som behöver uppföljning.",
+    "Matchar question.json (answer.shape) och step_policy.json (auto-rättning först)."
+  ],
+  "constraints": {
+    "noPII": true,
+    "language": "sv-SE",
+    "questionTypesAllowed": ["mcq_single", "mcq_multi", "true_false", "numeric", "short_answer"],
+    "answerShapesAllowed": ["single", "multi", "bool", "number", "short"],
+    "scoreRangePercent": { "min": 0, "max": 100 }
+  },
+  "schema": {
+    "required": [
+      "id",
+      "kind",
+      "attempt",
+      "context",
+      "answers",
+      "summary"
+    ],
+    "properties": {
+      "id": { "type": "string", "description": "res_..." },
+      "kind": { "type": "string", "enum": ["training_result"] },
+
+      "attempt": {
+        "type": "object",
+        "required": ["attemptId", "startedAt", "completedAt", "status"],
+        "properties": {
+          "attemptId": { "type": "string", "description": "att_..." },
+          "startedAt": { "type": "number", "description": "epoch ms" },
+          "completedAt": { "type": "number", "description": "epoch ms" },
+          "status": { "type": "string", "enum": ["in_progress", "completed", "aborted"] }
+        }
+      },
+
+      "context": {
+        "type": "object",
+        "required": ["trainingId", "moduleId", "areaId", "chapterId", "step", "difficulty"],
+        "properties": {
+          "trainingId": { "type": "string" },
+          "moduleId": { "type": "string" },
+          "areaId": { "type": "string" },
+          "chapterId": { "type": "string" },
+          "step": { "type": "string", "enum": ["1", "2", "3", "4", "5"] },
+          "difficulty": { "type": "string", "enum": ["intro", "normal", "advanced"] }
+        }
+      },
+
+      "actor": {
+        "type": "object",
+        "description": "No PII: endast employeeId (empNo) – inget namn/email.",
+        "required": ["employeeId"],
+        "properties": {
+          "employeeId": { "type": "string" },
+          "managerId": { "type": "string" },
+          "orgScopeId": { "type": "string" }
+        }
+      },
+
+      "answers": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": ["questionId", "questionType", "shape", "response", "graded"],
+          "properties": {
+            "questionId": { "type": "string" },
+            "questionType": {
+              "type": "string",
+              "enum": ["mcq_single", "mcq_multi", "true_false", "numeric", "short_answer"]
+            },
+            "shape": { "type": "string", "enum": ["single", "multi", "bool", "number", "short"] },
+
+            "response": {
+              "description": "Elevens svar i rätt shape.",
+              "oneOf": [
+                { "type": "string" },
+                { "type": "array", "items": { "type": "string" } },
+                { "type": "boolean" },
+                { "type": "number" }
+              ]
+            },
+
+            "graded": {
+              "type": "object",
+              "required": ["isCorrect", "pointsEarned", "pointsMax"],
+              "properties": {
+                "isCorrect": { "type": "boolean" },
+                "pointsEarned": { "type": "number" },
+                "pointsMax": { "type": "number" },
+                "criticalMistake": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "True om frågan var critical och svaret var fel."
+                },
+                "feedback": {
+                  "type": "string",
+                  "maxLength": 400,
+                  "description": "Valfri feedback att visa efter rättning."
+                }
+              }
+            }
+          }
+        }
+      },
+
+      "summary": {
+        "type": "object",
+        "required": ["questionCount", "correctCount", "pointsEarned", "pointsMax", "scorePercent", "needsFollowup"],
+        "properties": {
+          "questionCount": { "type": "number" },
+          "correctCount": { "type": "number" },
+          "pointsEarned": { "type": "number" },
+          "pointsMax": { "type": "number" },
+          "scorePercent": { "type": "number" },
+          "needsFollowup": { "type": "boolean" },
+          "followupReasons": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Ex: ['score_below_80','critical_mistake']"
+          }
+        }
+      },
+
+      "meta": {
+        "type": "object",
+        "description": "Teknisk metadata (ingen payload-logg).",
+        "properties": {
+          "requestId": { "type": "string" },
+          "engineVersion": { "type": "string" }
+        }
+      }
+    }
+  },
+
+  "rules": {
+    "needsFollowupDefault": "scorePercent < 80 OR any(answers[].graded.criticalMistake == true)",
+    "scorePercentFormula": "round((pointsEarned / pointsMax) * 100)"
+  },
+
+  "examples": [
+    {
+      "id": "res_ex_001",
+      "kind": "training_result",
+      "attempt": {
+        "attemptId": "att_1700",
+        "startedAt": 1737330000000,
+        "completedAt": 1737330060000,
+        "status": "completed"
+      },
+      "context": {
+        "trainingId": "tr_123",
+        "moduleId": "mod_quality",
+        "areaId": "ar_deviation",
+        "chapterId": "ch_4_scenario",
+        "step": "2",
+        "difficulty": "normal"
+      },
+      "actor": {
+        "employeeId": "E1007",
+        "managerId": "M2001",
+        "orgScopeId": "unit_01"
+      },
+      "answers": [
+        {
+          "questionId": "q_ex_001",
+          "questionType": "mcq_single",
+          "shape": "single",
+          "response": "opt_b",
+          "graded": {
+            "isCorrect": true,
+            "pointsEarned": 1,
+            "pointsMax": 1,
+            "criticalMistake": false,
+            "feedback": "Rätt. Avvikelsen ska registreras direkt enligt rutin."
+          }
+        }
+      ],
+      "summary": {
+        "questionCount": 1,
+        "correctCount": 1,
+        "pointsEarned": 1,
+        "pointsMax": 1,
+        "scorePercent": 100,
+        "needsFollowup": false,
+        "followupReasons": []
+      },
+      "meta": {
+        "requestId": "req_abc123",
+        "engineVersion": "worker-ai-v1"
+      }
+    }
+  ]
+}
 
