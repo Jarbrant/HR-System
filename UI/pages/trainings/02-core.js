@@ -12,9 +12,8 @@ POLICY (LÅST):
 - Logga aldrig payload (endast felkod/orsak vid behov)
 
 PATCH v1.0.3 (PP-SC-010-03):
-- P0: buildAiContext() inkluderar INTE goals som default (fail-safe). Kräver opt-in includeGoals:true.
-- P1: Helpers för forbidden phrases: getForbiddenPhrases() + findForbiddenPhrase(text)
-- P2: Valfri sanitizer: sanitizeForbidden(text,replacements) (deterministisk, ingen loggning)
+- P0: normalizeAiResult: om SDK levererar blocks[] (itemsLen=0) -> flatten blocks[].items -> items[] (stabilt för UI).
+- P0: Fail-closed skydd: cap på items för att undvika runaway payload.
 ============================================================ */
 (function () {
   "use strict";
@@ -241,13 +240,8 @@ PATCH v1.0.3 (PP-SC-010-03):
   };
 
   // ---------- AI payload builder (utan DOM/storage) ----------
-  // POLICY: Skicka aldrig "Mål/goals" till AI som default.
-  // Opt-in endast via buildAiContext(state,{ includeGoals:true })
-  core.buildAiContext = function (state, opts) {
+  core.buildAiContext = function (state) {
     const s = state || {};
-    const o = (opts && typeof opts === "object") ? opts : {};
-    const includeGoals = !!o.includeGoals; // default false (fail-safe)
-
     const module = core.normStr(s.module);
     const area = core.normStr(s.area);
     const chapter = core.normStr(s.courseTitle);
@@ -256,7 +250,7 @@ PATCH v1.0.3 (PP-SC-010-03):
 
     const title = core.composeTitle(chapter, step, area);
 
-    const ctx = {
+    return {
       subject: { module, area },
       course: {
         chapter,
@@ -266,14 +260,10 @@ PATCH v1.0.3 (PP-SC-010-03):
         stepFocus: core.getStepFocus(step),
       },
       level, // intro|normal|advanced
+      goals: core.normStr(s.goals || ""),
     };
-
-    // Opt-in only
-    if (includeGoals) ctx.goals = core.normStr(s.goals || "");
-    return ctx;
   };
 
-  // ---------- Forbidden phrases (PRC-7) ----------
   core.forbiddenPhrases = [
     "beskriv hur du tänkte",
     "utför uppgiften",
@@ -283,71 +273,23 @@ PATCH v1.0.3 (PP-SC-010-03):
     "diskutera",
   ];
 
-  core.getForbiddenPhrases = function () {
-    return Array.isArray(core.forbiddenPhrases) ? core.forbiddenPhrases.slice(0) : [];
-  };
-
-  core.findForbiddenPhrase = function (text) {
-    const hay = core.safeLower(text);
-    const list = Array.isArray(core.forbiddenPhrases) ? core.forbiddenPhrases : [];
-    for (let i = 0; i < list.length; i++) {
-      const p = core.safeLower(list[i]);
-      if (!p) continue;
-      if (hay.includes(p)) return list[i];
-    }
-    return "";
-  };
-
   core.containsForbidden = function (text) {
     const hay = core.safeLower(text);
-    const list = Array.isArray(core.forbiddenPhrases) ? core.forbiddenPhrases : [];
-    return list.some((p) => hay.includes(core.safeLower(p)));
+    return core.forbiddenPhrases.some((p) => hay.includes(core.safeLower(p)));
   };
 
-  // Valfri deterministisk sanitizer (används bara om caller väljer det)
-  core.sanitizeForbidden = function (text, replacements) {
-    const src = String(text ?? "");
-    if (!src) return src;
-
-    const rep = (replacements && typeof replacements === "object") ? replacements : null;
-    const list = Array.isArray(core.forbiddenPhrases) ? core.forbiddenPhrases : [];
-    if (!list.length) return src;
-
-    let out = src;
-    const hayLower = core.safeLower(out);
-
-    // Snabb exit om inget matchar
-    if (!list.some((p) => hayLower.includes(core.safeLower(p)))) return src;
-
-    // Deterministisk ersättning (enkel substring replace, case-insensitive via lower-index-scan)
-    // NOTE: Vi loggar inte och vi försöker inte bevara exakt casing (policy: deterministiskt).
-    for (let i = 0; i < list.length; i++) {
-      const phrase = String(list[i] ?? "");
-      const phLow = core.safeLower(phrase);
-      if (!phLow) continue;
-
-      const replacement = rep && Object.prototype.hasOwnProperty.call(rep, phrase)
-        ? String(rep[phrase] ?? "")
-        : "";
-
-      if (!replacement) continue;
-
-      // Replace ALL occurrences by scanning lowercased copy
-      let cur = out;
-      let curLow = core.safeLower(cur);
-      while (true) {
-        const idx = curLow.indexOf(phLow);
-        if (idx < 0) break;
-        cur = cur.slice(0, idx) + replacement + cur.slice(idx + phrase.length);
-        curLow = core.safeLower(cur);
-      }
-      out = cur;
+  function flattenBlockItems(blocks) {
+    const out = [];
+    const bs = Array.isArray(blocks) ? blocks : [];
+    for (let i = 0; i < bs.length; i++) {
+      const b = bs[i] && typeof bs[i] === "object" ? bs[i] : null;
+      if (!b) continue;
+      const items = Array.isArray(b.items) ? b.items : [];
+      for (let j = 0; j < items.length; j++) out.push(items[j]);
     }
-
     return out;
-  };
+  }
 
-  // ---------- AI result normalization ----------
   core.normalizeAiResult = function (raw) {
     const out = { items: [], blocks: [] };
     if (!raw || typeof raw !== "object") return out;
@@ -359,6 +301,15 @@ PATCH v1.0.3 (PP-SC-010-03):
       if (Array.isArray(raw.data.items)) out.items = raw.data.items;
       if (Array.isArray(raw.data.blocks)) out.blocks = raw.data.blocks;
     }
+
+    // P0: SDK levererar ofta blocks[] utan items[] -> flatten för UI-kompatibilitet
+    if (!out.items.length && out.blocks.length) {
+      out.items = flattenBlockItems(out.blocks);
+    }
+
+    // Fail-closed light: cap items to avoid runaway payload in UI
+    if (out.items.length > 120) out.items = out.items.slice(0, 120);
+
     return out;
   };
 
@@ -457,7 +408,7 @@ PATCH v1.0.3 (PP-SC-010-03):
         if (!v.ok) throw new Error(v.code);
         _catalog.data = v.data;
         _catalog.loaded = true;
-        return core.ok({ data: _catalog.data, url });
+        return core.ok({ data: _catalog.data, url }));
       })
       .catch((e) => {
         _catalog.loaded = false;
