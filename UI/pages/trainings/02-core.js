@@ -11,9 +11,10 @@ POLICY (LÅST):
 - ADMIN-only write (SYSTEM_ADMIN/MANAGER read-only)
 - Logga aldrig payload (endast felkod/orsak vid behov)
 
-PATCH v1.0.3 (PP-SC-010-03):
-- P0: normalizeAiResult: om SDK levererar blocks[] (itemsLen=0) -> flatten blocks[].items -> items[] (stabilt för UI).
-- P0: Fail-closed skydd: cap på items för att undvika runaway payload.
+PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
+- P0 FIX: Stöd för modules.json som använder label (inte title) + catalogs.chapters + areas[].chapterIds.
+- P0 FIX: Normaliserar katalogen i minnet så UI inte tappar kedjan Modul→Område→Kapitel→Steg.
+- P0 FIX: getCourseOptions kan läsa catalogs.steps (Kurs 1..5) från samma fil.
 ============================================================ */
 (function () {
   "use strict";
@@ -51,7 +52,7 @@ PATCH v1.0.3 (PP-SC-010-03):
     if (s === "MGR") return "MANAGER";
     if (s === "USER") return "EMPLOYEE";
 
-    // Lowercase role ids
+    // Canonical
     if (s === "ADMIN") return "ADMIN";
     if (s === "MANAGER") return "MANAGER";
     if (s === "EMPLOYEE") return "EMPLOYEE";
@@ -278,18 +279,6 @@ PATCH v1.0.3 (PP-SC-010-03):
     return core.forbiddenPhrases.some((p) => hay.includes(core.safeLower(p)));
   };
 
-  function flattenBlockItems(blocks) {
-    const out = [];
-    const bs = Array.isArray(blocks) ? blocks : [];
-    for (let i = 0; i < bs.length; i++) {
-      const b = bs[i] && typeof bs[i] === "object" ? bs[i] : null;
-      if (!b) continue;
-      const items = Array.isArray(b.items) ? b.items : [];
-      for (let j = 0; j < items.length; j++) out.push(items[j]);
-    }
-    return out;
-  }
-
   core.normalizeAiResult = function (raw) {
     const out = { items: [], blocks: [] };
     if (!raw || typeof raw !== "object") return out;
@@ -301,15 +290,6 @@ PATCH v1.0.3 (PP-SC-010-03):
       if (Array.isArray(raw.data.items)) out.items = raw.data.items;
       if (Array.isArray(raw.data.blocks)) out.blocks = raw.data.blocks;
     }
-
-    // P0: SDK levererar ofta blocks[] utan items[] -> flatten för UI-kompatibilitet
-    if (!out.items.length && out.blocks.length) {
-      out.items = flattenBlockItems(out.blocks);
-    }
-
-    // Fail-closed light: cap items to avoid runaway payload in UI
-    if (out.items.length > 120) out.items = out.items.slice(0, 120);
-
     return out;
   };
 
@@ -322,7 +302,8 @@ PATCH v1.0.3 (PP-SC-010-03):
   const _catalog = {
     loaded: false,
     loading: null,
-    data: null,
+    data: null,      // normalized (stable for UI)
+    raw: null,       // raw json (debug/compat)
     err: null,
     url: ""
   };
@@ -357,26 +338,149 @@ PATCH v1.0.3 (PP-SC-010-03):
     return !!v && typeof v === "object" && !Array.isArray(v);
   }
 
+  // GUARD: acceptera både {title} och {label} – fail-closed om id saknas.
+  function pickTitle(obj) {
+    if (!obj || typeof obj !== "object") return "";
+    return core.normStr(obj.title || obj.label || obj.name || "");
+  }
+
+  function pickId(obj) {
+    if (!obj || typeof obj !== "object") return "";
+    return core.normStr(obj.id || "");
+  }
+
+  // Bygg en stabil normaliserad struktur:
+  // data.modules[{id,title,areas[{id,title,chapters[{id,title}]}]}]
+  function normalizeCatalog(json) {
+    const norm = {
+      version: core.normStr(json && json.version),
+      type: core.normStr(json && json.type) || "catalog",
+      name: core.normStr(json && json.name) || "modules",
+      constraints: isPlainObject(json && json.constraints) ? json.constraints : {},
+      catalogs: isPlainObject(json && json.catalogs) ? json.catalogs : {},
+      modules: []
+    };
+
+    const catCh = isPlainObject(norm.catalogs) ? norm.catalogs : {};
+    const chaptersCatalog = Array.isArray(catCh.chapters) ? catCh.chapters : [];
+    const chapterMap = {};
+    for (const ch of chaptersCatalog) {
+      const id = pickId(ch);
+      const title = pickTitle(ch);
+      if (id && title) chapterMap[id] = title;
+    }
+
+    const stepsCatalog = Array.isArray(catCh.steps) ? catCh.steps : [];
+    // nothing else to do here; consumers may read it.
+
+    const modules = Array.isArray(json && json.modules) ? json.modules : [];
+    for (const m of modules) {
+      const mid = pickId(m);
+      const mtitle = pickTitle(m);
+      if (!mid || !mtitle) continue;
+
+      const nm = { id: mid, title: mtitle, areas: [] };
+      const areas = Array.isArray(m.areas) ? m.areas : [];
+      for (const a of areas) {
+        const aid = pickId(a);
+        const atitle = pickTitle(a);
+        if (!aid || !atitle) continue;
+
+        const na = { id: aid, title: atitle, chapters: [] };
+
+        // Shape A: area.chapters = [{id,title|label}]
+        if (Array.isArray(a.chapters) && a.chapters.length) {
+          for (const c of a.chapters) {
+            if (typeof c === "string") {
+              const cid = core.normStr(c);
+              const ctitle = chapterMap[cid] || cid;
+              if (cid && ctitle) na.chapters.push({ id: cid, title: ctitle });
+              continue;
+            }
+            const cid = pickId(c);
+            const ctitle = pickTitle(c);
+            if (cid && ctitle) na.chapters.push({ id: cid, title: ctitle });
+          }
+        }
+
+        // Shape B: area.chapterIds = ["ch_1_intro", ...] (katalog->chapters)
+        if (!na.chapters.length && Array.isArray(a.chapterIds) && a.chapterIds.length) {
+          for (const cidRaw of a.chapterIds) {
+            const cid = core.normStr(cidRaw);
+            const ctitle = chapterMap[cid] || cid;
+            if (cid && ctitle) na.chapters.push({ id: cid, title: ctitle });
+          }
+        }
+
+        // Shape C: fallback: defaultChapterIds om area saknar egna (stabil kedja hellre än tom)
+        if (!na.chapters.length && Array.isArray(catCh.defaultChapterIds) && catCh.defaultChapterIds.length) {
+          for (const cidRaw of catCh.defaultChapterIds) {
+            const cid = core.normStr(cidRaw);
+            const ctitle = chapterMap[cid] || cid;
+            if (cid && ctitle) na.chapters.push({ id: cid, title: ctitle });
+          }
+        }
+
+        nm.areas.push(na);
+      }
+
+      norm.modules.push(nm);
+    }
+
+    // Soft fallback: om modules finns men inga areas/chapters, behåll modules ändå.
+    return norm;
+  }
+
   function validateCatalog(json) {
+    // Fail-closed, men tolerant för label/title + chapterIds+catalogs.chapters
     if (!isPlainObject(json)) return core.fail("CATALOG_SHAPE", "modules.json: ogiltigt format");
     if (!Array.isArray(json.modules)) return core.fail("CATALOG_MISSING", "modules.json: saknar modules[]");
 
-    // Minimal validation (fail-closed but tolerant)
+    // P0: måste ha id + (title|label) på module/area
     for (const m of json.modules) {
       if (!isPlainObject(m)) return core.fail("CATALOG_MODULE", "modules.json: module måste vara objekt");
-      if (!core.normStr(m.id) || !core.normStr(m.title)) return core.fail("CATALOG_MODULE_FIELDS", "modules.json: module saknar id/title");
+      const mid = pickId(m);
+      const mtitle = pickTitle(m);
+      if (!mid || !mtitle) return core.fail("CATALOG_MODULE_FIELDS", "modules.json: module saknar id + title/label");
+
       if (!Array.isArray(m.areas)) return core.fail("CATALOG_AREAS", "modules.json: module.areas[] saknas");
       for (const a of m.areas) {
         if (!isPlainObject(a)) return core.fail("CATALOG_AREA", "modules.json: area måste vara objekt");
-        if (!core.normStr(a.id) || !core.normStr(a.title)) return core.fail("CATALOG_AREA_FIELDS", "modules.json: area saknar id/title");
-        if (!Array.isArray(a.chapters)) return core.fail("CATALOG_CHAPTERS", "modules.json: area.chapters[] saknas");
-        for (const c of a.chapters) {
-          if (!isPlainObject(c)) return core.fail("CATALOG_CHAPTER", "modules.json: chapter måste vara objekt");
-          if (!core.normStr(c.id) || !core.normStr(c.title)) return core.fail("CATALOG_CHAPTER_FIELDS", "modules.json: chapter saknar id/title");
+        const aid = pickId(a);
+        const atitle = pickTitle(a);
+        if (!aid || !atitle) return core.fail("CATALOG_AREA_FIELDS", "modules.json: area saknar id + title/label");
+
+        // Kapitel kan vara area.chapters[] (obj/str) ELLER area.chapterIds[] (med catalogs.chapters)
+        const hasChapters = Array.isArray(a.chapters) && a.chapters.length;
+        const hasChapterIds = Array.isArray(a.chapterIds) && a.chapterIds.length;
+
+        if (!hasChapters && !hasChapterIds) {
+          // Tillåt tomt, men om catalogs.defaultChapterIds finns så klarar vi UI-kedjan ändå.
+          // Fail-closed här skulle göra kedjan instabil om filen är designad för chapterIds.
+          continue;
+        }
+
+        if (hasChapters) {
+          for (const c of a.chapters) {
+            if (typeof c === "string") continue;
+            if (!isPlainObject(c)) return core.fail("CATALOG_CHAPTER", "modules.json: chapter måste vara objekt eller id-sträng");
+            const cid = pickId(c);
+            const ctitle = pickTitle(c);
+            if (!cid || !ctitle) return core.fail("CATALOG_CHAPTER_FIELDS", "modules.json: chapter saknar id + title/label");
+          }
         }
       }
     }
-    return core.ok({ data: json });
+
+    // Normalisera alltid så UI får stabil shape
+    const normalized = normalizeCatalog(json);
+
+    // Fail-closed: om normalisering gav noll moduler -> stoppa tydligt
+    if (!Array.isArray(normalized.modules) || !normalized.modules.length) {
+      return core.fail("CATALOG_EMPTY", "modules.json: kunde inte normalisera moduler (tom lista)");
+    }
+
+    return core.ok({ data: normalized, raw: json });
   }
 
   core.getCatalogUrl = function () {
@@ -406,13 +510,15 @@ PATCH v1.0.3 (PP-SC-010-03):
       .then((json) => {
         const v = validateCatalog(json);
         if (!v.ok) throw new Error(v.code);
-        _catalog.data = v.data;
+        _catalog.raw = v.raw || json;       // DEBUG/compat
+        _catalog.data = v.data;             // normalized for UI
         _catalog.loaded = true;
-        return core.ok({ data: _catalog.data, url }));
+        return core.ok({ data: _catalog.data, url });
       })
       .catch((e) => {
         _catalog.loaded = false;
         _catalog.data = null;
+        _catalog.raw = null;
         _catalog.err = String(e && e.message ? e.message : e);
         // Fail-closed but non-crashing: return ok:false so UI kan visa tydligt fel
         return core.fail("CATALOG_LOAD_FAIL", _catalog.err || "modules.json kunde inte laddas");
@@ -429,26 +535,36 @@ PATCH v1.0.3 (PP-SC-010-03):
     const k = core.safeLower(key);
     if (!k) return null;
     const mods = (data && Array.isArray(data.modules)) ? data.modules : [];
-    return mods.find((m) => core.safeLower(m.id) === k) || mods.find((m) => core.safeLower(m.title) === k) || null;
+    return mods.find((m) => core.safeLower(m.id) === k) ||
+      mods.find((m) => core.safeLower(m.title || m.label) === k) ||
+      null;
   }
 
   function findArea(mod, key) {
     const k = core.safeLower(key);
     if (!mod || !Array.isArray(mod.areas) || !k) return null;
-    return mod.areas.find((a) => core.safeLower(a.id) === k) || mod.areas.find((a) => core.safeLower(a.title) === k) || null;
+    return mod.areas.find((a) => core.safeLower(a.id) === k) ||
+      mod.areas.find((a) => core.safeLower(a.title || a.label) === k) ||
+      null;
   }
 
   core.getModuleOptions = function (catalogData) {
     const data = catalogData || _catalog.data;
     const mods = (data && Array.isArray(data.modules)) ? data.modules : [];
-    return mods.map((m) => ({ id: core.normStr(m.id), title: core.normStr(m.title) }));
+    return mods.map((m) => ({
+      id: core.normStr(m.id),
+      title: core.normStr(m.title || m.label)
+    })).filter(x => x.id && x.title);
   };
 
   core.getAreaOptions = function (catalogData, moduleKey) {
     const data = catalogData || _catalog.data;
     const mod = findModule(data, moduleKey);
     if (!mod) return [];
-    return (mod.areas || []).map((a) => ({ id: core.normStr(a.id), title: core.normStr(a.title) }));
+    return (mod.areas || []).map((a) => ({
+      id: core.normStr(a.id),
+      title: core.normStr(a.title || a.label)
+    })).filter(x => x.id && x.title);
   };
 
   core.getChapterOptions = function (catalogData, moduleKey, areaKey) {
@@ -456,13 +572,29 @@ PATCH v1.0.3 (PP-SC-010-03):
     const mod = findModule(data, moduleKey);
     const area = findArea(mod, areaKey);
     if (!area) return [];
-    return (area.chapters || []).map((c) => ({ id: core.normStr(c.id), title: core.normStr(c.title) }));
+    const ch = Array.isArray(area.chapters) ? area.chapters : [];
+    return ch.map((c) => ({
+      id: core.normStr(c && c.id),
+      title: core.normStr((c && (c.title || c.label)) || "")
+    })).filter(x => x.id && x.title);
   };
 
   core.getCourseOptions = function (catalogData) {
     const data = catalogData || _catalog.data;
+
+    // Stöd: catalogs.steps (Kurs 1..5) i ai-rules/v1/modules.json
+    const steps = data && data.catalogs && Array.isArray(data.catalogs.steps) ? data.catalogs.steps : [];
+    if (steps.length) {
+      return steps.map((s) => {
+        const id = core.normStr(s && s.id);
+        const title = core.normStr(s && (s.label || s.title)) || ("Kurs " + id);
+        const stepNumber = Number(id || 0) || 0;
+        return { id, title, stepNumber };
+      }).filter(x => x.id && x.title);
+    }
+
+    // Legacy/alt: data.courses
     const courses = (data && Array.isArray(data.courses)) ? data.courses : [];
-    // fallback: always return 1-5 even if missing
     if (!courses.length) {
       return [
         { id: "course_1", title: "Kurs 1", stepNumber: 1 },
@@ -476,18 +608,38 @@ PATCH v1.0.3 (PP-SC-010-03):
       id: core.normStr(c.id),
       title: core.normStr(c.title),
       stepNumber: Number(c.stepNumber || 0) || 0
-    }));
+    })).filter(x => x.id && x.title);
   };
 
   core.getDifficultyOptions = function (catalogData) {
     const data = catalogData || _catalog.data;
+
+    // Stöd: constraints.difficultyAllowed = ["intro","normal","advanced"]
+    const allowed = data && data.constraints && Array.isArray(data.constraints.difficultyAllowed)
+      ? data.constraints.difficultyAllowed
+      : [];
+
+    if (allowed.length) {
+      const mapTitle = {
+        intro: "Lätt",
+        normal: "Normal",
+        advanced: "Svår"
+      };
+      return allowed.map((idRaw) => {
+        const id = core.normStr(idRaw);
+        const t = mapTitle[id] || (id ? id[0].toUpperCase() + id.slice(1) : "");
+        return { id, title: t };
+      }).filter(x => x.id && x.title);
+    }
+
+    // Legacy/alt: difficultyLevels
     const lv = (data && Array.isArray(data.difficultyLevels)) ? data.difficultyLevels : [];
     if (!lv.length) return [
       { id: "intro", title: "Lätt" },
       { id: "normal", title: "Normal" },
       { id: "advanced", title: "Svår" }
     ];
-    return lv.map((x) => ({ id: core.normStr(x.id), title: core.normStr(x.title) }));
+    return lv.map((x) => ({ id: core.normStr(x.id), title: core.normStr(x.title) })).filter(x => x.id && x.title);
   };
 
   core.getOutputModes = function (catalogData) {
@@ -497,7 +649,7 @@ PATCH v1.0.3 (PP-SC-010-03):
       { id: "training", title: "Utbildning" },
       { id: "document", title: "Dokument" }
     ];
-    return om.map((x) => ({ id: core.normStr(x.id), title: core.normStr(x.title) }));
+    return om.map((x) => ({ id: core.normStr(x.id), title: core.normStr(x.title) })).filter(x => x.id && x.title);
   };
 
   core.__VERSION = "v1.0.3-PP-SC-010-03";
