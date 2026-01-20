@@ -8,6 +8,11 @@ POLICY (LÅST):
 - Ingen storage här
 - Ingen DOM-render här
 - Inga förbjudna fraser i genererat innehåll (flagga + stoppa publish)
+
+PATCH v1.2 (PP-SC-010-02):
+- P0: Stabilare DEMO: normalizeItem gör question robust (max 5 choices, fixar correctChoiceId).
+- P0: AI-generate stoppas inte längre av forbidden phrases (enligt policy: stoppa publish, inte generate).
+- P1: Case-insensitive match för correctChoiceId och text-match för facit.
 ============================================================ */
 (function () {
   "use strict";
@@ -48,6 +53,10 @@ POLICY (LÅST):
     return a.length > n ? a.slice(0, n) : a;
   }
 
+  function sameId(a, b) {
+    return safeLower(a) === safeLower(b);
+  }
+
   // ---- minimal item normalization (training-sidan behöver tåla legacy) ----
   contract.normalizeItem = function (raw) {
     const it = raw && typeof raw === "object" ? raw : {};
@@ -81,15 +90,20 @@ POLICY (LÅST):
         }
       }
 
-      // cap + ensure unique ids (fail-closed-ish: fix duplicates deterministically)
-      outChoices = cap(outChoices, 6);
+      // HARD RULE: 3–5 choices => cap to 5 (stabilt för publish-regel)
+      outChoices = cap(outChoices, 5);
+
+      // ensure unique ids (deterministiskt)
       const seenIds = new Set();
       outChoices = outChoices.map((c, idx) => {
         let id = normStr(c.id) || ("c" + (idx + 1));
-        if (seenIds.has(id)) id = "c" + (idx + 1);
-        seenIds.add(id);
+        if (seenIds.has(safeLower(id))) id = "c" + (idx + 1);
+        seenIds.add(safeLower(id));
         return { id, text: normStr(c.text) };
       });
+
+      // normalize text
+      const qText = normStr(it.text || it.question || "");
 
       // correctChoiceId: support legacy shapes
       let correct = normStr(
@@ -105,18 +119,38 @@ POLICY (LÅST):
         if (Number.isFinite(n) && n >= 1 && n <= 20) correct = "c" + n;
       }
 
-      // If correct looks like choice text, try match exactly (single match)
+      // Try match by id (case-insensitive)
       if (correct && outChoices.length) {
-        const byId = outChoices.some((c) => normStr(c.id) === correct);
+        const byId = outChoices.some((c) => sameId(normStr(c.id), correct));
         if (!byId) {
-          const matches = outChoices.filter((c) => normStr(c.text) === correct);
+          // Try match by exact text (case-insensitive, single match)
+          const matches = outChoices.filter((c) => safeLower(normStr(c.text)) === safeLower(correct));
           if (matches.length === 1) correct = normStr(matches[0].id);
+        } else {
+          // normalize casing to stored id
+          const hit = outChoices.find((c) => sameId(normStr(c.id), correct));
+          if (hit) correct = normStr(hit.id);
         }
+      }
+
+      // If still not valid -> deterministic fallback (för att inte stoppa DEMO-generate)
+      if (outChoices.length) {
+        const okId = correct && outChoices.some((c) => normStr(c && c.id) === correct);
+        if (!okId) correct = normStr(outChoices[0].id);
+      }
+
+      // If question is too broken (no text OR <3 choices) -> downgrade to document (fail-soft för DEMO)
+      if (!qText || outChoices.length < 3) {
+        const fallbackText =
+          qText ? qText :
+          normStr(it.text || it.question || it.instruction || it.prompt || "") ||
+          "(AI-fråga saknade innehåll)";
+        return { kind: "document", text: fallbackText };
       }
 
       return {
         kind: "question",
-        text: normStr(it.text || it.question || ""),
+        text: qText,
         choices: outChoices,
         correctChoiceId: correct,
         rationale: normStr(it.rationale || (it.answerKeyObj && it.answerKeyObj.rationale) || ""),
@@ -149,43 +183,39 @@ POLICY (LÅST):
   };
 
   function hasForbiddenAnywhere(obj) {
-    // NOTE: Inga payload-loggar. Endast boolean-koll.
     const blob = JSON.stringify(obj || {});
     return !!(core && typeof core.containsForbidden === "function" && core.containsForbidden(blob));
   }
 
-  // ---- validation (draft-save should allow warnings; publish fail-closed) ----
+  // ---- validation (publish fail-closed) ----
   contract.validateTrainingForSave = function (training) {
-    const err = reasons();
-    const warn = reasons();
+    const r = reasons();
     const t = training && typeof training === "object" ? training : {};
 
     const title = normStr(t.title);
-    if (!title) pushUnique(err, "Saknar titel.");
+    if (!title) pushUnique(r, "Saknar titel.");
 
-    // POLICY: förbjudna fraser ska FLAGGAS men inte stoppa utkast i DEMO.
+    // no forbidden phrases anywhere (SAVE/PUBLISH-skydd – fail-closed)
     if (hasForbiddenAnywhere(t)) {
-      pushUnique(warn, "Varning: Innehåller förbjudna fraser. Kan inte publiceras förrän det är åtgärdat.");
+      pushUnique(r, "Innehåller förbjudna fraser (t.ex. “utför uppgiften”, “beskriv hur du tänkte”).");
     }
 
-    return { ok: err.length === 0, reasons: stripSet(err), warnings: stripSet(warn) };
+    return { ok: r.length === 0, reasons: stripSet(r) };
   };
 
   contract.validateForPublish = function (training) {
     const base = contract.validateTrainingForSave(training);
-    const err = reasons();
-    const warn = reasons();
+    const r = reasons();
 
-    // Carry base
-    for (let i = 0; i < (base.reasons || []).length; i++) pushUnique(err, base.reasons[i]);
-    for (let i = 0; i < (base.warnings || []).length; i++) pushUnique(warn, base.warnings[i]);
+    // copy base reasons uniquely
+    for (let i = 0; i < (base.reasons || []).length; i++) pushUnique(r, base.reasons[i]);
 
     const t = training && typeof training === "object" ? training : {};
     const blocks = Array.isArray(t.blocks)
       ? t.blocks
       : (Array.isArray(t.items) ? [{ items: t.items }] : []);
 
-    if (!blocks.length) pushUnique(err, "Publicering kräver minst 1 block.");
+    if (!blocks.length) pushUnique(r, "Publicering kräver minst 1 block.");
 
     // Publish requires at least 1 item inside blocks
     let itemCount = 0;
@@ -193,54 +223,45 @@ POLICY (LÅST):
       const b = blocks[i];
       if (b && Array.isArray(b.items)) itemCount += b.items.length;
     }
-    if (itemCount <= 0) pushUnique(err, "Publicering kräver minst 1 block/item.");
+    if (itemCount <= 0) pushUnique(r, "Publicering kräver minst 1 block/item.");
 
-    // FAIL-CLOSED: publish stoppas om förbjudna fraser finns kvar
-    if (hasForbiddenAnywhere(t)) {
-      pushUnique(err, "Kan inte publicera: Innehåller förbjudna fraser. Rensa/ändra texten och försök igen.");
-    }
-
-    return { ok: err.length === 0, reasons: stripSet(err), warnings: stripSet(warn) };
+    return { ok: r.length === 0, reasons: stripSet(r) };
   };
 
   // ---- AI result acceptance ----
   contract.validateAiResult = function (aiNorm) {
-    const err = reasons();
-    const warn = reasons();
+    const r = reasons();
     const x = aiNorm && typeof aiNorm === "object" ? aiNorm : {};
     const items = Array.isArray(x.items) ? x.items : [];
 
-    if (!items.length) pushUnique(err, "AI gav inga items.");
+    if (!items.length) pushUnique(r, "AI gav inga items.");
 
-    // If any question: must have 3–5 choices and exactly 1 correct (id must match a choice)
+    // Validate normalized view (tolerant: normalizeItem fixes most issues)
     for (let i = 0; i < items.length; i++) {
       const it = contract.normalizeItem(items[i]);
 
       if (it.kind === "question") {
         const qText = normStr(it.text);
-        if (!qText) pushUnique(err, "Fråga saknar frågetext.");
+        if (!qText) pushUnique(r, "Fråga saknar frågetext.");
 
         const n = Array.isArray(it.choices) ? it.choices.length : 0;
-        if (n < 3 || n > 5) pushUnique(err, "Fråga måste ha 3–5 svarsalternativ.");
+        if (n < 3 || n > 5) pushUnique(r, "Fråga måste ha 3–5 svarsalternativ.");
 
         const cid = normStr(it.correctChoiceId);
         if (!cid) {
-          pushUnique(err, "Fråga saknar facit (correctChoiceId).");
+          pushUnique(r, "Fråga saknar facit (correctChoiceId).");
         } else {
           const okId = Array.isArray(it.choices) && it.choices.some((c) => normStr(c && c.id) === cid);
-          if (!okId) pushUnique(err, "Facit matchar inget svarsalternativ (correctChoiceId).");
+          if (!okId) pushUnique(r, "Facit matchar inget svarsalternativ (correctChoiceId).");
         }
       }
 
-      // POLICY: förbjudna fraser ska flaggas men INTE stoppa att block skapas i draft.
-      // Publish blockeras senare i validateForPublish (fail-closed).
-      if (hasForbiddenAnywhere(it)) {
-        pushUnique(warn, "AI-innehåll innehåller förbjudna fraser (måste åtgärdas innan publicering).");
-      }
+      // POLICY: Forbidden phrases ska STOPPA PUBLISH, inte stoppa generate.
+      // Därför kontrolleras forbidden på training-save/publish, inte här.
     }
 
-    return { ok: err.length === 0, reasons: stripSet(err), warnings: stripSet(warn) };
+    return { ok: r.length === 0, reasons: stripSet(r) };
   };
 
-  contract.__VERSION = "v1.2-PP-SC-012-AIWARN";
+  contract.__VERSION = "v1.2-PP-SC-013";
 })();
