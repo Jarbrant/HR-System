@@ -1,14 +1,15 @@
 /* ============================================================
 AO-TRAININGS-MODULAR-01 (PP-SC-010-04) | FILE 03/06 | FIL-ID: UI/pages/trainings/03-store.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Storage-layer för trainings (AO-057_TRAININGS_V1) • load/save/purge
-      Fail-closed vid korrupt data. Ingen DOM här.
+Syfte: Storage-adapter för trainings (AO-057_TRAININGS_V1) • load/save/purge
+      Fail-closed: korrupt data låser skrivning (caller får ok:false + corrupt:true)
 
 POLICY (LÅST):
 - UI-only • Fail-closed
-- Endast denna fil pratar storage (trainings)
-- Inga nya storage-keys (använder endast AO-057_TRAININGS_V1)
-- Logga aldrig payload (endast felkod/orsak om behövs)
+- Endast denna fil får skriva AO-057_TRAININGS_V1
+- Ingen DOM-render här
+- XSS-safe (ingen innerHTML)
+- Inga nya storage-keys
 ============================================================ */
 (function () {
   "use strict";
@@ -20,153 +21,166 @@ POLICY (LÅST):
   const store = (NS.store = {});
   store.__VERSION = "v1.0.4-PP-SC-010-04";
 
-  const KEY = "AO-057_TRAININGS_V1"; // LÅST
+  // LÅST KEY
+  const KEY = "AO-057_TRAININGS_V1";
+
+  // In-memory lock flag (persistas inte)
+  let _locked = false;
+  let _lockReason = "";
 
   function normStr(v) {
     return (core && core.normStr) ? core.normStr(v) : String(v ?? "").trim();
   }
 
-  function safeArr(a) { return Array.isArray(a) ? a : []; }
-
-  function isPlainObject(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
-
-  function fail(code, msg) {
-    if (core && typeof core.fail === "function") return core.fail(code, msg);
-    return { ok: false, code: String(code || "ERR"), err: String(msg || "Fel") };
+  function isPlainObject(v) {
+    return !!v && typeof v === "object" && !Array.isArray(v);
   }
 
-  function ok(data) {
-    if (core && typeof core.ok === "function") return core.ok(data);
-    return Object.assign({ ok: true }, data || {});
-  }
-
-  function getStorage() {
-    // LÅST policy i projektet: sessionStorage först, fallback localStorage via CORE/HRApp normalt.
-    // Här: vi läser/skriv direkt i localStorage eftersom trainings är "data". Fail-closed om ej tillgängligt.
-    try {
-      if (window && window.localStorage) return window.localStorage;
-    } catch (_) {}
-    return null;
-  }
-
-  function readRaw() {
-    const st = getStorage();
-    if (!st) return { ok: false, missing: true, raw: "" };
-
-    let raw = "";
-    try { raw = st.getItem(KEY) || ""; } catch (_) { raw = ""; }
-
-    if (!raw) return { ok: true, missing: true, raw: "" };
-    return { ok: true, missing: false, raw };
-  }
-
-  function writeRaw(str) {
-    const st = getStorage();
-    if (!st) return fail("STORAGE_MISSING", "Storage saknas");
-
-    try {
-      st.setItem(KEY, String(str ?? ""));
-      return ok({ key: KEY });
-    } catch (e) {
-      return fail("STORAGE_WRITE_FAIL", String(e && e.message ? e.message : e));
-    }
-  }
-
-  function removeKey() {
-    const st = getStorage();
-    if (!st) return fail("STORAGE_MISSING", "Storage saknas");
-    try {
-      st.removeItem(KEY);
-      return ok({ removed: true, key: KEY });
-    } catch (e) {
-      return fail("STORAGE_REMOVE_FAIL", String(e && e.message ? e.message : e));
-    }
-  }
-
-  // ------------------------------------------------------------
-  // Shape validation (tolerant but bounded)
-  // ------------------------------------------------------------
-  function normalizeTraining(t) {
-    const x = isPlainObject(t) ? t : {};
-
-    const id = normStr(x.id);
-    if (!id) return null;
-
-    const out = {
-      id: id,
-      status: normStr(x.status) === "published" ? "published" : "draft",
-      module: normStr(x.module),
-      area: normStr(x.area),
-      courseTitle: normStr(x.courseTitle),
-      courseStep: normStr(x.courseStep),
-      goalsLevel: normStr(x.goalsLevel),
-      goals: normStr(x.goals),
-      title: normStr(x.title),
-      blocks: [],
-      meta: isPlainObject(x.meta) ? x.meta : {}
-    };
-
-    // blocks/items tolerant
-    if (Array.isArray(x.blocks)) out.blocks = x.blocks;
-    else if (Array.isArray(x.items)) out.blocks = [{ title: out.title || "(block)", items: x.items }];
-
+  function fail(code, msg, extra) {
+    const out = Object.assign({ ok: false, code: String(code || "ERR"), err: String(msg || "Fel") }, extra || {});
     return out;
   }
 
-  function validatePayload(obj) {
-    // Accept either {trainings:[...]} or direct array
-    if (Array.isArray(obj)) return ok({ trainings: obj });
-    if (isPlainObject(obj) && Array.isArray(obj.trainings)) return ok({ trainings: obj.trainings });
-    return fail("SHAPE_BAD", "Fel format");
+  function ok(data) {
+    return Object.assign({ ok: true }, data || {});
+  }
+
+  function safeParse(jsonText) {
+    try { return { ok: true, data: JSON.parse(String(jsonText || "")) }; }
+    catch (e) { return { ok: false, err: String(e && e.message ? e.message : e) }; }
+  }
+
+  function validateShape(root) {
+    // Tillåter två shapes:
+    // A) { trainings: [...] } (preferred wrapper)
+    // B) [...] (legacy array)
+    if (Array.isArray(root)) return ok({ trainings: root, legacyArray: true });
+
+    if (!isPlainObject(root)) return fail("SHAPE", "Trainings: ogiltigt format");
+    if (!Array.isArray(root.trainings)) return fail("SHAPE", "Trainings: saknar trainings[]");
+    return ok({ trainings: root.trainings, legacyArray: false });
+  }
+
+  function scrubTraining(t) {
+    // Minimal normalisering: vi tar inte bort fält, bara säkrar grundfält
+    const x = isPlainObject(t) ? t : {};
+    const id = normStr(x.id) || ("tr_" + Date.now());
+    const status = (normStr(x.status) === "published") ? "published" : "draft";
+    const title = normStr(x.title);
+    const module = normStr(x.module);
+    const area = normStr(x.area);
+
+    // blocks/items tolereras, inget krav här
+    const out = Object.assign({}, x, { id, status, title, module, area });
+    return out;
+  }
+
+  function scrubList(list) {
+    const arr = Array.isArray(list) ? list : [];
+    return arr.map(scrubTraining);
+  }
+
+  function readRaw() {
+    // Fail-closed: om HRApp finns kan den ha guardad storage wrapper
+    try {
+      if (window.HRApp && typeof window.HRApp.safeGet === "function") {
+        return window.HRApp.safeGet(KEY);
+      }
+    } catch (_) {}
+    try {
+      return localStorage.getItem(KEY);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function writeRaw(value) {
+    try {
+      if (window.HRApp && typeof window.HRApp.safeSet === "function") {
+        window.HRApp.safeSet(KEY, value);
+        return ok();
+      }
+    } catch (_) {}
+    try {
+      localStorage.setItem(KEY, value);
+      return ok();
+    } catch (e) {
+      return fail("WRITE_FAIL", "Kunde inte skriva till storage", { detail: String(e && e.message ? e.message : e) });
+    }
+  }
+
+  function removeRaw() {
+    try {
+      if (window.HRApp && typeof window.HRApp.safeRemove === "function") {
+        window.HRApp.safeRemove(KEY);
+        return ok();
+      }
+    } catch (_) {}
+    try {
+      localStorage.removeItem(KEY);
+      return ok();
+    } catch (e) {
+      return fail("REMOVE_FAIL", "Kunde inte rensa storage", { detail: String(e && e.message ? e.message : e) });
+    }
   }
 
   // ------------------------------------------------------------
   // Public API
   // ------------------------------------------------------------
-  store.lockReasonFor = function () {
-    return "Korrupt data i AO-057_TRAININGS_V1 (fail-closed).";
+  store.key = function () { return KEY; };
+
+  store.isLocked = function () { return _locked === true; };
+
+  store.lockReasonFor = function () { return normStr(_lockReason) || "Korrupt data."; };
+
+  store.unlock = function () {
+    _locked = false;
+    _lockReason = "";
+    return ok();
   };
 
   store.load = function () {
-    const rr = readRaw();
-    if (!rr.ok) return fail("READ_FAIL", "Kunde inte läsa");
+    if (_locked) return fail("LOCKED", store.lockReasonFor(), { corrupt: true, trainings: [] });
 
-    if (rr.missing) return ok({ trainings: [], missing: true });
+    const raw = readRaw();
+    if (!raw) return ok({ trainings: [], empty: true });
 
-    let parsed = null;
-    try {
-      parsed = JSON.parse(rr.raw);
-    } catch (_) {
-      return { ok: false, corrupt: true, code: "JSON_PARSE", err: "Korrupt JSON" };
+    const parsed = safeParse(raw);
+    if (!parsed.ok) {
+      _locked = true;
+      _lockReason = "Trainings är korrupt JSON.";
+      return fail("CORRUPT_JSON", _lockReason, { corrupt: true, trainings: [] });
     }
 
-    const vp = validatePayload(parsed);
-    if (!vp.ok) return { ok: false, corrupt: true, code: vp.code || "SHAPE", err: vp.err || "Korrupt shape" };
-
-    const listIn = safeArr(vp.trainings);
-    const out = [];
-    for (const t of listIn) {
-      const nt = normalizeTraining(t);
-      if (nt) out.push(nt);
+    const shape = validateShape(parsed.data);
+    if (!shape.ok) {
+      _locked = true;
+      _lockReason = "Trainings har fel format.";
+      return fail("CORRUPT_SHAPE", _lockReason, { corrupt: true, trainings: [] });
     }
 
-    return ok({ trainings: out, missing: false });
+    const trainings = scrubList(shape.trainings);
+    return ok({ trainings, legacyArray: !!shape.legacyArray });
   };
 
-  store.save = function (trainings) {
-    const list = safeArr(trainings);
-    // Minimal deterministic wrapper
-    const payload = { trainings: list };
+  store.save = function (trainingsList) {
+    if (_locked) return fail("LOCKED", store.lockReasonFor(), { corrupt: true });
 
-    let raw = "";
-    try { raw = JSON.stringify(payload); } catch (e) { return fail("JSON_STRINGIFY", String(e && e.message ? e.message : e)); }
+    const trainings = scrubList(trainingsList);
+    const payload = JSON.stringify({ trainings: trainings });
 
-    return writeRaw(raw);
+    const w = writeRaw(payload);
+    if (!w.ok) return w;
+
+    return ok({ count: trainings.length });
   };
 
   store.purgeAll = function () {
-    return removeKey();
+    if (_locked) return fail("LOCKED", store.lockReasonFor(), { corrupt: true });
+
+    const r = removeRaw();
+    if (!r.ok) return r;
+    return ok();
   };
 
-  store.getKey = function () { return KEY; };
 })();
