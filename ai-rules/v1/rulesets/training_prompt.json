@@ -1,201 +1,162 @@
 {
   "version": "ai-rules/v1",
-  "type": "format",
-  "name": "result",
+  "type": "ruleset",
+  "name": "training_prompt",
   "updatedAt": "2026-01-20",
   "purpose": [
-    "Standardformat för elev/employee-svar och auto-rättning.",
-    "Manager/Teacher kan läsa status, poäng och vilka frågor som behöver uppföljning.",
-    "Matchar question.json (answer.shape) och step_policy.json (auto-rättning först)."
+    "Styr exakt payload från UI till Worker för AI-generering.",
+    "Säkrar målbild: modul -> område -> kapitel -> steg -> difficulty.",
+    "Gör output deterministiskt: blocks eller questions enligt formatfiler."
   ],
   "constraints": {
     "noPII": true,
-    "language": "sv-SE",
-    "questionTypesAllowed": ["mcq_single", "mcq_multi", "true_false", "numeric", "short_answer"],
-    "answerShapesAllowed": ["single", "multi", "bool", "number", "short"],
-    "scoreRangePercent": { "min": 0, "max": 100 }
+    "maxPayloadKb": 64,
+    "logPolicy": "never_log_payload",
+    "difficultyAllowed": ["intro", "normal", "advanced"],
+    "stepAllowed": ["1", "2", "3", "4", "5"],
+    "contentTypeAllowed": ["training_blocks", "document", "questions"]
   },
-  "schema": {
+  "input": {
     "required": [
-      "id",
-      "kind",
-      "attempt",
+      "requestId",
+      "contentType",
+      "count",
+      "language",
       "context",
-      "answers",
-      "summary"
+      "output"
     ],
     "properties": {
-      "id": { "type": "string", "description": "res_..." },
-      "kind": { "type": "string", "enum": ["training_result"] },
+      "requestId": { "type": "string", "description": "UI genererar req_..." },
 
-      "attempt": {
-        "type": "object",
-        "required": ["attemptId", "startedAt", "completedAt", "status"],
-        "properties": {
-          "attemptId": { "type": "string", "description": "att_..." },
-          "startedAt": { "type": "number", "description": "epoch ms" },
-          "completedAt": { "type": "number", "description": "epoch ms" },
-          "status": { "type": "string", "enum": ["in_progress", "completed", "aborted"] }
-        }
+      "contentType": {
+        "type": "string",
+        "enum": ["training_blocks", "document", "questions"],
+        "description": "Vad AI ska skapa."
+      },
+
+      "count": {
+        "type": "number",
+        "minimum": 1,
+        "maximum": 12,
+        "description": "Antal block eller antal frågor."
+      },
+
+      "language": {
+        "type": "string",
+        "enum": ["sv-SE"],
+        "default": "sv-SE"
       },
 
       "context": {
         "type": "object",
-        "required": ["trainingId", "moduleId", "areaId", "chapterId", "step", "difficulty"],
+        "required": ["catalogRef", "moduleId", "areaId", "chapterId", "step", "difficulty"],
         "properties": {
-          "trainingId": { "type": "string" },
+          "catalogRef": {
+            "type": "string",
+            "enum": ["ai-rules/v1/modules.json"],
+            "description": "Vilken katalog som gäller."
+          },
           "moduleId": { "type": "string" },
           "areaId": { "type": "string" },
           "chapterId": { "type": "string" },
           "step": { "type": "string", "enum": ["1", "2", "3", "4", "5"] },
-          "difficulty": { "type": "string", "enum": ["intro", "normal", "advanced"] }
+          "difficulty": { "type": "string", "enum": ["intro", "normal", "advanced"] },
+
+          "chapterLabel": { "type": "string", "description": "Valfri för UI-läsbarhet." },
+          "areaLabel": { "type": "string", "description": "Valfri för UI-läsbarhet." },
+          "moduleLabel": { "type": "string", "description": "Valfri för UI-läsbarhet." }
         }
       },
 
-      "actor": {
+      "output": {
         "type": "object",
-        "description": "No PII: endast employeeId (empNo) – inget namn/email.",
-        "required": ["employeeId"],
+        "required": ["formatRef"],
         "properties": {
-          "employeeId": { "type": "string" },
-          "managerId": { "type": "string" },
-          "orgScopeId": { "type": "string" }
-        }
-      },
-
-      "answers": {
-        "type": "array",
-        "minItems": 1,
-        "items": {
-          "type": "object",
-          "required": ["questionId", "questionType", "shape", "response", "graded"],
-          "properties": {
-            "questionId": { "type": "string" },
-            "questionType": {
-              "type": "string",
-              "enum": ["mcq_single", "mcq_multi", "true_false", "numeric", "short_answer"]
-            },
-            "shape": { "type": "string", "enum": ["single", "multi", "bool", "number", "short"] },
-
-            "response": {
-              "description": "Elevens svar i rätt shape.",
-              "oneOf": [
-                { "type": "string" },
-                { "type": "array", "items": { "type": "string" } },
-                { "type": "boolean" },
-                { "type": "number" }
-              ]
-            },
-
-            "graded": {
-              "type": "object",
-              "required": ["isCorrect", "pointsEarned", "pointsMax"],
-              "properties": {
-                "isCorrect": { "type": "boolean" },
-                "pointsEarned": { "type": "number" },
-                "pointsMax": { "type": "number" },
-                "criticalMistake": {
-                  "type": "boolean",
-                  "default": false,
-                  "description": "True om frågan var critical och svaret var fel."
-                },
-                "feedback": {
-                  "type": "string",
-                  "maxLength": 400,
-                  "description": "Valfri feedback att visa efter rättning."
-                }
-              }
-            }
+          "formatRef": {
+            "type": "string",
+            "enum": [
+              "ai-rules/v1/formats/block.json",
+              "ai-rules/v1/formats/question.json"
+            ]
+          },
+          "questionType": {
+            "type": "string",
+            "enum": ["auto", "mcq_single", "mcq_multi", "true_false", "numeric", "short_answer"],
+            "default": "auto",
+            "description": "Gäller bara contentType='questions'."
+          },
+          "feedbackEnabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "Om AI ska inkludera feedback per fråga."
           }
         }
       },
 
-      "summary": {
+      "trainingMeta": {
         "type": "object",
-        "required": ["questionCount", "correctCount", "pointsEarned", "pointsMax", "scorePercent", "needsFollowup"],
+        "description": "Valfritt: UI kan skicka måltext som extra kontext.",
         "properties": {
-          "questionCount": { "type": "number" },
-          "correctCount": { "type": "number" },
-          "pointsEarned": { "type": "number" },
-          "pointsMax": { "type": "number" },
-          "scorePercent": { "type": "number" },
-          "needsFollowup": { "type": "boolean" },
-          "followupReasons": {
-            "type": "array",
-            "items": { "type": "string" },
-            "description": "Ex: ['score_below_80','critical_mistake']"
-          }
-        }
-      },
-
-      "meta": {
-        "type": "object",
-        "description": "Teknisk metadata (ingen payload-logg).",
-        "properties": {
-          "requestId": { "type": "string" },
-          "engineVersion": { "type": "string" }
+          "goalsText": { "type": "string", "maxLength": 2000 },
+          "titleHint": { "type": "string", "maxLength": 200 }
         }
       }
     }
   },
-
-  "rules": {
-    "needsFollowupDefault": "scorePercent < 80 OR any(answers[].graded.criticalMistake == true)",
-    "scorePercentFormula": "round((pointsEarned / pointsMax) * 100)"
+  "output": {
+    "description": "Worker returnerar payload i exakt formatRef (block.json eller question.json).",
+    "successEnvelope": {
+      "required": ["ok", "requestId", "items"],
+      "properties": {
+        "ok": { "type": "boolean", "enum": [true] },
+        "requestId": { "type": "string" },
+        "items": { "type": "array", "description": "Array av blocks eller questions enligt formatRef." }
+      }
+    },
+    "errorEnvelope": {
+      "required": ["ok", "requestId", "errorCode"],
+      "properties": {
+        "ok": { "type": "boolean", "enum": [false] },
+        "requestId": { "type": "string" },
+        "errorCode": {
+          "type": "string",
+          "enum": [
+            "VALIDATION_FAILED",
+            "MISSING_CONTEXT",
+            "UNSUPPORTED_TYPE",
+            "PAYLOAD_TOO_LARGE",
+            "INTERNAL_ERROR"
+          ]
+        }
+      }
+    }
   },
-
   "examples": [
     {
-      "id": "res_ex_001",
-      "kind": "training_result",
-      "attempt": {
-        "attemptId": "att_1700",
-        "startedAt": 1737330000000,
-        "completedAt": 1737330060000,
-        "status": "completed"
-      },
+      "requestId": "req_demo_001",
+      "contentType": "questions",
+      "count": 5,
+      "language": "sv-SE",
       "context": {
-        "trainingId": "tr_123",
+        "catalogRef": "ai-rules/v1/modules.json",
         "moduleId": "mod_quality",
         "areaId": "ar_deviation",
         "chapterId": "ch_4_scenario",
         "step": "2",
-        "difficulty": "normal"
+        "difficulty": "normal",
+        "moduleLabel": "Kvalitet",
+        "areaLabel": "Avvikelsehantering",
+        "chapterLabel": "Scenario & tillämpning"
       },
-      "actor": {
-        "employeeId": "E1007",
-        "managerId": "M2001",
-        "orgScopeId": "unit_01"
+      "output": {
+        "formatRef": "ai-rules/v1/formats/question.json",
+        "questionType": "auto",
+        "feedbackEnabled": true
       },
-      "answers": [
-        {
-          "questionId": "q_ex_001",
-          "questionType": "mcq_single",
-          "shape": "single",
-          "response": "opt_b",
-          "graded": {
-            "isCorrect": true,
-            "pointsEarned": 1,
-            "pointsMax": 1,
-            "criticalMistake": false,
-            "feedback": "Rätt. Avvikelsen ska registreras direkt enligt rutin."
-          }
-        }
-      ],
-      "summary": {
-        "questionCount": 1,
-        "correctCount": 1,
-        "pointsEarned": 1,
-        "pointsMax": 1,
-        "scorePercent": 100,
-        "needsFollowup": false,
-        "followupReasons": []
-      },
-      "meta": {
-        "requestId": "req_abc123",
-        "engineVersion": "worker-ai-v1"
+      "trainingMeta": {
+        "goalsText": "- Förstå vad en avvikelse är.\n- Veta när och hur den ska registreras.",
+        "titleHint": "Scenario • Kurs 2 • Avvikelsehantering"
       }
     }
   ]
 }
-
