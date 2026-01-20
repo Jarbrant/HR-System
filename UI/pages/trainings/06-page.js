@@ -13,22 +13,10 @@ POLICY (LÅST):
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
 PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
-- P0: Modul/Område fungerar oavsett om UI använder <select> eller <input list="...">
-- P0: Re-render område på både input+change (select triggar change, inte alltid input)
-- P0: Självläkning: saknas modList/areaList → skapa datalist vid behov (runtime-only)
-- P0: Auto-init HRWorkerSDK (once) via window.__HR_WORKER_BASE_URL (behåll)
-- P1: (best-effort) init triggas även vid boot utan att blockera UI
-Ändringslogg (≤8):
-1) Robust picker-render för mod/area: SELECT vs INPUT+DATAList
-2) Wire events: change+input för mod/area/kursplanfält
-3) Skapa datalist om saknas (ingen ny storage)
-4) Behåller fail-closed + goals:"" till AI
-Testnoteringar:
-- Välj modul → område-population ska uppdateras direkt (SELECT eller INPUT)
-- Ändra modul → område-lista byts + tidigare område kan bli tomt om ej matchar
-- Testa AI efter reload: ska självläka via init
-Risk/edge:
-- Om trainings.html har helt andra id än mod/area/modList/areaList krävs sidkontrakt-uppdatering
+- P0: FIX: SDK aiGenerate returnerar blocks[] (inte items[]) → mappa blocks till draft.blocks
+- P0: Fail-closed: validera items per block via contract.validateAiResult({items})
+- P0: Tydligare UI-text: "AI gav inga block/items."
+- P1: Backward compat: om endast items finns → skapa ett block
 ============================================================ */
 (function () {
   "use strict";
@@ -205,7 +193,6 @@ Risk/edge:
   }
   function safeArr(a) { return Array.isArray(a) ? a : []; }
   function lowerKey(v) { return normStr(v).toLowerCase(); }
-  function tagName(el) { return el ? String(el.tagName || "").toUpperCase() : ""; }
 
   function deepClone(obj) {
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
@@ -471,7 +458,7 @@ Risk/edge:
     // 1) exact key
     if (Array.isArray(map[mod])) return safeArr(map[mod]);
 
-    // 2) case-insensitive match
+    // 2) case-insensitive match (P0 fix: områden kommer inte fram)
     const want = lowerKey(mod);
     for (const k of Object.keys(map)) {
       if (lowerKey(k) === want) return safeArr(map[k]);
@@ -480,10 +467,41 @@ Risk/edge:
     return [];
   }
 
+  function renderModuleDatalist() {
+    if (!dom || !dom.modList) return;
+    while (dom.modList.firstChild) dom.modList.removeChild(dom.modList.firstChild);
+
+    const fixed = safeArr(state.defaults.modules);
+    const fromData = collectModulesFromTrainings();
+    const all = uniqueSorted(fixed.concat(fromData));
+
+    for (const m of all) {
+      const opt = document.createElement("option");
+      opt.value = m;
+      dom.modList.appendChild(opt);
+    }
+  }
+
+  function renderAreaDatalist() {
+    if (!dom || !dom.areaList) return;
+    while (dom.areaList.firstChild) dom.areaList.removeChild(dom.areaList.firstChild);
+
+    const modVal = normStr(dom.mod && dom.mod.value);
+    const fixed = safeArr(getAreasForModuleLoose(modVal));
+    const fromData = collectAreasFromTrainingsForModule(modVal);
+    const all = uniqueSorted(fixed.concat(fromData));
+
+    for (const a of all) {
+      const opt = document.createElement("option");
+      opt.value = a;
+      dom.areaList.appendChild(opt);
+    }
+  }
+
   // Kapitel (7) — fungerar för <select> eller <input list="...">
   function ensureDatalistForInput(inputEl, listId) {
     if (!inputEl) return null;
-    const tag = tagName(inputEl);
+    const tag = String(inputEl.tagName || "").toUpperCase();
     if (tag === "SELECT") return null;
 
     const id = String(listId || "dl_auto");
@@ -527,53 +545,11 @@ Risk/edge:
     }
   }
 
-  // -------------------------
-  // MODUL / OMRÅDE render (P0)
-  // -------------------------
-  function renderModulePicker() {
-    if (!dom || !dom.mod) return;
-
-    const fixed = safeArr(state.defaults.modules);
-    const fromData = collectModulesFromTrainings();
-    const all = uniqueSorted(fixed.concat(fromData));
-
-    const tag = tagName(dom.mod);
-    if (tag === "SELECT") {
-      fillSelectOptions(dom.mod, all, "Välj modul…");
-      return;
-    }
-
-    // INPUT + datalist (prefer existing modList, annars skapa)
-    if (!dom.modList) dom.modList = byId("modList");
-    const dl = dom.modList || ensureDatalistForInput(dom.mod, "modList");
-    fillDatalistOptions(dl, all);
-  }
-
-  function renderAreaPicker() {
-    if (!dom || !dom.area) return;
-
-    const modVal = normStr(dom.mod && dom.mod.value);
-    const fixed = safeArr(getAreasForModuleLoose(modVal));
-    const fromData = collectAreasFromTrainingsForModule(modVal);
-    const all = uniqueSorted(fixed.concat(fromData));
-
-    const tag = tagName(dom.area);
-    if (tag === "SELECT") {
-      fillSelectOptions(dom.area, all, "Välj område…");
-      return;
-    }
-
-    // INPUT + datalist (prefer existing areaList, annars skapa)
-    if (!dom.areaList) dom.areaList = byId("areaList");
-    const dl = dom.areaList || ensureDatalistForInput(dom.area, "areaList");
-    fillDatalistOptions(dl, all);
-  }
-
   function renderChapterAndStepPickers() {
     // Chapters
     const chapters = safeArr(state.defaults.chapterLabels);
     if (dom.courseTitle) {
-      const tag = tagName(dom.courseTitle);
+      const tag = String(dom.courseTitle.tagName || "").toUpperCase();
       if (tag === "SELECT") {
         fillSelectOptions(dom.courseTitle, chapters, "Välj kapitel…");
       } else {
@@ -586,7 +562,7 @@ Risk/edge:
     const steps = safeArr(state.defaults.steps);
     const stepIds = steps.map(s => String(s && s.id)).filter(Boolean);
     if (dom.courseStep) {
-      const tagS = tagName(dom.courseStep);
+      const tagS = String(dom.courseStep.tagName || "").toUpperCase();
       if (tagS === "SELECT") {
         while (dom.courseStep.firstChild) dom.courseStep.removeChild(dom.courseStep.firstChild);
         const ph = document.createElement("option");
@@ -697,7 +673,7 @@ Risk/edge:
     if (!d || !dom) return;
 
     if (dom.mod) dom.mod.value = normStr(d.module);
-    renderAreaPicker(); // P0: render korrekt för SELECT/INPUT
+    renderAreaDatalist();
     if (dom.area) dom.area.value = normStr(d.area);
 
     // pickers
@@ -764,7 +740,7 @@ Risk/edge:
     state.selectedId = normStr(id);
     state.draft = deepClone(state.trainings[idx]);
     setDirty(false);
-    renderAreaPicker();
+    renderAreaDatalist();
     updateUiAll();
   }
 
@@ -808,8 +784,8 @@ Risk/edge:
 
     state.showAll = true;
     setDirty(false);
-    renderModulePicker();
-    renderAreaPicker();
+    renderModuleDatalist();
+    renderAreaDatalist();
     renderChapterAndStepPickers();
     updateUiAll();
   }
@@ -831,8 +807,8 @@ Risk/edge:
     state.selectedId = "";
     state.draft = null;
     setDirty(false);
-    renderModulePicker();
-    renderAreaPicker();
+    renderModuleDatalist();
+    renderAreaDatalist();
     updateUiAll();
   }
 
@@ -850,8 +826,8 @@ Risk/edge:
     state.draft = null;
     state.showAll = false;
     setDirty(false);
-    renderModulePicker();
-    renderAreaPicker();
+    renderModuleDatalist();
+    renderAreaDatalist();
     updateUiAll();
   }
 
@@ -921,8 +897,8 @@ Risk/edge:
 
     setDirty(false);
     DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
-    renderModulePicker();
-    renderAreaPicker();
+    renderModuleDatalist();
+    renderAreaDatalist();
     updateUiAll();
   }
 
@@ -1032,7 +1008,7 @@ Risk/edge:
     if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
       const ctx = DEPS.core.buildAiContext(s) || {};
       // Guard: även om core i framtiden ändras, nolla här också.
-      try { ctx.goals = ""; } catch (_) { }
+      try { ctx.goals = ""; } catch (_) {}
       return ctx;
     }
 
@@ -1061,6 +1037,38 @@ Risk/edge:
     return { mode, count, questionType, feedbackEnabled };
   }
 
+  // P0: Extract blocks/items from SDK return (new: raw.blocks[])
+  function extractAiBlocks(raw, norm) {
+    const r = (raw && typeof raw === "object") ? raw : {};
+
+    // Prefer blocks (SDK v1.1+)
+    if (Array.isArray(r.blocks)) return r.blocks;
+    if (r.data && typeof r.data === "object" && Array.isArray(r.data.blocks)) return r.data.blocks;
+
+    // Back-compat: items
+    const items = (norm && typeof norm === "object" && Array.isArray(norm.items)) ? norm.items
+      : (r.data && typeof r.data === "object" && Array.isArray(r.data.items)) ? r.data.items
+        : Array.isArray(r.items) ? r.items
+          : null;
+
+    if (Array.isArray(items) && items.length) return [{ title: "AI-block", items: items }];
+    return [];
+  }
+
+  function normalizeItems(items) {
+    const arr = Array.isArray(items) ? items : [];
+    if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
+      return arr.map(DEPS.contract.normalizeItem);
+    }
+    return arr;
+  }
+
+  function validateItemsFailClosed(items) {
+    if (!DEPS.contract || typeof DEPS.contract.validateAiResult !== "function") return { ok: true, reasons: [] };
+    // validateAiResult förväntar "items" i objektet
+    return DEPS.contract.validateAiResult({ items: Array.isArray(items) ? items : [] }) || { ok: false, reasons: ["AI-resultat kunde inte valideras."] };
+  }
+
   async function generateAi() {
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
@@ -1085,7 +1093,6 @@ Risk/edge:
       const ctx = buildAiContextNoGoals();
       const ctl = readAiControls();
 
-      // Minimal request shape (SDK avgör server-side)
       const req = {
         mode: ctl.mode,
         count: ctl.count,
@@ -1093,7 +1100,6 @@ Risk/edge:
         language: "sv"
       };
 
-      // optional hints (best-effort, safe)
       if (ctl.questionType) req.questionType = ctl.questionType;
       if (ctl.feedbackEnabled) req.feedbackEnabled = true;
 
@@ -1106,33 +1112,55 @@ Risk/edge:
         ? DEPS.core.normalizeAiResult(raw)
         : (raw && typeof raw === "object" ? raw : { items: [] });
 
-      // Validera fail-closed
-      if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
-        const v = DEPS.contract.validateAiResult(norm);
+      // P0: SDK returnerar blocks[] → mappa korrekt
+      const aiBlocks = extractAiBlocks(raw, norm);
+
+      // Säkra att vi har åtminstone ett block med items
+      let anyItems = false;
+      for (const b of aiBlocks) {
+        const its = Array.isArray(b && b.items) ? b.items : [];
+        if (its.length) { anyItems = true; break; }
+      }
+
+      if (!aiBlocks.length || !anyItems) {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga block/items.");
+        return;
+      }
+
+      // Skapa blocks i draft (inte auto-save)
+      if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
+
+      let added = 0;
+      const baseTitle = normStr(state.draft.title) || "(utan titel)";
+
+      for (const b of aiBlocks) {
+        const itemsIn = Array.isArray(b && b.items) ? b.items : [];
+        if (!itemsIn.length) continue;
+
+        // Fail-closed: validera per block
+        const v = validateItemsFailClosed(itemsIn);
         if (!v || v.ok !== true) {
           const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
           DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
           return;
         }
+
+        const itemsNorm = normalizeItems(itemsIn);
+
+        const t0 = normStr(b && b.title);
+        const title = t0 ? t0 : ("AI-block • " + baseTitle);
+
+        state.draft.blocks.push({ title: title, items: itemsNorm });
+        added++;
       }
 
-      const itemsIn = Array.isArray(norm.items) ? norm.items : [];
-      if (!itemsIn.length) {
+      if (!added) {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items.");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga block med items.");
         return;
       }
-
-      const itemsNorm = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
-        ? itemsIn.map(DEPS.contract.normalizeItem)
-        : itemsIn;
-
-      // Skapa nytt block i draft (inte auto-save)
-      if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
-
-      const title = "AI-block • " + (normStr(state.draft.title) || "(utan titel)");
-      state.draft.blocks.push({ title: title, items: itemsNorm });
 
       setDirty(true);
       updateUiAll();
@@ -1199,38 +1227,24 @@ Risk/edge:
       if (!isWriterAllowed()) return;
       if (dom.mod) dom.mod.value = "";
       if (dom.area) dom.area.value = "";
-      renderAreaPicker();
+      renderAreaDatalist();
       syncDraftTitleFromFields();
       setDirty(true);
       updateButtons();
     });
 
-    const onModuleChange = function () {
+    const onEditorChange = function () {
       if (!state.draft) return;
-      renderAreaPicker();          // P0
+      renderAreaDatalist();
       syncDraftTitleFromFields();
       setDirty(true);
       updateButtons();
     };
 
-    const onAreaChange = function () {
-      if (!state.draft) return;
-      syncDraftTitleFromFields();
-      setDirty(true);
-      updateButtons();
-    };
-
-    // P0: SELECT triggar change, INPUT triggar input (wire båda)
-    dom.on(dom.mod, "input", onModuleChange);
-    dom.on(dom.mod, "change", onModuleChange);
-
-    dom.on(dom.area, "input", onAreaChange);
-    dom.on(dom.area, "change", onAreaChange);
-
-    dom.on(dom.courseTitle, "change", onAreaChange);
-    dom.on(dom.courseStep, "change", onAreaChange);
-    dom.on(dom.courseTitle, "input", onAreaChange);
-    dom.on(dom.courseStep, "input", onAreaChange);
+    dom.on(dom.mod, "input", onEditorChange);
+    dom.on(dom.area, "input", onEditorChange);
+    dom.on(dom.courseTitle, "change", onEditorChange);
+    dom.on(dom.courseStep, "change", onEditorChange);
 
     dom.on(dom.goalsLevel, "change", function () {
       if (state.draft) {
@@ -1280,8 +1294,8 @@ Risk/edge:
     }
 
     // Baseline lists
-    renderModulePicker();
-    renderAreaPicker();
+    renderModuleDatalist();
+    renderAreaDatalist();
     renderChapterAndStepPickers();
 
     state.showAll = false;
@@ -1303,8 +1317,8 @@ Risk/edge:
       try {
         const r = await loadCatalogOnce();
         if (r && r.ok) {
-          renderModulePicker();
-          renderAreaPicker();
+          renderModuleDatalist();
+          renderAreaDatalist();
           renderChapterAndStepPickers();
           updateUiAll();
         } else {
