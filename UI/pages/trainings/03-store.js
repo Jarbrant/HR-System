@@ -1,18 +1,14 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-03) | FILE 03/06 | FIL-ID: UI/pages/trainings/03-store.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-04) | FILE 03/06 | FIL-ID: UI/pages/trainings/03-store.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Storage-lager för trainings (AO-057_TRAININGS_V1) – load/save/purge + fail-closed vid korrupt JSON.
+Syfte: Storage-layer för trainings (AO-057_TRAININGS_V1) • load/save/purge
+      Fail-closed vid korrupt data. Ingen DOM här.
 
 POLICY (LÅST):
 - UI-only • Fail-closed
-- Inga nya storage-keys (ENDAST: AO-057_TRAININGS_V1)
-- Lagra aldrig tokens här
-- Ingen DOM här
-- XSS-safe: render sker i 05-render via textContent
-
-PATCH v1.0.3 (PP-SC-010-03) – CORRUPT-GUARD:
-- P0: Fail-closed: korrupt JSON => ok:false + corrupt:true + tydlig lockReason.
-- P0: Tolerant read: accepterar både array och wrapper {trainings:[...]} (för bakåtkomp).
+- Endast denna fil pratar storage (trainings)
+- Inga nya storage-keys (använder endast AO-057_TRAININGS_V1)
+- Logga aldrig payload (endast felkod/orsak om behövs)
 ============================================================ */
 (function () {
   "use strict";
@@ -20,125 +16,157 @@ PATCH v1.0.3 (PP-SC-010-03) – CORRUPT-GUARD:
   const NS = (window.Trainings = window.Trainings || {});
   if (NS.store) return;
 
+  const core = NS.core || null;
   const store = (NS.store = {});
-  store.__VERSION = "v1.0.3-PP-SC-010-03";
+  store.__VERSION = "v1.0.4-PP-SC-010-04";
 
-  // LÅST key
-  const TRAININGS_KEY = "AO-057_TRAININGS_V1";
+  const KEY = "AO-057_TRAININGS_V1"; // LÅST
 
-  // ------------------------------------------------------------
-  // Internal helpers (no side effects)
-  // ------------------------------------------------------------
-  function normStr(v) { return String(v ?? "").trim(); }
-
-  function safeJsonParse(s) {
-    try { return { ok: true, value: JSON.parse(s) }; }
-    catch (e) { return { ok: false, err: String(e && e.message ? e.message : e) }; }
-  }
-
-  function safeJsonStringify(v) {
-    try { return { ok: true, value: JSON.stringify(v) }; }
-    catch (e) { return { ok: false, err: String(e && e.message ? e.message : e) }; }
+  function normStr(v) {
+    return (core && core.normStr) ? core.normStr(v) : String(v ?? "").trim();
   }
 
   function safeArr(a) { return Array.isArray(a) ? a : []; }
 
-  function isPlainObject(v) {
-    return !!v && typeof v === "object" && !Array.isArray(v);
+  function isPlainObject(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
+
+  function fail(code, msg) {
+    if (core && typeof core.fail === "function") return core.fail(code, msg);
+    return { ok: false, code: String(code || "ERR"), err: String(msg || "Fel") };
   }
 
-  function normalizeTrainingsShape(parsed) {
-    // Tolerant: array OR { trainings: [] }
-    if (Array.isArray(parsed)) return parsed;
-    if (isPlainObject(parsed) && Array.isArray(parsed.trainings)) return parsed.trainings;
-    // Some older shapes might use { items: [] } or { data: [] }
-    if (isPlainObject(parsed) && Array.isArray(parsed.items)) return parsed.items;
-    if (isPlainObject(parsed) && Array.isArray(parsed.data)) return parsed.data;
-    return [];
+  function ok(data) {
+    if (core && typeof core.ok === "function") return core.ok(data);
+    return Object.assign({ ok: true }, data || {});
   }
 
-  function tryGetItem(key) {
-    try { return localStorage.getItem(key); } catch (_) { return null; }
+  function getStorage() {
+    // LÅST policy i projektet: sessionStorage först, fallback localStorage via CORE/HRApp normalt.
+    // Här: vi läser/skriv direkt i localStorage eftersom trainings är "data". Fail-closed om ej tillgängligt.
+    try {
+      if (window && window.localStorage) return window.localStorage;
+    } catch (_) {}
+    return null;
   }
 
-  function trySetItem(key, value) {
-    try { localStorage.setItem(key, value); return true; } catch (_) { return false; }
+  function readRaw() {
+    const st = getStorage();
+    if (!st) return { ok: false, missing: true, raw: "" };
+
+    let raw = "";
+    try { raw = st.getItem(KEY) || ""; } catch (_) { raw = ""; }
+
+    if (!raw) return { ok: true, missing: true, raw: "" };
+    return { ok: true, missing: false, raw };
   }
 
-  function tryRemoveItem(key) {
-    try { localStorage.removeItem(key); return true; } catch (_) { return false; }
+  function writeRaw(str) {
+    const st = getStorage();
+    if (!st) return fail("STORAGE_MISSING", "Storage saknas");
+
+    try {
+      st.setItem(KEY, String(str ?? ""));
+      return ok({ key: KEY });
+    } catch (e) {
+      return fail("STORAGE_WRITE_FAIL", String(e && e.message ? e.message : e));
+    }
+  }
+
+  function removeKey() {
+    const st = getStorage();
+    if (!st) return fail("STORAGE_MISSING", "Storage saknas");
+    try {
+      st.removeItem(KEY);
+      return ok({ removed: true, key: KEY });
+    } catch (e) {
+      return fail("STORAGE_REMOVE_FAIL", String(e && e.message ? e.message : e));
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Shape validation (tolerant but bounded)
+  // ------------------------------------------------------------
+  function normalizeTraining(t) {
+    const x = isPlainObject(t) ? t : {};
+
+    const id = normStr(x.id);
+    if (!id) return null;
+
+    const out = {
+      id: id,
+      status: normStr(x.status) === "published" ? "published" : "draft",
+      module: normStr(x.module),
+      area: normStr(x.area),
+      courseTitle: normStr(x.courseTitle),
+      courseStep: normStr(x.courseStep),
+      goalsLevel: normStr(x.goalsLevel),
+      goals: normStr(x.goals),
+      title: normStr(x.title),
+      blocks: [],
+      meta: isPlainObject(x.meta) ? x.meta : {}
+    };
+
+    // blocks/items tolerant
+    if (Array.isArray(x.blocks)) out.blocks = x.blocks;
+    else if (Array.isArray(x.items)) out.blocks = [{ title: out.title || "(block)", items: x.items }];
+
+    return out;
+  }
+
+  function validatePayload(obj) {
+    // Accept either {trainings:[...]} or direct array
+    if (Array.isArray(obj)) return ok({ trainings: obj });
+    if (isPlainObject(obj) && Array.isArray(obj.trainings)) return ok({ trainings: obj.trainings });
+    return fail("SHAPE_BAD", "Fel format");
   }
 
   // ------------------------------------------------------------
   // Public API
   // ------------------------------------------------------------
-  store.key = function () { return TRAININGS_KEY; };
-
-  store.lockReasonFor = function (details) {
-    const d = normStr(details);
-    if (d) return "Låst: Trainings-data är korrupt (" + d + ").";
-    return "Låst: Trainings-data är korrupt.";
+  store.lockReasonFor = function () {
+    return "Korrupt data i AO-057_TRAININGS_V1 (fail-closed).";
   };
 
   store.load = function () {
-    const raw = tryGetItem(TRAININGS_KEY);
+    const rr = readRaw();
+    if (!rr.ok) return fail("READ_FAIL", "Kunde inte läsa");
 
-    if (raw == null || raw === "") {
-      return { ok: true, trainings: [], empty: true };
+    if (rr.missing) return ok({ trainings: [], missing: true });
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rr.raw);
+    } catch (_) {
+      return { ok: false, corrupt: true, code: "JSON_PARSE", err: "Korrupt JSON" };
     }
 
-    const parsed = safeJsonParse(String(raw));
-    if (!parsed.ok) {
-      return {
-        ok: false,
-        corrupt: true,
-        err: "JSON_PARSE",
-        detail: parsed.err || "parse-fel"
-      };
+    const vp = validatePayload(parsed);
+    if (!vp.ok) return { ok: false, corrupt: true, code: vp.code || "SHAPE", err: vp.err || "Korrupt shape" };
+
+    const listIn = safeArr(vp.trainings);
+    const out = [];
+    for (const t of listIn) {
+      const nt = normalizeTraining(t);
+      if (nt) out.push(nt);
     }
 
-    const trainings = normalizeTrainingsShape(parsed.value);
-
-    // Fail-closed: om shape inte ens går att normalisera men rådata fanns -> markera corrupt
-    // (Annars risk att UI ”tappar kedjan” när data i praktiken är fel.)
-    const isMeaningful =
-      Array.isArray(parsed.value) ||
-      (isPlainObject(parsed.value) && (
-        Array.isArray(parsed.value.trainings) ||
-        Array.isArray(parsed.value.items) ||
-        Array.isArray(parsed.value.data)
-      ));
-
-    if (!isMeaningful && trainings.length === 0) {
-      return {
-        ok: false,
-        corrupt: true,
-        err: "SHAPE",
-        detail: "okänd wrapper"
-      };
-    }
-
-    return { ok: true, trainings: safeArr(trainings) };
+    return ok({ trainings: out, missing: false });
   };
 
   store.save = function (trainings) {
-    // LÅST: Vi sparar en wrapper med tydlig struktur (bakåtkomp på load).
-    const payload = { trainings: safeArr(trainings) };
+    const list = safeArr(trainings);
+    // Minimal deterministic wrapper
+    const payload = { trainings: list };
 
-    const str = safeJsonStringify(payload);
-    if (!str.ok) {
-      return { ok: false, err: "JSON_STRINGIFY", detail: str.err || "stringify-fel" };
-    }
+    let raw = "";
+    try { raw = JSON.stringify(payload); } catch (e) { return fail("JSON_STRINGIFY", String(e && e.message ? e.message : e)); }
 
-    const ok = trySetItem(TRAININGS_KEY, str.value);
-    if (!ok) return { ok: false, err: "STORAGE_WRITE", detail: "localStorage write-fel" };
-
-    return { ok: true };
+    return writeRaw(raw);
   };
 
   store.purgeAll = function () {
-    const ok = tryRemoveItem(TRAININGS_KEY);
-    if (!ok) return { ok: false, err: "STORAGE_REMOVE", detail: "localStorage remove-fel" };
-    return { ok: true };
+    return removeKey();
   };
+
+  store.getKey = function () { return KEY; };
 })();
