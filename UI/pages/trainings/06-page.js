@@ -12,12 +12,9 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
-- P0 FIX: UI kan skicka mode="blocks" → normaliseras till "training" (worker kräver training|document).
-- P0 FIX: SDK/worker kan returnera raw.blocks som antingen:
-    A) block-wrappers {title, items:[...]} eller
-    B) items direkt [{type,text,...}]  → UI accepterar båda och lägger till i draft.blocks.
-- P1: Robust titel-hämtning: använd bara raw.blocks[0].title när blocks är wrappers (har .items).
+PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
+- P0 FIX: Sanerar AI-texter som innehåller "[object Object]" vid import + i modal-visning (ingen stringify av objekt, fail-closed).
+- P1: Sanering sker bara på strängfält (text/instruction/question/prompt/explanation/feedback/rationale/reason/title/heading) och lämnar objekt orörda.
 ============================================================ */
 (function () {
   "use strict";
@@ -26,7 +23,7 @@ PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0.8-PP-SC-010-06";
+  page.__VERSION = "v1.0.9-PP-SC-010-06";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -231,6 +228,40 @@ PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
     if (s === "blocks" || s === "utbildning" || s === "kurs" || s === "train" || s === "trainings" || s === "training-v1" || s === "training_v1") return "training";
     if (s === "doc" || s === "dokument" || s === "documents" || s === "document-v1" || s === "document_v1") return "document";
     return "training"; // fail-safe
+  }
+
+  // ------------------------------------------------------------
+  // P0: UI-sanerare för "[object Object]" i AI-texter (fail-closed)
+  // ------------------------------------------------------------
+  function scrubObjectObjectToken(s) {
+    if (typeof s !== "string") return s;
+    if (s.indexOf("[object Object]") === -1) return s;
+    // Exakt token ersätts — vi försöker INTE stringify objekt (risk: stor/konstig payload)
+    return s.replace(/\[object Object\]/g, "(kontext dolt)");
+  }
+
+  function sanitizeAiItemInPlace(item) {
+    if (!item || typeof item !== "object") return item;
+    const keys = ["text", "instruction", "prompt", "question", "explanation", "feedback", "rationale", "reason", "title", "heading"];
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (typeof item[k] === "string") item[k] = scrubObjectObjectToken(item[k]);
+    }
+    return item;
+  }
+
+  function getItemPrimaryTextForEditor(it) {
+    try {
+      if (!it || typeof it !== "object") return "";
+      const cand = (typeof it.text === "string" && it.text) ? it.text
+        : (typeof it.instruction === "string" && it.instruction) ? it.instruction
+        : (typeof it.prompt === "string" && it.prompt) ? it.prompt
+        : (typeof it.question === "string" && it.question) ? it.question
+        : "";
+      return scrubObjectObjectToken(String(cand || ""));
+    } catch (_) {
+      return "";
+    }
   }
 
   function getWhoFresh() {
@@ -925,7 +956,8 @@ PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
 
     const ta = document.createElement("textarea");
     ta.className = "textarea";
-    ta.value = (b.items && b.items[0] && (b.items[0].text || b.items[0].instruction)) ? String(b.items[0].text || b.items[0].instruction) : "";
+    // P0: undvik att visa "[object Object]" i editorn
+    ta.value = getItemPrimaryTextForEditor(b.items && b.items[0] ? b.items[0] : null);
     wrap.appendChild(ta);
 
     DEPS.render.openModal("Block " + (idx + 1), wrap, function () {
@@ -1041,22 +1073,16 @@ PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
 
   // P0 helper: extrahera items ur både "items[]" och "blocks[]"
   function extractItemsFromAi(raw, norm) {
-    // 1) norm.items (om core normalize redan gjort jobbet)
     const nItems = norm && Array.isArray(norm.items) ? norm.items : [];
     if (nItems.length) return { items: nItems, source: "norm.items" };
 
-    // 2) raw.items
     const rItems = raw && Array.isArray(raw.items) ? raw.items : [];
     if (rItems.length) return { items: rItems, source: "raw.items" };
 
-    // 3) raw.blocks kan vara:
-    //    A) wrappers: [{title, items:[...]}]
-    //    B) items direkt: [{type,text,...}]
     const blocks = raw && Array.isArray(raw.blocks) ? raw.blocks : [];
     if (blocks.length) {
       const b0 = blocks[0];
 
-      // A) wrappers med items
       if (b0 && Array.isArray(b0.items)) {
         const out = [];
         for (const b of blocks) {
@@ -1066,7 +1092,6 @@ PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
         return { items: [], source: "raw.blocks(wrappers-empty-items)" };
       }
 
-      // B) blocks = items (det du såg i DevTools)
       const looksLikeItems = blocks.some(b =>
         b && (typeof b.type === "string" || typeof b.text === "string" || typeof b.instruction === "string")
       );
@@ -1075,7 +1100,6 @@ PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
       return { items: [], source: "raw.blocks(unknown-shape)" };
     }
 
-    // 4) raw.data.blocks kan också vara wrappers eller items
     const db = raw && raw.data && Array.isArray(raw.data.blocks) ? raw.data.blocks : [];
     if (db.length) {
       const d0 = db[0];
@@ -1125,7 +1149,7 @@ PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
       const ctl = readAiControls();
 
       const req = {
-        mode: ctl.mode, // redan normaliserad (P0)
+        mode: ctl.mode,
         count: ctl.count,
         context: ctx,
         language: "sv"
@@ -1139,16 +1163,13 @@ PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
 
       const raw = await window.HRWorkerSDK.aiGenerate(req);
 
-      // Normalize (om core finns), annars baseline
       const norm = (DEPS.core && typeof DEPS.core.normalizeAiResult === "function")
         ? (DEPS.core.normalizeAiResult(raw) || {})
         : (raw && typeof raw === "object" ? raw : {});
 
-      // P0: ta items oavsett om svaret är items[] eller blocks[] (wrappers eller items)
       const pick = extractItemsFromAi(raw, norm);
       const itemsIn = Array.isArray(pick.items) ? pick.items : [];
 
-      // Validera fail-closed (mot items-shape)
       if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
         const v = DEPS.contract.validateAiResult({ items: itemsIn });
         if (!v || v.ok !== true) {
@@ -1169,9 +1190,11 @@ PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
         ? itemsIn.map(DEPS.contract.normalizeItem)
         : itemsIn;
 
+      // P0: sanera "[object Object]" i strängfält innan vi sparar in i draft (påverkar preview + modal)
+      for (let i = 0; i < itemsNorm.length; i++) sanitizeAiItemInPlace(itemsNorm[i]);
+
       if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
 
-      // Titel: använd bara raw.blocks[0].title när blocks är wrappers (har .items)
       let sdkTitle = "";
       try {
         const b0 = raw && Array.isArray(raw.blocks) ? raw.blocks[0] : null;
