@@ -1,7 +1,9 @@
 /* ============================================================
 AO-TRAININGS-MODULAR-01 (PP-SC-010-04) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Bootstrap + state + event wiring för trainings (ADMIN create/edit). Fix: "Skapa ny" ska fungera för ADMIN.
+Syfte: Bootstrap + state + event wiring för trainings (ADMIN create/edit).
+Fix: "Skapa ny" ska fungera för ADMIN.
+Fix: Ladda ai-rules/v1/modules.json så Modul/Område/Kapitel/Kurs styrs av rules.
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -9,11 +11,12 @@ POLICY (LÅST):
 - XSS-safe: render via 05-render.js + dom.setText (textContent)
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 
-PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
-- P0: Fixar "const-capture" av deps: 06-page kan laddas före 02/03/04/05 utan att låsa permanent.
-- P0: Fail-closed kvar: writes är avstängda tills deps finns, men sidan bootar så fort deps laddat.
-- P0: Boot retry-loop + unlock när deps är redo.
-- P1: Skydd mot dubbel-boot (wire events bara en gång).
+PATCH v1.0.4-PP-SC-010-04 (AUTOPATCH):
+- P0: Boot retry-loop kvar (load-order tålig)
+- P0: Writer-check strikt: ADMIN + empNo krävs (via core.getWho)
+- P0: Triggar core.loadModulesCatalog() => modules.json syns i Network
+- P0: Datalists: modul/område hämtas från catalog när den finns, annars fallback
+- P1: Titel hålls konsekvent via core.composeTitle(chapter,step,area) vid ändringar
 ============================================================ */
 (function () {
   "use strict";
@@ -22,7 +25,7 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0.3-PP-SC-010-04";
+  page.__VERSION = "v1.0.4-PP-SC-010-04";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -93,6 +96,12 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     D.aiFeedbackEnabled = byId("aiFeedbackEnabled");
     D.questionControls = byId("questionControls");
 
+    // Optional (om de finns i HTML i senare versioner)
+    D.chapterList = byId("chapterList");          // datalist för kapitel
+    D.courseTitleList = byId("courseTitleList");  // datalist för kurs-titlar
+    D.levelList = byId("levelList");              // datalist för svårighetsgrad
+    D.outputMode = byId("outputMode");            // select/input för outputMode
+
     // Helpers
     D.setText = function (el, txt) { if (!el) return; el.textContent = String(txt ?? ""); };
     D.disable = function (el, disabled) {
@@ -118,7 +127,7 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   // State
   // ------------------------------------------------------------
   const state = {
-    who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false },
+    who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false, authOk: false },
     locked: true,
     lockReason: "BOOT: väntar på moduler…",
     trainings: [],
@@ -130,6 +139,10 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     fStatus: "",
     onlyProblems: false,
 
+    // In-memory catalog (ingen storage)
+    catalog: { ok: false, data: null, err: "", url: "" },
+
+    // Fallback om catalog saknas (tills rules är igång)
     defaults: {
       modules: [
         "Kvalitet",
@@ -165,6 +178,7 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     return (DEPS.core && DEPS.core.normStr) ? DEPS.core.normStr(v) : String(v ?? "").trim();
   }
   function safeArr(a) { return Array.isArray(a) ? a : []; }
+  function upper(v) { return String(v ?? "").toUpperCase(); }
 
   function deepClone(obj) {
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
@@ -193,46 +207,32 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     return n > 0;
   }
 
-  function upper(v) { return String(v ?? "").toUpperCase(); }
-
+  // ------------------------------------------------------------
+  // Auth/who (STRIKT via core.getWho)
+  // ------------------------------------------------------------
   function getWhoFresh() {
-    // Fail-closed: om locked/bootPending, behåll SYSTEM_ADMIN.
     try {
       if (DEPS.core && typeof DEPS.core.getWho === "function") {
         const w = DEPS.core.getWho();
         if (w && typeof w === "object") return w;
       }
-    } catch (_) { /* ignore */ }
+    } catch (_) {}
 
-    try {
-      if (window.HRApp && typeof window.HRApp.getRole === "function") {
-        const r = window.HRApp.getRole();
-        if (typeof r === "string") {
-          const role = upper(r);
-          return { role, empNo: "", canWrite: role === "ADMIN" };
-        }
-        if (r && typeof r === "object") {
-          const role = upper(r.roleId || r.role || "SYSTEM_ADMIN");
-          const empNo = String(r.empNo || r.emp || r.employeeNo || "");
-          const hasCanWrite = Object.prototype.hasOwnProperty.call(r, "canWrite");
-          const canWrite = hasCanWrite ? !!r.canWrite : (role === "ADMIN");
-          return { role, empNo, canWrite };
-        }
-      }
-    } catch (_) { /* ignore */ }
-
-    return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
+    // sista fallback (fail-closed)
+    return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false, authOk: false };
   }
 
   function isWriterAllowed() {
     if (state.locked) return false;
-
     const who = getWhoFresh();
     state.who = who;
 
     const role = upper(who.role || "SYSTEM_ADMIN");
+    const empNo = normStr(who.empNo || "");
     if (role !== "ADMIN") return false;
+    if (!empNo) return false;
 
+    // canWrite ska redan vara strict från core, men vi fail-closed här också
     if (who.canWrite === false) return false;
     return true;
   }
@@ -250,6 +250,44 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   function clearLock() {
     state.locked = false;
     state.lockReason = "";
+  }
+
+  // ------------------------------------------------------------
+  // Catalog load (ai-rules/v1/modules.json) — via core.loadModulesCatalog()
+  // ------------------------------------------------------------
+  function kickCatalogLoadOnce() {
+    if (!DEPS.core || typeof DEPS.core.loadModulesCatalog !== "function") return;
+    if (state.catalog && state.catalog._started) return;
+    state.catalog._started = true;
+
+    try {
+      // Gör att du ser modules.json i Network (no-store)
+      DEPS.core.loadModulesCatalog({ force: true }).then(function (res) {
+        if (res && res.ok) {
+          state.catalog.ok = true;
+          state.catalog.data = res.data || null;
+          state.catalog.err = "";
+          state.catalog.url = res.url || (DEPS.core.getCatalogUrl ? DEPS.core.getCatalogUrl() : "");
+        } else {
+          state.catalog.ok = false;
+          state.catalog.data = null;
+          state.catalog.err = (res && res.err) ? String(res.err) : "catalog load fail";
+          state.catalog.url = (DEPS.core.getCatalogUrl ? DEPS.core.getCatalogUrl() : "");
+        }
+
+        // Uppdatera datalists direkt när catalog kommer in
+        renderModuleDatalist();
+        renderAreaDatalist();
+        renderChapterDatalist();
+        renderCourseTitleDatalist();
+        renderLevelDatalist();
+        updateUiAll();
+      });
+    } catch (e) {
+      state.catalog.ok = false;
+      state.catalog.data = null;
+      state.catalog.err = String(e && e.message ? e.message : e);
+    }
   }
 
   // ------------------------------------------------------------
@@ -281,35 +319,114 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     return uniqueSorted(out);
   }
 
+  function getCatalogData() {
+    return (state.catalog && state.catalog.ok && state.catalog.data) ? state.catalog.data : null;
+  }
+
+  function renderDatalist(el, values) {
+    if (!el) return;
+    while (el.firstChild) el.removeChild(el.firstChild);
+    for (const v of values) {
+      const opt = document.createElement("option");
+      opt.value = String(v || "");
+      el.appendChild(opt);
+    }
+  }
+
   function renderModuleDatalist() {
     if (!dom || !dom.modList) return;
-    while (dom.modList.firstChild) dom.modList.removeChild(dom.modList.firstChild);
 
+    const data = getCatalogData();
+    if (data && DEPS.core && typeof DEPS.core.getModuleOptions === "function") {
+      const opts = DEPS.core.getModuleOptions(data);
+      renderDatalist(dom.modList, opts.map((o) => o.title).filter(Boolean));
+      return;
+    }
+
+    // fallback
     const fixed = safeArr(state.defaults.modules);
     const fromData = collectModulesFromTrainings();
-    const all = uniqueSorted(fixed.concat(fromData));
-
-    for (const m of all) {
-      const opt = document.createElement("option");
-      opt.value = m;
-      dom.modList.appendChild(opt);
-    }
+    renderDatalist(dom.modList, uniqueSorted(fixed.concat(fromData)));
   }
 
   function renderAreaDatalist() {
     if (!dom || !dom.areaList) return;
-    while (dom.areaList.firstChild) dom.areaList.removeChild(dom.areaList.firstChild);
 
     const mod = normStr(dom.mod && dom.mod.value);
+    const data = getCatalogData();
+
+    if (data && DEPS.core && typeof DEPS.core.getAreaOptions === "function") {
+      const opts = DEPS.core.getAreaOptions(data, mod);
+      renderDatalist(dom.areaList, opts.map((o) => o.title).filter(Boolean));
+      return;
+    }
+
+    // fallback
     const fixed = safeArr((state.defaults.areasByModule[mod] || []));
     const fromData = collectAreasFromTrainingsForModule(mod);
-    const all = uniqueSorted(fixed.concat(fromData));
+    renderDatalist(dom.areaList, uniqueSorted(fixed.concat(fromData)));
+  }
 
-    for (const a of all) {
-      const opt = document.createElement("option");
-      opt.value = a;
-      dom.areaList.appendChild(opt);
+  function renderChapterDatalist() {
+    // optional UI: om du har datalist/id för kapitel
+    if (!dom || !dom.chapterList) return;
+
+    const data = getCatalogData();
+    const mod = normStr(dom.mod && dom.mod.value);
+    const area = normStr(dom.area && dom.area.value);
+
+    if (data && DEPS.core && typeof DEPS.core.getChapterOptions === "function") {
+      const opts = DEPS.core.getChapterOptions(data, mod, area);
+      renderDatalist(dom.chapterList, opts.map((o) => o.title).filter(Boolean));
+      return;
     }
+
+    // fallback: inga kapitel utan catalog
+    renderDatalist(dom.chapterList, []);
+  }
+
+  function renderCourseTitleDatalist() {
+    if (!dom || !dom.courseTitleList) return;
+
+    const data = getCatalogData();
+    if (data && DEPS.core && typeof DEPS.core.getChapterOptions === "function") {
+      const mod = normStr(dom.mod && dom.mod.value);
+      const area = normStr(dom.area && dom.area.value);
+      const opts = DEPS.core.getChapterOptions(data, mod, area);
+      renderDatalist(dom.courseTitleList, opts.map((o) => o.title).filter(Boolean));
+      return;
+    }
+
+    // fallback: ge några standardtitlar så du kan jobba även utan catalog
+    renderDatalist(dom.courseTitleList, ["Introduktion", "Grundläggande", "Tillämpning", "Analys", "Självständigt"]);
+  }
+
+  function renderLevelDatalist() {
+    if (!dom || !dom.levelList) return;
+
+    const data = getCatalogData();
+    if (data && DEPS.core && typeof DEPS.core.getDifficultyOptions === "function") {
+      const opts = DEPS.core.getDifficultyOptions(data);
+      renderDatalist(dom.levelList, opts.map((o) => o.id).filter(Boolean));
+      return;
+    }
+
+    renderDatalist(dom.levelList, ["intro", "normal", "advanced"]);
+  }
+
+  // ------------------------------------------------------------
+  // Title sync (konsekvent)
+  // ------------------------------------------------------------
+  function syncTitleFromFields() {
+    if (!state.draft) return;
+    if (!DEPS.core || typeof DEPS.core.composeTitle !== "function") return;
+
+    const chapter = normStr(dom.courseTitle && dom.courseTitle.value) || normStr(state.draft.courseTitle) || "Introduktion";
+    const step = normStr(dom.courseStep && dom.courseStep.value) || normStr(state.draft.courseStep) || "1";
+    const area = normStr(dom.area && dom.area.value) || normStr(state.draft.area) || "—";
+
+    state.draft.title = DEPS.core.composeTitle(chapter, step, area);
+    if (dom && dom.setText && dom.titleDisplay) dom.setText(dom.titleDisplay, state.draft.title);
   }
 
   // ------------------------------------------------------------
@@ -361,6 +478,12 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     } else {
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: OK", "ok");
     }
+
+    // Visar (tyst) om catalog är laddad
+    if (DEPS.render && DEPS.render.setRightHint) {
+      if (state.catalog && state.catalog.ok) DEPS.render.setRightHint("Rules: OK");
+      else if (state.catalog && state.catalog._started) DEPS.render.setRightHint("Rules: saknas");
+    }
   }
 
   function updateLeftHint() {
@@ -387,11 +510,17 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     renderAreaDatalist();
     if (dom.area) dom.area.value = normStr(d.area);
 
+    renderChapterDatalist();
+    renderCourseTitleDatalist();
+    renderLevelDatalist();
+
     if (dom.courseTitle) dom.courseTitle.value = normStr(d.courseTitle) || "Introduktion";
     if (dom.courseStep) dom.courseStep.value = normStr(d.courseStep) || "1";
 
     if (dom.goalsLevel) dom.goalsLevel.value = normStr(d.goalsLevel) || "normal";
     if (dom.goals) dom.goals.value = normStr(d.goals) || "";
+
+    syncTitleFromFields();
 
     const blocks = currentBlocks();
     DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
@@ -448,13 +577,18 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     state.draft = deepClone(state.trainings[idx]);
     setDirty(false);
     renderAreaDatalist();
+    renderChapterDatalist();
+    renderCourseTitleDatalist();
+    renderLevelDatalist();
+    syncTitleFromFields();
     updateUiAll();
   }
 
   function newTrainingTemplate() {
     const who = getWhoFresh();
+    const id = (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now());
     return {
-      id: (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now()),
+      id: id,
       status: "draft",
       module: "",
       area: "",
@@ -476,6 +610,8 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     state.selectedId = t.id;
     state.draft = deepClone(t);
 
+    syncTitleFromFields();
+
     const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
@@ -486,6 +622,9 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     setDirty(false);
     renderModuleDatalist();
     renderAreaDatalist();
+    renderChapterDatalist();
+    renderCourseTitleDatalist();
+    renderLevelDatalist();
     updateUiAll();
   }
 
@@ -551,6 +690,9 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     if (dom && dom.courseStep) state.draft.courseStep = normStr(dom.courseStep.value);
     if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value);
     if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
+
+    // P1: Håll title konsekvent
+    syncTitleFromFields();
 
     state.draft.status = (status === "published") ? "published" : "draft";
 
@@ -640,7 +782,7 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
   }
 
   // ------------------------------------------------------------
-  // AI hooks (health + generate via SDK)
+  // AI hooks (health)
   // ------------------------------------------------------------
   async function testAi() {
     try {
@@ -713,13 +855,22 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
       if (dom.mod) dom.mod.value = "";
       if (dom.area) dom.area.value = "";
       renderAreaDatalist();
+      renderChapterDatalist();
+      renderCourseTitleDatalist();
+      syncTitleFromFields();
       setDirty(true);
       updateButtons();
     });
 
     const onEditorChange = function () {
       if (!state.draft) return;
+
+      // När modul/område ändras: uppdatera datalists beroende på val
       renderAreaDatalist();
+      renderChapterDatalist();
+      renderCourseTitleDatalist();
+
+      syncTitleFromFields();
       setDirty(true);
       updateButtons();
     };
@@ -728,8 +879,22 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     dom.on(dom.area, "input", onEditorChange);
     dom.on(dom.courseTitle, "change", onEditorChange);
     dom.on(dom.courseStep, "change", onEditorChange);
-    dom.on(dom.goalsLevel, "change", function () { if (state.draft) { state.draft.goalsLevel = normStr(dom.goalsLevel && dom.goalsLevel.value); setDirty(true); updateButtons(); } });
-    dom.on(dom.goals, "input", function () { if (state.draft) { state.draft.goals = normStr(dom.goals && dom.goals.value); setDirty(true); updateButtons(); } });
+
+    dom.on(dom.goalsLevel, "change", function () {
+      if (state.draft) {
+        state.draft.goalsLevel = normStr(dom.goalsLevel && dom.goalsLevel.value);
+        setDirty(true);
+        updateButtons();
+      }
+    });
+
+    dom.on(dom.goals, "input", function () {
+      if (state.draft) {
+        state.draft.goals = normStr(dom.goals && dom.goals.value);
+        setDirty(true);
+        updateButtons();
+      }
+    });
 
     dom.on(dom.btnTestAI, "click", testAi);
 
@@ -753,6 +918,9 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
     clearLock();
     refreshDeps();
 
+    // P0: kicka catalog-load så modules.json syns i Network
+    kickCatalogLoadOnce();
+
     // Load trainings
     const load = (DEPS.store && DEPS.store.load) ? DEPS.store.load() : { ok: false };
     if (!load.ok && load.corrupt) {
@@ -763,8 +931,14 @@ PATCH v1.0.3-PP-SC-010-04 (AUTOPATCH):
       clearLock();
     }
 
+    // init who
+    state.who = getWhoFresh();
+
     renderModuleDatalist();
     renderAreaDatalist();
+    renderChapterDatalist();
+    renderCourseTitleDatalist();
+    renderLevelDatalist();
 
     state.showAll = false;
 
