@@ -1,20 +1,21 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-05) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-06) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
 Projekt: HR-System (GitHub Pages / UI-only)
 Syfte: Bootstrap + state + event wiring för trainings (ADMIN create/edit).
       Nu: Koppla in ai-rules/v1/modules.json → Modul/Område/Kapitel/Steg.
+      + AI-generate via HRWorkerSDK (fail-closed) utan att skicka "Mål" till AI.
 
 POLICY (LÅST):
 - UI-only • Fail-closed
 - Inga nya storage-keys (endast AO-057_TRAININGS_V1 skrivs via 03-store)
 - XSS-safe: render via 05-render.js + dom.setText (textContent)
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
+- AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
-- P0: Laddar ai-rules/v1/modules.json (same-origin) och bygger val-listor deterministiskt.
-- P0: Fixar "områden kommer inte fram" via robust matchning (trim + case-insensitive).
-- P0: Kapitel (7) + Steg (1–5) fylls i UI (select eller datalist) utan ny datamodell.
-- P1: Titel synkas vid ändring: "<Kapitel> • Steg <N> • <Område>" via core.composeTitle().
+PATCH v1.0.5-PP-SC-010-06 (AUTOPATCH):
+- P0: Wire btnGenAI → generateAi()
+- P0: AI-context byggs från editor, men goals skickas ALDRIG (goals:"")
+- P1: Validera AI-resultat via contract.validateAiResult() innan block skapas
 ============================================================ */
 (function () {
   "use strict";
@@ -23,7 +24,7 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0.4-PP-SC-010-05";
+  page.__VERSION = "v1.0.5-PP-SC-010-06";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -523,7 +524,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
     if (dom.courseStep) {
       const tagS = String(dom.courseStep.tagName || "").toUpperCase();
       if (tagS === "SELECT") {
-        // Visa "Kurs 1" men spara id (1..5) — men vi håller det enkelt: value = id, text = label
         while (dom.courseStep.firstChild) dom.courseStep.removeChild(dom.courseStep.firstChild);
         const ph = document.createElement("option");
         ph.value = "";
@@ -538,7 +538,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
         }
       } else {
         const dlS = ensureDatalistForInput(dom.courseStep, "courseStepList");
-        // input kan skriva "1" eller "Kurs 1" — vi erbjuder båda
         const labels = steps.map(s => String(s.label || "")).filter(Boolean);
         fillDatalistOptions(dlS, uniqueSorted(stepIds.concat(labels)));
       }
@@ -926,6 +925,137 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
     }
   }
 
+  function snapshotEditorStateForAi() {
+    // NOTE (LÅST): goals skickas INTE till AI, oavsett vad som står i textarea.
+    const module = normStr(dom && dom.mod && dom.mod.value);
+    const area = normStr(dom && dom.area && dom.area.value);
+    const courseTitle = normStr(dom && dom.courseTitle && dom.courseTitle.value) || "Introduktion";
+
+    let courseStep = "1";
+    if (dom && dom.courseStep) {
+      const raw = normStr(dom.courseStep.value);
+      const m = raw.match(/(\d+)/);
+      courseStep = m ? String(m[1]) : (raw || "1");
+    }
+
+    const goalsLevel = normStr(dom && dom.goalsLevel && dom.goalsLevel.value) || "normal";
+
+    return {
+      module,
+      area,
+      courseTitle,
+      courseStep,
+      goalsLevel,
+      goals: "" // LÅST: alltid tomt till AI
+    };
+  }
+
+  function buildAiContextNoGoals() {
+    const s = snapshotEditorStateForAi();
+
+    if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
+      const ctx = DEPS.core.buildAiContext(s) || {};
+      // Guard: även om core i framtiden ändras, nolla här också.
+      try { ctx.goals = ""; } catch (_) {}
+      return ctx;
+    }
+
+    // fallback minimal context
+    return {
+      subject: { module: s.module, area: s.area },
+      course: {
+        chapter: s.courseTitle,
+        step: s.courseStep,
+        title: (DEPS.core && DEPS.core.composeTitle) ? DEPS.core.composeTitle(s.courseTitle, s.courseStep, s.area || "—") : (s.courseTitle + " • Steg " + s.courseStep + " • " + (s.area || "—"))
+      },
+      level: s.goalsLevel,
+      goals: "" // LÅST
+    };
+  }
+
+  function readAiControls() {
+    const mode = normStr(dom && dom.aiContent && dom.aiContent.value) || "training";
+    const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
+    const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
+
+    // Dessa kan vara valfria beroende på UI
+    const questionType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
+    const feedbackEnabled = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked === true));
+
+    return { mode, count, questionType, feedbackEnabled };
+  }
+
+  async function generateAi() {
+    if (!isWriterAllowed()) return;
+    if (!state.draft) return;
+
+    try {
+      if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
+        return;
+      }
+
+      const ctx = buildAiContextNoGoals();
+      const ctl = readAiControls();
+
+      // Minimal request shape (SDK avgör server-side)
+      const req = {
+        mode: ctl.mode,
+        count: ctl.count,
+        context: ctx,
+        language: "sv"
+      };
+
+      // optional hints (best-effort, safe)
+      if (ctl.questionType) req.questionType = ctl.questionType;
+      if (ctl.feedbackEnabled) req.feedbackEnabled = true;
+
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI jobbar…", "warn");
+      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
+
+      const raw = await window.HRWorkerSDK.aiGenerate(req);
+
+      const norm = (DEPS.core && typeof DEPS.core.normalizeAiResult === "function")
+        ? DEPS.core.normalizeAiResult(raw)
+        : (raw && typeof raw === "object" ? raw : { items: [] });
+
+      // Validera fail-closed
+      if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
+        const v = DEPS.contract.validateAiResult(norm);
+        if (!v || v.ok !== true) {
+          const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
+          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
+          return;
+        }
+      }
+
+      const itemsIn = Array.isArray(norm.items) ? norm.items : [];
+      if (!itemsIn.length) {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items.");
+        return;
+      }
+
+      const itemsNorm = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
+        ? itemsIn.map(DEPS.contract.normalizeItem)
+        : itemsIn;
+
+      // Skapa nytt block i draft (inte auto-save)
+      if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
+
+      const title = "AI-block • " + (normStr(state.draft.title) || "(utan titel)");
+      state.draft.blocks.push({ title: title, items: itemsNorm });
+
+      setDirty(true);
+      updateUiAll();
+
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
+    } catch (_) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
+    }
+  }
+
   // ------------------------------------------------------------
   // Bootstrap (retry)
   // ------------------------------------------------------------
@@ -1017,6 +1147,7 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
     });
 
     dom.on(dom.btnTestAI, "click", testAi);
+    dom.on(dom.btnGenAI, "click", generateAi);
 
     dom.on(dom.btnLogout, "click", function () {
       try {
@@ -1028,7 +1159,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
   }
 
   function bootWhenReady() {
-    // Fail-closed tills deps finns, men inte permanent lock pga load-order.
     if (!depsReady()) {
       setLock("BOOT: väntar på moduler (core/store/contract/render/dom)…");
       updateUiAll();
@@ -1093,7 +1223,6 @@ PATCH v1.0.4-PP-SC-010-05 (AUTOPATCH):
     if (ok) return;
 
     if (attempt >= RETRIES.length - 1) {
-      // Efter retries: permanent fail-closed (men med tydlig orsak)
       setLock("BOOT: deps saknas (core/store/contract/render/dom).");
       updateUiAll();
       return;
