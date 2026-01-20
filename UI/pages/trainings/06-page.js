@@ -12,9 +12,12 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
-- P0 FIX: SDK returnerar "blocks[]" (inte "items[]") → UI accepterar båda.
-- P0: Generera-knappen ska nu faktiskt lägga till block i draft.blocks.
+PATCH v1.0.8-PP-SC-010-06 (AUTOPATCH):
+- P0 FIX: UI kan skicka mode="blocks" → normaliseras till "training" (worker kräver training|document).
+- P0 FIX: SDK/worker kan returnera raw.blocks som antingen:
+    A) block-wrappers {title, items:[...]} eller
+    B) items direkt [{type,text,...}]  → UI accepterar båda och lägger till i draft.blocks.
+- P1: Robust titel-hämtning: använd bara raw.blocks[0].title när blocks är wrappers (har .items).
 ============================================================ */
 (function () {
   "use strict";
@@ -23,7 +26,7 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0.7-PP-SC-010-06";
+  page.__VERSION = "v1.0.8-PP-SC-010-06";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -220,6 +223,15 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
   }
 
   function upper(v) { return String(v ?? "").toUpperCase(); }
+
+  // P0: mode-normalisering (worker kräver training|document)
+  function normalizeMode(m) {
+    const s = String(m ?? "").trim().toLowerCase();
+    if (s === "training" || s === "document") return s;
+    if (s === "blocks" || s === "utbildning" || s === "kurs" || s === "train" || s === "trainings" || s === "training-v1" || s === "training_v1") return "training";
+    if (s === "doc" || s === "dokument" || s === "documents" || s === "document-v1" || s === "document_v1") return "document";
+    return "training"; // fail-safe
+  }
 
   function getWhoFresh() {
     // Fail-closed: om locked/bootPending, behåll SYSTEM_ADMIN.
@@ -1015,7 +1027,9 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
   }
 
   function readAiControls() {
-    const mode = normStr(dom && dom.aiContent && dom.aiContent.value) || "training";
+    const modeRaw = normStr(dom && dom.aiContent && dom.aiContent.value) || "training";
+    const mode = normalizeMode(modeRaw);
+
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
     const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
 
@@ -1035,25 +1049,52 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     const rItems = raw && Array.isArray(raw.items) ? raw.items : [];
     if (rItems.length) return { items: rItems, source: "raw.items" };
 
-    // 3) raw.blocks[].items (det du ser i DevTools)
+    // 3) raw.blocks kan vara:
+    //    A) wrappers: [{title, items:[...]}]
+    //    B) items direkt: [{type,text,...}]
     const blocks = raw && Array.isArray(raw.blocks) ? raw.blocks : [];
     if (blocks.length) {
-      const out = [];
-      for (const b of blocks) {
-        if (b && Array.isArray(b.items)) out.push.apply(out, b.items);
+      const b0 = blocks[0];
+
+      // A) wrappers med items
+      if (b0 && Array.isArray(b0.items)) {
+        const out = [];
+        for (const b of blocks) {
+          if (b && Array.isArray(b.items)) out.push.apply(out, b.items);
+        }
+        if (out.length) return { items: out, source: "raw.blocks[].items" };
+        return { items: [], source: "raw.blocks(wrappers-empty-items)" };
       }
-      if (out.length) return { items: out, source: "raw.blocks[].items" };
-      return { items: [], source: "raw.blocks(empty-items)" };
+
+      // B) blocks = items (det du såg i DevTools)
+      const looksLikeItems = blocks.some(b =>
+        b && (typeof b.type === "string" || typeof b.text === "string" || typeof b.instruction === "string")
+      );
+      if (looksLikeItems) return { items: blocks, source: "raw.blocks(as-items)" };
+
+      return { items: [], source: "raw.blocks(unknown-shape)" };
     }
 
-    // 4) raw.data.blocks?.items (best-effort)
+    // 4) raw.data.blocks kan också vara wrappers eller items
     const db = raw && raw.data && Array.isArray(raw.data.blocks) ? raw.data.blocks : [];
     if (db.length) {
-      const out2 = [];
-      for (const b of db) {
-        if (b && Array.isArray(b.items)) out2.push.apply(out2, b.items);
+      const d0 = db[0];
+
+      if (d0 && Array.isArray(d0.items)) {
+        const out2 = [];
+        for (const b of db) {
+          if (b && Array.isArray(b.items)) out2.push.apply(out2, b.items);
+        }
+        if (out2.length) return { items: out2, source: "raw.data.blocks[].items" };
+        return { items: [], source: "raw.data.blocks(wrappers-empty-items)" };
       }
-      if (out2.length) return { items: out2, source: "raw.data.blocks[].items" };
+
+      const looksLikeItems2 = db.some(b =>
+        b && (typeof b.type === "string" || typeof b.text === "string" || typeof b.instruction === "string")
+      );
+      if (looksLikeItems2) return { items: db, source: "raw.data.blocks(as-items)" };
+
+      return { items: [], source: "raw.data.blocks(unknown-shape)" };
     }
 
     return { items: [], source: "none" };
@@ -1084,7 +1125,7 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
       const ctl = readAiControls();
 
       const req = {
-        mode: ctl.mode,
+        mode: ctl.mode, // redan normaliserad (P0)
         count: ctl.count,
         context: ctx,
         language: "sv"
@@ -1103,7 +1144,7 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
         ? (DEPS.core.normalizeAiResult(raw) || {})
         : (raw && typeof raw === "object" ? raw : {});
 
-      // P0: ta items oavsett om svaret är items[] eller blocks[]
+      // P0: ta items oavsett om svaret är items[] eller blocks[] (wrappers eller items)
       const pick = extractItemsFromAi(raw, norm);
       const itemsIn = Array.isArray(pick.items) ? pick.items : [];
 
@@ -1130,11 +1171,11 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
 
       if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
 
-      // Titel: försök ta första block-title från SDK, annars fallback
+      // Titel: använd bara raw.blocks[0].title när blocks är wrappers (har .items)
       let sdkTitle = "";
       try {
         const b0 = raw && Array.isArray(raw.blocks) ? raw.blocks[0] : null;
-        sdkTitle = b0 && b0.title ? normStr(b0.title) : "";
+        if (b0 && Array.isArray(b0.items) && b0.title) sdkTitle = normStr(b0.title);
       } catch (_) { /* ignore */ }
 
       const title = (sdkTitle || ("AI-block • " + (normStr(state.draft.title) || "(utan titel)")));
