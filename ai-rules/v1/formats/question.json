@@ -4,152 +4,190 @@
   "name": "question",
   "updatedAt": "2026-01-20",
   "purpose": [
-    "Standardformat för frågor som kan auto-rättas.",
-    "Låst till kryss-frågor (single/multi) för att förenkla elev-svar och rapportering till MANAGER."
+    "Standardformat för provfrågor som kan auto-rättas.",
+    "Matchar result.json (responseShapes) och step_policy.json (rekommenderade typer per steg).",
+    "Förhindrar otydliga uppgifter: fråga + svarsalternativ + facit måste vara deterministiskt."
   ],
   "constraints": {
-    "grading": "auto",
-    "allowedQuestionKinds": ["choice_single", "choice_multi"],
-    "disallowFreeTextAnswers": true,
-    "maxPromptChars": 600,
-    "maxChoiceTextChars": 120,
-    "minChoices": 2,
-    "maxChoices": 6,
-    "minCorrect": 1,
-    "maxCorrectSingle": 1,
-    "maxCorrectMulti": 3,
+    "noPII": true,
     "language": "sv-SE",
-    "noPII": true
+    "typesAllowed": ["mcq_single", "mcq_multi", "true_false", "numeric", "short_answer"],
+    "maxOptions": 6,
+    "minOptions": 2,
+    "shortAnswerMaxCharsLimit": 160,
+    "numericDefaultTolerance": 0,
+    "forbiddenPhrases": [
+      "beskriv hur du tänkte",
+      "reflektera",
+      "diskutera",
+      "lämna in",
+      "utför uppgiften",
+      "mellanled"
+    ]
   },
   "schema": {
     "required": [
       "id",
-      "kind",
+      "type",
       "prompt",
-      "choices",
-      "answerKey",
-      "explanation",
+      "context",
       "difficulty",
-      "tags"
+      "answer"
     ],
     "properties": {
-      "id": {
+      "id": { "type": "string", "description": "q_..." },
+      "type": {
         "type": "string",
-        "description": "Unikt id för frågan (ex q_...)."
-      },
-      "kind": {
-        "type": "string",
-        "enum": ["choice_single", "choice_multi"],
-        "description": "choice_single = ett rätt svar. choice_multi = flera rätt svar."
+        "enum": ["mcq_single", "mcq_multi", "true_false", "numeric", "short_answer"]
       },
       "prompt": {
-        "type": "string",
-        "description": "Själva frågetexten. Ska vara tydlig, kort och utan fluff."
+        "type": "object",
+        "required": ["title", "text"],
+        "properties": {
+          "title": { "type": "string", "maxLength": 90 },
+          "text": { "type": "string", "maxLength": 600 }
+        }
       },
-      "choices": {
+      "context": {
+        "type": "object",
+        "required": ["moduleId", "areaId", "chapterId", "step"],
+        "properties": {
+          "moduleId": { "type": "string" },
+          "areaId": { "type": "string" },
+          "chapterId": { "type": "string" },
+          "step": { "type": "string", "enum": ["1", "2", "3", "4", "5"] },
+          "tags": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "difficulty": { "type": "string", "enum": ["intro", "normal", "advanced"] },
+
+      "options": {
         "type": "array",
-        "minItems": 2,
-        "maxItems": 6,
+        "description": "Endast för mcq_*",
         "items": {
           "type": "object",
           "required": ["id", "text"],
           "properties": {
-            "id": {
-              "type": "string",
-              "description": "Svarsalternativets id: A, B, C, D, E, F."
-            },
-            "text": {
-              "type": "string",
-              "description": "Svarsalternativets text (max 120 tecken)."
-            }
+            "id": { "type": "string", "description": "opt_a/opt_b/..." },
+            "text": { "type": "string", "maxLength": 180 }
           }
         }
       },
-      "answerKey": {
+
+      "answer": {
         "type": "object",
-        "required": ["correctChoiceIds"],
+        "description": "Facit (deterministiskt).",
+        "required": ["shape", "value"],
         "properties": {
-          "correctChoiceIds": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 3,
-            "items": { "type": "string" }
+          "shape": {
+            "type": "string",
+            "enum": ["single", "multi", "bool", "number", "short"]
+          },
+          "value": {},
+          "tolerance": { "type": "number", "description": "Endast numeric. Default 0." },
+          "explanation": {
+            "type": "string",
+            "maxLength": 400,
+            "description": "Kort förklaring som kan visas som feedback (valfri)."
           }
-        },
-        "description": "Rätt svar: array av choice-ids (t.ex. ['B'] eller ['A','D'])."
+        }
       },
-      "explanation": {
-        "type": "string",
-        "description": "Kort förklaring varför svaret är rätt. Visas efter rättning."
-      },
-      "difficulty": {
-        "type": "string",
-        "enum": ["intro", "normal", "advanced"],
-        "description": "Svårighetsgrad."
-      },
-      "tags": {
-        "type": "array",
-        "items": { "type": "string" },
-        "description": "Taggar för filtrering (ex: 'ISO9001', 'scenario', 'kapitel:Introduktion', 'steg:1')."
-      },
-      "meta": {
+
+      "scoring": {
         "type": "object",
-        "description": "Valfri metadata, men får inte innehålla persondata."
+        "description": "Valfritt – annars 1 poäng per fråga.",
+        "properties": {
+          "points": { "type": "number", "default": 1 },
+          "critical": {
+            "type": "boolean",
+            "default": false,
+            "description": "Om true: fel svar kan trigga managerFollowup-flagga."
+          }
+        }
       }
     }
   },
-  "examples": [
+
+  "answerRules": [
     {
-      "id": "q_example_001",
-      "kind": "choice_single",
-      "prompt": "Vilket är syftet med en avvikelsehantering?",
-      "choices": [
-        { "id": "A", "text": "Att hitta någon att skylla på." },
-        { "id": "B", "text": "Att upptäcka, åtgärda och förebygga att felet händer igen." },
-        { "id": "C", "text": "Att spara tid genom att hoppa över dokumentation." }
-      ],
-      "answerKey": { "correctChoiceIds": ["B"] },
-      "explanation": "Avvikelsehantering ska leda till korrigering och förebyggande åtgärder, inte skuld.",
-      "difficulty": "intro",
-      "tags": ["Kvalitet", "Avvikelse", "kapitel:Introduktion", "steg:1"]
+      "type": "mcq_single",
+      "requires": ["options"],
+      "answerShape": "single",
+      "answerValueType": "string",
+      "answerValueRule": "value måste vara ett options[].id"
+    },
+    {
+      "type": "mcq_multi",
+      "requires": ["options"],
+      "answerShape": "multi",
+      "answerValueType": "array",
+      "answerValueRule": "value måste vara array av options[].id (min 1)"
+    },
+    {
+      "type": "true_false",
+      "answerShape": "bool",
+      "answerValueType": "boolean"
+    },
+    {
+      "type": "numeric",
+      "answerShape": "number",
+      "answerValueType": "number",
+      "toleranceDefault": 0
+    },
+    {
+      "type": "short_answer",
+      "answerShape": "short",
+      "answerValueType": "string",
+      "answerValueRule": "max 160 tecken, får inte vara essä. Ska vara styrbart och rättningsbart (exakt match eller whitelist)."
     }
   ],
+
   "validationRules": [
     {
-      "rule": "choices_ids_unique",
-      "description": "Alla choices[].id måste vara unika."
+      "rule": "forbidden_phrases",
+      "description": "prompt.title/text får inte innehålla forbiddenPhrases."
     },
     {
-      "rule": "choice_ids_allowed",
-      "description": "choices[].id måste vara en av A,B,C,D,E,F."
+      "rule": "options_required_for_mcq",
+      "description": "mcq_single/mcq_multi måste ha options med 2–6 alternativ."
     },
     {
-      "rule": "answerKey_subset_of_choices",
-      "description": "answerKey.correctChoiceIds måste finnas i choices[].id."
+      "rule": "answer_matches_type",
+      "description": "answer.shape och answer.value måste matcha type enligt answerRules."
     },
     {
-      "rule": "single_has_one_correct",
-      "description": "Om kind=choice_single måste correctChoiceIds ha exakt 1 id."
-    },
-    {
-      "rule": "multi_has_1_to_3_correct",
-      "description": "Om kind=choice_multi måste correctChoiceIds ha 1–3 id."
-    },
-    {
-      "rule": "no_free_text",
-      "description": "Inga fält för fri text-svar får förekomma."
+      "rule": "no_inner_html",
+      "description": "All text ska tolkas som ren text (UI använder textContent)."
     }
   ],
-  "uiHints": {
-    "studentAnswerShape": {
-      "choice_single": { "selectedChoiceId": "B" },
-      "choice_multi": { "selectedChoiceIds": ["A", "D"] }
-    },
-    "teacherReportShape": {
-      "questionId": "q_example_001",
-      "isCorrect": true,
-      "selected": ["B"],
-      "correct": ["B"]
+
+  "examples": [
+    {
+      "id": "q_ex_001",
+      "type": "mcq_single",
+      "prompt": {
+        "title": "Avvikelse: första åtgärd",
+        "text": "En avvikelse upptäcks i en rutin. Vad är första korrekta åtgärden?"
+      },
+      "context": {
+        "moduleId": "mod_quality",
+        "areaId": "ar_deviation",
+        "chapterId": "ch_4_scenario",
+        "step": "2",
+        "tags": ["scenario"]
+      },
+      "difficulty": "normal",
+      "options": [
+        { "id": "opt_a", "text": "Ignorera tills nästa möte" },
+        { "id": "opt_b", "text": "Registrera avvikelsen enligt rutin" },
+        { "id": "opt_c", "text": "Vänta och se om det händer igen" }
+      ],
+      "answer": {
+        "shape": "single",
+        "value": "opt_b",
+        "explanation": "Avvikelser ska registreras direkt enligt fastställd rutin."
+      },
+      "scoring": { "points": 1, "critical": true }
     }
-  }
+  ]
 }
