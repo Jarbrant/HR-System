@@ -13,10 +13,9 @@ POLICY (LÅST):
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
 PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
-- P0: FIX: Worker svarar med {blocks:[...]} → UI skapar block korrekt (tidigare letade vi items[])
-- P0: Fail-closed: validera via contract.validateAiResult({items: flatItems}) när möjligt
-- P0: SDK-init självläker: BASE_URL_MISSING cache:as inte (annars fastnar init för alltid)
-- P1: Tydligare felorsak vid oväntat AI-format
+- P0 FIX: Worker svarar med {blocks:[...]} men UI väntade {items:[...]} → “AI gav inga items.”
+         Nu: stöd för blocks[] (primärt) + items[] (fallback) och korrekt push in i draft.blocks.
+- P0: Behåller självläkande init + fail-closed felorsaker.
 ============================================================ */
 (function () {
   "use strict";
@@ -280,8 +279,6 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     state.lockReason = "";
   }
 
-  function isPlainObject(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
-
   // ------------------------------------------------------------
   // Worker SDK init (P0) — självläkande, runtime-only (NO STORAGE)
   // ------------------------------------------------------------
@@ -303,27 +300,17 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
 
     const baseUrl = getWorkerBaseUrl();
     if (!baseUrl) {
-      // VIKTIGT: cache:a inte detta — annars fastnar init om config laddas efteråt.
-      return { ok: false, error: { code: "BASE_URL_MISSING", message: "Worker URL saknas (window.__HR_WORKER_BASE_URL)" } };
+      page.__SDK_INIT_PROMISE = Promise.resolve({ ok: false, error: { code: "BASE_URL_MISSING", message: "Worker URL saknas (window.__HR_WORKER_BASE_URL)" } });
+      return page.__SDK_INIT_PROMISE;
     }
 
     page.__SDK_INIT_PROMISE = (async function () {
       try {
         const r = await window.HRWorkerSDK.init({ baseUrl: baseUrl });
-        const ok = !!(r && r.ok);
-        page.__SDK_INIT_OK = ok;
-
-        if (!ok) {
-          // självläk: tillåt ny init senare
-          page.__SDK_INIT_PROMISE = null;
-        }
-
-        return r && typeof r === "object"
-          ? r
-          : { ok: false, error: { code: "INIT_BAD_RETURN", message: "Init gav okänt svar" } };
+        page.__SDK_INIT_OK = !!(r && r.ok);
+        return r && typeof r === "object" ? r : { ok: false, error: { code: "INIT_BAD_RETURN", message: "Init gav okänt svar" } };
       } catch (e) {
         page.__SDK_INIT_OK = false;
-        page.__SDK_INIT_PROMISE = null; // självläk
         return { ok: false, error: { code: "INIT_EXCEPTION", message: "Init exception", detail: String(e && e.message ? e.message : e) } };
       }
     })();
@@ -339,6 +326,8 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     "./ai-rules/v1/modules.json"
   ];
   let _catalogPromise = null;
+
+  function isPlainObject(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
 
   function buildDefaultsFromCatalog(cat) {
     // cat.modules[{label, areas[{label,chapterIds}]}], cat.catalogs.defaultChapterIds + catalogs.chapters
@@ -859,7 +848,6 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     if (dom && dom.area) state.draft.area = normStr(dom.area.value);
     if (dom && dom.courseTitle) state.draft.courseTitle = normStr(dom.courseTitle.value) || "Introduktion";
     if (dom && dom.courseStep) {
-      // accept "Kurs 1" in input, normalize to "1"
       const raw = normStr(dom.courseStep.value);
       const m = raw.match(/(\d+)/);
       state.draft.courseStep = m ? String(m[1]) : (raw || "1");
@@ -867,9 +855,7 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value);
     if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
 
-    // Title sync (P1)
     syncDraftTitleFromFields();
-
     state.draft.status = (status === "published") ? "published" : "draft";
 
     const v = (status === "published" && DEPS.contract && DEPS.contract.validateForPublish)
@@ -958,72 +944,6 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
   }
 
   // ------------------------------------------------------------
-  // AI normalize helpers (P0) — stöd för {blocks:[...]} och {items:[...]}
-  // ------------------------------------------------------------
-  function pickBlocksFromRaw(raw) {
-    if (!raw || typeof raw !== "object") return null;
-
-    if (Array.isArray(raw.blocks)) return raw.blocks;
-    if (raw.data && typeof raw.data === "object" && Array.isArray(raw.data.blocks)) return raw.data.blocks;
-
-    return null;
-  }
-
-  function pickItemsFromRaw(raw) {
-    if (!raw || typeof raw !== "object") return null;
-
-    if (Array.isArray(raw.items)) return raw.items;
-    if (raw.data && typeof raw.data === "object" && Array.isArray(raw.data.items)) return raw.data.items;
-
-    return null;
-  }
-
-  function normalizeAiRawToBlocks(raw) {
-    // Return shape: { ok:true, blocks:[{title,items}], flatItems:[] } or {ok:false, reasons:[]}
-    const out = { ok: false, blocks: [], flatItems: [], reasons: [] };
-
-    const blocksIn = pickBlocksFromRaw(raw);
-    const itemsIn = pickItemsFromRaw(raw);
-
-    // 1) Prefer blocks[] om det finns (det är vad din worker verkar returnera)
-    if (Array.isArray(blocksIn) && blocksIn.length) {
-      const blocksOut = [];
-      const flat = [];
-
-      for (let i = 0; i < blocksIn.length; i++) {
-        const b = blocksIn[i] || {};
-        const title = normStr(b.title) || ("AI-block " + (i + 1));
-        const items = Array.isArray(b.items) ? b.items : [];
-        if (!items.length) continue;
-
-        blocksOut.push({ title, items });
-        for (const it of items) flat.push(it);
-      }
-
-      if (!blocksOut.length) {
-        out.reasons.push("AI returnerade blocks men utan items.");
-        return out;
-      }
-
-      out.ok = true;
-      out.blocks = blocksOut;
-      out.flatItems = flat;
-      return out;
-    }
-
-    // 2) Fallback: items[] → wrapa till 1 block
-    if (Array.isArray(itemsIn) && itemsIn.length) {
-      out.ok = true;
-      out.blocks = [{ title: "AI-block", items: itemsIn }];
-      out.flatItems = itemsIn.slice();
-      return out;
-    }
-
-    out.reasons.push("AI-svaret saknar både blocks[] och items[].");
-    return out;
-  }
-
-  // ------------------------------------------------------------
   // AI hooks (health + generate via SDK)
   // ------------------------------------------------------------
   async function testAi() {
@@ -1082,20 +1002,16 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
 
     if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
       const ctx = DEPS.core.buildAiContext(s) || {};
-      // Guard: även om core i framtiden ändras, nolla här också.
       try { ctx.goals = ""; } catch (_) {}
       return ctx;
     }
 
-    // fallback minimal context
     return {
       subject: { module: s.module, area: s.area },
       course: {
         chapter: s.courseTitle,
         step: s.courseStep,
-        title: (DEPS.core && DEPS.core.composeTitle)
-          ? DEPS.core.composeTitle(s.courseTitle, s.courseStep, s.area || "—")
-          : (s.courseTitle + " • Steg " + s.courseStep + " • " + (s.area || "—"))
+        title: (DEPS.core && DEPS.core.composeTitle) ? DEPS.core.composeTitle(s.courseTitle, s.courseStep, s.area || "—") : (s.courseTitle + " • Steg " + s.courseStep + " • " + (s.area || "—"))
       },
       level: s.goalsLevel,
       goals: "" // LÅST
@@ -1107,11 +1023,30 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
     const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
 
-    // Dessa kan vara valfria beroende på UI
     const questionType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
     const feedbackEnabled = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked === true));
 
     return { mode, count, questionType, feedbackEnabled };
+  }
+
+  function normalizeIncomingBlocks(raw) {
+    // Worker/SKD format (din console): { ok:true, blocks:[{title,type,items:[...]}], ... }
+    // Fallback: norm.items (äldre/andra format).
+    const blocks = safeArr(raw && (raw.blocks || raw.data && raw.data.blocks));
+    const out = [];
+
+    for (const b of blocks) {
+      if (!b || typeof b !== "object") continue;
+      const items = safeArr(b.items);
+      if (!items.length) continue;
+
+      const title = normStr(b.title) || "AI-block";
+      out.push({
+        title,
+        items
+      });
+    }
+    return out;
   }
 
   async function generateAi() {
@@ -1129,7 +1064,6 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
         const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
         if (code === "BASE_URL_MISSING") {
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
-          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Sätt window.__HR_WORKER_BASE_URL (via UI-04-CONFIG) och ladda om.");
         } else {
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
         }
@@ -1153,69 +1087,79 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
 
       const raw = await window.HRWorkerSDK.aiGenerate(req);
 
-      // P0: Normalisera worker-format → blocks
-      const nb = normalizeAiRawToBlocks(raw);
-      if (!nb.ok) {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint((nb.reasons || ["AI gav inget användbart svar."]).join(" "));
-        return;
-      }
+      // 1) Primärt: blocks[]
+      let blocksOut = normalizeIncomingBlocks(raw);
 
-      // Fail-closed: validera items via contract (om finns)
-      if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
-        const v = DEPS.contract.validateAiResult({ items: nb.flatItems });
-        if (!v || v.ok !== true) {
-          const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
-          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
-          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
+      // 2) Fallback: äldre norm.items
+      if (!blocksOut.length) {
+        const norm = (DEPS.core && typeof DEPS.core.normalizeAiResult === "function")
+          ? DEPS.core.normalizeAiResult(raw)
+          : (raw && typeof raw === "object" ? raw : { items: [] });
+
+        // Validera fail-closed (om contract kräver items-shape)
+        if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
+          const v = DEPS.contract.validateAiResult(norm);
+          if (!v || v.ok !== true) {
+            const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
+            DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
+            DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
+            return;
+          }
+        }
+
+        const itemsIn = Array.isArray(norm.items) ? norm.items : [];
+        if (!itemsIn.length) {
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
+          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items (varken blocks[] eller items[]).");
           return;
         }
+
+        const itemsNorm = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
+          ? itemsIn.map(DEPS.contract.normalizeItem)
+          : itemsIn;
+
+        blocksOut = [{ title: "AI-block", items: itemsNorm }];
       }
 
-      // Normalize items per block
-      const normalizeItemFn = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
-        ? DEPS.contract.normalizeItem
-        : null;
+      // Normalize items inside blocks (fail-closed best-effort)
+      const finalBlocks = [];
+      for (const b of blocksOut) {
+        const items = safeArr(b.items);
+        if (!items.length) continue;
 
-      const blocksOut = [];
-      for (let i = 0; i < nb.blocks.length; i++) {
-        const b = nb.blocks[i];
-        const items = Array.isArray(b.items) ? b.items : [];
-        const itemsNorm = normalizeItemFn ? items.map(normalizeItemFn) : items;
+        const itemsNorm = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
+          ? items.map(DEPS.contract.normalizeItem)
+          : items;
 
-        if (!itemsNorm.length) continue;
-
-        const title = normStr(b.title) || ("AI-block " + (i + 1));
-        blocksOut.push({ title, items: itemsNorm });
+        finalBlocks.push({
+          title: normStr(b.title) || "AI-block",
+          items: itemsNorm
+        });
       }
 
-      if (!blocksOut.length) {
+      if (!finalBlocks.length) {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI returnerade block men inget kunde normaliseras.");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI-block saknade items efter normalisering.");
         return;
       }
 
+      // Push blocks into draft (inte auto-save)
       if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
 
-      // Lägg in alla block (så du kan få flera “kort” direkt)
-      const titleSuffix = normStr(state.draft.title) || "(utan titel)";
-      for (let i = 0; i < blocksOut.length; i++) {
-        const b = blocksOut[i];
-        const t = (blocksOut.length === 1)
-          ? ("AI-block • " + titleSuffix)
-          : (`AI-block ${i + 1}/${blocksOut.length} • ${titleSuffix}`);
-        state.draft.blocks.push({ title: t, items: b.items });
+      const baseTitle = normStr(state.draft.title) || "(utan titel)";
+      for (const b of finalBlocks) {
+        state.draft.blocks.push({
+          title: (normStr(b.title) || "AI-block") + " • " + baseTitle,
+          items: b.items
+        });
       }
 
       setDirty(true);
       updateUiAll();
 
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
-      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
-    } catch (e) {
+    } catch (_) {
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
-      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI exception. Se Console för detaljer.");
-      try { console.error("[TRAININGS][AI] exception", e); } catch (_) {}
     }
   }
 
