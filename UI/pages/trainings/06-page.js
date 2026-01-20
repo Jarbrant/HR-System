@@ -13,10 +13,9 @@ POLICY (LÅST):
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
 PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
-- P0: FIX: SDK aiGenerate returnerar blocks[] (inte items[]) → mappa blocks till draft.blocks
-- P0: Fail-closed: validera items per block via contract.validateAiResult({items})
-- P0: Tydligare UI-text: "AI gav inga block/items."
-- P1: Backward compat: om endast items finns → skapa ett block
+- P0 FIX: Acceptera SDK-svar som { blocks:[...] } (inte bara { items:[...] }).
+- P0 FIX: Robust extraktion: blocks[].items -> items[] (flatten) + fail-closed om tomt.
+- P1: Förbättrat felmeddelande vid “AI gav inget” (items+blocks) och bevarad requestId.
 ============================================================ */
 (function () {
   "use strict";
@@ -1037,36 +1036,31 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
     return { mode, count, questionType, feedbackEnabled };
   }
 
-  // P0: Extract blocks/items from SDK return (new: raw.blocks[])
-  function extractAiBlocks(raw, norm) {
-    const r = (raw && typeof raw === "object") ? raw : {};
+  // P0 helper: extrahera items från flera möjliga shapes
+  function extractItemsFromAiResponse(raw, norm) {
+    // 1) Först: norm.items (gamla kontrakt)
+    const itemsA = (norm && Array.isArray(norm.items)) ? norm.items : null;
+    if (itemsA && itemsA.length) return itemsA;
 
-    // Prefer blocks (SDK v1.1+)
-    if (Array.isArray(r.blocks)) return r.blocks;
-    if (r.data && typeof r.data === "object" && Array.isArray(r.data.blocks)) return r.data.blocks;
+    // 2) Näst: norm.blocks / raw.blocks (SDK-kontraktet du visade i DevTools)
+    const blocks = (norm && Array.isArray(norm.blocks)) ? norm.blocks
+      : (raw && Array.isArray(raw.blocks)) ? raw.blocks
+      : (raw && raw.data && Array.isArray(raw.data.blocks)) ? raw.data.blocks
+      : null;
 
-    // Back-compat: items
-    const items = (norm && typeof norm === "object" && Array.isArray(norm.items)) ? norm.items
-      : (r.data && typeof r.data === "object" && Array.isArray(r.data.items)) ? r.data.items
-        : Array.isArray(r.items) ? r.items
+    if (blocks && blocks.length) {
+      const out = [];
+      for (const b of blocks) {
+        const items = (b && Array.isArray(b.items)) ? b.items
+          : (b && Array.isArray(b.questions)) ? b.questions
+          : (b && Array.isArray(b.content)) ? b.content
           : null;
-
-    if (Array.isArray(items) && items.length) return [{ title: "AI-block", items: items }];
-    return [];
-  }
-
-  function normalizeItems(items) {
-    const arr = Array.isArray(items) ? items : [];
-    if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
-      return arr.map(DEPS.contract.normalizeItem);
+        if (items && items.length) out.push.apply(out, items);
+      }
+      if (out.length) return out;
     }
-    return arr;
-  }
 
-  function validateItemsFailClosed(items) {
-    if (!DEPS.contract || typeof DEPS.contract.validateAiResult !== "function") return { ok: true, reasons: [] };
-    // validateAiResult förväntar "items" i objektet
-    return DEPS.contract.validateAiResult({ items: Array.isArray(items) ? items : [] }) || { ok: false, reasons: ["AI-resultat kunde inte valideras."] };
+    return [];
   }
 
   async function generateAi() {
@@ -1112,55 +1106,37 @@ PATCH v1.0.7-PP-SC-010-06 (AUTOPATCH):
         ? DEPS.core.normalizeAiResult(raw)
         : (raw && typeof raw === "object" ? raw : { items: [] });
 
-      // P0: SDK returnerar blocks[] → mappa korrekt
-      const aiBlocks = extractAiBlocks(raw, norm);
-
-      // Säkra att vi har åtminstone ett block med items
-      let anyItems = false;
-      for (const b of aiBlocks) {
-        const its = Array.isArray(b && b.items) ? b.items : [];
-        if (its.length) { anyItems = true; break; }
-      }
-
-      if (!aiBlocks.length || !anyItems) {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga block/items.");
-        return;
-      }
-
-      // Skapa blocks i draft (inte auto-save)
-      if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
-
-      let added = 0;
-      const baseTitle = normStr(state.draft.title) || "(utan titel)";
-
-      for (const b of aiBlocks) {
-        const itemsIn = Array.isArray(b && b.items) ? b.items : [];
-        if (!itemsIn.length) continue;
-
-        // Fail-closed: validera per block
-        const v = validateItemsFailClosed(itemsIn);
+      // Validera fail-closed (om kontrakt finns)
+      if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
+        const v = DEPS.contract.validateAiResult(norm);
         if (!v || v.ok !== true) {
           const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
           DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
           return;
         }
-
-        const itemsNorm = normalizeItems(itemsIn);
-
-        const t0 = normStr(b && b.title);
-        const title = t0 ? t0 : ("AI-block • " + baseTitle);
-
-        state.draft.blocks.push({ title: title, items: itemsNorm });
-        added++;
       }
 
-      if (!added) {
+      // P0 FIX: extrahera items även om SDK svarar med blocks[]
+      const itemsIn = extractItemsFromAiResponse(raw, norm);
+
+      if (!itemsIn.length) {
+        const rid = normStr((raw && raw.requestId) || (norm && norm.requestId) || "");
+        const hint = rid ? ("AI gav inga items/blocks. requestId: " + rid) : "AI gav inga items/blocks.";
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga block med items.");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(hint);
         return;
       }
+
+      const itemsNorm = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
+        ? itemsIn.map(DEPS.contract.normalizeItem)
+        : itemsIn;
+
+      // Skapa nytt block i draft (inte auto-save)
+      if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
+
+      const title = "AI-block • " + (normStr(state.draft.title) || "(utan titel)");
+      state.draft.blocks.push({ title: title, items: itemsNorm });
 
       setDirty(true);
       updateUiAll();
