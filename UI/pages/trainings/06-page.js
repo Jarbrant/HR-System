@@ -12,10 +12,11 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.0.5-PP-SC-010-06 (AUTOPATCH):
-- P0: Wire btnGenAI → generateAi()
-- P0: AI-context byggs från editor, men goals skickas ALDRIG (goals:"")
-- P1: Validera AI-resultat via contract.validateAiResult() innan block skapas
+PATCH v1.0.6-PP-SC-010-06 (AUTOPATCH):
+- P0: Auto-init HRWorkerSDK (once) via window.__HR_WORKER_BASE_URL
+- P0: Testa AI / Generera block självläker (init -> health/generate)
+- P0: Fail-closed och tydligare felorsak (SDK saknas / URL saknas / init misslyckas)
+- P1: (best-effort) init triggas även vid boot utan att blockera UI
 ============================================================ */
 (function () {
   "use strict";
@@ -24,7 +25,7 @@ PATCH v1.0.5-PP-SC-010-06 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0.5-PP-SC-010-06";
+  page.__VERSION = "v1.0.6-PP-SC-010-06";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -277,6 +278,45 @@ PATCH v1.0.5-PP-SC-010-06 (AUTOPATCH):
   function clearLock() {
     state.locked = false;
     state.lockReason = "";
+  }
+
+  // ------------------------------------------------------------
+  // Worker SDK init (P0) — självläkande, runtime-only (NO STORAGE)
+  // ------------------------------------------------------------
+  page.__SDK_INIT_PROMISE = page.__SDK_INIT_PROMISE || null;
+  page.__SDK_INIT_OK = page.__SDK_INIT_OK || false;
+
+  function getWorkerBaseUrl() {
+    const u = (window.__HR_WORKER_BASE_URL != null) ? String(window.__HR_WORKER_BASE_URL) : "";
+    return normStr(u);
+  }
+
+  async function ensureSdkReady() {
+    // Fail-closed: inga antaganden, ingen storage
+    if (!window.HRWorkerSDK) return { ok: false, error: { code: "SDK_MISSING", message: "HRWorkerSDK saknas" } };
+    if (typeof window.HRWorkerSDK.init !== "function") return { ok: false, error: { code: "SDK_NO_INIT", message: "HRWorkerSDK.init saknas" } };
+
+    if (page.__SDK_INIT_OK === true) return { ok: true, data: { already: true } };
+    if (page.__SDK_INIT_PROMISE) return page.__SDK_INIT_PROMISE;
+
+    const baseUrl = getWorkerBaseUrl();
+    if (!baseUrl) {
+      page.__SDK_INIT_PROMISE = Promise.resolve({ ok: false, error: { code: "BASE_URL_MISSING", message: "Worker URL saknas (window.__HR_WORKER_BASE_URL)" } });
+      return page.__SDK_INIT_PROMISE;
+    }
+
+    page.__SDK_INIT_PROMISE = (async function () {
+      try {
+        const r = await window.HRWorkerSDK.init({ baseUrl: baseUrl });
+        page.__SDK_INIT_OK = !!(r && r.ok);
+        return r && typeof r === "object" ? r : { ok: false, error: { code: "INIT_BAD_RETURN", message: "Init gav okänt svar" } };
+      } catch (e) {
+        page.__SDK_INIT_OK = false;
+        return { ok: false, error: { code: "INIT_EXCEPTION", message: "Init exception", detail: String(e && e.message ? e.message : e) } };
+      }
+    })();
+
+    return page.__SDK_INIT_PROMISE;
   }
 
   // ------------------------------------------------------------
@@ -917,6 +957,18 @@ PATCH v1.0.5-PP-SC-010-06 (AUTOPATCH):
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
         return;
       }
+
+      const initR = await ensureSdkReady();
+      if (!initR || initR.ok !== true) {
+        const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
+        if (code === "BASE_URL_MISSING") {
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
+        } else {
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "warn");
+        }
+        return;
+      }
+
       const r = await window.HRWorkerSDK.health();
       if (r && r.ok) DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI OK", "ok");
       else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "warn");
@@ -992,6 +1044,17 @@ PATCH v1.0.5-PP-SC-010-06 (AUTOPATCH):
     try {
       if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
+        return;
+      }
+
+      const initR = await ensureSdkReady();
+      if (!initR || initR.ok !== true) {
+        const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
+        if (code === "BASE_URL_MISSING") {
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
+        } else {
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
+        }
         return;
       }
 
@@ -1191,6 +1254,11 @@ PATCH v1.0.5-PP-SC-010-06 (AUTOPATCH):
     setTimeout(updateUiAll, 0);
     setTimeout(updateUiAll, 50);
     setTimeout(updateUiAll, 300);
+
+    // P1: Trigger SDK init i bakgrunden (blockar inte UI)
+    (async function () {
+      try { await ensureSdkReady(); } catch (_) { /* fail-closed */ }
+    })();
 
     // Async: load catalog and re-render lists (utan att bryta boot)
     (async function () {
