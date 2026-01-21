@@ -15,8 +15,10 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras i 06-page (render visar bara)
 
-PATCH v1.0.0 (PP-SC-010-05):
-- Stabil render med dom.setText + defensiva guards
+PATCH v1.0.1 (PP-SC-010-05) (AUTOPATCH):
+- P0 FIX: Guardar om #list eller #blocksList saknas (ingen throw).
+- P1: "item/items" pluralisering i block-meta.
+- P1: Modal: role="dialog" + aria-modal + fokus på Stäng (a11y-light).
 ============================================================ */
 (function () {
   "use strict";
@@ -25,7 +27,7 @@ PATCH v1.0.0 (PP-SC-010-05):
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.0.0-PP-SC-010-05";
+  render.__VERSION = "v1.0.1-PP-SC-010-05";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
@@ -173,6 +175,9 @@ PATCH v1.0.0 (PP-SC-010-05):
     const selectedId = normStr(opts && opts.selectedId);
     const onPick = typeof (opts && opts.onPick) === "function" ? opts.onPick : function () { };
 
+    // P0: om list saknas -> fail-closed (ingen throw)
+    if (!EL.list) return;
+
     clearChildren(EL.list);
 
     if (!items.length) {
@@ -180,7 +185,7 @@ PATCH v1.0.0 (PP-SC-010-05):
       empty.className = "muted2";
       empty.style.padding = "10px 2px";
       empty.textContent = "Ingen träff. Sök eller tryck “Visa alla”.";
-      EL.list && EL.list.appendChild(empty);
+      EL.list.appendChild(empty);
       return;
     }
 
@@ -224,6 +229,9 @@ PATCH v1.0.0 (PP-SC-010-05):
     const onEdit = typeof (opts && opts.onEdit) === "function" ? opts.onEdit : null;
     const onDelete = typeof (opts && opts.onDelete) === "function" ? opts.onDelete : null;
 
+    // P0: om blocksList saknas -> fail-closed (ingen throw)
+    if (!EL.blocksList) return;
+
     clearChildren(EL.blocksList);
 
     if (!blocks.length) {
@@ -231,7 +239,7 @@ PATCH v1.0.0 (PP-SC-010-05):
       empty.className = "muted2";
       empty.style.padding = "10px 2px";
       empty.textContent = "Inga block ännu. Generera via AI eller lägg till senare.";
-      EL.blocksList && EL.blocksList.appendChild(empty);
+      EL.blocksList.appendChild(empty);
       return;
     }
 
@@ -266,7 +274,8 @@ PATCH v1.0.0 (PP-SC-010-05):
       const meta = document.createElement("div");
       meta.className = "muted2";
       meta.style.textAlign = "left";
-      meta.textContent = `${items.length} item`;
+      // P1: plural
+      meta.textContent = `${items.length} ${items.length === 1 ? "item" : "items"}`;
       left.appendChild(meta);
 
       const right = document.createElement("div");
@@ -349,6 +358,11 @@ PATCH v1.0.0 (PP-SC-010-05):
     overlay.style.padding = "14px";
     overlay.style.zIndex = "9999";
 
+    // a11y-light
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", normStr(title) || "Dialog");
+
     const card = document.createElement("div");
     card.style.width = "min(720px, 96vw)";
     card.style.maxHeight = "88vh";
@@ -417,9 +431,19 @@ PATCH v1.0.0 (PP-SC-010-05):
       if (e.target === overlay) closeModal();
     });
 
+    // ESC to close (baseline)
+    overlay.addEventListener("keydown", function (e) {
+      try {
+        if (e && (e.key === "Escape" || e.keyCode === 27)) closeModal();
+      } catch (_) { }
+    });
+
     overlay.appendChild(card);
     document.body.appendChild(overlay);
     _modalEl = overlay;
+
+    // focus "Stäng"
+    try { x.focus && x.focus(); } catch (_) { }
   };
 
   // ------------------------------
