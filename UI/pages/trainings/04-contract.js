@@ -1,20 +1,22 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-04) | FILE 04/06 | FIL-ID: UI/pages/trainings/04-contract.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-05) | FILE 04/06 | FIL-ID: UI/pages/trainings/04-contract.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Kontrakt/validering för Trainings: save/publish + AI-resultat (items) + normalisering.
-      Skyddar kedjan Modul→Område→Kapitel→Steg genom tydliga krav vid publicering.
+Syfte: Kontrakt/validering för trainings + AI-resultat (deterministiskt)
+      - validateTrainingForSave / validateForPublish
+      - validateAiResult + normalizeItem
+      - Inga nätverksanrop • ingen DOM • ingen storage
 
 POLICY (LÅST):
 - UI-only • Fail-closed
-- Ingen storage här (03-store)
-- Ingen DOM-render här (05-render)
-- XSS-safe: inga innerHTML
-- ADMIN-only write (page/core styr); contract ger bara regler + felorsaker.
+- Inga nya storage-keys/datamodell (endast validering)
+- XSS: ingen rendering här
+- ADMIN-only write hanteras i 06-page/core (inte här)
+- AI: Skicka aldrig "Mål/goals" – detta kontrakt validerar endast resultat
 
-PATCH v1.0.4 (PP-SC-010-04):
-- P0: validateForPublish kräver modul/område/kapitel/steg + minst 1 block/item.
-- P1: validateTrainingForSave är tolerant (utkast kan sparas) men ger reasons för “problemfilter”.
-- P0: validateAiResult stoppar tomma/ogiltiga items och (om core.containsForbidden finns) förbjudna fraser i AI-text.
+PATCH v1.0.0 (PP-SC-010-05):
+- Basvalidering för titel/modul/område/kapitel/steg
+- Publish kräver minst 1 block och minst 1 item
+- AI-resultat: kräver items[] med känd typ och minimal text/fråga+facit
 ============================================================ */
 (function () {
   "use strict";
@@ -23,178 +25,179 @@ PATCH v1.0.4 (PP-SC-010-04):
   if (NS.contract) return;
 
   const contract = (NS.contract = {});
-  contract.__VERSION = "v1.0.4-PP-SC-010-04";
+  contract.__VERSION = "v1.0.0-PP-SC-010-05";
 
-  // ------------------------------------------------------------
-  // Helpers (no DOM, no storage)
-  // ------------------------------------------------------------
   function normStr(v) { return String(v ?? "").trim(); }
-  function safeLower(v) { return normStr(v).toLowerCase(); }
   function safeArr(a) { return Array.isArray(a) ? a : []; }
   function isPlainObject(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
 
-  function ok(data) { return Object.assign({ ok: true }, data || {}); }
-  function fail(reasons, code) {
-    const r = safeArr(reasons).map(normStr).filter(Boolean);
-    return { ok: false, code: normStr(code || "INVALID"), reasons: r.length ? r : ["Ogiltigt."] };
+  function pushReason(reasons, msg) {
+    if (!reasons) return;
+    const s = normStr(msg);
+    if (s) reasons.push(s);
   }
 
-  function inSet(val, setArr) {
-    const s = safeLower(val);
-    for (const x of setArr) if (safeLower(x) === s) return true;
-    return false;
+  function toIntStep(v) {
+    const s = normStr(v);
+    const m = s.match(/(\d+)/);
+    const n = m ? Number(m[1]) : Number(s);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.floor(n));
   }
 
-  function normalizeStep(step) {
-    const raw = normStr(step);
-    const m = raw.match(/(\d+)/);
-    return m ? String(m[1]) : raw;
+  function getBlocks(t) {
+    if (!t || typeof t !== "object") return [];
+    if (Array.isArray(t.blocks)) return t.blocks;
+    if (Array.isArray(t.items)) return [{ title: normStr(t.title) || "(block)", items: safeArr(t.items) }];
+    return [];
   }
 
-  function countItemsInTraining(t) {
-    const blocks = safeArr(t && t.blocks);
-    if (blocks.length) {
-      let n = 0;
-      for (const b of blocks) n += safeArr(b && b.items).length;
-      return n;
-    }
-    // fallback older shape: items[]
-    return safeArr(t && t.items).length;
+  function countItems(blocks) {
+    let n = 0;
+    for (const b of safeArr(blocks)) if (b && Array.isArray(b.items)) n += b.items.length;
+    return n;
   }
 
-  // ------------------------------------------------------------
-  // Training validation
-  // ------------------------------------------------------------
+  // ------------------------------
+  // Training validate
+  // ------------------------------
   contract.validateTrainingForSave = function (t) {
-    // Tolerant: tillåt utkast att sparas, men rapportera problem.
-    if (!t || typeof t !== "object") return fail(["Utbildning saknas."]);
     const reasons = [];
+    if (!isPlainObject(t)) {
+      pushReason(reasons, "Ogiltig utbildning (saknar objekt).");
+      return { ok: false, reasons };
+    }
 
-    const id = normStr(t.id);
-    if (!id) return fail(["Saknar id (kan inte spara)."]);
+    if (!normStr(t.id)) pushReason(reasons, "Saknar id.");
+    if (!normStr(t.title)) pushReason(reasons, "Saknar titel.");
+    if (!normStr(t.module)) pushReason(reasons, "Saknar modul.");
+    if (!normStr(t.area)) pushReason(reasons, "Saknar område.");
 
-    const status = normStr(t.status || "draft");
-    if (status !== "draft" && status !== "published") reasons.push("Okänd status.");
+    const ct = normStr(t.courseTitle);
+    if (!ct) pushReason(reasons, "Saknar kapitel (courseTitle).");
 
-    const module = normStr(t.module);
-    const area = normStr(t.area);
+    const step = toIntStep(t.courseStep);
+    if (step < 1 || step > 99) pushReason(reasons, "Saknar giltigt steg (courseStep).");
 
-    const courseTitle = normStr(t.courseTitle);
-    const courseStep = normalizeStep(t.courseStep);
+    const status = String(t.status || "draft");
+    if (status !== "draft" && status !== "published") pushReason(reasons, "Ogiltig status.");
 
-    const goalsLevel = normStr(t.goalsLevel || "normal");
-    if (!inSet(goalsLevel, ["intro", "normal", "advanced"])) reasons.push("Okänd nivå (intro/normal/advanced).");
-
-    // Kedjan: vi “varnar” i save-läget om den saknas (men blockerar inte draft-save).
-    if (!module) reasons.push("Saknar modul.");
-    if (!area) reasons.push("Saknar område.");
-    if (!courseTitle) reasons.push("Saknar kapitel.");
-    if (!courseStep) reasons.push("Saknar steg.");
-
-    // Innehåll: ok att vara tomt i utkast, men flagga om tomt (för problemfilter).
-    const itemsCount = countItemsInTraining(t);
-    if (itemsCount <= 0) reasons.push("Inga block/items ännu.");
-
-    return ok({ reasons });
+    return { ok: reasons.length === 0, reasons };
   };
 
   contract.validateForPublish = function (t) {
-    // Strikt: publicering måste ha komplett kedja + innehåll.
-    if (!t || typeof t !== "object") return fail(["Utbildning saknas."]);
-    const reasons = [];
+    const base = contract.validateTrainingForSave(t);
+    const reasons = safeArr(base.reasons).slice();
 
-    const id = normStr(t.id);
-    if (!id) reasons.push("Saknar id.");
+    const blocks = getBlocks(t);
+    if (!blocks.length) pushReason(reasons, "Publicering kräver minst 1 block.");
+    if (countItems(blocks) < 1) pushReason(reasons, "Publicering kräver minst 1 item i blocken.");
 
-    const module = normStr(t.module);
-    const area = normStr(t.area);
-    const courseTitle = normStr(t.courseTitle);
-    const courseStep = normalizeStep(t.courseStep);
-
-    if (!module) reasons.push("Välj modul.");
-    if (!area) reasons.push("Välj område.");
-    if (!courseTitle) reasons.push("Välj kapitel.");
-    if (!courseStep) reasons.push("Välj steg.");
-
-    // LÅST steg: 1–5
-    if (courseStep && !inSet(courseStep, ["1", "2", "3", "4", "5"])) reasons.push("Steg måste vara 1–5.");
-
-    const goalsLevel = normStr(t.goalsLevel || "normal");
-    if (!inSet(goalsLevel, ["intro", "normal", "advanced"])) reasons.push("Nivå måste vara intro/normal/advanced.");
-
-    const itemsCount = countItemsInTraining(t);
-    if (itemsCount <= 0) reasons.push("Publicering kräver minst 1 block/item.");
-
-    if (reasons.length) return fail(reasons, "PUBLISH_BLOCKED");
-    return ok({ reasons: [] });
+    return { ok: reasons.length === 0, reasons };
   };
 
-  // ------------------------------------------------------------
-  // AI result validation + normalization
-  // ------------------------------------------------------------
-  function extractTextFields(it) {
-    // Vi letar bara i vanliga textfält (för att undvika “hela objekt”).
-    const fields = ["text", "instruction", "prompt", "question", "explanation", "feedback", "rationale", "reason", "title", "heading"];
-    const out = [];
-    for (const k of fields) {
-      if (typeof it[k] === "string") out.push(it[k]);
+  // ------------------------------
+  // AI result validate
+  // ------------------------------
+  // Tillåtna item-typer (minimalt):
+  // - info/task/document/persona: kräver text/instruction/prompt
+  // - question/quiz: kräver question + answer (facit) eller mcq med correctIndex
+  const ALLOWED_TYPES = new Set(["info", "task", "document", "doc", "persona", "question", "quiz", "both"]);
+
+  function getPrimaryText(it) {
+    if (!it || typeof it !== "object") return "";
+    const cand =
+      (typeof it.text === "string" && it.text) ||
+      (typeof it.instruction === "string" && it.instruction) ||
+      (typeof it.prompt === "string" && it.prompt) ||
+      (typeof it.heading === "string" && it.heading) ||
+      "";
+    return normStr(cand);
+  }
+
+  function hasAnswer(it) {
+    if (!it || typeof it !== "object") return false;
+
+    if (typeof it.answer === "string" && normStr(it.answer)) return true;
+    if (typeof it.correctAnswer === "string" && normStr(it.correctAnswer)) return true;
+    if (typeof it.facit === "string" && normStr(it.facit)) return true;
+
+    // MCQ
+    if (Array.isArray(it.options) && it.options.length >= 2) {
+      const idx = Number(it.correctIndex);
+      if (Number.isFinite(idx) && idx >= 0 && idx < it.options.length) return true;
+
+      // alternativ: correctOptionId
+      if (typeof it.correctOptionId === "string" && normStr(it.correctOptionId)) return true;
     }
-    return out;
+    return false;
+  }
+
+  function isQuestionType(t) {
+    const s = normStr(t).toLowerCase();
+    return s === "question" || s === "quiz";
   }
 
   contract.validateAiResult = function (payload) {
-    const p = (payload && typeof payload === "object") ? payload : {};
-    const items = safeArr(p.items);
+    const reasons = [];
+    const items = payload && Array.isArray(payload.items) ? payload.items : null;
+    if (!items) {
+      pushReason(reasons, "AI-resultat saknar items[].");
+      return { ok: false, reasons };
+    }
+    if (!items.length) {
+      pushReason(reasons, "AI-resultat innehåller inga items.");
+      return { ok: false, reasons };
+    }
 
-    if (!items.length) return fail(["AI gav inga items."], "AI_EMPTY");
-
-    // Basic shape checks
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
-      if (!it || typeof it !== "object") return fail(["AI-item " + (i + 1) + " är inte ett objekt."], "AI_SHAPE");
-    }
-
-    // Optional forbidden phrase guard (om core finns)
-    try {
-      const core = NS.core;
-      if (core && typeof core.containsForbidden === "function") {
-        for (const it of items) {
-          const texts = extractTextFields(it);
-          for (const txt of texts) {
-            if (core.containsForbidden(txt)) {
-              return fail(["AI-text innehåller förbjudna fraser. Justera styrningen och testa igen."], "AI_FORBIDDEN");
-            }
-          }
-        }
+      if (!isPlainObject(it)) {
+        pushReason(reasons, `Item ${i + 1} är inte ett objekt.`);
+        continue;
       }
-    } catch (_) {
-      // fail-closed? här väljer vi att inte krascha, utan bara hoppa över extra kontrollen
+
+      const type = normStr(it.type || "info").toLowerCase();
+      if (!ALLOWED_TYPES.has(type)) pushReason(reasons, `Item ${i + 1} har okänd typ: ${type || "?"}.`);
+
+      // Mintext för allt
+      const txt = getPrimaryText(it);
+      if (!txt && !isQuestionType(type)) pushReason(reasons, `Item ${i + 1} saknar text/instruction/prompt.`);
+
+      // För frågor krävs fråga + facit
+      if (isQuestionType(type)) {
+        const q = normStr(it.question || it.q || "");
+        if (!q) pushReason(reasons, `Fråga ${i + 1} saknar question.`);
+        if (!hasAnswer(it)) pushReason(reasons, `Fråga ${i + 1} saknar facit/answer.`);
+      }
     }
 
-    return ok({ reasons: [] });
+    return { ok: reasons.length === 0, reasons };
   };
 
-  contract.normalizeItem = function (raw) {
-    // Gör minimal normalisering (tolerant). Låter render/page bestämma UI.
-    const it = (raw && typeof raw === "object") ? raw : {};
-
-    // Standardfält vi försöker stabilisera:
-    // - type: info|task|question|document (default info)
-    // - text/instruction/question/prompt: lämna som finns
-    const type = normStr(it.type || it.kind || it.blockType || "info").toLowerCase();
-    const outType = inSet(type, ["info", "task", "question", "document"]) ? type : "info";
+  // ------------------------------
+  // Normalize item (fail-safe)
+  // ------------------------------
+  contract.normalizeItem = function (it) {
+    if (!isPlainObject(it)) return { type: "info", text: "" };
 
     const out = Object.assign({}, it);
-    out.type = outType;
+    const type = normStr(out.type || "info").toLowerCase();
+    out.type = ALLOWED_TYPES.has(type) ? type : "info";
 
-    // Normalisera val om de finns (för provfrågor)
-    if (Array.isArray(out.choices)) {
-      out.choices = out.choices.map((c) => normStr(c)).filter(Boolean);
+    // Trima strängfält (utan att röra objekt)
+    const STR_KEYS = [
+      "text", "instruction", "prompt", "question", "explanation", "feedback",
+      "rationale", "reason", "title", "heading", "answer", "correctAnswer", "facit"
+    ];
+    for (const k of STR_KEYS) {
+      if (typeof out[k] === "string") out[k] = normStr(out[k]);
     }
 
-    // correctChoiceId/answerKey kan komma i olika namn
-    if (out.correctChoiceId == null && out.correct_choice_id != null) out.correctChoiceId = out.correct_choice_id;
-    if (out.correctChoiceId == null && out.answerKey != null) out.correctChoiceId = out.answerKey;
+    // MCQ options -> trim
+    if (Array.isArray(out.options)) {
+      out.options = out.options.map(x => (typeof x === "string" ? normStr(x) : x)).filter(x => x !== "");
+    }
 
     return out;
   };
