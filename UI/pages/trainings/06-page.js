@@ -12,9 +12,10 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.1.0-PP-SC-010-06 (AUTOPATCH):
+PATCH v1.1.1-PP-SC-010-06 (AUTOPATCH):
+- P0 FIX: AI-block: om SDK returnerar blocks[] skapas ALLTID 1 UI-block per blocks[i]
+          (både wrapper-shape {title,items[]} och item-shape {type,...} hanteras).
 - P0 FIX: Debug-box uppdateras (visar sparad data + aktuell draft) via textContent.
-- P0 FIX: AI-block: om SDK returnerar blocks[] skapas 1 block per block (inte 1 block med alla items).
 - P1: Sanerar "[object Object]" endast i strängfält som tidigare.
 ============================================================ */
 (function () {
@@ -24,7 +25,7 @@ PATCH v1.1.0-PP-SC-010-06 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.1.0-PP-SC-010-06";
+  page.__VERSION = "v1.1.1-PP-SC-010-06";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -977,7 +978,16 @@ PATCH v1.1.0-PP-SC-010-06 (AUTOPATCH):
       const txt = normStr(ta.value);
       if (!state.draft.blocks) state.draft.blocks = blocks;
       const bb = state.draft.blocks[idx];
-      if (bb && Array.isArray(bb.items) && bb.items[0]) bb.items[0].text = txt;
+      if (bb && Array.isArray(bb.items) && bb.items[0]) {
+        // Baseline: skriv till första relevanta textfältet (utan att skapa nya keys)
+        const it0 = bb.items[0];
+        if (it0 && typeof it0 === "object") {
+          if (typeof it0.text === "string") it0.text = txt;
+          else if (typeof it0.instruction === "string") it0.instruction = txt;
+          else if (typeof it0.prompt === "string") it0.prompt = txt;
+          else if (typeof it0.question === "string") it0.question = txt;
+        }
+      }
       setDirty(true);
       updateUiAll();
     });
@@ -1145,6 +1155,47 @@ PATCH v1.1.0-PP-SC-010-06 (AUTOPATCH):
     return itemsNorm;
   }
 
+  // P0: Hämta blocks[] från flera möjliga platser (SDK + ev wrapper)
+  function getSdkBlocks(raw) {
+    if (raw && Array.isArray(raw.blocks)) return raw.blocks;
+    if (raw && raw.data && Array.isArray(raw.data.blocks)) return raw.data.blocks;
+    return null;
+  }
+
+  // P0: Skapa UI-block från sdkBlocks oavsett shape
+  function applySdkBlocksToDraft(sdkBlocks, wantCount) {
+    const take = Math.min(sdkBlocks.length, (Number(wantCount) || sdkBlocks.length));
+    if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
+
+    for (let bi = 0; bi < take; bi++) {
+      const b = sdkBlocks[bi];
+
+      const isWrapper = !!(b && typeof b === "object" && Array.isArray(b.items));
+      const itemsIn = isWrapper ? safeArr(b.items) : [b];
+
+      // Validera alltid items-arrayen (fail-closed)
+      if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
+        const v = DEPS.contract.validateAiResult({ items: itemsIn });
+        if (!v || v.ok !== true) {
+          const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
+          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
+          return { ok: false, stopped: true };
+        }
+      }
+
+      const itemsNorm = normalizeItemsArray(itemsIn);
+
+      const tDraft = normStr(state.draft.title) || "(utan titel)";
+      const bTitle = (b && typeof b === "object" && typeof b.title === "string") ? normStr(b.title) : "";
+      const title = bTitle || ("AI-block " + (bi + 1) + " • " + tDraft);
+
+      state.draft.blocks.push({ title: title, items: itemsNorm });
+    }
+
+    return { ok: true, added: take };
+  }
+
   async function generateAi() {
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
@@ -1184,37 +1235,18 @@ PATCH v1.1.0-PP-SC-010-06 (AUTOPATCH):
 
       const raw = await window.HRWorkerSDK.aiGenerate(req);
 
-      // Prefer: om SDK returnerar blocks[] med items => skapa 1 UI-block per SDK-block (P0 FIX)
-      const sdkBlocks = raw && Array.isArray(raw.blocks) ? raw.blocks : null;
-
-      if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
-
-      if (sdkBlocks && sdkBlocks.length && sdkBlocks.every(b => b && Array.isArray(b.items))) {
-        const take = Math.min(sdkBlocks.length, ctl.count || sdkBlocks.length);
-
-        for (let bi = 0; bi < take; bi++) {
-          const b = sdkBlocks[bi];
-          const itemsIn = safeArr(b.items);
-
-          if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
-            const v = DEPS.contract.validateAiResult({ items: itemsIn });
-            if (!v || v.ok !== true) {
-              const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
-              DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
-              DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
-              return;
-            }
-          }
-
-          const itemsNorm = normalizeItemsArray(itemsIn);
-          const title = normStr(b.title) || ("AI-block " + (bi + 1) + " • " + (normStr(state.draft.title) || "(utan titel)"));
-          state.draft.blocks.push({ title: title, items: itemsNorm });
+      // P0: Huvudväg — blocks[] => 1 UI-block per blocks[i] (oavsett shape)
+      const sdkBlocks = getSdkBlocks(raw);
+      if (sdkBlocks && sdkBlocks.length) {
+        const r = applySdkBlocksToDraft(sdkBlocks, ctl.count);
+        if (r && r.ok) {
+          setDirty(true);
+          updateUiAll();
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
+          return;
         }
-
-        setDirty(true);
-        updateUiAll();
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
-        return;
+        // fail-closed: apply stoppade pga validering
+        if (r && r.stopped) return;
       }
 
       // Fallback: äldre/annan shape => behåll tidigare beteende (1 block)
@@ -1243,13 +1275,8 @@ PATCH v1.1.0-PP-SC-010-06 (AUTOPATCH):
 
       const itemsNorm = normalizeItemsArray(itemsIn);
 
-      let sdkTitle = "";
-      try {
-        const b0 = raw && Array.isArray(raw.blocks) ? raw.blocks[0] : null;
-        if (b0 && Array.isArray(b0.items) && b0.title) sdkTitle = normStr(b0.title);
-      } catch (_) { /* ignore */ }
-
-      const title = (sdkTitle || ("AI-block • " + (normStr(state.draft.title) || "(utan titel)")));
+      const title = ("AI-block • " + (normStr(state.draft.title) || "(utan titel)"));
+      if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
       state.draft.blocks.push({ title: title, items: itemsNorm });
 
       setDirty(true);
