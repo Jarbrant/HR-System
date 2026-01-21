@@ -15,29 +15,23 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras (render visar, callbacks hanterar write)
 
-PATCH v1.1.3 (PP-SC-010-08B) (AUTOPATCH):
-- P0: “Det händer inget när jag trycker på vänsterkortet” → robust klick via event-delegation på list-container.
-- P1: Gör kort “button-like” (role, tabindex, Enter/Space) + data-training-id.
-- P1: Aria-label förbättras (inkl titel) för bättre a11y.
-- P0 (2B stöd): Exponera render.closeItemModal()/hideItemModal() som fail-soft wrapper till modal close
-               så 06-page kan stänga öppen modal vid byte av utbildning.
+PATCH v1.1.4 (PP-SC-010-08C) (AUTOPATCH):
+- P0: Blockera “Spara” i item-modal för question om alternativen/facit saknas (håll modalen öppen).
+- P0: View-läge visar tydliga varningar för trasiga frågor (saknar alternativ/facit) och undviker “Rätt!”-känsla när data saknas.
+- P2: openModal stöder onSave() => false för att inte stänga (bakåtkompatibelt).
 
 Ändringslogg (≤8):
-- v1.1.2: Event-delegation för trainings-list (click + keydown)
-- v1.1.2: data-training-id på kort + aria/keyboard
-- v1.1.2: Fail-soft debug hook
-- v1.1.3: render.closeItemModal/hideItemModal (stöd för 06-page P0 2B)
-- v1.1.3: aria-label inkluderar titel (a11y)
+- v1.1.4: openModal: respektera onSave()==false (stäng inte)
+- v1.1.4: openItemModal: validera question innan onSave + alert + håll öppen
+- v1.1.4: view(question): varning vid saknade alternativ/facit och “Rätt!” visas bara när det finns facit
 
 Testnoteringar:
-- Klick på ett kort i vänsterlistan ska alltid trigga onPick(id).
-- Enter/Space på fokuserat kort ska välja.
-- Om klick inte funkar: sätt window.__HR_DEBUG_TRAININGS_CLICKS=true och se console-log “PICK”.
-- Vid byte av utbildning ska ev. öppen modal kunna stängas av 06-page via render.closeItemModal().
+- Öppna fråga utan alternativ: “Spara” ska varna och inte stänga.
+- Öppna fråga med alternativ men inget korrekt valt: “Spara” ska varna och inte stänga.
+- View: fråga utan facit ska visa “Saknar facit” och inte kännas “klar”.
 
 Risk/edge cases:
-- closeItemModal stänger “den aktiva modalen” (generell). Om någon annan modal är öppen vid selectTraining stängs den också.
-- Om 06-page skickar onPick som inte uppdaterar state korrekt, kommer klick ändå loggas men UI kan förbli oförändrad.
+- openModal-beteendet ändras bara när onSave explicit returnerar false (övriga modaler påverkas ej).
 ============================================================ */
 (function () {
   "use strict";
@@ -46,7 +40,7 @@ Risk/edge cases:
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.1.3-PP-SC-010-08B";
+  render.__VERSION = "v1.1.4-PP-SC-010-08C";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
@@ -282,10 +276,8 @@ Risk/edge cases:
     const selectedId = normStr(opts && opts.selectedId);
     const onPick = typeof (opts && opts.onPick) === "function" ? opts.onPick : function () { };
 
-    // om list saknas -> fail-closed (ingen throw)
     if (!EL.list) return;
 
-    // P0: bind delegation + spara aktuell onPick (så delegation alltid kan kalla senaste)
     render.__listOnPick = onPick;
     bindListDelegation();
 
@@ -300,7 +292,6 @@ Risk/edge cases:
       return;
     }
 
-    // OBS: vi sätter INGA per-kort click listeners här (delegation tar allt).
     for (const t of items) {
       const id = normStr(t && t.id);
       const card = makeCardRow(t, id && id === selectedId, id);
@@ -338,7 +329,6 @@ Risk/edge cases:
     const onEdit = typeof (opts && opts.onEdit) === "function" ? opts.onEdit : null;
     const onDelete = typeof (opts && opts.onDelete) === "function" ? opts.onDelete : null;
 
-    // klick för modal
     const onOpenBlock = typeof (opts && opts.onOpenBlock) === "function" ? opts.onOpenBlock : null;
     const onOpenItem = typeof (opts && opts.onOpenItem) === "function" ? opts.onOpenItem : null;
 
@@ -618,8 +608,15 @@ Risk/edge cases:
     save.className = "btn primary";
     save.textContent = "Spara";
     save.addEventListener("click", function () {
-      try { if (typeof onSave === "function") onSave(); } catch (_) { }
-      closeModal();
+      // P2: om onSave() returnerar false -> håll modalen öppen
+      let shouldClose = true;
+      try {
+        if (typeof onSave === "function") {
+          const res = onSave();
+          if (res === false) shouldClose = false;
+        }
+      } catch (_) { }
+      if (shouldClose) closeModal();
     });
 
     footer.appendChild(cancel);
@@ -657,7 +654,7 @@ Risk/edge cases:
   };
 
   // ------------------------------
-  // Modal: Item editor (oförändrat)
+  // Modal: Item editor
   // ------------------------------
   function extractOptions(it) {
     if (!it) return [];
@@ -697,6 +694,8 @@ Risk/edge cases:
   function itemKind(it) {
     const t = normStr(it && it.type).toLowerCase();
     if (t === "question" || t === "quiz") return "question";
+    // fail-soft: om question-fält finns -> behandla som question
+    if (it && typeof it === "object" && typeof it.question === "string" && normStr(it.question)) return "question";
     return "other";
   }
 
@@ -714,6 +713,19 @@ Risk/edge cases:
     hr.style.background = "var(--line)";
     hr.style.margin = "12px 0";
     return hr;
+  }
+
+  function showWarnLine(parent, text) {
+    const w = document.createElement("div");
+    w.style.marginTop = "10px";
+    w.style.border = "1px solid rgba(220,38,38,.35)";
+    w.style.background = "rgba(220,38,38,.06)";
+    w.style.borderRadius = "12px";
+    w.style.padding = "10px 12px";
+    w.style.fontWeight = "800";
+    w.style.color = "#991b1b";
+    w.textContent = text;
+    parent.appendChild(w);
   }
 
   render.openItemModal = function (opts) {
@@ -802,6 +814,12 @@ Risk/edge cases:
         const optsList = extractOptions(item);
         const correctSet = extractCorrect(item, optsList);
 
+        const hasOpts = optsList.length > 0;
+        const hasCorrect = correctSet && correctSet.size > 0;
+
+        if (!hasOpts) showWarnLine(content, "Den här frågan saknar svarsalternativ. (Fixa innan publicering/demo.)");
+        if (!hasCorrect) showWarnLine(content, "Den här frågan saknar facit. (Markera korrekt svar innan publicering/demo.)");
+
         const list = document.createElement("div");
         list.style.marginTop = "10px";
         list.style.display = "flex";
@@ -836,18 +854,32 @@ Risk/edge cases:
 
         content.appendChild(list);
         content.appendChild(makeHr());
-        content.appendChild(makeSectionTitle("Förklaring:"));
 
-        const okLine = document.createElement("div");
-        okLine.style.fontWeight = "900";
-        okLine.textContent = "Rätt!";
-        content.appendChild(okLine);
+        // Visa “Rätt!” bara när facit faktiskt finns (annars blir det falsk trygghet)
+        const hasExpl = normStr(item.explanation || item.feedback || item.rationale || "").length > 0;
 
-        const expl = document.createElement("div");
-        expl.className = "muted2";
-        expl.style.textAlign = "left";
-        expl.textContent = normStr(item.explanation || item.feedback || item.rationale || "") || "—";
-        content.appendChild(expl);
+        if (hasCorrect) {
+          content.appendChild(makeSectionTitle("Förklaring:"));
+
+          const okLine = document.createElement("div");
+          okLine.style.fontWeight = "900";
+          okLine.textContent = "Rätt!";
+          content.appendChild(okLine);
+
+          const expl = document.createElement("div");
+          expl.className = "muted2";
+          expl.style.textAlign = "left";
+          expl.textContent = hasExpl ? normStr(item.explanation || item.feedback || item.rationale || "") : "—";
+          content.appendChild(expl);
+        } else {
+          // Om facit saknas: visa neutral info istället
+          content.appendChild(makeSectionTitle("Förklaring:"));
+          const expl = document.createElement("div");
+          expl.className = "muted2";
+          expl.style.textAlign = "left";
+          expl.textContent = hasExpl ? normStr(item.explanation || item.feedback || item.rationale || "") : "Saknar facit – lägg till korrekt svar för att få en riktig förklaring.";
+          content.appendChild(expl);
+        }
       } else {
         const info = document.createElement("div");
         info.style.marginTop = "8px";
@@ -909,7 +941,9 @@ Risk/edge cases:
         wrapOpts.style.flexDirection = "column";
         wrapOpts.style.gap = "8px";
 
+        // fail-soft: minst 2 rader att börja med
         if (!optsList.length) optsList.push({ text: "" }, { text: "" });
+        if (optsList.length === 1) optsList.push({ text: "" });
 
         for (let i = 0; i < optsList.length; i++) {
           const row = document.createElement("div");
@@ -985,12 +1019,12 @@ Risk/edge cases:
     buildView();
 
     render.openModal(title, wrap, function () {
-      if (!canWrite) return;
-      if (!onSave) return;
-      if (!editMode) return;
+      if (!canWrite) return true;
+      if (!onSave) return true;
+      if (!editMode) return true;
 
       const refs = content.__EDIT_REFS || null;
-      if (!refs || !refs.taQ) return;
+      if (!refs || !refs.taQ) return true;
 
       const updated = (isObj(item) ? JSON.parse(JSON.stringify(item)) : { type: "info", text: String(item) });
 
@@ -1012,6 +1046,16 @@ Risk/edge cases:
           if (!t) continue;
           optOut.push(t);
           if (refs.optRows[i].cb.checked) correctIdxs.push(optOut.length - 1);
+        }
+
+        // P0: fail-closed i modal-edit (håll öppen)
+        if (optOut.length < 2) {
+          try { window.alert("Frågan måste ha minst 2 svarsalternativ innan du sparar."); } catch (_) { }
+          return false;
+        }
+        if (correctIdxs.length < 1) {
+          try { window.alert("Markera minst ett korrekt svar (facit) innan du sparar."); } catch (_) { }
+          return false;
         }
 
         if (isObj(updated)) {
@@ -1040,6 +1084,7 @@ Risk/edge cases:
       }
 
       try { onSave(updated); } catch (_) { }
+      return true; // close
     });
   };
 
