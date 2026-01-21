@@ -1,9 +1,10 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-06) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-07) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
 Projekt: HR-System (GitHub Pages / UI-only)
 Syfte: Bootstrap + state + event wiring för trainings (ADMIN create/edit).
       Nu: Koppla in ai-rules/v1/modules.json → Modul/Område/Kapitel/Steg.
       + AI-generate via HRWorkerSDK (fail-closed) utan att skicka "Mål" till AI.
+      + PP-SC-010-07: Klick på item i blocklistan öppnar modal (view/edit/delete/save).
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -12,12 +13,14 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.1.3-PP-SC-010-06 (AUTOPATCH):
+PATCH v1.2.0-PP-SC-010-07 (AUTOPATCH):
 - P0 FIX (1A): "Skapa ny" triggar INTE "Visa alla". I läge utan sök + showAll=false
                visas endast vald (selected) utbildning i vänsterlistan.
 - P0 FIX (1B): Modul/Område/Kapitel/Steg tappades vid async UI-refresh (t.ex. när catalog laddas),
                eftersom draft inte uppdaterades vid input/val. Nu synkas draft alltid från inputs
                vid editor-change och innan save => värden sparas korrekt till AO-057_TRAININGS_V1.
+- P0 (PP-SC-010-07): Klick på blockets item-preview öppnar item-modal (view/edit).
+                     Spara/Ta bort sker via callbacks som uppdaterar draft + dirty (ingen storage här).
 ============================================================ */
 (function () {
   "use strict";
@@ -26,7 +29,7 @@ PATCH v1.1.3-PP-SC-010-06 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.1.3-PP-SC-010-06";
+  page.__VERSION = "v1.2.0-PP-SC-010-07";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -198,6 +201,7 @@ PATCH v1.1.3-PP-SC-010-06 (AUTOPATCH):
   }
   function safeArr(a) { return Array.isArray(a) ? a : []; }
   function lowerKey(v) { return normStr(v).toLowerCase(); }
+  function isObj(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
 
   function deepClone(obj) {
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
@@ -748,6 +752,94 @@ PATCH v1.1.3-PP-SC-010-06 (AUTOPATCH):
     });
   }
 
+  // ------------------------------------------------------------
+  // PP-SC-010-07: Item-modal helpers (draft-only, no storage)
+  // ------------------------------------------------------------
+  function itemTitleForModal(blockIdx, itemIdx, item) {
+    const bi = Number(blockIdx) + 1;
+    const ii = Number(itemIdx) + 1;
+    const kind = (item && typeof item === "object" && typeof item.type === "string") ? normStr(item.type) : "";
+    const k = kind ? (" • " + kind) : "";
+    return `Block ${bi} – Item ${ii}${k}`;
+  }
+
+  function getDraftBlockAndItem(blockIdx, itemIdx) {
+    if (!state.draft) return { ok: false };
+    const blocks = currentBlocks();
+
+    if (!Array.isArray(state.draft.blocks)) state.draft.blocks = blocks.slice();
+    const b = state.draft.blocks[blockIdx];
+    if (!b || !Array.isArray(b.items)) return { ok: false };
+
+    const it = b.items[itemIdx];
+    if (it == null) return { ok: false };
+
+    return { ok: true, block: b, item: it, blocks: state.draft.blocks };
+  }
+
+  function openItemModal(blockIdx, itemIdx) {
+    if (!DEPS.render || typeof DEPS.render.openItemModal !== "function") return;
+
+    const got = getDraftBlockAndItem(blockIdx, itemIdx);
+    if (!got.ok) return;
+
+    const canWrite = isWriterAllowed();
+    const item = got.item;
+
+    DEPS.render.openItemModal({
+      title: itemTitleForModal(blockIdx, itemIdx, item),
+      item: deepClone(item), // skydda draft tills onSave
+      canWrite: canWrite,
+      onSave: function (updated) {
+        if (!isWriterAllowed()) return;
+
+        // fail-closed: måste finnas kvar när vi sparar
+        const again = getDraftBlockAndItem(blockIdx, itemIdx);
+        if (!again.ok) return;
+
+        const original = again.item;
+
+        // Sanera ev "[object Object]" tokens i strängar
+        if (updated && typeof updated === "object") sanitizeAiItemInPlace(updated);
+
+        // Bevara string-items som string om original var string (minimerar modellskift)
+        if (typeof original === "string") {
+          if (typeof updated === "string") {
+            again.block.items[itemIdx] = updated;
+          } else if (updated && typeof updated === "object") {
+            const txt = (typeof updated.text === "string" && updated.text) ||
+              (typeof updated.instruction === "string" && updated.instruction) ||
+              (typeof updated.prompt === "string" && updated.prompt) ||
+              (typeof updated.question === "string" && updated.question) || "";
+            again.block.items[itemIdx] = normStr(txt);
+          } else {
+            return;
+          }
+        } else {
+          // Objekt -> spara objekt (deepClone)
+          if (updated && typeof updated === "object") again.block.items[itemIdx] = deepClone(updated);
+          else if (typeof updated === "string") again.block.items[itemIdx] = { type: "info", text: normStr(updated) };
+          else return;
+        }
+
+        setDirty(true);
+        updateUiAll();
+      },
+      onDelete: function () {
+        if (!isWriterAllowed()) return;
+
+        const again = getDraftBlockAndItem(blockIdx, itemIdx);
+        if (!again.ok) return;
+
+        again.block.items.splice(itemIdx, 1);
+
+        // om block blev tomt -> behåll block men tomt (ingen auto-rensning här)
+        setDirty(true);
+        updateUiAll();
+      }
+    });
+  }
+
   function fillEditorFromDraft() {
     const d = state.draft;
     if (!d || !dom) return;
@@ -769,7 +861,20 @@ PATCH v1.1.3-PP-SC-010-06 (AUTOPATCH):
     DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
       blocks,
       onEdit: function (idx) { openBlockEditor(idx); },
-      onDelete: function (idx) { deleteBlock(idx); }
+      onDelete: function (idx) { deleteBlock(idx); },
+
+      // PP-SC-010-07: klickbara previews öppnar item-modal
+      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); },
+
+      // valfritt: klick på blockkort öppnar första item om finns
+      onOpenBlock: function (bIdx) {
+        try {
+          const bb = blocks && blocks[bIdx];
+          const items = bb && Array.isArray(bb.items) ? bb.items : [];
+          if (!items.length) return;
+          openItemModal(bIdx, 0);
+        } catch (_) { }
+      }
     });
   }
 
@@ -1009,6 +1114,8 @@ PATCH v1.1.3-PP-SC-010-06 (AUTOPATCH):
           else if (typeof it0.instruction === "string") it0.instruction = txt;
           else if (typeof it0.prompt === "string") it0.prompt = txt;
           else if (typeof it0.question === "string") it0.question = txt;
+        } else if (typeof it0 === "string") {
+          bb.items[0] = txt;
         }
       }
       setDirty(true);
