@@ -13,13 +13,10 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.2.2-PP-SC-010-07A (AUTOPATCH):
-- P0 FIX (2A): Val av utbildning i vänsterlistan ska INTE auto-öppna item-modal.
-               Endast klick på item-preview i blockslistan (höger) öppnar modal.
-               (Vi tar bort onOpenBlock-handling som kunde triggas automatiskt av rendern.)
-- P0 FIX (2B): Vid byte av utbildning stänger vi ev. öppen item-modal om render erbjuder close/hide.
-- P0 FIX (A):  UI-städning: tar bort hela frasen "Utgå från detta sammanhang: …" när den bara innehåller
-               "(kontext dolt)" eller "[object Object]" (inte bara token-replace).
+PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
+- P0: Fail-closed “transaktionellt” UI vid save-fel (create + writeBack återställer state).
+- P1: courseTitle/courseStep: input-event stöd för datalist inputs (snabbare title-sync).
+- P2: selectTraining: tar bort redundant area-datalist refresh före fill (minskar blink/mismatch).
 ============================================================ */
 (function () {
   "use strict";
@@ -28,7 +25,7 @@ PATCH v1.2.2-PP-SC-010-07A (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.2.2-PP-SC-010-07A";
+  page.__VERSION = "v1.2.3-PP-SC-010-07B";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -953,7 +950,8 @@ PATCH v1.2.2-PP-SC-010-07A (AUTOPATCH):
     state.selectedId = normStr(id);
     state.draft = deepClone(state.trainings[idx]);
     setDirty(false);
-    renderAreaDatalist();
+
+    // P2: area-datalist fylls korrekt i fillEditorFromDraft efter att mod satts
     updateUiAll();
   }
 
@@ -984,6 +982,13 @@ PATCH v1.2.2-PP-SC-010-07A (AUTOPATCH):
   function createNewTraining() {
     if (!isWriterAllowed()) return;
 
+    // P0: transaktionellt UI — om save failar, återställ allt vi muterat
+    const prevTrainings = deepClone(state.trainings);
+    const prevSelectedId = state.selectedId;
+    const prevDraft = deepClone(state.draft);
+    const prevShowAll = !!state.showAll;
+    const prevDirty = !!state.dirty;
+
     const t = newTrainingTemplate();
     state.trainings.unshift(t);
     state.selectedId = t.id;
@@ -991,12 +996,18 @@ PATCH v1.2.2-PP-SC-010-07A (AUTOPATCH):
 
     const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
+      state.trainings = prevTrainings;
+      state.selectedId = prevSelectedId;
+      state.draft = prevDraft;
+      state.showAll = prevShowAll;
+      setDirty(prevDirty);
+
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+      updateUiAll();
       return;
     }
 
     // P0 (1A): Skapa ny ska inte trigga mass-lista.
-    // Vi håller showAll=false och listan visar då endast selected (se visibleTrainings).
     state.showAll = false;
 
     setDirty(false);
@@ -1013,10 +1024,22 @@ PATCH v1.2.2-PP-SC-010-07A (AUTOPATCH):
     const idx = findTrainingIndexById(state.selectedId);
     if (idx < 0) return;
 
+    // transaktionellt
+    const prevTrainings = deepClone(state.trainings);
+    const prevSelectedId = state.selectedId;
+    const prevDraft = deepClone(state.draft);
+    const prevDirty = !!state.dirty;
+
     state.trainings.splice(idx, 1);
     const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
+      state.trainings = prevTrainings;
+      state.selectedId = prevSelectedId;
+      state.draft = prevDraft;
+      setDirty(prevDirty);
+
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+      updateUiAll();
       return;
     }
 
@@ -1092,11 +1115,15 @@ PATCH v1.2.2-PP-SC-010-07A (AUTOPATCH):
       return;
     }
 
+    // P0: transaktionellt — spara föregående om save misslyckas
+    const prev = deepClone(state.trainings[idx]);
     state.trainings[idx] = deepClone(state.draft);
 
     const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
+      state.trainings[idx] = prev; // återställ
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+      updateUiAll();
       return;
     }
 
@@ -1522,8 +1549,12 @@ PATCH v1.2.2-PP-SC-010-07A (AUTOPATCH):
 
     dom.on(dom.mod, "input", onEditorChange);
     dom.on(dom.area, "input", onEditorChange);
+
+    // SELECT: change, INPUT: både input+change (P1)
     dom.on(dom.courseTitle, "change", onEditorChange);
     dom.on(dom.courseStep, "change", onEditorChange);
+    dom.on(dom.courseTitle, "input", onEditorChange);
+    dom.on(dom.courseStep, "input", onEditorChange);
 
     dom.on(dom.goalsLevel, "change", function () {
       if (state.draft) {
