@@ -15,10 +15,23 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras (render visar, callbacks hanterar write)
 
-PATCH v1.1.0 (PP-SC-010-07) (AUTOPATCH):
-- Modal v2: openItemModal() med view/edit, ta bort, spara (XSS-safe).
-- Blocks: renderBlocksList stöd för onOpenItem/onOpenBlock + klickbara preview-rader.
-- Modal a11y-light: overlay tabIndex + fokus för stabil ESC.
+PATCH v1.1.1 (PP-SC-010-07) (AUTOPATCH):
+- P0: Modal “syns inte” – höjer z-index till max + skapar säker modal-root (append direkt i body).
+- P0: Robust ESC-stängning via window keydown när modal är öppen (fail-soft).
+- P1: Låser body-scroll när modal är öppen (återställer vid stäng).
+- P2: Extra guard/logik för att inte krascha om DOM är i oväntat läge.
+
+Ändringslogg (≤8):
+- v1.1.1: modalRoot + zIndex 2147483647
+- v1.1.1: body overflow lock/unlock vid modal
+- v1.1.1: global ESC handler när modal är öppen
+- v1.1.1: fail-soft guards kring append/remove
+Testnoteringar:
+- Klick på preview-rad (“Öppna item”) ska alltid visa modal ovanpå allt.
+- ESC stänger modal även om fokus ligger i input/textarea.
+- Scroll bakom modalen ska vara låst när modal är öppen.
+Risk/edge cases:
+- Om annan kod också manipulerar body overflow kan det bli “toggling” (vi återställer tidigare värde).
 ============================================================ */
 (function () {
   "use strict";
@@ -27,7 +40,7 @@ PATCH v1.1.0 (PP-SC-010-07) (AUTOPATCH):
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.1.0-PP-SC-010-07";
+  render.__VERSION = "v1.1.1-PP-SC-010-07";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
@@ -393,11 +406,71 @@ PATCH v1.1.0 (PP-SC-010-07) (AUTOPATCH):
   // Modal (core)
   // ------------------------------
   let _modalEl = null;
+  let _modalRoot = null;
+  let _prevBodyOverflow = null;
+
+  function ensureModalRoot() {
+    // P0: direkt i body, så vi inte hamnar under någon z-index-stapel i en wrapper
+    try {
+      if (_modalRoot && _modalRoot.parentNode === document.body) return _modalRoot;
+      const existing = document.getElementById("hrModalRoot");
+      if (existing && existing.parentNode === document.body) {
+        _modalRoot = existing;
+        return _modalRoot;
+      }
+      const root = document.createElement("div");
+      root.id = "hrModalRoot";
+      root.style.position = "relative";
+      root.style.zIndex = "2147483647"; // max-ish för att alltid ligga över
+      document.body.appendChild(root);
+      _modalRoot = root;
+      return _modalRoot;
+    } catch (_) {
+      _modalRoot = null;
+      return null;
+    }
+  }
+
+  function lockBodyScroll() {
+    try {
+      const b = document.body;
+      if (!b) return;
+      if (_prevBodyOverflow == null) _prevBodyOverflow = b.style.overflow || "";
+      b.style.overflow = "hidden";
+    } catch (_) { }
+  }
+
+  function unlockBodyScroll() {
+    try {
+      const b = document.body;
+      if (!b) return;
+      if (_prevBodyOverflow != null) b.style.overflow = _prevBodyOverflow;
+      _prevBodyOverflow = null;
+    } catch (_) { _prevBodyOverflow = null; }
+  }
 
   function closeModal() {
-    if (_modalEl && _modalEl.parentNode) _modalEl.parentNode.removeChild(_modalEl);
+    try {
+      if (_modalEl && _modalEl.parentNode) _modalEl.parentNode.removeChild(_modalEl);
+    } catch (_) { }
     _modalEl = null;
+    unlockBodyScroll();
   }
+
+  // P0: robust ESC även när fokus “försvinner” eller ligger i inputs
+  function onWindowKeydown(e) {
+    try {
+      if (!_modalEl) return;
+      const k = e && (e.key || e.keyCode);
+      if (k === "Escape" || k === "Esc" || k === 27) {
+        e.preventDefault && e.preventDefault();
+        closeModal();
+      }
+    } catch (_) { }
+  }
+  try {
+    window.addEventListener("keydown", onWindowKeydown, true);
+  } catch (_) { }
 
   render.openModal = function (title, contentNode, onSave) {
     closeModal();
@@ -410,7 +483,7 @@ PATCH v1.1.0 (PP-SC-010-07) (AUTOPATCH):
     overlay.style.alignItems = "center";
     overlay.style.justifyContent = "center";
     overlay.style.padding = "14px";
-    overlay.style.zIndex = "9999";
+    overlay.style.zIndex = "2147483647"; // P0: alltid överst
 
     // a11y-light
     overlay.setAttribute("role", "dialog");
@@ -488,7 +561,7 @@ PATCH v1.1.0 (PP-SC-010-07) (AUTOPATCH):
       if (e.target === overlay) closeModal();
     });
 
-    // ESC to close (baseline)
+    // ESC to close (baseline, overlay focus)
     overlay.addEventListener("keydown", function (e) {
       try {
         if (e && (e.key === "Escape" || e.keyCode === 27)) closeModal();
@@ -496,8 +569,18 @@ PATCH v1.1.0 (PP-SC-010-07) (AUTOPATCH):
     });
 
     overlay.appendChild(card);
-    document.body.appendChild(overlay);
+
+    // P0: append via modalRoot (direkt i body)
+    const root = ensureModalRoot();
+    try {
+      if (root) root.appendChild(overlay);
+      else document.body.appendChild(overlay);
+    } catch (_) {
+      try { document.body.appendChild(overlay); } catch (_) { }
+    }
+
     _modalEl = overlay;
+    lockBodyScroll();
 
     // fokus overlay + sen "Stäng"
     try { overlay.focus(); } catch (_) { }
@@ -757,12 +840,8 @@ PATCH v1.1.0 (PP-SC-010-07) (AUTOPATCH):
       content.appendChild(taQ);
 
       let optRows = [];
-      let correctSet = new Set();
-
       if (kind === "question") {
         const optsList = extractOptions(item);
-        correctSet = extractCorrect(item, optsList);
-
         content.appendChild(makeSectionTitle("Svarsalternativ"));
 
         const wrapOpts = document.createElement("div");
@@ -774,6 +853,8 @@ PATCH v1.1.0 (PP-SC-010-07) (AUTOPATCH):
           // fail-soft: skapa 2 rader tomma för edit
           optsList.push({ text: "" }, { text: "" });
         }
+
+        const correctSet = extractCorrect(item, optsList);
 
         for (let i = 0; i < optsList.length; i++) {
           const row = document.createElement("div");
@@ -842,7 +923,6 @@ PATCH v1.1.0 (PP-SC-010-07) (AUTOPATCH):
       if (!ok) return;
 
       try { onDelete(); } catch (_) { }
-      // stängs av openModal save/cancel; vi stänger direkt genom att simulera overlay-klick via closeModal
       try { closeModal(); } catch (_) { }
     });
 
