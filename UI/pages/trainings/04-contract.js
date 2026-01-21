@@ -15,8 +15,9 @@ POLICY (LÅST):
 - XSS-safe: textContent i render (denna fil gör ingen DOM)
 - ADMIN-only write hanteras i 06-page (inte här)
 
-PATCH v1.0.0 (PP-SC-010-04):
-- Stabil deterministisk kontrakt-layer
+PATCH v1.0.1 (PP-SC-010-04A) – AUTOPATCH:
+- P0: Blockera publicering om question saknar facit och/eller saknar svarsalternativ när alternativ förväntas.
+- P1: Stoppa AI-resultat som innehåller question-like items utan facit (fail-closed).
 ============================================================ */
 (function () {
   "use strict";
@@ -25,20 +26,19 @@ PATCH v1.0.0 (PP-SC-010-04):
   if (NS.contract) return;
 
   const contract = (NS.contract = {});
-  contract.__VERSION = "v1.0.0-PP-SC-010-04";
+  contract.__VERSION = "v1.0.1-PP-SC-010-04A";
 
   function normStr(v) { return String(v ?? "").trim(); }
   function safeArr(a) { return Array.isArray(a) ? a : []; }
   function isPlainObject(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
 
+  function isNonEmptyStr(v) { return typeof v === "string" && normStr(v).length > 0; }
+  function isBool(v) { return typeof v === "boolean"; }
+  function isNum(v) { return typeof v === "number" && Number.isFinite(v); }
+
   // ------------------------------
   // Training validation
   // ------------------------------
-  function hasBlocks(t) {
-    const blocks = t && Array.isArray(t.blocks) ? t.blocks : [];
-    return blocks.length > 0;
-  }
-
   function countItems(t) {
     const blocks = t && Array.isArray(t.blocks) ? t.blocks : [];
     let n = 0;
@@ -48,6 +48,114 @@ PATCH v1.0.0 (PP-SC-010-04):
     return n;
   }
 
+  // ------------------------------
+  // Item helpers (robust, fail-closed)
+  // ------------------------------
+  function normType(v) {
+    const s = normStr(v).toLowerCase();
+    if (!s) return "info";
+    // tillåt fler men normalisera till stabil bas
+    if (s === "question" || s === "quiz" || s === "mcq" || s === "true_false") return "question";
+    if (s === "task" || s === "assignment") return "task";
+    if (s === "document" || s === "doc") return "document";
+    if (s === "both") return "both";
+    return "info";
+  }
+
+  function primaryText(it) {
+    if (typeof it === "string") return normStr(it);
+    if (!isPlainObject(it)) return "";
+    return (
+      normStr(it.text) ||
+      normStr(it.instruction) ||
+      normStr(it.prompt) ||
+      normStr(it.question) ||
+      normStr(it.title) ||
+      normStr(it.heading)
+    );
+  }
+
+  function hasOptions(it) {
+    if (!isPlainObject(it)) return false;
+
+    const opt = it.options;
+    const choices = it.choices;
+    const answers = it.answers;
+
+    if (Array.isArray(opt) && opt.some(isNonEmptyStr)) return true;
+    if (Array.isArray(choices) && choices.some(isNonEmptyStr)) return true;
+    if (Array.isArray(answers) && answers.some(isNonEmptyStr)) return true;
+
+    // stöd för [{label:..}] eller [{text:..}]
+    if (Array.isArray(opt) && opt.some(o => isPlainObject(o) && (isNonEmptyStr(o.label) || isNonEmptyStr(o.text)))) return true;
+    if (Array.isArray(choices) && choices.some(o => isPlainObject(o) && (isNonEmptyStr(o.label) || isNonEmptyStr(o.text)))) return true;
+
+    return false;
+  }
+
+  function hasAnswer(it) {
+    if (!isPlainObject(it)) return false;
+
+    // vanligast
+    if (isNonEmptyStr(it.answer) || isNum(it.answer) || isBool(it.answer)) return true;
+    if (isNonEmptyStr(it.correct) || isNum(it.correct) || isBool(it.correct)) return true;
+
+    // varianter
+    if (isNonEmptyStr(it.correctAnswer) || isNum(it.correctAnswer) || isBool(it.correctAnswer)) return true;
+    if (isNonEmptyStr(it.solution) || isNum(it.solution) || isBool(it.solution)) return true;
+
+    // index-baserat (för MCQ)
+    if (isNum(it.correctIndex) && it.correctIndex >= 0) return true;
+    if (isNum(it.answerIndex) && it.answerIndex >= 0) return true;
+
+    // bool-flagga + options kan räcka i vissa modeller, men här kräver vi ändå någon form av facit
+    return false;
+  }
+
+  function isQuestionLike(it) {
+    if (typeof it === "string") return false;
+    if (!isPlainObject(it)) return false;
+
+    const t = normType(it.type);
+    if (t === "question") return true;
+
+    // ibland kommer AI utan type men med question-fält
+    if (isNonEmptyStr(it.question)) return true;
+
+    return false;
+  }
+
+  function validateItemForPublish(it) {
+    const reasons = [];
+
+    if (it == null) return { ok: false, reasons: ["Tom item."] };
+
+    const p = primaryText(it);
+    if (!p) reasons.push("Item saknar text (text/instruction/prompt/question).");
+
+    if (isQuestionLike(it)) {
+      if (!hasAnswer(it)) reasons.push("Fråga saknar facit (answer/correct/correctIndex).");
+
+      // Om item använder svarsalternativ måste de vara ifyllda.
+      // (Vi kan inte säkert veta om en fråga ska vara fritext eller MCQ,
+      // men om options/choices/answers finns måste de vara användbara.)
+      const hasAnyOpts = hasOptions(it);
+      if (hasAnyOpts === true) {
+        // ok
+      } else {
+        // Om frågan ser ut som MCQ (t.ex. correctIndex finns) men inga options -> stoppa.
+        if (isPlainObject(it) && (isNum(it.correctIndex) || isNum(it.answerIndex))) {
+          reasons.push("Fråga saknar svarsalternativ (options/choices/answers) men har index-facit.");
+        }
+      }
+    }
+
+    return { ok: reasons.length === 0, reasons };
+  }
+
+  // ------------------------------
+  // validateTrainingForSave (snäll)
+  // ------------------------------
   contract.validateTrainingForSave = function (t) {
     const reasons = [];
     if (!t || typeof t !== "object") return { ok: false, reasons: ["Saknar training-objekt."] };
@@ -56,22 +164,17 @@ PATCH v1.0.0 (PP-SC-010-04):
     const module = normStr(t.module);
     const area = normStr(t.area);
 
-    // Fail-closed men inte överstrikt: vi låter draft sparas även om vissa saknas,
-    // men "problem"-läget ska kunna flagga det.
+    // Save ska vara snällt: ok:true men reasons för problemfilter.
     if (!title) reasons.push("Saknar titel.");
     if (!module) reasons.push("Saknar modul.");
     if (!area) reasons.push("Saknar område.");
 
-    // Goals är frivilligt i UI (och skickas ändå inte till AI enligt policy)
-    // men vi kan flagga tomma mål som "problem" om man vill.
-    // (håll snällt: bara som reason, inget stopp i save)
-    // if (!normStr(t.goals)) reasons.push("Saknar mål (frivilligt).");
-
-    // Save ska normalt vara ok även med reasons (för att inte låsa användaren),
-    // men vi ger ok:true och reasons för problemfilter.
     return { ok: true, reasons };
   };
 
+  // ------------------------------
+  // validateForPublish (strikt, blockera demo om trasigt)
+  // ------------------------------
   contract.validateForPublish = function (t) {
     const reasons = [];
     if (!t || typeof t !== "object") return { ok: false, reasons: ["Saknar training-objekt."] };
@@ -88,27 +191,38 @@ PATCH v1.0.0 (PP-SC-010-04):
     if (!chapter) reasons.push("Publicering: saknar kapitel.");
     if (!step) reasons.push("Publicering: saknar steg.");
 
-    // Hard requirement i policy: published kräver minst 1 block/item
+    const blocks = t && Array.isArray(t.blocks) ? t.blocks : [];
+    if (!blocks.length) reasons.push("Publicering: kräver minst 1 block.");
+
     const nItems = countItems(t);
     if (nItems <= 0) reasons.push("Publicering: kräver minst 1 block/item.");
+
+    // P0: item-level strictness
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const b = blocks[bi];
+      const items = b && Array.isArray(b.items) ? b.items : null;
+      if (!items || items.length === 0) {
+        reasons.push(`Publicering: Block ${bi + 1} saknar items.`);
+        continue;
+      }
+
+      for (let ii = 0; ii < items.length; ii++) {
+        const it = items[ii];
+        const v = validateItemForPublish(it);
+        if (!v.ok) {
+          for (const r of safeArr(v.reasons)) {
+            reasons.push(`Publicering: Block ${bi + 1} Item ${ii + 1} – ${r}`);
+          }
+        }
+      }
+    }
 
     return { ok: reasons.length === 0, reasons };
   };
 
   // ------------------------------
-  // AI validation + normalization
+  // normalizeItem (minimal, stabil)
   // ------------------------------
-  function normType(v) {
-    const s = normStr(v).toLowerCase();
-    if (!s) return "info";
-    // tillåt fler men normalisera till stabil bas
-    if (s === "question" || s === "quiz" || s === "mcq" || s === "true_false") return "question";
-    if (s === "task" || s === "assignment") return "task";
-    if (s === "document" || s === "doc") return "document";
-    if (s === "both") return "both";
-    return "info";
-  }
-
   contract.normalizeItem = function (it) {
     // Minimal stabil shape. Rör inte okända fält (låt dem finnas kvar).
     if (!isPlainObject(it)) return { type: "info", text: normStr(it) };
@@ -124,10 +238,12 @@ PATCH v1.0.0 (PP-SC-010-04):
     if (typeof out.explanation === "string") out.explanation = normStr(out.explanation);
     if (typeof out.feedback === "string") out.feedback = normStr(out.feedback);
 
-    // Facit/answer: lämna om det är string/number/bool, annars rör ej.
     return out;
   };
 
+  // ------------------------------
+  // validateAiResult (fail-closed om trasigt)
+  // ------------------------------
   contract.validateAiResult = function (payload) {
     const reasons = [];
     const items = payload && Array.isArray(payload.items) ? payload.items : null;
@@ -135,13 +251,23 @@ PATCH v1.0.0 (PP-SC-010-04):
     if (!items) return { ok: false, reasons: ["AI-resultat saknar items[]."] };
     if (items.length <= 0) return { ok: false, reasons: ["AI-resultat innehåller inga items."] };
 
-    // Light sanity: varje item ska vara object eller string, men får normaliseras senare.
-    let bad = 0;
+    // Light sanity: varje item ska vara object eller string
+    let badShape = 0;
     for (const it of items) {
       const ok = (typeof it === "string") || (it && typeof it === "object");
-      if (!ok) bad++;
+      if (!ok) badShape++;
     }
-    if (bad > 0) reasons.push("AI-resultat innehåller ogiltiga items.");
+    if (badShape > 0) reasons.push("AI-resultat innehåller ogiltiga items.");
+
+    // P1: Stoppa om AI ger question-like items utan facit (detta är roten till “Rätt!” utan innehåll).
+    let badQuestions = 0;
+    for (const it of items) {
+      if (!isQuestionLike(it)) continue;
+      if (!hasAnswer(it)) badQuestions++;
+      // Om index-facit men inga options -> också trasigt
+      if (isPlainObject(it) && (isNum(it.correctIndex) || isNum(it.answerIndex)) && !hasOptions(it)) badQuestions++;
+    }
+    if (badQuestions > 0) reasons.push("AI-resultat innehåller frågor utan facit och/eller utan svarsalternativ.");
 
     return { ok: reasons.length === 0, reasons };
   };
@@ -162,27 +288,15 @@ PATCH v1.0.0 (PP-SC-010-04):
 
     const t = normType(it.type);
 
-    // minst en huvudtext ska finnas
-    const primary =
-      normStr(it.text) ||
-      normStr(it.instruction) ||
-      normStr(it.prompt) ||
-      normStr(it.question);
+    const p = primaryText(it);
+    if (!p) reasons.push("Saknar text/instruction/prompt/question.");
 
-    if (!primary) reasons.push("Saknar text/instruction/prompt/question.");
-
-    // om question-typ: försök kräva facit (men bara som problem-flagga, ej alltid stopp)
-    if (t === "question") {
-      const hasAnswer =
-        typeof it.answer === "string" ? normStr(it.answer).length > 0 :
-        typeof it.answer === "number" ? true :
-        typeof it.answer === "boolean" ? true :
-        typeof it.correct === "string" ? normStr(it.correct).length > 0 :
-        typeof it.correct === "number" ? true :
-        typeof it.correct === "boolean" ? true :
-        false;
-
-      if (!hasAnswer) reasons.push("Fråga saknar facit (answer/correct).");
+    // question: flagga facit + ev. svarsalternativ som problem (inte nödvändigtvis stopp i draft-save)
+    if (t === "question" || isNonEmptyStr(it.question)) {
+      if (!hasAnswer(it)) reasons.push("Fråga saknar facit (answer/correct/correctIndex).");
+      if ((isNum(it.correctIndex) || isNum(it.answerIndex)) && !hasOptions(it)) {
+        reasons.push("Fråga har index-facit men saknar svarsalternativ.");
+      }
     }
 
     return { ok: reasons.length === 0, reasons };
