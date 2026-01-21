@@ -1,15 +1,24 @@
 /* ============================================================
 AO-TRAININGS-MODULAR-01 (PP-SC-010-04) | FILE 03/06 | FIL-ID: UI/pages/trainings/03-store.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Storage-adapter för trainings (AO-057_TRAININGS_V1) • load/save/purge
-      Fail-closed: korrupt data låser skrivning (caller får ok:false + corrupt:true)
+Syfte: Storage-lager för Trainings (AO-057_TRAININGS_V1) • load/save/purge
+      + fail-closed vid korrupt data • ingen DOM • ingen AI • inga nya keys
 
 POLICY (LÅST):
 - UI-only • Fail-closed
-- Endast denna fil får skriva AO-057_TRAININGS_V1
-- Ingen DOM-render här
-- XSS-safe (ingen innerHTML)
-- Inga nya storage-keys
+- Inga nya storage-keys (endast AO-057_TRAININGS_V1)
+- Ingen DOM-render här (05-render)
+- XSS-safe: inga innerHTML (ingen rendering)
+- ADMIN-only write styrs av page/core (inte här)
+- Logga aldrig payload
+
+NYCKEL (LÅST):
+- AO-057_TRAININGS_V1
+
+PATCH v1.0.0 (PP-SC-010-04):
+- Robust load med corrupt-detektion + lockReason
+- Robust save (dedupe ids, bounded size)
+- purgeAll + helper lockReasonFor()
 ============================================================ */
 (function () {
   "use strict";
@@ -17,170 +26,171 @@ POLICY (LÅST):
   const NS = (window.Trainings = window.Trainings || {});
   if (NS.store) return;
 
-  const core = NS.core || null;
   const store = (NS.store = {});
-  store.__VERSION = "v1.0.4-PP-SC-010-04";
+  store.__VERSION = "v1.0.0-PP-SC-010-04";
 
-  // LÅST KEY
   const KEY = "AO-057_TRAININGS_V1";
-
-  // In-memory lock flag (persistas inte)
-  let _locked = false;
+  const MAX_BYTES = 1024 * 1024 * 2; // 2MB (best-effort), fail-closed om överskrids
   let _lockReason = "";
 
-  function normStr(v) {
-    return (core && core.normStr) ? core.normStr(v) : String(v ?? "").trim();
+  function normStr(v) { return String(v ?? "").trim(); }
+  function safeArr(a) { return Array.isArray(a) ? a : []; }
+  function isPlainObject(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
+
+  function safeJsonParse(str) {
+    try { return { ok: true, value: JSON.parse(str) }; }
+    catch (e) { return { ok: false, error: e }; }
   }
 
-  function isPlainObject(v) {
-    return !!v && typeof v === "object" && !Array.isArray(v);
+  function safeJsonStringify(obj) {
+    try { return { ok: true, value: JSON.stringify(obj) }; }
+    catch (e) { return { ok: false, error: e }; }
   }
 
-  function fail(code, msg, extra) {
-    const out = Object.assign({ ok: false, code: String(code || "ERR"), err: String(msg || "Fel") }, extra || {});
+  function byteLen(s) {
+    try { return new Blob([String(s || "")]).size; } catch (_) { return String(s || "").length; }
+  }
+
+  function mkFail(code, msg, extra) {
+    const out = { ok: false, code: String(code || "ERR"), message: String(msg || "Fel") };
+    if (extra && typeof extra === "object") Object.assign(out, extra);
     return out;
   }
 
-  function ok(data) {
-    return Object.assign({ ok: true }, data || {});
+  function mkOk(extra) {
+    return Object.assign({ ok: true }, extra || {});
   }
 
-  function safeParse(jsonText) {
-    try { return { ok: true, data: JSON.parse(String(jsonText || "")) }; }
-    catch (e) { return { ok: false, err: String(e && e.message ? e.message : e) }; }
-  }
+  function normalizeTraining(t) {
+    // OBS: ingen ny datamodell – vi bevarar fält, men säkrar minsta shape.
+    if (!isPlainObject(t)) return null;
+    const id = normStr(t.id);
+    if (!id) return null;
 
-  function validateShape(root) {
-    // Tillåter två shapes:
-    // A) { trainings: [...] } (preferred wrapper)
-    // B) [...] (legacy array)
-    if (Array.isArray(root)) return ok({ trainings: root, legacyArray: true });
+    const out = Object.assign({}, t);
+    out.id = id;
+    out.status = (String(out.status || "draft") === "published") ? "published" : "draft";
 
-    if (!isPlainObject(root)) return fail("SHAPE", "Trainings: ogiltigt format");
-    if (!Array.isArray(root.trainings)) return fail("SHAPE", "Trainings: saknar trainings[]");
-    return ok({ trainings: root.trainings, legacyArray: false });
-  }
+    if (!Array.isArray(out.blocks) && Array.isArray(out.items)) {
+      // legacy: items -> wrap i ett block
+      out.blocks = [{ title: normStr(out.title) || "(block)", items: safeArr(out.items) }];
+      delete out.items;
+    }
+    if (!Array.isArray(out.blocks)) out.blocks = [];
 
-  function scrubTraining(t) {
-    // Minimal normalisering: vi tar inte bort fält, bara säkrar grundfält
-    const x = isPlainObject(t) ? t : {};
-    const id = normStr(x.id) || ("tr_" + Date.now());
-    const status = (normStr(x.status) === "published") ? "published" : "draft";
-    const title = normStr(x.title);
-    const module = normStr(x.module);
-    const area = normStr(x.area);
+    if (!isPlainObject(out.meta)) out.meta = {};
+    if (typeof out.meta.createdAt !== "number") out.meta.createdAt = Date.now();
+    if (typeof out.meta.updatedAt !== "number") out.meta.updatedAt = out.meta.updatedAt || 0;
 
-    // blocks/items tolereras, inget krav här
-    const out = Object.assign({}, x, { id, status, title, module, area });
+    // Minimalt skydd för stora strängar (fail-soft, inte loss av data)
+    if (typeof out.title !== "string") out.title = normStr(out.title);
+    if (typeof out.module !== "string") out.module = normStr(out.module);
+    if (typeof out.area !== "string") out.area = normStr(out.area);
+
     return out;
   }
 
-  function scrubList(list) {
-    const arr = Array.isArray(list) ? list : [];
-    return arr.map(scrubTraining);
+  function dedupeById(list) {
+    const seen = new Set();
+    const out = [];
+    for (const x of safeArr(list)) {
+      const t = normalizeTraining(x);
+      if (!t) continue;
+      if (seen.has(t.id)) continue;
+      seen.add(t.id);
+      out.push(t);
+    }
+    return out;
   }
 
   function readRaw() {
-    // Fail-closed: om HRApp finns kan den ha guardad storage wrapper
     try {
-      if (window.HRApp && typeof window.HRApp.safeGet === "function") {
-        return window.HRApp.safeGet(KEY);
-      }
-    } catch (_) {}
-    try {
-      return localStorage.getItem(KEY);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function writeRaw(value) {
-    try {
-      if (window.HRApp && typeof window.HRApp.safeSet === "function") {
-        window.HRApp.safeSet(KEY, value);
-        return ok();
-      }
-    } catch (_) {}
-    try {
-      localStorage.setItem(KEY, value);
-      return ok();
+      const v = localStorage.getItem(KEY);
+      return (v == null) ? "" : String(v);
     } catch (e) {
-      return fail("WRITE_FAIL", "Kunde inte skriva till storage", { detail: String(e && e.message ? e.message : e) });
+      _lockReason = "Storage ej tillgänglig (localStorage).";
+      return "";
     }
   }
 
-  function removeRaw() {
+  function writeRaw(str) {
     try {
-      if (window.HRApp && typeof window.HRApp.safeRemove === "function") {
-        window.HRApp.safeRemove(KEY);
-        return ok();
-      }
-    } catch (_) {}
-    try {
-      localStorage.removeItem(KEY);
-      return ok();
+      localStorage.setItem(KEY, String(str || ""));
+      return true;
     } catch (e) {
-      return fail("REMOVE_FAIL", "Kunde inte rensa storage", { detail: String(e && e.message ? e.message : e) });
+      _lockReason = "Kunde inte skriva till storage.";
+      return false;
     }
   }
 
-  // ------------------------------------------------------------
-  // Public API
-  // ------------------------------------------------------------
-  store.key = function () { return KEY; };
-
-  store.isLocked = function () { return _locked === true; };
-
-  store.lockReasonFor = function () { return normStr(_lockReason) || "Korrupt data."; };
-
-  store.unlock = function () {
-    _locked = false;
-    _lockReason = "";
-    return ok();
+  store.lockReasonFor = function () {
+    return _lockReason || "Korrupt eller ogiltig data.";
   };
 
   store.load = function () {
-    if (_locked) return fail("LOCKED", store.lockReasonFor(), { corrupt: true, trainings: [] });
-
+    _lockReason = "";
     const raw = readRaw();
-    if (!raw) return ok({ trainings: [], empty: true });
 
-    const parsed = safeParse(raw);
+    if (!raw) {
+      return mkOk({ trainings: [], empty: true });
+    }
+
+    const parsed = safeJsonParse(raw);
     if (!parsed.ok) {
-      _locked = true;
-      _lockReason = "Trainings är korrupt JSON.";
-      return fail("CORRUPT_JSON", _lockReason, { corrupt: true, trainings: [] });
+      _lockReason = "Korrupt JSON i AO-057_TRAININGS_V1.";
+      return mkFail("TRAININGS_CORRUPT_JSON", _lockReason, { corrupt: true, trainings: [] });
     }
 
-    const shape = validateShape(parsed.data);
-    if (!shape.ok) {
-      _locked = true;
-      _lockReason = "Trainings har fel format.";
-      return fail("CORRUPT_SHAPE", _lockReason, { corrupt: true, trainings: [] });
+    const obj = parsed.value;
+
+    // Tillåt 2 former:
+    // A) { trainings: [...] }
+    // B) [...] (direkt lista)
+    let trainings = [];
+    if (Array.isArray(obj)) trainings = obj;
+    else if (isPlainObject(obj) && Array.isArray(obj.trainings)) trainings = obj.trainings;
+    else {
+      _lockReason = "Ogiltigt format i AO-057_TRAININGS_V1.";
+      return mkFail("TRAININGS_BAD_SHAPE", _lockReason, { corrupt: true, trainings: [] });
     }
 
-    const trainings = scrubList(shape.trainings);
-    return ok({ trainings, legacyArray: !!shape.legacyArray });
+    const norm = dedupeById(trainings);
+    return mkOk({ trainings: norm });
   };
 
   store.save = function (trainingsList) {
-    if (_locked) return fail("LOCKED", store.lockReasonFor(), { corrupt: true });
+    _lockReason = "";
+    const list = dedupeById(trainingsList);
 
-    const trainings = scrubList(trainingsList);
-    const payload = JSON.stringify({ trainings: trainings });
+    const payload = { trainings: list };
+    const js = safeJsonStringify(payload);
+    if (!js.ok) {
+      _lockReason = "Kunde inte serialisera trainings.";
+      return mkFail("TRAININGS_STRINGIFY_FAIL", _lockReason);
+    }
 
-    const w = writeRaw(payload);
-    if (!w.ok) return w;
+    const bytes = byteLen(js.value);
+    if (bytes > MAX_BYTES) {
+      _lockReason = "För stor data för lagring (max ~2MB).";
+      return mkFail("TRAININGS_TOO_LARGE", _lockReason, { bytes, max: MAX_BYTES });
+    }
 
-    return ok({ count: trainings.length });
+    const ok = writeRaw(js.value);
+    if (!ok) return mkFail("TRAININGS_WRITE_FAIL", _lockReason || "Write fail");
+
+    return mkOk({ count: list.length, bytes });
   };
 
   store.purgeAll = function () {
-    if (_locked) return fail("LOCKED", store.lockReasonFor(), { corrupt: true });
-
-    const r = removeRaw();
-    if (!r.ok) return r;
-    return ok();
+    _lockReason = "";
+    try {
+      localStorage.removeItem(KEY);
+      return mkOk({ purged: true });
+    } catch (e) {
+      _lockReason = "Kunde inte rensa storage.";
+      return mkFail("TRAININGS_PURGE_FAIL", _lockReason);
+    }
   };
 
+  store.KEY = KEY;
 })();
