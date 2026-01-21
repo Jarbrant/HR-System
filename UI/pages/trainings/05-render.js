@@ -15,10 +15,10 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras i 06-page (render visar bara)
 
-PATCH v1.0.1 (PP-SC-010-05) (AUTOPATCH):
-- P0 FIX: Guardar om #list eller #blocksList saknas (ingen throw).
-- P1: "item/items" pluralisering i block-meta.
-- P1: Modal: role="dialog" + aria-modal + fokus på Stäng (a11y-light).
+PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
+- P0: Listkort meta visar: status • modul • område • kapitel • steg (fail-soft "—").
+- P1: Fallback-titel i listan om t.title saknas: courseTitle • Steg X • area.
+- Behåller v1.0.1-fixar: guards för saknade element, pluralisering, modal a11y-light.
 ============================================================ */
 (function () {
   "use strict";
@@ -27,7 +27,7 @@ PATCH v1.0.1 (PP-SC-010-05) (AUTOPATCH):
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.0.1-PP-SC-010-05";
+  render.__VERSION = "v1.0.2-PP-SC-010-05";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
@@ -60,6 +60,18 @@ PATCH v1.0.1 (PP-SC-010-05) (AUTOPATCH):
     if (!pillEl || !pillEl.classList) return;
     pillEl.classList.remove("ok", "warn", "bad");
     if (kind === "ok" || kind === "warn" || kind === "bad") pillEl.classList.add(kind);
+  }
+
+  function asDash(v) {
+    const s = normStr(v);
+    return s ? s : "—";
+  }
+
+  function normStep(v) {
+    const s = normStr(v);
+    if (!s) return "—";
+    const m = s.match(/(\d+)/);
+    return m ? String(m[1]) : s;
   }
 
   // ------------------------------
@@ -106,6 +118,13 @@ PATCH v1.0.1 (PP-SC-010-05) (AUTOPATCH):
     return b;
   }
 
+  function composeFallbackTitle(t) {
+    const chapter = asDash(t && t.courseTitle);
+    const step = normStep(t && t.courseStep);
+    const area = asDash(t && t.area);
+    return `${chapter} • Steg ${step} • ${area}`;
+  }
+
   function makeCardRow(t, selected) {
     const wrap = document.createElement("div");
     wrap.style.border = "1px solid var(--line)";
@@ -131,16 +150,21 @@ PATCH v1.0.1 (PP-SC-010-05) (AUTOPATCH):
 
     const title = document.createElement("div");
     title.style.fontWeight = "900";
-    title.textContent = normStr(t && t.title) || "(utan titel)";
+    const tTitle = normStr(t && t.title);
+    title.textContent = tTitle ? tTitle : composeFallbackTitle(t);
     left.appendChild(title);
 
     const meta = document.createElement("div");
     meta.className = "muted2";
     meta.style.textAlign = "left";
+
+    // P0: Full info efter save: status • modul • område • kapitel • steg
     const st = normStr(t && t.status) || "draft";
-    const mod = normStr(t && t.module) || "—";
-    const area = normStr(t && t.area) || "—";
-    meta.textContent = `${st} • ${mod} • ${area}`;
+    const mod = asDash(t && t.module);
+    const area = asDash(t && t.area);
+    const chapter = asDash(t && t.courseTitle);
+    const step = normStep(t && t.courseStep);
+    meta.textContent = `${st} • ${mod} • ${area} • ${chapter} • Steg ${step}`;
     left.appendChild(meta);
 
     const right = document.createElement("div");
