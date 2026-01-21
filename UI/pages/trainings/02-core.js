@@ -11,10 +11,10 @@ POLICY (LÅST):
 - ADMIN-only write (SYSTEM_ADMIN/MANAGER read-only)
 - Logga aldrig payload (endast felkod/orsak vid behov)
 
-PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
-- P0 FIX: Stöd för modules.json som använder label (inte title) + catalogs.chapters + areas[].chapterIds.
-- P0 FIX: Normaliserar katalogen i minnet så UI inte tappar kedjan Modul→Område→Kapitel→Steg.
-- P0 FIX: getCourseOptions kan läsa catalogs.steps (Kurs 1..5) från samma fil.
+PATCH v1.0.2 (PP-SC-010-03):
+- P0: Strikt auth: canWrite kräver (role===ADMIN && empNo)
+- P0: Robust roll/who-detektion: stöd för roleId/role_code/rbacRole + nested containers + normalisering
+- P0: In-memory loader för ai-rules/v1/modules.json (ingen storage, ingen DOM) + helpers för modul/område/kapitel/kurs
 ============================================================ */
 (function () {
   "use strict";
@@ -52,7 +52,6 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
     if (s === "MGR") return "MANAGER";
     if (s === "USER") return "EMPLOYEE";
 
-    // Canonical
     if (s === "ADMIN") return "ADMIN";
     if (s === "MANAGER") return "MANAGER";
     if (s === "EMPLOYEE") return "EMPLOYEE";
@@ -137,18 +136,18 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
         const maybe = tryCall(() => HRApp.requireAuth());
         if (maybe && typeof maybe === "object") sources.push(maybe);
       }
-    } catch (_) {}
+    } catch (_) { }
 
-    try { if (typeof HRApp.getWho === "function") { const w = tryCall(() => HRApp.getWho()); if (w && typeof w === "object") sources.push(w); } } catch (_) {}
-    try { if (typeof HRApp.getAuth === "function") { const a = tryCall(() => HRApp.getAuth()); if (a && typeof a === "object") sources.push(a); } } catch (_) {}
-    try { if (typeof HRApp.readAuthState === "function") { const s = tryCall(() => HRApp.readAuthState()); if (s && typeof s === "object") sources.push(s); } } catch (_) {}
-    try { if (typeof HRApp.mustGetSession === "function") { const s = tryCall(() => HRApp.mustGetSession()); if (s && typeof s === "object") sources.push(s); } } catch (_) {}
-    try { if (typeof HRApp.getSession === "function") { const s = tryCall(() => HRApp.getSession()); if (s && typeof s === "object") sources.push(s); } } catch (_) {}
-    try { if (typeof HRApp.getRole === "function") { const r = tryCall(() => HRApp.getRole()); if (r && typeof r === "object") sources.push(r); } } catch (_) {}
+    try { if (typeof HRApp.getWho === "function") { const w = tryCall(() => HRApp.getWho()); if (w && typeof w === "object") sources.push(w); } } catch (_) { }
+    try { if (typeof HRApp.getAuth === "function") { const a = tryCall(() => HRApp.getAuth()); if (a && typeof a === "object") sources.push(a); } } catch (_) { }
+    try { if (typeof HRApp.readAuthState === "function") { const s = tryCall(() => HRApp.readAuthState()); if (s && typeof s === "object") sources.push(s); } } catch (_) { }
+    try { if (typeof HRApp.mustGetSession === "function") { const s = tryCall(() => HRApp.mustGetSession()); if (s && typeof s === "object") sources.push(s); } } catch (_) { }
+    try { if (typeof HRApp.getSession === "function") { const s = tryCall(() => HRApp.getSession()); if (s && typeof s === "object") sources.push(s); } } catch (_) { }
+    try { if (typeof HRApp.getRole === "function") { const r = tryCall(() => HRApp.getRole()); if (r && typeof r === "object") sources.push(r); } } catch (_) { }
 
-    try { if (HRApp.session && typeof HRApp.session === "object") sources.push(HRApp.session); } catch (_) {}
-    try { if (HRApp.auth && typeof HRApp.auth === "object") sources.push(HRApp.auth); } catch (_) {}
-    try { if (HRApp.user && typeof HRApp.user === "object") sources.push(HRApp.user); } catch (_) {}
+    try { if (HRApp.session && typeof HRApp.session === "object") sources.push(HRApp.session); } catch (_) { }
+    try { if (HRApp.auth && typeof HRApp.auth === "object") sources.push(HRApp.auth); } catch (_) { }
+    try { if (HRApp.user && typeof HRApp.user === "object") sources.push(HRApp.user); } catch (_) { }
 
     let best = { role: "", empNo: "" };
     for (const s of sources) {
@@ -240,6 +239,23 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
     return "Allmänt fokus för kapitlet.";
   };
 
+  // ---------- SubjectId (Modul → Område) ----------
+  // Målet: tappa aldrig kedjan. SubjectId blir stabilt även om användaren skriver in fritext.
+  // Format: "<module>::<area>" (lowercase, trim). Tomt => "".
+  core.composeSubjectId = function (module, area) {
+    const m = core.safeLower(module);
+    const a = core.safeLower(area);
+    if (!m || !a) return "";
+    return `${m}::${a}`;
+  };
+
+  core.parseSubjectId = function (subjectId) {
+    const s = core.safeLower(subjectId);
+    if (!s || !s.includes("::")) return { module: "", area: "" };
+    const parts = s.split("::");
+    return { module: core.normStr(parts[0]), area: core.normStr(parts.slice(1).join("::")) };
+  };
+
   // ---------- AI payload builder (utan DOM/storage) ----------
   core.buildAiContext = function (state) {
     const s = state || {};
@@ -252,7 +268,7 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
     const title = core.composeTitle(chapter, step, area);
 
     return {
-      subject: { module, area },
+      subject: { module, area, subjectId: core.composeSubjectId(module, area) },
       course: {
         chapter,
         step,
@@ -265,6 +281,9 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
     };
   };
 
+  // ---------- "forbidden phrases" (enkel, UI-skydd) ----------
+  // Detta är INTE en “AI-säkerhet”. Det är en liten spärr för att slippa vissa skol-instruktioner i genererat innehåll.
+  // Obs: Den ska vara liten och tydlig – och kan flyttas till worker/regler senare.
   core.forbiddenPhrases = [
     "beskriv hur du tänkte",
     "utför uppgiften",
@@ -279,6 +298,7 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
     return core.forbiddenPhrases.some((p) => hay.includes(core.safeLower(p)));
   };
 
+  // ---------- Normalize worker result ----------
   core.normalizeAiResult = function (raw) {
     const out = { items: [], blocks: [] };
     if (!raw || typeof raw !== "object") return out;
@@ -302,8 +322,7 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
   const _catalog = {
     loaded: false,
     loading: null,
-    data: null,      // normalized (stable for UI)
-    raw: null,       // raw json (debug/compat)
+    data: null,
     err: null,
     url: ""
   };
@@ -316,21 +335,19 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
         const bp = core.normStr(cfg.BASE_PATH || cfg.basePath || "");
         if (bp) return bp;
       }
-    } catch (_) {}
+    } catch (_) { }
     // Fallback: derive from location (best-effort, no assumptions about repo name)
     try {
       const p = String(location.pathname || "/");
-      // Typically "/HR-System/admin/trainings.html" -> base "/HR-System"
       const parts = p.split("/").filter(Boolean);
       if (parts.length >= 2) return "/" + parts[0];
       if (parts.length === 1) return "";
-    } catch (_) {}
+    } catch (_) { }
     return "";
   }
 
   function buildCatalogUrl() {
     const base = getBasePath();
-    // Always absolute-from-origin path (stable)
     return `${base}/ai-rules/v1/modules.json`;
   }
 
@@ -338,149 +355,25 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
     return !!v && typeof v === "object" && !Array.isArray(v);
   }
 
-  // GUARD: acceptera både {title} och {label} – fail-closed om id saknas.
-  function pickTitle(obj) {
-    if (!obj || typeof obj !== "object") return "";
-    return core.normStr(obj.title || obj.label || obj.name || "");
-  }
-
-  function pickId(obj) {
-    if (!obj || typeof obj !== "object") return "";
-    return core.normStr(obj.id || "");
-  }
-
-  // Bygg en stabil normaliserad struktur:
-  // data.modules[{id,title,areas[{id,title,chapters[{id,title}]}]}]
-  function normalizeCatalog(json) {
-    const norm = {
-      version: core.normStr(json && json.version),
-      type: core.normStr(json && json.type) || "catalog",
-      name: core.normStr(json && json.name) || "modules",
-      constraints: isPlainObject(json && json.constraints) ? json.constraints : {},
-      catalogs: isPlainObject(json && json.catalogs) ? json.catalogs : {},
-      modules: []
-    };
-
-    const catCh = isPlainObject(norm.catalogs) ? norm.catalogs : {};
-    const chaptersCatalog = Array.isArray(catCh.chapters) ? catCh.chapters : [];
-    const chapterMap = {};
-    for (const ch of chaptersCatalog) {
-      const id = pickId(ch);
-      const title = pickTitle(ch);
-      if (id && title) chapterMap[id] = title;
-    }
-
-    const stepsCatalog = Array.isArray(catCh.steps) ? catCh.steps : [];
-    // nothing else to do here; consumers may read it.
-
-    const modules = Array.isArray(json && json.modules) ? json.modules : [];
-    for (const m of modules) {
-      const mid = pickId(m);
-      const mtitle = pickTitle(m);
-      if (!mid || !mtitle) continue;
-
-      const nm = { id: mid, title: mtitle, areas: [] };
-      const areas = Array.isArray(m.areas) ? m.areas : [];
-      for (const a of areas) {
-        const aid = pickId(a);
-        const atitle = pickTitle(a);
-        if (!aid || !atitle) continue;
-
-        const na = { id: aid, title: atitle, chapters: [] };
-
-        // Shape A: area.chapters = [{id,title|label}]
-        if (Array.isArray(a.chapters) && a.chapters.length) {
-          for (const c of a.chapters) {
-            if (typeof c === "string") {
-              const cid = core.normStr(c);
-              const ctitle = chapterMap[cid] || cid;
-              if (cid && ctitle) na.chapters.push({ id: cid, title: ctitle });
-              continue;
-            }
-            const cid = pickId(c);
-            const ctitle = pickTitle(c);
-            if (cid && ctitle) na.chapters.push({ id: cid, title: ctitle });
-          }
-        }
-
-        // Shape B: area.chapterIds = ["ch_1_intro", ...] (katalog->chapters)
-        if (!na.chapters.length && Array.isArray(a.chapterIds) && a.chapterIds.length) {
-          for (const cidRaw of a.chapterIds) {
-            const cid = core.normStr(cidRaw);
-            const ctitle = chapterMap[cid] || cid;
-            if (cid && ctitle) na.chapters.push({ id: cid, title: ctitle });
-          }
-        }
-
-        // Shape C: fallback: defaultChapterIds om area saknar egna (stabil kedja hellre än tom)
-        if (!na.chapters.length && Array.isArray(catCh.defaultChapterIds) && catCh.defaultChapterIds.length) {
-          for (const cidRaw of catCh.defaultChapterIds) {
-            const cid = core.normStr(cidRaw);
-            const ctitle = chapterMap[cid] || cid;
-            if (cid && ctitle) na.chapters.push({ id: cid, title: ctitle });
-          }
-        }
-
-        nm.areas.push(na);
-      }
-
-      norm.modules.push(nm);
-    }
-
-    // Soft fallback: om modules finns men inga areas/chapters, behåll modules ändå.
-    return norm;
-  }
-
   function validateCatalog(json) {
-    // Fail-closed, men tolerant för label/title + chapterIds+catalogs.chapters
     if (!isPlainObject(json)) return core.fail("CATALOG_SHAPE", "modules.json: ogiltigt format");
     if (!Array.isArray(json.modules)) return core.fail("CATALOG_MISSING", "modules.json: saknar modules[]");
 
-    // P0: måste ha id + (title|label) på module/area
     for (const m of json.modules) {
       if (!isPlainObject(m)) return core.fail("CATALOG_MODULE", "modules.json: module måste vara objekt");
-      const mid = pickId(m);
-      const mtitle = pickTitle(m);
-      if (!mid || !mtitle) return core.fail("CATALOG_MODULE_FIELDS", "modules.json: module saknar id + title/label");
-
+      if (!core.normStr(m.id) || !core.normStr(m.title)) return core.fail("CATALOG_MODULE_FIELDS", "modules.json: module saknar id/title");
       if (!Array.isArray(m.areas)) return core.fail("CATALOG_AREAS", "modules.json: module.areas[] saknas");
       for (const a of m.areas) {
         if (!isPlainObject(a)) return core.fail("CATALOG_AREA", "modules.json: area måste vara objekt");
-        const aid = pickId(a);
-        const atitle = pickTitle(a);
-        if (!aid || !atitle) return core.fail("CATALOG_AREA_FIELDS", "modules.json: area saknar id + title/label");
-
-        // Kapitel kan vara area.chapters[] (obj/str) ELLER area.chapterIds[] (med catalogs.chapters)
-        const hasChapters = Array.isArray(a.chapters) && a.chapters.length;
-        const hasChapterIds = Array.isArray(a.chapterIds) && a.chapterIds.length;
-
-        if (!hasChapters && !hasChapterIds) {
-          // Tillåt tomt, men om catalogs.defaultChapterIds finns så klarar vi UI-kedjan ändå.
-          // Fail-closed här skulle göra kedjan instabil om filen är designad för chapterIds.
-          continue;
-        }
-
-        if (hasChapters) {
-          for (const c of a.chapters) {
-            if (typeof c === "string") continue;
-            if (!isPlainObject(c)) return core.fail("CATALOG_CHAPTER", "modules.json: chapter måste vara objekt eller id-sträng");
-            const cid = pickId(c);
-            const ctitle = pickTitle(c);
-            if (!cid || !ctitle) return core.fail("CATALOG_CHAPTER_FIELDS", "modules.json: chapter saknar id + title/label");
-          }
+        if (!core.normStr(a.id) || !core.normStr(a.title)) return core.fail("CATALOG_AREA_FIELDS", "modules.json: area saknar id/title");
+        if (!Array.isArray(a.chapters)) return core.fail("CATALOG_CHAPTERS", "modules.json: area.chapters[] saknas");
+        for (const c of a.chapters) {
+          if (!isPlainObject(c)) return core.fail("CATALOG_CHAPTER", "modules.json: chapter måste vara objekt");
+          if (!core.normStr(c.id) || !core.normStr(c.title)) return core.fail("CATALOG_CHAPTER_FIELDS", "modules.json: chapter saknar id/title");
         }
       }
     }
-
-    // Normalisera alltid så UI får stabil shape
-    const normalized = normalizeCatalog(json);
-
-    // Fail-closed: om normalisering gav noll moduler -> stoppa tydligt
-    if (!Array.isArray(normalized.modules) || !normalized.modules.length) {
-      return core.fail("CATALOG_EMPTY", "modules.json: kunde inte normalisera moduler (tom lista)");
-    }
-
-    return core.ok({ data: normalized, raw: json });
+    return core.ok({ data: json });
   }
 
   core.getCatalogUrl = function () {
@@ -510,17 +403,14 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
       .then((json) => {
         const v = validateCatalog(json);
         if (!v.ok) throw new Error(v.code);
-        _catalog.raw = v.raw || json;       // DEBUG/compat
-        _catalog.data = v.data;             // normalized for UI
+        _catalog.data = v.data;
         _catalog.loaded = true;
         return core.ok({ data: _catalog.data, url });
       })
       .catch((e) => {
         _catalog.loaded = false;
         _catalog.data = null;
-        _catalog.raw = null;
         _catalog.err = String(e && e.message ? e.message : e);
-        // Fail-closed but non-crashing: return ok:false so UI kan visa tydligt fel
         return core.fail("CATALOG_LOAD_FAIL", _catalog.err || "modules.json kunde inte laddas");
       })
       .finally(() => {
@@ -535,36 +425,26 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
     const k = core.safeLower(key);
     if (!k) return null;
     const mods = (data && Array.isArray(data.modules)) ? data.modules : [];
-    return mods.find((m) => core.safeLower(m.id) === k) ||
-      mods.find((m) => core.safeLower(m.title || m.label) === k) ||
-      null;
+    return mods.find((m) => core.safeLower(m.id) === k) || mods.find((m) => core.safeLower(m.title) === k) || null;
   }
 
   function findArea(mod, key) {
     const k = core.safeLower(key);
     if (!mod || !Array.isArray(mod.areas) || !k) return null;
-    return mod.areas.find((a) => core.safeLower(a.id) === k) ||
-      mod.areas.find((a) => core.safeLower(a.title || a.label) === k) ||
-      null;
+    return mod.areas.find((a) => core.safeLower(a.id) === k) || mod.areas.find((a) => core.safeLower(a.title) === k) || null;
   }
 
   core.getModuleOptions = function (catalogData) {
     const data = catalogData || _catalog.data;
     const mods = (data && Array.isArray(data.modules)) ? data.modules : [];
-    return mods.map((m) => ({
-      id: core.normStr(m.id),
-      title: core.normStr(m.title || m.label)
-    })).filter(x => x.id && x.title);
+    return mods.map((m) => ({ id: core.normStr(m.id), title: core.normStr(m.title) }));
   };
 
   core.getAreaOptions = function (catalogData, moduleKey) {
     const data = catalogData || _catalog.data;
     const mod = findModule(data, moduleKey);
     if (!mod) return [];
-    return (mod.areas || []).map((a) => ({
-      id: core.normStr(a.id),
-      title: core.normStr(a.title || a.label)
-    })).filter(x => x.id && x.title);
+    return (mod.areas || []).map((a) => ({ id: core.normStr(a.id), title: core.normStr(a.title) }));
   };
 
   core.getChapterOptions = function (catalogData, moduleKey, areaKey) {
@@ -572,28 +452,11 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
     const mod = findModule(data, moduleKey);
     const area = findArea(mod, areaKey);
     if (!area) return [];
-    const ch = Array.isArray(area.chapters) ? area.chapters : [];
-    return ch.map((c) => ({
-      id: core.normStr(c && c.id),
-      title: core.normStr((c && (c.title || c.label)) || "")
-    })).filter(x => x.id && x.title);
+    return (area.chapters || []).map((c) => ({ id: core.normStr(c.id), title: core.normStr(c.title) }));
   };
 
   core.getCourseOptions = function (catalogData) {
     const data = catalogData || _catalog.data;
-
-    // Stöd: catalogs.steps (Kurs 1..5) i ai-rules/v1/modules.json
-    const steps = data && data.catalogs && Array.isArray(data.catalogs.steps) ? data.catalogs.steps : [];
-    if (steps.length) {
-      return steps.map((s) => {
-        const id = core.normStr(s && s.id);
-        const title = core.normStr(s && (s.label || s.title)) || ("Kurs " + id);
-        const stepNumber = Number(id || 0) || 0;
-        return { id, title, stepNumber };
-      }).filter(x => x.id && x.title);
-    }
-
-    // Legacy/alt: data.courses
     const courses = (data && Array.isArray(data.courses)) ? data.courses : [];
     if (!courses.length) {
       return [
@@ -608,38 +471,18 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
       id: core.normStr(c.id),
       title: core.normStr(c.title),
       stepNumber: Number(c.stepNumber || 0) || 0
-    })).filter(x => x.id && x.title);
+    }));
   };
 
   core.getDifficultyOptions = function (catalogData) {
     const data = catalogData || _catalog.data;
-
-    // Stöd: constraints.difficultyAllowed = ["intro","normal","advanced"]
-    const allowed = data && data.constraints && Array.isArray(data.constraints.difficultyAllowed)
-      ? data.constraints.difficultyAllowed
-      : [];
-
-    if (allowed.length) {
-      const mapTitle = {
-        intro: "Lätt",
-        normal: "Normal",
-        advanced: "Svår"
-      };
-      return allowed.map((idRaw) => {
-        const id = core.normStr(idRaw);
-        const t = mapTitle[id] || (id ? id[0].toUpperCase() + id.slice(1) : "");
-        return { id, title: t };
-      }).filter(x => x.id && x.title);
-    }
-
-    // Legacy/alt: difficultyLevels
     const lv = (data && Array.isArray(data.difficultyLevels)) ? data.difficultyLevels : [];
     if (!lv.length) return [
       { id: "intro", title: "Lätt" },
       { id: "normal", title: "Normal" },
       { id: "advanced", title: "Svår" }
     ];
-    return lv.map((x) => ({ id: core.normStr(x.id), title: core.normStr(x.title) })).filter(x => x.id && x.title);
+    return lv.map((x) => ({ id: core.normStr(x.id), title: core.normStr(x.title) }));
   };
 
   core.getOutputModes = function (catalogData) {
@@ -649,8 +492,8 @@ PATCH v1.0.3 (PP-SC-010-03) – CATALOG-SHAPE-FIX (fail-closed):
       { id: "training", title: "Utbildning" },
       { id: "document", title: "Dokument" }
     ];
-    return om.map((x) => ({ id: core.normStr(x.id), title: core.normStr(x.title) })).filter(x => x.id && x.title);
+    return om.map((x) => ({ id: core.normStr(x.id), title: core.normStr(x.title) }));
   };
 
-  core.__VERSION = "v1.0.3-PP-SC-010-03";
+  core.__VERSION = "v1.0.2-PP-SC-010-03";
 })();
