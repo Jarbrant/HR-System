@@ -13,11 +13,13 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
-- P0 FIX (3A): Vid boot: om trainings finns och ingen selection är satt -> auto-välj första utbildningen
-              (så vänsterlistan inte blir tom i search-first läge).
-- P1 FIX (3B): Read-only: disable editor-inputs (mod/area/kapitel/steg/mål/AI-controls) så UI är tydligt fail-closed.
-- P1 FIX (3C): Read-only: editor-change uppdaterar titel/preview men sätter inte dirty.
+PATCH v1.2.2-PP-SC-010-07A (AUTOPATCH):
+- P0 FIX (2A): Val av utbildning i vänsterlistan ska INTE auto-öppna item-modal.
+               Endast klick på item-preview i blockslistan (höger) öppnar modal.
+               (Vi tar bort onOpenBlock-handling som kunde triggas automatiskt av rendern.)
+- P0 FIX (2B): Vid byte av utbildning stänger vi ev. öppen item-modal om render erbjuder close/hide.
+- P0 FIX (A):  UI-städning: tar bort hela frasen "Utgå från detta sammanhang: …" när den bara innehåller
+               "(kontext dolt)" eller "[object Object]" (inte bara token-replace).
 ============================================================ */
 (function () {
   "use strict";
@@ -26,7 +28,7 @@ PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.2.2-PP-SC-010-07B";
+  page.__VERSION = "v1.2.2-PP-SC-010-07A";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -239,12 +241,33 @@ PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
   }
 
   // ------------------------------------------------------------
-  // P0: UI-sanerare för "[object Object]" i AI-texter (fail-closed)
+  // P0: UI-sanerare för "[object Object]" + kontext-malltext (fail-closed)
   // ------------------------------------------------------------
+  function stripContextBoilerplate(s) {
+    if (typeof s !== "string") return s;
+    let out = s;
+
+    // Ta bort exakt mallfrasen när den bara bär "dolt"/objekt-token.
+    // Ex: "Utgå från detta sammanhang: (kontext dolt)" eller "Utgå från detta sammanhang: [object Object]"
+    out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*(\(\s*kontext\s*dolt\s*\)|\[object\s+Object\])\s*/gi, " ");
+
+    // Ta bort en tom "Utgå från detta sammanhang:" om den står ensam i slutet av rad/sträng
+    out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*$/gmi, "");
+
+    // Normalisera whitespace lite försiktigt
+    out = out.replace(/[ \t]{2,}/g, " ");
+    out = out.replace(/\n{3,}/g, "\n\n");
+    return out.trim();
+  }
+
   function scrubObjectObjectToken(s) {
     if (typeof s !== "string") return s;
-    if (s.indexOf("[object Object]") === -1) return s;
-    return s.replace(/\[object Object\]/g, "(kontext dolt)");
+    let out = s;
+    if (out.indexOf("[object Object]") !== -1) {
+      // Behåll fail-closed (ingen dump av objekt), men gör texten renare
+      out = out.replace(/\[object Object\]/g, "(kontext dolt)");
+    }
+    return stripContextBoilerplate(out);
   }
 
   function sanitizeAiItemInPlace(item) {
@@ -796,8 +819,9 @@ PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
 
         const original = again.item;
 
-        // Sanera ev "[object Object]" tokens i strängar
+        // Sanera ev "[object Object]" + kontext-malltext
         if (updated && typeof updated === "object") sanitizeAiItemInPlace(updated);
+        if (typeof updated === "string") updated = scrubObjectObjectToken(updated);
 
         // Bevara string-items som string om original var string (minimerar modellskift)
         if (typeof original === "string") {
@@ -808,7 +832,7 @@ PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
               (typeof updated.instruction === "string" && updated.instruction) ||
               (typeof updated.prompt === "string" && updated.prompt) ||
               (typeof updated.question === "string" && updated.question) || "";
-            again.block.items[itemIdx] = normStr(txt);
+            again.block.items[itemIdx] = normStr(scrubObjectObjectToken(txt));
           } else {
             return;
           }
@@ -885,20 +909,6 @@ PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
 
     dom && dom.disable && dom.disable(dom.btnModAll, false);
     dom && dom.disable && dom.disable(dom.btnModClear, !writer);
-
-    // P1 (3B): disable editor-inputs i read-only/låst (tydlig fail-closed)
-    const editorDisabled = !writer;
-    dom && dom.disable && dom.disable(dom.mod, editorDisabled);
-    dom && dom.disable && dom.disable(dom.area, editorDisabled);
-    dom && dom.disable && dom.disable(dom.courseTitle, editorDisabled);
-    dom && dom.disable && dom.disable(dom.courseStep, editorDisabled);
-    dom && dom.disable && dom.disable(dom.goalsLevel, editorDisabled);
-    dom && dom.disable && dom.disable(dom.goals, editorDisabled);
-
-    dom && dom.disable && dom.disable(dom.aiContent, editorDisabled);
-    dom && dom.disable && dom.disable(dom.aiCount, editorDisabled);
-    dom && dom.disable && dom.disable(dom.aiQuestionType, editorDisabled);
-    dom && dom.disable && dom.disable(dom.aiFeedbackEnabled, editorDisabled);
 
     setDirty(state.dirty);
   }
@@ -1505,9 +1515,7 @@ PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
       renderAreaDatalist();
       syncDraftTitleFromFields();
 
-      // P1 (3C): i read-only uppdaterar vi UI men markerar inte dirty
-      if (isWriterAllowed()) setDirty(true);
-
+      setDirty(true);
       updateButtons();
       updateDebug();
     };
@@ -1520,7 +1528,7 @@ PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
     dom.on(dom.goalsLevel, "change", function () {
       if (state.draft) {
         syncDraftFromInputs();
-        if (isWriterAllowed()) setDirty(true);
+        setDirty(true);
         updateButtons();
         updateDebug();
       }
@@ -1528,7 +1536,7 @@ PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
     dom.on(dom.goals, "input", function () {
       if (state.draft) {
         syncDraftFromInputs();
-        if (isWriterAllowed()) setDirty(true);
+        setDirty(true);
         updateButtons();
         updateDebug();
       }
@@ -1570,17 +1578,6 @@ PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
     renderChapterAndStepPickers();
 
     state.showAll = false;
-
-    // P0 (3A): auto-välj första training vid boot (så listan inte blir tom)
-    if (!state.selectedId && state.trainings.length) {
-      const first = state.trainings[0];
-      const fid = normStr(first && first.id);
-      if (fid) {
-        state.selectedId = fid;
-        state.draft = deepClone(first);
-        setDirty(false);
-      }
-    }
 
     wireEventsOnce();
 
