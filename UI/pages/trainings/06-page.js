@@ -12,11 +12,9 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.1.1-PP-SC-010-06 (AUTOPATCH):
-- P0 FIX: AI-block: om SDK returnerar blocks[] skapas ALLTID 1 UI-block per blocks[i]
-          (både wrapper-shape {title,items[]} och item-shape {type,...} hanteras).
-- P0 FIX: Debug-box uppdateras (visar sparad data + aktuell draft) via textContent.
-- P1: Sanerar "[object Object]" endast i strängfält som tidigare.
+PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
+- P0 FIX (1A): "Skapa ny" triggar INTE "Visa alla". I läge utan sök + showAll=false
+               visas endast vald (selected) utbildning i vänsterlistan.
 ============================================================ */
 (function () {
   "use strict";
@@ -25,7 +23,7 @@ PATCH v1.1.1-PP-SC-010-06 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.1.1-PP-SC-010-06";
+  page.__VERSION = "v1.1.2-PP-SC-010-06";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -665,6 +663,7 @@ PATCH v1.1.1-PP-SC-010-06 (AUTOPATCH):
     const q = normStr(state.q).toLowerCase();
     const st = normStr(state.fStatus);
     const onlyProb = !!state.onlyProblems;
+    const selectedId = normStr(state.selectedId);
 
     const out = [];
     for (const t of state.trainings) {
@@ -675,7 +674,9 @@ PATCH v1.1.1-PP-SC-010-06 (AUTOPATCH):
         const blob = (normStr(t.title) + " " + normStr(t.module) + " " + normStr(t.area)).toLowerCase();
         if (!blob.includes(q)) continue;
       } else if (!state.showAll) {
-        continue;
+        // P0 (1A): i "inte showAll"-läge och utan sök visar vi endast selected.
+        const tid = normStr(t.id);
+        if (!selectedId || tid !== selectedId) continue;
       }
 
       if (onlyProb) {
@@ -834,7 +835,10 @@ PATCH v1.1.1-PP-SC-010-06 (AUTOPATCH):
       return;
     }
 
-    state.showAll = true;
+    // P0 (1A): Skapa ny ska inte trigga mass-lista.
+    // Vi håller showAll=false och listan visar då endast selected (se visibleTrainings).
+    state.showAll = false;
+
     setDirty(false);
     renderModuleDatalist();
     renderAreaDatalist();
@@ -1064,7 +1068,7 @@ PATCH v1.1.1-PP-SC-010-06 (AUTOPATCH):
 
     if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
       const ctx = DEPS.core.buildAiContext(s) || {};
-      try { ctx.goals = ""; } catch (_) {}
+      try { ctx.goals = ""; } catch (_) { }
       return ctx;
     }
 
@@ -1473,3 +1477,4 @@ PATCH v1.1.1-PP-SC-010-06 (AUTOPATCH):
 
   try { tryBoot(); } catch (_) { setLock("BOOT: exception (fail-closed)."); updateUiAll(); }
 })();
+
