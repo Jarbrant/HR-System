@@ -1,165 +1,195 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-03) | FILE 01/06 | FIL-ID: UI/pages/trainings/01-dom.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-01) | FILE 01/06 | FIL-ID: UI/pages/trainings/01-dom.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: DOM-bindningar + små DOM-helpers för trainings-sidan.
+Syfte: Stabil DOM-bindning + säkra DOM-helpers (textContent, inga innerHTML).
+      Denna fil ska ENBART:
+      - hitta element via id (trainings.html)
+      - erbjuda små helpers: setText/disable/show/hide/on/clear
+      - rapportera missing-id (utan att krascha)
 
 POLICY (LÅST):
-- UI-only • Inga storage-keys
-- XSS-safe rendering: setText använder textContent (ingen innerHTML)
-- Fail-closed: om kritiska DOM-noder saknas exponeras dom.missing[] (page avgör lock)
-
+- UI-only • Fail-closed
+- Ingen storage här
+- Ingen affärslogik här
+- XSS-safe rendering: textContent, inga osäkra innerHTML
 ============================================================ */
 (function () {
   "use strict";
 
   const NS = (window.Trainings = window.Trainings || {});
-  const dom = (NS.dom = NS.dom || {});
-  dom.__VERSION = "v1.0-PP-SC-010-03";
+  if (NS.dom && NS.dom.__VERSION) return;
 
-  // -----------------------------
-  // Helpers
-  // -----------------------------
+  const dom = (NS.dom = NS.dom || {});
+  dom.__VERSION = "v1.0.0-PP-SC-010-01";
+
+  // ------------------------------------------------------------
+  // Core getters
+  // ------------------------------------------------------------
   function byId(id) {
-    return document.getElementById(id);
+    const key = String(id || "");
+    if (!key) return null;
+    return document.getElementById(key);
   }
 
-  function setText(el, txt) {
+  // ------------------------------------------------------------
+  // Safe helpers (XSS-safe: textContent only)
+  // ------------------------------------------------------------
+  dom.setText = function (el, txt) {
     if (!el) return;
     el.textContent = String(txt ?? "");
-  }
+  };
 
-  function disable(el, on) {
+  dom.disable = function (el, disabled) {
     if (!el) return;
-    const v = !!on;
-    el.disabled = v;
-    // UI-konvention: "btn disabled"
-    if (v) el.classList.add("disabled");
-    else el.classList.remove("disabled");
-  }
+    const d = !!disabled;
+    el.disabled = d;
+    try {
+      if (el.classList) el.classList.toggle("disabled", d);
+      if (d) el.setAttribute("aria-disabled", "true");
+      else el.removeAttribute("aria-disabled");
+    } catch (_) {}
+  };
 
-  function on(el, evt, fn, opts) {
-    if (!el || !evt || !fn) return;
-    el.addEventListener(evt, fn, opts || false);
-  }
-
-  function show(el) {
+  dom.show = function (el) {
     if (!el) return;
-    el.hidden = false;
     el.style.display = "";
-    el.classList.remove("hidden");
-  }
+    try { el.removeAttribute("aria-hidden"); } catch (_) {}
+  };
 
-  function hide(el) {
+  dom.hide = function (el) {
     if (!el) return;
-    el.hidden = true;
     el.style.display = "none";
-    el.classList.add("hidden");
-  }
+    try { el.setAttribute("aria-hidden", "true"); } catch (_) {}
+  };
 
-  // Exponera helpers (används av 06-page + 05-render)
-  dom.byId = byId;
-  dom.setText = setText;
-  dom.disable = disable;
-  dom.on = on;
-  dom.show = show;
-  dom.hide = hide;
+  dom.on = function (el, ev, fn, opts) {
+    if (!el || !ev || !fn) return;
+    el.addEventListener(ev, fn, opts || false);
+  };
 
-  // -----------------------------
-  // Bind DOM (IDs måste matcha trainings.html)
-  // -----------------------------
-  // Left/list controls
+  dom.clear = function (el) {
+    if (!el) return;
+    while (el.firstChild) el.removeChild(el.firstChild);
+  };
+
+  dom.make = function (tag, className) {
+    const t = String(tag || "div");
+    const el = document.createElement(t);
+    if (className) el.className = String(className);
+    return el;
+  };
+
+  dom.safeFocus = function (el) {
+    try { el && el.focus && el.focus(); } catch (_) {}
+  };
+
+  // ------------------------------------------------------------
+  // Bind elements (MÅSTE matcha admin/trainings.html)
+  // ------------------------------------------------------------
+  // Topbar / pills
+  dom.contextPill = byId("contextPill");
+  dom.contextText = byId("contextText");
+  dom.statePill = byId("statePill");
+  dom.stateText = byId("stateText");
+  dom.whoPill = byId("whoPill");
+  dom.whoText = byId("whoText");
+
+  // Left / list
   dom.q = byId("q");
   dom.fStatus = byId("fStatus");
   dom.onlyProblems = byId("onlyProblems");
-
   dom.btnShowAll = byId("btnShowAll");
   dom.btnClear = byId("btnClear");
 
-  dom.btnNew = byId("btnNew");
+  dom.leftHint = byId("leftHint");
+  dom.list = byId("list");
+
   dom.btnDelete = byId("btnDelete");
   dom.btnPurge = byId("btnPurge");
+  dom.btnNew = byId("btnNew");
 
-  // Editor: module/area/course
+  // Editor fields
+  dom.btnModAll = byId("btnModAll");
+  dom.btnModClear = byId("btnModClear");
+
+  dom.subjectIdText = byId("subjectIdText");
+  dom.subjectCallout = byId("subjectCallout");
+
   dom.mod = byId("mod");
   dom.area = byId("area");
   dom.modList = byId("modList");
   dom.areaList = byId("areaList");
 
-  dom.btnModAll = byId("btnModAll");
-  dom.btnModClear = byId("btnModClear");
-
   dom.courseTitle = byId("courseTitle");
   dom.courseStep = byId("courseStep");
-
   dom.titleDisplay = byId("titleDisplay");
-  dom.subjectIdText = byId("subjectIdText");
+  dom.courseTouchHint = byId("courseTouchHint");
 
-  // Goals
   dom.goalsLevel = byId("goalsLevel");
   dom.goals = byId("goals");
 
-  // Footer/buttons
-  dom.revertHint = byId("revertHint");
-  dom.btnRevert = byId("btnRevert");
-  dom.btnSaveDraft = byId("btnSaveDraft");
-  dom.btnSavePublish = byId("btnSavePublish");
-
-  // AI
+  // AI controls
   dom.aiContent = byId("aiContent");
   dom.aiCount = byId("aiCount");
-  dom.btnTestAI = byId("btnTestAI");
-  dom.btnGenAI = byId("btnGenAI");
-
   dom.questionControls = byId("questionControls");
   dom.aiQuestionType = byId("aiQuestionType");
   dom.aiFeedbackEnabled = byId("aiFeedbackEnabled");
+  dom.aiHint = byId("aiHint");
 
-  // Topbar
+  // Blocks
+  dom.blocksList = byId("blocksList");
+
+  // Footer buttons
+  dom.btnRevert = byId("btnRevert");
+  dom.revertHint = byId("revertHint");
+
+  dom.btnTestAI = byId("btnTestAI");
+  dom.btnGenAI = byId("btnGenAI");
+
+  dom.btnSaveDraft = byId("btnSaveDraft");
+  dom.btnSavePublish = byId("btnSavePublish");
+
+  // Session / logout
   dom.btnLogout = byId("btnLogout");
 
-  // -----------------------------
-  // Missing map (för tydlig fail-closed)
-  // -----------------------------
-  const required = [
-    ["q", dom.q],
-    ["fStatus", dom.fStatus],
-    ["onlyProblems", dom.onlyProblems],
-    ["btnShowAll", dom.btnShowAll],
-    ["btnClear", dom.btnClear],
-    ["btnNew", dom.btnNew],
-    ["btnDelete", dom.btnDelete],
-    ["btnPurge", dom.btnPurge],
+  // Debug
+  dom.debugBox = byId("debugBox");
+  dom.debugPre = byId("debugPre");
 
-    ["mod", dom.mod],
-    ["area", dom.area],
-    ["modList", dom.modList],
-    ["areaList", dom.areaList],
-    ["btnModAll", dom.btnModAll],
-    ["btnModClear", dom.btnModClear],
-
-    ["courseTitle", dom.courseTitle],
-    ["courseStep", dom.courseStep],
-    ["titleDisplay", dom.titleDisplay],
-    ["subjectIdText", dom.subjectIdText],
-
-    ["goalsLevel", dom.goalsLevel],
-    ["goals", dom.goals],
-
-    ["revertHint", dom.revertHint],
-    ["btnRevert", dom.btnRevert],
-    ["btnSaveDraft", dom.btnSaveDraft],
-    ["btnSavePublish", dom.btnSavePublish],
-
-    ["aiContent", dom.aiContent],
-    ["aiCount", dom.aiCount],
-    ["btnTestAI", dom.btnTestAI],
-    ["btnGenAI", dom.btnGenAI],
-    ["questionControls", dom.questionControls],
-    ["aiQuestionType", dom.aiQuestionType],
-    ["aiFeedbackEnabled", dom.aiFeedbackEnabled],
-
-    ["btnLogout", dom.btnLogout],
+  // ------------------------------------------------------------
+  // Fail-closed diagnostics (utan att krascha)
+  // ------------------------------------------------------------
+  const REQUIRED_IDS = [
+    // Topbar
+    "contextPill","contextText","statePill","stateText","whoPill","whoText",
+    // Left
+    "q","fStatus","onlyProblems","btnShowAll","btnClear","leftHint","list","btnDelete","btnPurge","btnNew",
+    // Editor
+    "btnModAll","btnModClear","subjectIdText","mod","area","modList","areaList",
+    "courseTitle","courseStep","titleDisplay","goalsLevel","goals",
+    // AI
+    "aiContent","aiCount","questionControls","aiQuestionType","aiFeedbackEnabled","aiHint",
+    // Blocks
+    "blocksList",
+    // Footer
+    "btnRevert","revertHint","btnTestAI","btnGenAI","btnSaveDraft","btnSavePublish",
+    // Logout
+    "btnLogout",
+    // Debug
+    "debugBox","debugPre"
   ];
 
-  dom.missing = required.filter((x) => !x[1]).map((x) => x[0]);
+  dom.missing = [];
+  for (let i = 0; i < REQUIRED_IDS.length; i++) {
+    const id = REQUIRED_IDS[i];
+    if (!byId(id)) dom.missing.push(id);
+  }
+
+  dom.isReady = function () {
+    return dom.missing.length === 0;
+  };
+
+  dom.getMissing = function () {
+    return dom.missing.slice();
+  };
 })();
