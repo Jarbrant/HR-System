@@ -12,9 +12,10 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
-- P0 FIX: Sanerar AI-texter som innehåller "[object Object]" vid import + i modal-visning (ingen stringify av objekt, fail-closed).
-- P1: Sanering sker bara på strängfält (text/instruction/question/prompt/explanation/feedback/rationale/reason/title/heading) och lämnar objekt orörda.
+PATCH v1.1.0-PP-SC-010-06 (AUTOPATCH):
+- P0 FIX: Debug-box uppdateras (visar sparad data + aktuell draft) via textContent.
+- P0 FIX: AI-block: om SDK returnerar blocks[] skapas 1 block per block (inte 1 block med alla items).
+- P1: Sanerar "[object Object]" endast i strängfält som tidigare.
 ============================================================ */
 (function () {
   "use strict";
@@ -23,7 +24,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.0.9-PP-SC-010-06";
+  page.__VERSION = "v1.1.0-PP-SC-010-06";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -93,6 +94,10 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
     D.aiQuestionType = byId("aiQuestionType");
     D.aiFeedbackEnabled = byId("aiFeedbackEnabled");
     D.questionControls = byId("questionControls");
+
+    // Debug
+    D.debugBox = byId("debugBox");
+    D.debugPre = byId("debugPre");
 
     // Helpers
     D.setText = function (el, txt) { if (!el) return; el.textContent = String(txt ?? ""); };
@@ -236,7 +241,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
   function scrubObjectObjectToken(s) {
     if (typeof s !== "string") return s;
     if (s.indexOf("[object Object]") === -1) return s;
-    // Exakt token ersätts — vi försöker INTE stringify objekt (risk: stor/konstig payload)
     return s.replace(/\[object Object\]/g, "(kontext dolt)");
   }
 
@@ -265,7 +269,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
   }
 
   function getWhoFresh() {
-    // Fail-closed: om locked/bootPending, behåll SYSTEM_ADMIN.
     try {
       if (DEPS.core && typeof DEPS.core.getWho === "function") {
         const w = DEPS.core.getWho();
@@ -322,6 +325,27 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
   }
 
   // ------------------------------------------------------------
+  // Debug render (P0) — visar vad som faktiskt finns (XSS-safe)
+  // ------------------------------------------------------------
+  function updateDebug() {
+    try {
+      if (!dom || !dom.debugPre || !dom.setText) return;
+      const payload = {
+        version: page.__VERSION,
+        locked: !!state.locked,
+        lockReason: state.lockReason || "",
+        selectedId: state.selectedId || "",
+        draft: state.draft ? state.draft : null,
+        trainingsCount: Array.isArray(state.trainings) ? state.trainings.length : 0,
+        trainings: Array.isArray(state.trainings) ? state.trainings : []
+      };
+      dom.setText(dom.debugPre, JSON.stringify(payload, null, 2));
+    } catch (_) {
+      // fail-closed: skriv inget
+    }
+  }
+
+  // ------------------------------------------------------------
   // Worker SDK init (P0) — självläkande, runtime-only (NO STORAGE)
   // ------------------------------------------------------------
   page.__SDK_INIT_PROMISE = page.__SDK_INIT_PROMISE || null;
@@ -333,7 +357,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
   }
 
   async function ensureSdkReady() {
-    // Fail-closed: inga antaganden, ingen storage
     if (!window.HRWorkerSDK) return { ok: false, error: { code: "SDK_MISSING", message: "HRWorkerSDK saknas" } };
     if (typeof window.HRWorkerSDK.init !== "function") return { ok: false, error: { code: "SDK_NO_INIT", message: "HRWorkerSDK.init saknas" } };
 
@@ -372,7 +395,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
   function isPlainObject(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
 
   function buildDefaultsFromCatalog(cat) {
-    // cat.modules[{label, areas[{label,chapterIds}]}], cat.catalogs.defaultChapterIds + catalogs.chapters
     const out = {
       modules: [],
       areasByModule: {},
@@ -390,7 +412,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
       out.areasByModule[mLabel] = areas;
     }
 
-    // chapters
     const catalogs = isPlainObject(cat && cat.catalogs) ? cat.catalogs : {};
     const chapters = safeArr(catalogs.chapters);
     const defaultIds = safeArr(catalogs.defaultChapterIds);
@@ -407,7 +428,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
       out.chapterLabels = safeArr(state.defaults.chapterLabels);
     }
 
-    // steps
     const steps = safeArr(catalogs.steps);
     if (steps.length) {
       out.steps = steps
@@ -415,7 +435,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
         .filter(x => x.id && x.label);
     }
 
-    // Safety fallback
     if (!out.modules.length) out.modules = safeArr(state.defaults.modules);
     if (!Object.keys(out.areasByModule).length) out.areasByModule = state.defaults.areasByModule;
     if (!out.chapterLabels.length) out.chapterLabels = safeArr(state.defaults.chapterLabels);
@@ -439,7 +458,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
           const json = await res.json();
           if (!json || typeof json !== "object") continue;
 
-          // minimal validation
           if (normStr(json.type) !== "catalog") continue;
           if (!Array.isArray(json.modules)) continue;
 
@@ -447,9 +465,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
           state.defaults = buildDefaultsFromCatalog(json);
           state.catalogStatus = "ok";
           return { ok: true, url };
-        } catch (_) {
-          // try next url
-        }
+        } catch (_) { /* try next */ }
       }
 
       state.catalogStatus = "missing";
@@ -496,10 +512,8 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
     const map = state.defaults && state.defaults.areasByModule ? state.defaults.areasByModule : {};
     if (!isPlainObject(map)) return [];
 
-    // 1) exact key
     if (Array.isArray(map[mod])) return safeArr(map[mod]);
 
-    // 2) case-insensitive match
     const want = lowerKey(mod);
     for (const k of Object.keys(map)) {
       if (lowerKey(k) === want) return safeArr(map[k]);
@@ -539,7 +553,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
     }
   }
 
-  // Kapitel (7) — fungerar för <select> eller <input list="...">
   function ensureDatalistForInput(inputEl, listId) {
     if (!inputEl) return null;
     const tag = String(inputEl.tagName || "").toUpperCase();
@@ -756,6 +769,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
     refreshList();
     fillEditorFromDraft();
     updateButtons();
+    updateDebug(); // P0: alltid uppdatera debug när UI uppdateras
   }
 
   page._recalc = updateUiAll;
@@ -956,7 +970,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
 
     const ta = document.createElement("textarea");
     ta.className = "textarea";
-    // P0: undvik att visa "[object Object]" i editorn
     ta.value = getItemPrimaryTextForEditor(b.items && b.items[0] ? b.items[0] : null);
     wrap.appendChild(ta);
 
@@ -1013,7 +1026,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
   }
 
   function snapshotEditorStateForAi() {
-    // NOTE (LÅST): goals skickas INTE till AI, oavsett vad som står i textarea.
     const module = normStr(dom && dom.mod && dom.mod.value);
     const area = normStr(dom && dom.area && dom.area.value);
     const courseTitle = normStr(dom && dom.courseTitle && dom.courseTitle.value) || "Introduktion";
@@ -1124,6 +1136,15 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
     return { items: [], source: "none" };
   }
 
+  function normalizeItemsArray(itemsIn) {
+    const itemsNorm = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
+      ? itemsIn.map(DEPS.contract.normalizeItem)
+      : itemsIn;
+
+    for (let i = 0; i < itemsNorm.length; i++) sanitizeAiItemInPlace(itemsNorm[i]);
+    return itemsNorm;
+  }
+
   async function generateAi() {
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
@@ -1163,6 +1184,40 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
 
       const raw = await window.HRWorkerSDK.aiGenerate(req);
 
+      // Prefer: om SDK returnerar blocks[] med items => skapa 1 UI-block per SDK-block (P0 FIX)
+      const sdkBlocks = raw && Array.isArray(raw.blocks) ? raw.blocks : null;
+
+      if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
+
+      if (sdkBlocks && sdkBlocks.length && sdkBlocks.every(b => b && Array.isArray(b.items))) {
+        const take = Math.min(sdkBlocks.length, ctl.count || sdkBlocks.length);
+
+        for (let bi = 0; bi < take; bi++) {
+          const b = sdkBlocks[bi];
+          const itemsIn = safeArr(b.items);
+
+          if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
+            const v = DEPS.contract.validateAiResult({ items: itemsIn });
+            if (!v || v.ok !== true) {
+              const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
+              DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
+              DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
+              return;
+            }
+          }
+
+          const itemsNorm = normalizeItemsArray(itemsIn);
+          const title = normStr(b.title) || ("AI-block " + (bi + 1) + " • " + (normStr(state.draft.title) || "(utan titel)"));
+          state.draft.blocks.push({ title: title, items: itemsNorm });
+        }
+
+        setDirty(true);
+        updateUiAll();
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
+        return;
+      }
+
+      // Fallback: äldre/annan shape => behåll tidigare beteende (1 block)
       const norm = (DEPS.core && typeof DEPS.core.normalizeAiResult === "function")
         ? (DEPS.core.normalizeAiResult(raw) || {})
         : (raw && typeof raw === "object" ? raw : {});
@@ -1186,14 +1241,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
         return;
       }
 
-      const itemsNorm = (DEPS.contract && typeof DEPS.contract.normalizeItem === "function")
-        ? itemsIn.map(DEPS.contract.normalizeItem)
-        : itemsIn;
-
-      // P0: sanera "[object Object]" i strängfält innan vi sparar in i draft (påverkar preview + modal)
-      for (let i = 0; i < itemsNorm.length; i++) sanitizeAiItemInPlace(itemsNorm[i]);
-
-      if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
+      const itemsNorm = normalizeItemsArray(itemsIn);
 
       let sdkTitle = "";
       try {
@@ -1206,7 +1254,6 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
 
       setDirty(true);
       updateUiAll();
-
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
     } catch (_) {
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
@@ -1228,7 +1275,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
     dom.on(dom.btnSaveDraft, "click", function () { writeBackDraft("draft"); });
     dom.on(dom.btnSavePublish, "click", function () { writeBackDraft("published"); });
 
-    dom.on(dom.btnShowAll, "click", function () { state.showAll = true; refreshList(); });
+    dom.on(dom.btnShowAll, "click", function () { state.showAll = true; refreshList(); updateDebug(); });
 
     dom.on(dom.btnClear, "click", function () {
       state.q = "";
@@ -1240,6 +1287,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
       state.showAll = false;
       refreshList();
       updateButtons();
+      updateDebug();
     });
 
     dom.on(dom.q, "input", function () {
@@ -1247,6 +1295,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
       state.showAll = state.showAll || !!state.q;
       refreshList();
       updateButtons();
+      updateDebug();
     });
 
     dom.on(dom.fStatus, "change", function () {
@@ -1254,6 +1303,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
       state.showAll = true;
       refreshList();
       updateButtons();
+      updateDebug();
     });
 
     dom.on(dom.onlyProblems, "change", function () {
@@ -1261,6 +1311,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
       state.showAll = true;
       refreshList();
       updateButtons();
+      updateDebug();
     });
 
     dom.on(dom.btnModAll, "click", function () { dom.mod && dom.mod.focus && dom.mod.focus(); });
@@ -1273,6 +1324,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
       syncDraftTitleFromFields();
       setDirty(true);
       updateButtons();
+      updateDebug();
     });
 
     const onEditorChange = function () {
@@ -1281,6 +1333,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
       syncDraftTitleFromFields();
       setDirty(true);
       updateButtons();
+      updateDebug();
     };
 
     dom.on(dom.mod, "input", onEditorChange);
@@ -1293,6 +1346,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
         state.draft.goalsLevel = normStr(dom.goalsLevel && dom.goalsLevel.value);
         setDirty(true);
         updateButtons();
+        updateDebug();
       }
     });
     dom.on(dom.goals, "input", function () {
@@ -1300,6 +1354,7 @@ PATCH v1.0.9-PP-SC-010-06 (AUTOPATCH):
         state.draft.goals = normStr(dom.goals && dom.goals.value);
         setDirty(true);
         updateButtons();
+        updateDebug();
       }
     });
 
