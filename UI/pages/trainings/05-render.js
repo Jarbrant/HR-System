@@ -1,25 +1,24 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-05) | FILE 05/06 | FIL-ID: UI/pages/trainings/05-render.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-07) | FILE 05/06 | FIL-ID: UI/pages/trainings/05-render.js
 Projekt: HR-System (GitHub Pages / UI-only)
 Syfte: Render-layer (XSS-safe) för trainings:
       - pills (who/state/context)
       - left hint + ai hint
       - list-render (vänster)
       - blocks-render (höger)
-      - enkel modal (för 06-page.openModal baseline)
+      - modal: view/edit/delete/save (för item-modal via 06-page)
 
 POLICY (LÅST):
 - UI-only • Fail-closed
 - Inga nya storage-keys
 - XSS-safe: endast textContent (ingen osäker innerHTML)
 - Ingen fetch • ingen worker
-- Read-only respekteras i 06-page (render visar bara)
+- Read-only respekteras (render visar, callbacks hanterar write)
 
-PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
-- P0 FIX: Vänsterkortets meta visar även Kapitel + Steg (courseTitle/courseStep).
-          Format: status • modul • område • kapitel • Steg X (— om saknas)
-- P0: Robust step-formattering (1 -> "Steg 1", "Steg 1" behålls).
-- (Behåller tidigare P0/P1 guards, pluralisering, modal a11y-light)
+PATCH v1.1.0 (PP-SC-010-07) (AUTOPATCH):
+- Modal v2: openItemModal() med view/edit, ta bort, spara (XSS-safe).
+- Blocks: renderBlocksList stöd för onOpenItem/onOpenBlock + klickbara preview-rader.
+- Modal a11y-light: overlay tabIndex + fokus för stabil ESC.
 ============================================================ */
 (function () {
   "use strict";
@@ -28,11 +27,12 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.0.2-PP-SC-010-05";
+  render.__VERSION = "v1.1.0-PP-SC-010-07";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
   function safeArr(a) { return Array.isArray(a) ? a : []; }
+  function isObj(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
 
   // We expect 01-dom to provide dom helpers; fallback to minimal.
   const dom = NS.dom || {
@@ -155,7 +155,7 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
     const mod = normStr(t && t.module) || "—";
     const area = normStr(t && t.area) || "—";
 
-    // P0: Kapitellogik: ta kursfält om de finns (06-page skriver courseTitle/courseStep)
+    // Kapitellogik: ta kursfält om de finns (06-page skriver courseTitle/courseStep)
     const chapter = normStr(t && (t.courseTitle != null ? t.courseTitle : "")) || "—";
     const stepLabel = formatStep(t && (t.courseStep != null ? t.courseStep : ""));
 
@@ -194,7 +194,7 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
     const selectedId = normStr(opts && opts.selectedId);
     const onPick = typeof (opts && opts.onPick) === "function" ? opts.onPick : function () { };
 
-    // P0: om list saknas -> fail-closed (ingen throw)
+    // om list saknas -> fail-closed (ingen throw)
     if (!EL.list) return;
 
     clearChildren(EL.list);
@@ -245,10 +245,15 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
 
   render.renderBlocksList = function (opts) {
     const blocks = safeArr(opts && opts.blocks);
+
     const onEdit = typeof (opts && opts.onEdit) === "function" ? opts.onEdit : null;
     const onDelete = typeof (opts && opts.onDelete) === "function" ? opts.onDelete : null;
 
-    // P0: om blocksList saknas -> fail-closed (ingen throw)
+    // NYTT (PP-SC-010-07): klick för modal
+    const onOpenBlock = typeof (opts && opts.onOpenBlock) === "function" ? opts.onOpenBlock : null;
+    const onOpenItem = typeof (opts && opts.onOpenItem) === "function" ? opts.onOpenItem : null;
+
+    // om blocksList saknas -> fail-closed (ingen throw)
     if (!EL.blocksList) return;
 
     clearChildren(EL.blocksList);
@@ -270,6 +275,24 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
       card.style.background = "var(--card)";
       card.style.boxShadow = "0 2px 10px rgba(17,24,39,.06)";
       card.style.marginBottom = "10px";
+
+      if (onOpenBlock) {
+        card.style.cursor = "pointer";
+        card.setAttribute("role", "button");
+        card.setAttribute("tabindex", "0");
+        card.setAttribute("aria-label", "Öppna block");
+        card.addEventListener("keydown", function (e) {
+          try {
+            if (e && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpenBlock(idx); }
+          } catch (_) { }
+        });
+        card.addEventListener("click", function (e) {
+          // om klick kommer från en knapp, låt knappen styra
+          const tag = String(e && e.target && e.target.tagName || "").toUpperCase();
+          if (tag === "BUTTON") return;
+          onOpenBlock(idx);
+        });
+      }
 
       const h = document.createElement("div");
       h.style.display = "flex";
@@ -333,6 +356,19 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
         row.style.padding = "8px 10px";
         row.style.background = "rgba(17,24,39,.02)";
 
+        if (onOpenItem) {
+          row.style.cursor = "pointer";
+          row.setAttribute("role", "button");
+          row.setAttribute("tabindex", "0");
+          row.setAttribute("aria-label", "Öppna item");
+          row.addEventListener("keydown", function (e) {
+            try {
+              if (e && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onOpenItem(idx, i); }
+            } catch (_) { }
+          });
+          row.addEventListener("click", function (e) { e.stopPropagation(); onOpenItem(idx, i); });
+        }
+
         const a = document.createElement("div");
         a.className = "muted2";
         a.style.textAlign = "left";
@@ -354,7 +390,7 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
   };
 
   // ------------------------------
-  // Modal (baseline)
+  // Modal (core)
   // ------------------------------
   let _modalEl = null;
 
@@ -381,8 +417,11 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
     overlay.setAttribute("aria-modal", "true");
     overlay.setAttribute("aria-label", normStr(title) || "Dialog");
 
+    // P0: gör overlay focusbar så ESC blir stabil även med inputs
+    overlay.tabIndex = -1;
+
     const card = document.createElement("div");
-    card.style.width = "min(720px, 96vw)";
+    card.style.width = "min(820px, 96vw)";
     card.style.maxHeight = "88vh";
     card.style.overflow = "auto";
     card.style.background = "var(--card)";
@@ -460,8 +499,421 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
     document.body.appendChild(overlay);
     _modalEl = overlay;
 
-    // focus "Stäng"
+    // fokus overlay + sen "Stäng"
+    try { overlay.focus(); } catch (_) { }
     try { x.focus && x.focus(); } catch (_) { }
+  };
+
+  // ------------------------------
+  // Modal: Item editor (PP-SC-010-07)
+  // ------------------------------
+  function extractOptions(it) {
+    if (!it) return [];
+    const cand = it.options || it.choices || it.answers || it.alternatives;
+    const arr = safeArr(cand);
+    return arr.map(function (o) {
+      if (typeof o === "string") return { text: normStr(o) };
+      if (isObj(o)) return { text: normStr(o.text || o.label || o.value || "") };
+      return { text: normStr(String(o)) };
+    }).filter(x => x.text);
+  }
+
+  function extractCorrect(it, optList) {
+    const set = new Set();
+
+    const idx = it && (it.correctIndex ?? it.answerIndex ?? it.correctIdx);
+    const idxs = it && (it.correctIndices ?? it.answerIndices ?? it.correctIdxs);
+    const val = it && (it.correctAnswer ?? it.answer ?? it.correct);
+    const vals = it && (it.correctAnswers ?? it.answersCorrect);
+
+    if (typeof idx === "number" && idx >= 0) set.add(String(idx));
+    if (Array.isArray(idxs)) idxs.forEach(i => { if (typeof i === "number" && i >= 0) set.add(String(i)); });
+
+    // värde-matchning
+    function matchValue(v) {
+      const s = normStr(v);
+      if (!s) return;
+      for (let i = 0; i < optList.length; i++) {
+        if (normStr(optList[i].text).toLowerCase() === s.toLowerCase()) set.add(String(i));
+      }
+    }
+    if (typeof val === "string") matchValue(val);
+    if (Array.isArray(vals)) vals.forEach(matchValue);
+
+    return set;
+  }
+
+  function itemKind(it) {
+    const t = normStr(it && it.type).toLowerCase();
+    if (t === "question" || t === "quiz") return "question";
+    return "other";
+  }
+
+  function makeSectionTitle(txt) {
+    const h = document.createElement("div");
+    h.style.fontWeight = "900";
+    h.style.margin = "8px 0 6px";
+    h.textContent = txt;
+    return h;
+  }
+
+  function makeHr() {
+    const hr = document.createElement("div");
+    hr.style.height = "1px";
+    hr.style.background = "var(--line)";
+    hr.style.margin = "12px 0";
+    return hr;
+  }
+
+  // Public API: öppna item-modal (render-only; write sker via callbacks)
+  render.openItemModal = function (opts) {
+    const title = normStr(opts && opts.title) || "Item";
+    const item = (opts && opts.item) ? opts.item : null;
+    const canWrite = !!(opts && opts.canWrite);
+    const onSave = typeof (opts && opts.onSave) === "function" ? opts.onSave : null;
+    const onDelete = typeof (opts && opts.onDelete) === "function" ? opts.onDelete : null;
+
+    // fail-closed om vi inte kan visa item
+    if (!item || (typeof item !== "object" && typeof item !== "string")) {
+      const box = document.createElement("div");
+      box.className = "muted2";
+      box.textContent = "Kan inte visa detta item (okänd shape).";
+      render.openModal(title, box, null);
+      return;
+    }
+
+    const wrap = document.createElement("div");
+    wrap.style.display = "flex";
+    wrap.style.flexDirection = "column";
+    wrap.style.gap = "10px";
+
+    // Action-row (redigera/ta bort)
+    const actionRow = document.createElement("div");
+    actionRow.style.display = "flex";
+    actionRow.style.justifyContent = "flex-end";
+    actionRow.style.gap = "10px";
+    actionRow.style.flexWrap = "wrap";
+
+    const btnEdit = makeBtn("redigera", "Redigera item");
+    btnEdit.style.border = "2px solid #d11";
+    btnEdit.style.color = "#d11";
+    btnEdit.style.background = "transparent";
+    btnEdit.style.padding = "10px 18px";
+    btnEdit.style.borderRadius = "10px";
+
+    const btnDel = makeBtn("ta bort", "Ta bort item");
+    btnDel.style.border = "2px solid #d11";
+    btnDel.style.color = "#d11";
+    btnDel.style.background = "transparent";
+    btnDel.style.padding = "10px 18px";
+    btnDel.style.borderRadius = "10px";
+
+    if (!canWrite) {
+      btnEdit.disabled = true;
+      btnDel.disabled = true;
+      try { btnEdit.setAttribute("aria-disabled", "true"); } catch (_) { }
+      try { btnDel.setAttribute("aria-disabled", "true"); } catch (_) { }
+    }
+
+    actionRow.appendChild(btnEdit);
+    actionRow.appendChild(btnDel);
+
+    // Content area (view/edit)
+    const content = document.createElement("div");
+
+    // state
+    let editMode = false;
+
+    function buildView() {
+      while (content.firstChild) content.removeChild(content.firstChild);
+
+      const kind = itemKind(item);
+
+      // Title line likt exempel: "Exempel – ..."
+      const top = document.createElement("div");
+      top.style.display = "flex";
+      top.style.alignItems = "center";
+      top.style.gap = "10px";
+
+      const icon = document.createElement("span");
+      icon.textContent = "🧪";
+      icon.setAttribute("aria-hidden", "true");
+
+      const h = document.createElement("div");
+      h.style.fontWeight = "900";
+      h.style.fontSize = "20px";
+      h.textContent = title;
+
+      top.appendChild(icon);
+      top.appendChild(h);
+
+      content.appendChild(top);
+
+      if (kind === "question") {
+        const q = document.createElement("div");
+        q.style.marginTop = "8px";
+        q.style.fontWeight = "700";
+        q.textContent = primaryText(item) || "—";
+        content.appendChild(q);
+
+        const optsList = extractOptions(item);
+        const correctSet = extractCorrect(item, optsList);
+
+        const list = document.createElement("div");
+        list.style.marginTop = "10px";
+        list.style.display = "flex";
+        list.style.flexDirection = "column";
+        list.style.gap = "8px";
+
+        if (optsList.length) {
+          for (let i = 0; i < optsList.length; i++) {
+            const row = document.createElement("label");
+            row.style.display = "flex";
+            row.style.alignItems = "center";
+            row.style.gap = "10px";
+
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.disabled = true;
+            cb.checked = correctSet.has(String(i));
+
+            const tx = document.createElement("span");
+            tx.textContent = optsList[i].text;
+
+            row.appendChild(cb);
+            row.appendChild(tx);
+            list.appendChild(row);
+          }
+        } else {
+          const empty = document.createElement("div");
+          empty.className = "muted2";
+          empty.textContent = "Inga svarsalternativ.";
+          list.appendChild(empty);
+        }
+
+        content.appendChild(list);
+
+        content.appendChild(makeHr());
+
+        content.appendChild(makeSectionTitle("Förklaring:"));
+
+        const okLine = document.createElement("div");
+        okLine.style.fontWeight = "900";
+        okLine.textContent = "Rätt!";
+        content.appendChild(okLine);
+
+        const expl = document.createElement("div");
+        expl.className = "muted2";
+        expl.style.textAlign = "left";
+        expl.textContent = normStr(item.explanation || item.feedback || item.rationale || "") || "—";
+        content.appendChild(expl);
+      } else {
+        const info = document.createElement("div");
+        info.style.marginTop = "8px";
+        info.style.fontWeight = "700";
+        info.textContent = primaryText(item) || "(tomt)";
+        content.appendChild(info);
+
+        const hint = document.createElement("div");
+        hint.className = "muted2";
+        hint.style.marginTop = "8px";
+        hint.textContent = "Detta item är inte en frågetyp. (Modal stöder fortfarande redigera/spara av grundtext.)";
+        content.appendChild(hint);
+      }
+    }
+
+    function buildEdit() {
+      while (content.firstChild) content.removeChild(content.firstChild);
+
+      const kind = itemKind(item);
+
+      const top = document.createElement("div");
+      top.style.display = "flex";
+      top.style.alignItems = "center";
+      top.style.justifyContent = "space-between";
+      top.style.gap = "10px";
+      top.style.flexWrap = "wrap";
+
+      const h = document.createElement("div");
+      h.style.fontWeight = "900";
+      h.style.fontSize = "18px";
+      h.textContent = title + " (redigera)";
+      top.appendChild(h);
+
+      const badge = document.createElement("span");
+      badge.className = "pill";
+      badge.style.padding = "5px 9px";
+      badge.style.fontSize = "12px";
+      badge.textContent = kind === "question" ? "Fråga" : "Item";
+      top.appendChild(badge);
+
+      content.appendChild(top);
+
+      content.appendChild(makeSectionTitle("Fråga / text"));
+
+      const taQ = document.createElement("textarea");
+      taQ.className = "textarea";
+      taQ.value = primaryText(item) || "";
+      content.appendChild(taQ);
+
+      let optRows = [];
+      let correctSet = new Set();
+
+      if (kind === "question") {
+        const optsList = extractOptions(item);
+        correctSet = extractCorrect(item, optsList);
+
+        content.appendChild(makeSectionTitle("Svarsalternativ"));
+
+        const wrapOpts = document.createElement("div");
+        wrapOpts.style.display = "flex";
+        wrapOpts.style.flexDirection = "column";
+        wrapOpts.style.gap = "8px";
+
+        if (!optsList.length) {
+          // fail-soft: skapa 2 rader tomma för edit
+          optsList.push({ text: "" }, { text: "" });
+        }
+
+        for (let i = 0; i < optsList.length; i++) {
+          const row = document.createElement("div");
+          row.style.display = "flex";
+          row.style.alignItems = "center";
+          row.style.gap = "10px";
+
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = correctSet.has(String(i));
+
+          const inp = document.createElement("input");
+          inp.type = "text";
+          inp.className = "input";
+          inp.value = normStr(optsList[i].text);
+
+          row.appendChild(cb);
+          row.appendChild(inp);
+          wrapOpts.appendChild(row);
+
+          optRows.push({ cb, inp });
+        }
+
+        content.appendChild(wrapOpts);
+
+        content.appendChild(makeSectionTitle("Förklaring"));
+
+        const taE = document.createElement("textarea");
+        taE.className = "textarea";
+        taE.value = normStr(item.explanation || item.feedback || item.rationale || "");
+        content.appendChild(taE);
+
+        // spara-referenser på wrapper för onSave
+        content.__EDIT_REFS = { kind, taQ, taE, optRows };
+      } else {
+        content.__EDIT_REFS = { kind, taQ, taE: null, optRows: [] };
+      }
+    }
+
+    function toEdit() {
+      if (!canWrite) return;
+      editMode = true;
+      buildEdit();
+    }
+
+    function toView() {
+      editMode = false;
+      buildView();
+    }
+
+    btnEdit.addEventListener("click", function (e) {
+      e && e.preventDefault && e.preventDefault();
+      if (!editMode) toEdit();
+      else toView();
+    });
+
+    btnDel.addEventListener("click", function (e) {
+      e && e.preventDefault && e.preventDefault();
+      if (!canWrite) return;
+      if (!onDelete) return;
+
+      let ok = false;
+      try { ok = window.confirm("Ta bort detta item? Detta sparas först när du sparar utbildningen."); }
+      catch (_) { ok = false; }
+
+      if (!ok) return;
+
+      try { onDelete(); } catch (_) { }
+      // stängs av openModal save/cancel; vi stänger direkt genom att simulera overlay-klick via closeModal
+      try { closeModal(); } catch (_) { }
+    });
+
+    // build initial view
+    wrap.appendChild(actionRow);
+    wrap.appendChild(content);
+    buildView();
+
+    // Spara: vi samlar fält och skickar upp via callback (render gör ingen storage)
+    render.openModal(title, wrap, function () {
+      if (!canWrite) return;
+      if (!onSave) return;
+      if (!editMode) return; // inget att spara i view-läge
+
+      const refs = content.__EDIT_REFS || null;
+      if (!refs || !refs.taQ) return;
+
+      const updated = (isObj(item) ? JSON.parse(JSON.stringify(item)) : { type: "info", text: String(item) });
+
+      // update question/text
+      const qText = normStr(refs.taQ.value || "");
+      if (isObj(updated)) {
+        // skriv tillbaka på befintliga nycklar om möjligt (ingen ny datamodell här)
+        if (typeof updated.question === "string") updated.question = qText;
+        else if (typeof updated.text === "string") updated.text = qText;
+        else if (typeof updated.instruction === "string") updated.instruction = qText;
+        else if (typeof updated.prompt === "string") updated.prompt = qText;
+        else updated.text = qText; // fail-soft
+      }
+
+      if (refs.kind === "question") {
+        const optOut = [];
+        const correctIdxs = [];
+
+        for (let i = 0; i < refs.optRows.length; i++) {
+          const t = normStr(refs.optRows[i].inp.value || "");
+          if (!t) continue;
+          optOut.push(t);
+          if (refs.optRows[i].cb.checked) correctIdxs.push(optOut.length - 1);
+        }
+
+        // options: respektera vanliga nycklar (försök bevara)
+        if (isObj(updated)) {
+          if (Array.isArray(updated.options)) updated.options = optOut;
+          else if (Array.isArray(updated.choices)) updated.choices = optOut;
+          else if (Array.isArray(updated.answers)) updated.answers = optOut;
+          else updated.options = optOut;
+
+          const expl = refs.taE ? normStr(refs.taE.value || "") : "";
+          if (typeof updated.explanation === "string") updated.explanation = expl;
+          else if (typeof updated.feedback === "string") updated.feedback = expl;
+          else updated.explanation = expl;
+
+          // correctness: skriv tillbaka på befintliga nycklar om möjligt
+          if (typeof updated.correctIndex === "number" || updated.correctIndex === null) {
+            updated.correctIndex = correctIdxs.length ? correctIdxs[0] : -1;
+          } else if (Array.isArray(updated.correctIndices)) {
+            updated.correctIndices = correctIdxs;
+          } else if (typeof updated.answerIndex === "number") {
+            updated.answerIndex = correctIdxs.length ? correctIdxs[0] : -1;
+          } else if (Array.isArray(updated.answerIndices)) {
+            updated.answerIndices = correctIdxs;
+          } else {
+            // fail-soft: lägg correctIndices om inget annat finns
+            updated.correctIndices = correctIdxs;
+          }
+        }
+      }
+
+      try { onSave(updated); } catch (_) { }
+    });
   };
 
   // ------------------------------
@@ -477,4 +929,3 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
     }
   };
 })();
-
