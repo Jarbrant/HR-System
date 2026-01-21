@@ -1,5 +1,5 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-07) | FILE 05/06 | FIL-ID: UI/pages/trainings/05-render.js
+AO-TRAININGS-MODULAR-01 (PP-SC-010-08) | FILE 05/06 | FIL-ID: UI/pages/trainings/05-render.js
 Projekt: HR-System (GitHub Pages / UI-only)
 Syfte: Render-layer (XSS-safe) för trainings:
       - pills (who/state/context)
@@ -15,23 +15,22 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras (render visar, callbacks hanterar write)
 
-PATCH v1.1.1 (PP-SC-010-07) (AUTOPATCH):
-- P0: Modal “syns inte” – höjer z-index till max + skapar säker modal-root (append direkt i body).
-- P0: Robust ESC-stängning via window keydown när modal är öppen (fail-soft).
-- P1: Låser body-scroll när modal är öppen (återställer vid stäng).
-- P2: Extra guard/logik för att inte krascha om DOM är i oväntat läge.
+PATCH v1.1.2 (PP-SC-010-08) (AUTOPATCH):
+- P0: “Det händer inget när jag trycker på vänsterkortet” → robust klick via event-delegation på list-container.
+      (Om per-kort listeners blockas av overlay/CSS/omrendering så fångas klick ändå.)
+- P1: Gör kort “button-like” (role, tabindex, Enter/Space) + data-training-id.
+- P2: Fail-soft debug hook (window.__HR_DEBUG_TRAININGS_CLICKS = true).
 
 Ändringslogg (≤8):
-- v1.1.1: modalRoot + zIndex 2147483647
-- v1.1.1: body overflow lock/unlock vid modal
-- v1.1.1: global ESC handler när modal är öppen
-- v1.1.1: fail-soft guards kring append/remove
+- v1.1.2: Event-delegation för trainings-list (click + keydown)
+- v1.1.2: data-training-id på kort + aria/keyboard
+- v1.1.2: Fail-soft debug hook
 Testnoteringar:
-- Klick på preview-rad (“Öppna item”) ska alltid visa modal ovanpå allt.
-- ESC stänger modal även om fokus ligger i input/textarea.
-- Scroll bakom modalen ska vara låst när modal är öppen.
+- Klick på ett kort i vänsterlistan ska alltid trigga onPick(id).
+- Enter/Space på fokuserat kort ska välja.
+- Om klick inte funkar: sätt window.__HR_DEBUG_TRAININGS_CLICKS=true och se console-log “PICK”.
 Risk/edge cases:
-- Om annan kod också manipulerar body overflow kan det bli “toggling” (vi återställer tidigare värde).
+- Om 06-page skickar onPick som inte uppdaterar state korrekt, kommer klick ändå loggas men UI kan förbli oförändrad.
 ============================================================ */
 (function () {
   "use strict";
@@ -40,7 +39,7 @@ Risk/edge cases:
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.1.1-PP-SC-010-07";
+  render.__VERSION = "v1.1.2-PP-SC-010-08";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
@@ -132,8 +131,74 @@ Risk/edge cases:
     return "Steg " + s; // sista fallback
   }
 
-  function makeCardRow(t, selected) {
+  // --- P0: Event-delegation state ---
+  render.__LIST_BOUND = false;
+  render.__listOnPick = null;
+
+  function dbgPick(msg, obj) {
+    try {
+      if (window.__HR_DEBUG_TRAININGS_CLICKS) console.log("[Trainings][PICK]", msg, obj || "");
+    } catch (_) { }
+  }
+
+  function bindListDelegation() {
+    if (render.__LIST_BOUND) return;
+    if (!EL.list) return;
+
+    // CLICK delegation
+    EL.list.addEventListener("click", function (e) {
+      try {
+        const t = e && e.target;
+        if (!t) return;
+        const el = t.closest ? t.closest("[data-training-id]") : null;
+        const id = normStr(el && el.getAttribute && el.getAttribute("data-training-id"));
+        if (!id) return;
+
+        dbgPick("click", { id: id });
+
+        if (typeof render.__listOnPick === "function") {
+          render.__listOnPick(id);
+        }
+      } catch (_) { }
+    }, true);
+
+    // KEY delegation (Enter/Space)
+    EL.list.addEventListener("keydown", function (e) {
+      try {
+        if (!e) return;
+        const k = e.key || e.keyCode;
+        const isActivate = (k === "Enter" || k === " " || k === 13 || k === 32);
+        if (!isActivate) return;
+
+        const t = e.target;
+        const el = t && t.closest ? t.closest("[data-training-id]") : null;
+        const id = normStr(el && el.getAttribute && el.getAttribute("data-training-id"));
+        if (!id) return;
+
+        e.preventDefault && e.preventDefault();
+        dbgPick("keydown", { id: id, key: k });
+
+        if (typeof render.__listOnPick === "function") {
+          render.__listOnPick(id);
+        }
+      } catch (_) { }
+    }, true);
+
+    render.__LIST_BOUND = true;
+  }
+
+  function makeCardRow(t, selected, id) {
     const wrap = document.createElement("div");
+
+    // P1: data + button-semantik
+    const tid = normStr(id || (t && t.id));
+    if (tid) wrap.setAttribute("data-training-id", tid);
+    wrap.setAttribute("role", "button");
+    wrap.setAttribute("tabindex", "0");
+    wrap.setAttribute("aria-label", "Välj utbildning");
+    wrap.style.pointerEvents = "auto";
+    wrap.style.position = "relative";
+
     wrap.style.border = "1px solid var(--line)";
     wrap.style.borderRadius = "14px";
     wrap.style.padding = "10px 10px";
@@ -210,6 +275,10 @@ Risk/edge cases:
     // om list saknas -> fail-closed (ingen throw)
     if (!EL.list) return;
 
+    // P0: bind delegation + spara aktuell onPick (så delegation alltid kan kalla senaste)
+    render.__listOnPick = onPick;
+    bindListDelegation();
+
     clearChildren(EL.list);
 
     if (!items.length) {
@@ -221,13 +290,11 @@ Risk/edge cases:
       return;
     }
 
+    // OBS: vi sätter INGA per-kort click listeners här (delegation tar allt).
+    // Det gör listan robust om klick blockas/stopPropagation sker i child-noder.
     for (const t of items) {
       const id = normStr(t && t.id);
-      const card = makeCardRow(t, id && id === selectedId);
-      card.addEventListener("click", function () {
-        if (!id) return;
-        onPick(id);
-      });
+      const card = makeCardRow(t, id && id === selectedId, id);
       EL.list.appendChild(card);
     }
   };
@@ -262,11 +329,10 @@ Risk/edge cases:
     const onEdit = typeof (opts && opts.onEdit) === "function" ? opts.onEdit : null;
     const onDelete = typeof (opts && opts.onDelete) === "function" ? opts.onDelete : null;
 
-    // NYTT (PP-SC-010-07): klick för modal
+    // klick för modal
     const onOpenBlock = typeof (opts && opts.onOpenBlock) === "function" ? opts.onOpenBlock : null;
     const onOpenItem = typeof (opts && opts.onOpenItem) === "function" ? opts.onOpenItem : null;
 
-    // om blocksList saknas -> fail-closed (ingen throw)
     if (!EL.blocksList) return;
 
     clearChildren(EL.blocksList);
@@ -300,7 +366,6 @@ Risk/edge cases:
           } catch (_) { }
         });
         card.addEventListener("click", function (e) {
-          // om klick kommer från en knapp, låt knappen styra
           const tag = String(e && e.target && e.target.tagName || "").toUpperCase();
           if (tag === "BUTTON") return;
           onOpenBlock(idx);
@@ -353,7 +418,6 @@ Risk/edge cases:
       h.appendChild(right);
       card.appendChild(h);
 
-      // Preview first 1–2 items (XSS-safe)
       const prev = document.createElement("div");
       prev.style.marginTop = "8px";
       prev.style.display = "flex";
@@ -403,14 +467,13 @@ Risk/edge cases:
   };
 
   // ------------------------------
-  // Modal (core)
+  // Modal (core) – oförändrat från v1.1.1
   // ------------------------------
   let _modalEl = null;
   let _modalRoot = null;
   let _prevBodyOverflow = null;
 
   function ensureModalRoot() {
-    // P0: direkt i body, så vi inte hamnar under någon z-index-stapel i en wrapper
     try {
       if (_modalRoot && _modalRoot.parentNode === document.body) return _modalRoot;
       const existing = document.getElementById("hrModalRoot");
@@ -421,7 +484,7 @@ Risk/edge cases:
       const root = document.createElement("div");
       root.id = "hrModalRoot";
       root.style.position = "relative";
-      root.style.zIndex = "2147483647"; // max-ish för att alltid ligga över
+      root.style.zIndex = "2147483647";
       document.body.appendChild(root);
       _modalRoot = root;
       return _modalRoot;
@@ -457,7 +520,6 @@ Risk/edge cases:
     unlockBodyScroll();
   }
 
-  // P0: robust ESC även när fokus “försvinner” eller ligger i inputs
   function onWindowKeydown(e) {
     try {
       if (!_modalEl) return;
@@ -483,14 +545,11 @@ Risk/edge cases:
     overlay.style.alignItems = "center";
     overlay.style.justifyContent = "center";
     overlay.style.padding = "14px";
-    overlay.style.zIndex = "2147483647"; // P0: alltid överst
+    overlay.style.zIndex = "2147483647";
 
-    // a11y-light
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
     overlay.setAttribute("aria-label", normStr(title) || "Dialog");
-
-    // P0: gör overlay focusbar så ESC blir stabil även med inputs
     overlay.tabIndex = -1;
 
     const card = document.createElement("div");
@@ -561,7 +620,6 @@ Risk/edge cases:
       if (e.target === overlay) closeModal();
     });
 
-    // ESC to close (baseline, overlay focus)
     overlay.addEventListener("keydown", function (e) {
       try {
         if (e && (e.key === "Escape" || e.keyCode === 27)) closeModal();
@@ -570,7 +628,6 @@ Risk/edge cases:
 
     overlay.appendChild(card);
 
-    // P0: append via modalRoot (direkt i body)
     const root = ensureModalRoot();
     try {
       if (root) root.appendChild(overlay);
@@ -582,13 +639,12 @@ Risk/edge cases:
     _modalEl = overlay;
     lockBodyScroll();
 
-    // fokus overlay + sen "Stäng"
     try { overlay.focus(); } catch (_) { }
     try { x.focus && x.focus(); } catch (_) { }
   };
 
   // ------------------------------
-  // Modal: Item editor (PP-SC-010-07)
+  // Modal: Item editor (oförändrat)
   // ------------------------------
   function extractOptions(it) {
     if (!it) return [];
@@ -612,7 +668,6 @@ Risk/edge cases:
     if (typeof idx === "number" && idx >= 0) set.add(String(idx));
     if (Array.isArray(idxs)) idxs.forEach(i => { if (typeof i === "number" && i >= 0) set.add(String(i)); });
 
-    // värde-matchning
     function matchValue(v) {
       const s = normStr(v);
       if (!s) return;
@@ -648,7 +703,6 @@ Risk/edge cases:
     return hr;
   }
 
-  // Public API: öppna item-modal (render-only; write sker via callbacks)
   render.openItemModal = function (opts) {
     const title = normStr(opts && opts.title) || "Item";
     const item = (opts && opts.item) ? opts.item : null;
@@ -656,7 +710,6 @@ Risk/edge cases:
     const onSave = typeof (opts && opts.onSave) === "function" ? opts.onSave : null;
     const onDelete = typeof (opts && opts.onDelete) === "function" ? opts.onDelete : null;
 
-    // fail-closed om vi inte kan visa item
     if (!item || (typeof item !== "object" && typeof item !== "string")) {
       const box = document.createElement("div");
       box.className = "muted2";
@@ -670,7 +723,6 @@ Risk/edge cases:
     wrap.style.flexDirection = "column";
     wrap.style.gap = "10px";
 
-    // Action-row (redigera/ta bort)
     const actionRow = document.createElement("div");
     actionRow.style.display = "flex";
     actionRow.style.justifyContent = "flex-end";
@@ -701,10 +753,7 @@ Risk/edge cases:
     actionRow.appendChild(btnEdit);
     actionRow.appendChild(btnDel);
 
-    // Content area (view/edit)
     const content = document.createElement("div");
-
-    // state
     let editMode = false;
 
     function buildView() {
@@ -712,7 +761,6 @@ Risk/edge cases:
 
       const kind = itemKind(item);
 
-      // Title line likt exempel: "Exempel – ..."
       const top = document.createElement("div");
       top.style.display = "flex";
       top.style.alignItems = "center";
@@ -729,7 +777,6 @@ Risk/edge cases:
 
       top.appendChild(icon);
       top.appendChild(h);
-
       content.appendChild(top);
 
       if (kind === "question") {
@@ -775,9 +822,7 @@ Risk/edge cases:
         }
 
         content.appendChild(list);
-
         content.appendChild(makeHr());
-
         content.appendChild(makeSectionTitle("Förklaring:"));
 
         const okLine = document.createElement("div");
@@ -831,7 +876,6 @@ Risk/edge cases:
       top.appendChild(badge);
 
       content.appendChild(top);
-
       content.appendChild(makeSectionTitle("Fråga / text"));
 
       const taQ = document.createElement("textarea");
@@ -840,8 +884,11 @@ Risk/edge cases:
       content.appendChild(taQ);
 
       let optRows = [];
+
       if (kind === "question") {
         const optsList = extractOptions(item);
+        const correctSet = extractCorrect(item, optsList);
+
         content.appendChild(makeSectionTitle("Svarsalternativ"));
 
         const wrapOpts = document.createElement("div");
@@ -849,12 +896,7 @@ Risk/edge cases:
         wrapOpts.style.flexDirection = "column";
         wrapOpts.style.gap = "8px";
 
-        if (!optsList.length) {
-          // fail-soft: skapa 2 rader tomma för edit
-          optsList.push({ text: "" }, { text: "" });
-        }
-
-        const correctSet = extractCorrect(item, optsList);
+        if (!optsList.length) optsList.push({ text: "" }, { text: "" });
 
         for (let i = 0; i < optsList.length; i++) {
           const row = document.createElement("div");
@@ -887,7 +929,6 @@ Risk/edge cases:
         taE.value = normStr(item.explanation || item.feedback || item.rationale || "");
         content.appendChild(taE);
 
-        // spara-referenser på wrapper för onSave
         content.__EDIT_REFS = { kind, taQ, taE, optRows };
       } else {
         content.__EDIT_REFS = { kind, taQ, taE: null, optRows: [] };
@@ -926,31 +967,27 @@ Risk/edge cases:
       try { closeModal(); } catch (_) { }
     });
 
-    // build initial view
     wrap.appendChild(actionRow);
     wrap.appendChild(content);
     buildView();
 
-    // Spara: vi samlar fält och skickar upp via callback (render gör ingen storage)
     render.openModal(title, wrap, function () {
       if (!canWrite) return;
       if (!onSave) return;
-      if (!editMode) return; // inget att spara i view-läge
+      if (!editMode) return;
 
       const refs = content.__EDIT_REFS || null;
       if (!refs || !refs.taQ) return;
 
       const updated = (isObj(item) ? JSON.parse(JSON.stringify(item)) : { type: "info", text: String(item) });
 
-      // update question/text
       const qText = normStr(refs.taQ.value || "");
       if (isObj(updated)) {
-        // skriv tillbaka på befintliga nycklar om möjligt (ingen ny datamodell här)
         if (typeof updated.question === "string") updated.question = qText;
         else if (typeof updated.text === "string") updated.text = qText;
         else if (typeof updated.instruction === "string") updated.instruction = qText;
         else if (typeof updated.prompt === "string") updated.prompt = qText;
-        else updated.text = qText; // fail-soft
+        else updated.text = qText;
       }
 
       if (refs.kind === "question") {
@@ -964,7 +1001,6 @@ Risk/edge cases:
           if (refs.optRows[i].cb.checked) correctIdxs.push(optOut.length - 1);
         }
 
-        // options: respektera vanliga nycklar (försök bevara)
         if (isObj(updated)) {
           if (Array.isArray(updated.options)) updated.options = optOut;
           else if (Array.isArray(updated.choices)) updated.choices = optOut;
@@ -976,7 +1012,6 @@ Risk/edge cases:
           else if (typeof updated.feedback === "string") updated.feedback = expl;
           else updated.explanation = expl;
 
-          // correctness: skriv tillbaka på befintliga nycklar om möjligt
           if (typeof updated.correctIndex === "number" || updated.correctIndex === null) {
             updated.correctIndex = correctIdxs.length ? correctIdxs[0] : -1;
           } else if (Array.isArray(updated.correctIndices)) {
@@ -986,7 +1021,6 @@ Risk/edge cases:
           } else if (Array.isArray(updated.answerIndices)) {
             updated.answerIndices = correctIdxs;
           } else {
-            // fail-soft: lägg correctIndices om inget annat finns
             updated.correctIndices = correctIdxs;
           }
         }
