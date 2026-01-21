@@ -14,9 +14,9 @@ POLICY (LÅST):
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
 PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
-- P0: Fail-closed “transaktionellt” UI vid save-fel (create + writeBack återställer state).
-- P1: courseTitle/courseStep: input-event stöd för datalist inputs (snabbare title-sync).
-- P2: selectTraining: tar bort redundant area-datalist refresh före fill (minskar blink/mismatch).
+- P0 FIX (2C): renderBlocksList förväntar sig opts.onOpenBlock → skicka NO-OP för att undvika crash.
+- P0 FIX (2D): Boot dead-state (showAll=false + selectedId tom) → auto-välj första training efter load.
+- Behåller P0 2A/2B/A från v1.2.2: ingen auto-modal vid select, stäng modal vid byte, scrub kontext-boilerplate.
 ============================================================ */
 (function () {
   "use strict";
@@ -885,9 +885,10 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       onDelete: function (idx) { deleteBlock(idx); },
 
       // PP-SC-010-07: klickbara previews öppnar item-modal
-      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); }
+      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); },
 
-      // OBS: vi skickar INTE onOpenBlock längre (var "valfritt" och kunde triggas automatiskt)
+      // P0 FIX (2C): vissa render-versioner kräver denna callback -> NO-OP (ingen auto-modal)
+      onOpenBlock: function () { /* NO-OP */ }
     });
   }
 
@@ -950,8 +951,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     state.selectedId = normStr(id);
     state.draft = deepClone(state.trainings[idx]);
     setDirty(false);
-
-    // P2: area-datalist fylls korrekt i fillEditorFromDraft efter att mod satts
+    renderAreaDatalist();
     updateUiAll();
   }
 
@@ -982,13 +982,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
   function createNewTraining() {
     if (!isWriterAllowed()) return;
 
-    // P0: transaktionellt UI — om save failar, återställ allt vi muterat
-    const prevTrainings = deepClone(state.trainings);
-    const prevSelectedId = state.selectedId;
-    const prevDraft = deepClone(state.draft);
-    const prevShowAll = !!state.showAll;
-    const prevDirty = !!state.dirty;
-
     const t = newTrainingTemplate();
     state.trainings.unshift(t);
     state.selectedId = t.id;
@@ -996,18 +989,12 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
     const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
-      state.trainings = prevTrainings;
-      state.selectedId = prevSelectedId;
-      state.draft = prevDraft;
-      state.showAll = prevShowAll;
-      setDirty(prevDirty);
-
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-      updateUiAll();
       return;
     }
 
     // P0 (1A): Skapa ny ska inte trigga mass-lista.
+    // Vi håller showAll=false och listan visar då endast selected (se visibleTrainings).
     state.showAll = false;
 
     setDirty(false);
@@ -1024,22 +1011,10 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     const idx = findTrainingIndexById(state.selectedId);
     if (idx < 0) return;
 
-    // transaktionellt
-    const prevTrainings = deepClone(state.trainings);
-    const prevSelectedId = state.selectedId;
-    const prevDraft = deepClone(state.draft);
-    const prevDirty = !!state.dirty;
-
     state.trainings.splice(idx, 1);
     const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
-      state.trainings = prevTrainings;
-      state.selectedId = prevSelectedId;
-      state.draft = prevDraft;
-      setDirty(prevDirty);
-
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-      updateUiAll();
       return;
     }
 
@@ -1115,15 +1090,11 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       return;
     }
 
-    // P0: transaktionellt — spara föregående om save misslyckas
-    const prev = deepClone(state.trainings[idx]);
     state.trainings[idx] = deepClone(state.draft);
 
     const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
-      state.trainings[idx] = prev; // återställ
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-      updateUiAll();
       return;
     }
 
@@ -1549,12 +1520,8 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
     dom.on(dom.mod, "input", onEditorChange);
     dom.on(dom.area, "input", onEditorChange);
-
-    // SELECT: change, INPUT: både input+change (P1)
     dom.on(dom.courseTitle, "change", onEditorChange);
     dom.on(dom.courseStep, "change", onEditorChange);
-    dom.on(dom.courseTitle, "input", onEditorChange);
-    dom.on(dom.courseStep, "input", onEditorChange);
 
     dom.on(dom.goalsLevel, "change", function () {
       if (state.draft) {
@@ -1602,6 +1569,15 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     } else {
       state.trainings = safeArr(load.trainings);
       clearLock();
+    }
+
+    // P0 FIX (2D): undvik dead-state (showAll=false + selectedId tom => tom vänsterlista)
+    if (!state.locked && !state.selectedId && Array.isArray(state.trainings) && state.trainings.length) {
+      const firstId = normStr(state.trainings[0] && state.trainings[0].id);
+      if (firstId) {
+        state.selectedId = firstId;
+        state.draft = deepClone(state.trainings[0]);
+      }
     }
 
     renderModuleDatalist();
