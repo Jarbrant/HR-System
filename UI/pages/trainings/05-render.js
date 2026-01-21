@@ -15,21 +15,28 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras (render visar, callbacks hanterar write)
 
-PATCH v1.1.2 (PP-SC-010-08) (AUTOPATCH):
+PATCH v1.1.3 (PP-SC-010-08B) (AUTOPATCH):
 - P0: “Det händer inget när jag trycker på vänsterkortet” → robust klick via event-delegation på list-container.
-      (Om per-kort listeners blockas av overlay/CSS/omrendering så fångas klick ändå.)
 - P1: Gör kort “button-like” (role, tabindex, Enter/Space) + data-training-id.
-- P2: Fail-soft debug hook (window.__HR_DEBUG_TRAININGS_CLICKS = true).
+- P1: Aria-label förbättras (inkl titel) för bättre a11y.
+- P0 (2B stöd): Exponera render.closeItemModal()/hideItemModal() som fail-soft wrapper till modal close
+               så 06-page kan stänga öppen modal vid byte av utbildning.
 
 Ändringslogg (≤8):
 - v1.1.2: Event-delegation för trainings-list (click + keydown)
 - v1.1.2: data-training-id på kort + aria/keyboard
 - v1.1.2: Fail-soft debug hook
+- v1.1.3: render.closeItemModal/hideItemModal (stöd för 06-page P0 2B)
+- v1.1.3: aria-label inkluderar titel (a11y)
+
 Testnoteringar:
 - Klick på ett kort i vänsterlistan ska alltid trigga onPick(id).
 - Enter/Space på fokuserat kort ska välja.
 - Om klick inte funkar: sätt window.__HR_DEBUG_TRAININGS_CLICKS=true och se console-log “PICK”.
+- Vid byte av utbildning ska ev. öppen modal kunna stängas av 06-page via render.closeItemModal().
+
 Risk/edge cases:
+- closeItemModal stänger “den aktiva modalen” (generell). Om någon annan modal är öppen vid selectTraining stängs den också.
 - Om 06-page skickar onPick som inte uppdaterar state korrekt, kommer klick ändå loggas men UI kan förbli oförändrad.
 ============================================================ */
 (function () {
@@ -39,7 +46,7 @@ Risk/edge cases:
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.1.2-PP-SC-010-08";
+  render.__VERSION = "v1.1.3-PP-SC-010-08B";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
@@ -195,7 +202,10 @@ Risk/edge cases:
     if (tid) wrap.setAttribute("data-training-id", tid);
     wrap.setAttribute("role", "button");
     wrap.setAttribute("tabindex", "0");
-    wrap.setAttribute("aria-label", "Välj utbildning");
+
+    const tTitle = normStr(t && t.title) || "(utan titel)";
+    wrap.setAttribute("aria-label", "Välj utbildning: " + tTitle);
+
     wrap.style.pointerEvents = "auto";
     wrap.style.position = "relative";
 
@@ -222,7 +232,7 @@ Risk/edge cases:
 
     const title = document.createElement("div");
     title.style.fontWeight = "900";
-    title.textContent = normStr(t && t.title) || "(utan titel)";
+    title.textContent = tTitle;
     left.appendChild(title);
 
     const meta = document.createElement("div");
@@ -291,7 +301,6 @@ Risk/edge cases:
     }
 
     // OBS: vi sätter INGA per-kort click listeners här (delegation tar allt).
-    // Det gör listan robust om klick blockas/stopPropagation sker i child-noder.
     for (const t of items) {
       const id = normStr(t && t.id);
       const card = makeCardRow(t, id && id === selectedId, id);
@@ -467,7 +476,7 @@ Risk/edge cases:
   };
 
   // ------------------------------
-  // Modal (core) – oförändrat från v1.1.1
+  // Modal (core)
   // ------------------------------
   let _modalEl = null;
   let _modalRoot = null;
@@ -519,6 +528,10 @@ Risk/edge cases:
     _modalEl = null;
     unlockBodyScroll();
   }
+
+  // P0 (2B stöd): Exponera fail-soft stängning så 06-page kan stänga modal vid byte
+  render.closeItemModal = function () { try { closeModal(); } catch (_) { } };
+  render.hideItemModal = function () { try { closeModal(); } catch (_) { } };
 
   function onWindowKeydown(e) {
     try {
