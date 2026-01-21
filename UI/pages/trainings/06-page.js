@@ -13,11 +13,11 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.2.1-PP-SC-010-07A (AUTOPATCH):
-- P0 FIX (2A): Val av utbildning i vänsterlistan ska INTE auto-öppna item-modal.
-               Endast klick på item-preview i blockslistan (höger) öppnar modal.
-               (Vi tar bort onOpenBlock-handling som kunde triggas automatiskt av rendern.)
-- P0 FIX (2B): Vid byte av utbildning stänger vi ev. öppen item-modal om render erbjuder close/hide.
+PATCH v1.2.2-PP-SC-010-07B (AUTOPATCH):
+- P0 FIX (3A): Vid boot: om trainings finns och ingen selection är satt -> auto-välj första utbildningen
+              (så vänsterlistan inte blir tom i search-first läge).
+- P1 FIX (3B): Read-only: disable editor-inputs (mod/area/kapitel/steg/mål/AI-controls) så UI är tydligt fail-closed.
+- P1 FIX (3C): Read-only: editor-change uppdaterar titel/preview men sätter inte dirty.
 ============================================================ */
 (function () {
   "use strict";
@@ -26,7 +26,7 @@ PATCH v1.2.1-PP-SC-010-07A (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.2.1-PP-SC-010-07A";
+  page.__VERSION = "v1.2.2-PP-SC-010-07B";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -886,6 +886,20 @@ PATCH v1.2.1-PP-SC-010-07A (AUTOPATCH):
     dom && dom.disable && dom.disable(dom.btnModAll, false);
     dom && dom.disable && dom.disable(dom.btnModClear, !writer);
 
+    // P1 (3B): disable editor-inputs i read-only/låst (tydlig fail-closed)
+    const editorDisabled = !writer;
+    dom && dom.disable && dom.disable(dom.mod, editorDisabled);
+    dom && dom.disable && dom.disable(dom.area, editorDisabled);
+    dom && dom.disable && dom.disable(dom.courseTitle, editorDisabled);
+    dom && dom.disable && dom.disable(dom.courseStep, editorDisabled);
+    dom && dom.disable && dom.disable(dom.goalsLevel, editorDisabled);
+    dom && dom.disable && dom.disable(dom.goals, editorDisabled);
+
+    dom && dom.disable && dom.disable(dom.aiContent, editorDisabled);
+    dom && dom.disable && dom.disable(dom.aiCount, editorDisabled);
+    dom && dom.disable && dom.disable(dom.aiQuestionType, editorDisabled);
+    dom && dom.disable && dom.disable(dom.aiFeedbackEnabled, editorDisabled);
+
     setDirty(state.dirty);
   }
 
@@ -1491,7 +1505,9 @@ PATCH v1.2.1-PP-SC-010-07A (AUTOPATCH):
       renderAreaDatalist();
       syncDraftTitleFromFields();
 
-      setDirty(true);
+      // P1 (3C): i read-only uppdaterar vi UI men markerar inte dirty
+      if (isWriterAllowed()) setDirty(true);
+
       updateButtons();
       updateDebug();
     };
@@ -1504,7 +1520,7 @@ PATCH v1.2.1-PP-SC-010-07A (AUTOPATCH):
     dom.on(dom.goalsLevel, "change", function () {
       if (state.draft) {
         syncDraftFromInputs();
-        setDirty(true);
+        if (isWriterAllowed()) setDirty(true);
         updateButtons();
         updateDebug();
       }
@@ -1512,7 +1528,7 @@ PATCH v1.2.1-PP-SC-010-07A (AUTOPATCH):
     dom.on(dom.goals, "input", function () {
       if (state.draft) {
         syncDraftFromInputs();
-        setDirty(true);
+        if (isWriterAllowed()) setDirty(true);
         updateButtons();
         updateDebug();
       }
@@ -1554,6 +1570,17 @@ PATCH v1.2.1-PP-SC-010-07A (AUTOPATCH):
     renderChapterAndStepPickers();
 
     state.showAll = false;
+
+    // P0 (3A): auto-välj första training vid boot (så listan inte blir tom)
+    if (!state.selectedId && state.trainings.length) {
+      const first = state.trainings[0];
+      const fid = normStr(first && first.id);
+      if (fid) {
+        state.selectedId = fid;
+        state.draft = deepClone(first);
+        setDirty(false);
+      }
+    }
 
     wireEventsOnce();
 
