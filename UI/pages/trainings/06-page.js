@@ -12,9 +12,12 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
+PATCH v1.1.3-PP-SC-010-06 (AUTOPATCH):
 - P0 FIX (1A): "Skapa ny" triggar INTE "Visa alla". I läge utan sök + showAll=false
                visas endast vald (selected) utbildning i vänsterlistan.
+- P0 FIX (1B): Modul/Område/Kapitel/Steg tappades vid async UI-refresh (t.ex. när catalog laddas),
+               eftersom draft inte uppdaterades vid input/val. Nu synkas draft alltid från inputs
+               vid editor-change och innan save => värden sparas korrekt till AO-057_TRAININGS_V1.
 ============================================================ */
 (function () {
   "use strict";
@@ -23,7 +26,7 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.1.2-PP-SC-010-06";
+  page.__VERSION = "v1.1.3-PP-SC-010-06";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -321,6 +324,30 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
   function clearLock() {
     state.locked = false;
     state.lockReason = "";
+  }
+
+  // ------------------------------------------------------------
+  // P0 (1B): Synka draft från inputs så async refresh inte nollställer fält
+  // ------------------------------------------------------------
+  function parseCourseStep(rawVal) {
+    const raw = normStr(rawVal);
+    if (!raw) return "1";
+    const m = raw.match(/(\d+)/);
+    return m ? String(m[1]) : (raw || "1");
+  }
+
+  function syncDraftFromInputs() {
+    if (!state.draft) return;
+
+    // OBS: vi rör bara metadatafält; blocks hanteras separat
+    if (dom && dom.mod) state.draft.module = normStr(dom.mod.value);
+    if (dom && dom.area) state.draft.area = normStr(dom.area.value);
+
+    if (dom && dom.courseTitle) state.draft.courseTitle = normStr(dom.courseTitle.value) || "Introduktion";
+    if (dom && dom.courseStep) state.draft.courseStep = parseCourseStep(dom.courseStep.value);
+
+    if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value) || "normal";
+    if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
   }
 
   // ------------------------------------------------------------
@@ -638,7 +665,7 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
     if (!state.draft) return;
 
     const chapter = normStr(dom.courseTitle && dom.courseTitle.value) || normStr(state.draft.courseTitle) || "Introduktion";
-    const step = normStr(dom.courseStep && dom.courseStep.value) || normStr(state.draft.courseStep) || "1";
+    const step = parseCourseStep(dom.courseStep && dom.courseStep.value) || normStr(state.draft.courseStep) || "1";
     const area = normStr(dom.area && dom.area.value) || normStr(state.draft.area) || "—";
 
     if (DEPS.core && typeof DEPS.core.composeTitle === "function") {
@@ -902,16 +929,8 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
 
-    if (dom && dom.mod) state.draft.module = normStr(dom.mod.value);
-    if (dom && dom.area) state.draft.area = normStr(dom.area.value);
-    if (dom && dom.courseTitle) state.draft.courseTitle = normStr(dom.courseTitle.value) || "Introduktion";
-    if (dom && dom.courseStep) {
-      const raw = normStr(dom.courseStep.value);
-      const m = raw.match(/(\d+)/);
-      state.draft.courseStep = m ? String(m[1]) : (raw || "1");
-    }
-    if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value);
-    if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
+    // P0 (1B): alltid synka draft från inputs precis före save
+    syncDraftFromInputs();
 
     syncDraftTitleFromFields();
     state.draft.status = (status === "published") ? "published" : "draft";
@@ -1043,14 +1062,7 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
     const module = normStr(dom && dom.mod && dom.mod.value);
     const area = normStr(dom && dom.area && dom.area.value);
     const courseTitle = normStr(dom && dom.courseTitle && dom.courseTitle.value) || "Introduktion";
-
-    let courseStep = "1";
-    if (dom && dom.courseStep) {
-      const raw = normStr(dom.courseStep.value);
-      const m = raw.match(/(\d+)/);
-      courseStep = m ? String(m[1]) : (raw || "1");
-    }
-
+    const courseStep = parseCourseStep(dom && dom.courseStep && dom.courseStep.value);
     const goalsLevel = normStr(dom && dom.goalsLevel && dom.goalsLevel.value) || "normal";
 
     return {
@@ -1352,6 +1364,7 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
       if (dom.mod) dom.mod.value = "";
       if (dom.area) dom.area.value = "";
       renderAreaDatalist();
+      syncDraftFromInputs();
       syncDraftTitleFromFields();
       setDirty(true);
       updateButtons();
@@ -1360,8 +1373,13 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
 
     const onEditorChange = function () {
       if (!state.draft) return;
+
+      // P0 (1B): synka draft direkt när användaren ändrar inputs
+      syncDraftFromInputs();
+
       renderAreaDatalist();
       syncDraftTitleFromFields();
+
       setDirty(true);
       updateButtons();
       updateDebug();
@@ -1374,7 +1392,7 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
 
     dom.on(dom.goalsLevel, "change", function () {
       if (state.draft) {
-        state.draft.goalsLevel = normStr(dom.goalsLevel && dom.goalsLevel.value);
+        syncDraftFromInputs();
         setDirty(true);
         updateButtons();
         updateDebug();
@@ -1382,7 +1400,7 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
     });
     dom.on(dom.goals, "input", function () {
       if (state.draft) {
-        state.draft.goals = normStr(dom.goals && dom.goals.value);
+        syncDraftFromInputs();
         setDirty(true);
         updateButtons();
         updateDebug();
@@ -1444,6 +1462,10 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
           renderModuleDatalist();
           renderAreaDatalist();
           renderChapterAndStepPickers();
+
+          // P0 (1B): om användaren redan börjat skriva – behåll inputs genom draft-sync
+          syncDraftFromInputs();
+
           updateUiAll();
         } else {
           updateUiAll();
@@ -1477,4 +1499,3 @@ PATCH v1.1.2-PP-SC-010-06 (AUTOPATCH):
 
   try { tryBoot(); } catch (_) { setLock("BOOT: exception (fail-closed)."); updateUiAll(); }
 })();
-
