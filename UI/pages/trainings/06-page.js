@@ -13,14 +13,11 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.2.0-PP-SC-010-07 (AUTOPATCH):
-- P0 FIX (1A): "Skapa ny" triggar INTE "Visa alla". I läge utan sök + showAll=false
-               visas endast vald (selected) utbildning i vänsterlistan.
-- P0 FIX (1B): Modul/Område/Kapitel/Steg tappades vid async UI-refresh (t.ex. när catalog laddas),
-               eftersom draft inte uppdaterades vid input/val. Nu synkas draft alltid från inputs
-               vid editor-change och innan save => värden sparas korrekt till AO-057_TRAININGS_V1.
-- P0 (PP-SC-010-07): Klick på blockets item-preview öppnar item-modal (view/edit).
-                     Spara/Ta bort sker via callbacks som uppdaterar draft + dirty (ingen storage här).
+PATCH v1.2.1-PP-SC-010-07A (AUTOPATCH):
+- P0 FIX (2A): Val av utbildning i vänsterlistan ska INTE auto-öppna item-modal.
+               Endast klick på item-preview i blockslistan (höger) öppnar modal.
+               (Vi tar bort onOpenBlock-handling som kunde triggas automatiskt av rendern.)
+- P0 FIX (2B): Vid byte av utbildning stänger vi ev. öppen item-modal om render erbjuder close/hide.
 ============================================================ */
 (function () {
   "use strict";
@@ -29,7 +26,7 @@ PATCH v1.2.0-PP-SC-010-07 (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.2.0-PP-SC-010-07";
+  page.__VERSION = "v1.2.1-PP-SC-010-07A";
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -265,9 +262,9 @@ PATCH v1.2.0-PP-SC-010-07 (AUTOPATCH):
       if (!it || typeof it !== "object") return "";
       const cand = (typeof it.text === "string" && it.text) ? it.text
         : (typeof it.instruction === "string" && it.instruction) ? it.instruction
-        : (typeof it.prompt === "string" && it.prompt) ? it.prompt
-        : (typeof it.question === "string" && it.question) ? it.question
-        : "";
+          : (typeof it.prompt === "string" && it.prompt) ? it.prompt
+            : (typeof it.question === "string" && it.question) ? it.question
+              : "";
       return scrubObjectObjectToken(String(cand || ""));
     } catch (_) {
       return "";
@@ -858,23 +855,18 @@ PATCH v1.2.0-PP-SC-010-07 (AUTOPATCH):
     syncDraftTitleFromFields();
 
     const blocks = currentBlocks();
+
+    // P0 FIX (2A): renderBlocksList får INTE auto-öppna något item/block.
+    // Endast explicita item-klick (onOpenItem) ska öppna item-modal.
     DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
       blocks,
       onEdit: function (idx) { openBlockEditor(idx); },
       onDelete: function (idx) { deleteBlock(idx); },
 
       // PP-SC-010-07: klickbara previews öppnar item-modal
-      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); },
+      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); }
 
-      // valfritt: klick på blockkort öppnar första item om finns
-      onOpenBlock: function (bIdx) {
-        try {
-          const bb = blocks && blocks[bIdx];
-          const items = bb && Array.isArray(bb.items) ? bb.items : [];
-          if (!items.length) return;
-          openItemModal(bIdx, 0);
-        } catch (_) { }
-      }
+      // OBS: vi skickar INTE onOpenBlock längre (var "valfritt" och kunde triggas automatiskt)
     });
   }
 
@@ -912,7 +904,19 @@ PATCH v1.2.0-PP-SC-010-07 (AUTOPATCH):
   // ------------------------------------------------------------
   // Selection / CRUD
   // ------------------------------------------------------------
+  function tryCloseItemModal() {
+    try {
+      if (!DEPS.render) return;
+      if (typeof DEPS.render.closeItemModal === "function") { DEPS.render.closeItemModal(); return; }
+      if (typeof DEPS.render.hideItemModal === "function") { DEPS.render.hideItemModal(); return; }
+      if (typeof DEPS.render.closeModal === "function") { /* kan vara generell modal, men stäng inte allt här */ }
+    } catch (_) { /* ignore */ }
+  }
+
   function selectTraining(id) {
+    // P0 (2B): stäng ev. öppen item-modal vid byte av utbildning
+    tryCloseItemModal();
+
     const idx = findTrainingIndexById(id);
     if (idx < 0) {
       state.selectedId = "";
