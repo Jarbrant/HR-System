@@ -16,9 +16,10 @@ POLICY (LÅST):
 - Read-only respekteras i 06-page (render visar bara)
 
 PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
-- P0: Listkort meta visar: status • modul • område • kapitel • steg (fail-soft "—").
-- P1: Fallback-titel i listan om t.title saknas: courseTitle • Steg X • area.
-- Behåller v1.0.1-fixar: guards för saknade element, pluralisering, modal a11y-light.
+- P0 FIX: Vänsterkortets meta visar även Kapitel + Steg (courseTitle/courseStep).
+          Format: status • modul • område • kapitel • Steg X (— om saknas)
+- P0: Robust step-formattering (1 -> "Steg 1", "Steg 1" behålls).
+- (Behåller tidigare P0/P1 guards, pluralisering, modal a11y-light)
 ============================================================ */
 (function () {
   "use strict";
@@ -60,18 +61,6 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
     if (!pillEl || !pillEl.classList) return;
     pillEl.classList.remove("ok", "warn", "bad");
     if (kind === "ok" || kind === "warn" || kind === "bad") pillEl.classList.add(kind);
-  }
-
-  function asDash(v) {
-    const s = normStr(v);
-    return s ? s : "—";
-  }
-
-  function normStep(v) {
-    const s = normStr(v);
-    if (!s) return "—";
-    const m = s.match(/(\d+)/);
-    return m ? String(m[1]) : s;
   }
 
   // ------------------------------
@@ -118,11 +107,16 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
     return b;
   }
 
-  function composeFallbackTitle(t) {
-    const chapter = asDash(t && t.courseTitle);
-    const step = normStep(t && t.courseStep);
-    const area = asDash(t && t.area);
-    return `${chapter} • Steg ${step} • ${area}`;
+  // P0: robust step label ("1" -> "Steg 1", "Steg 1" behålls)
+  function formatStep(stepRaw) {
+    const s = normStr(stepRaw);
+    if (!s) return "—";
+    if (/^\d+$/.test(s)) return "Steg " + s;
+    const low = s.toLowerCase();
+    if (low.startsWith("steg")) return s; // redan "Steg X"
+    const m = s.match(/(\d+)/);
+    if (m && m[1]) return "Steg " + m[1];
+    return "Steg " + s; // sista fallback
   }
 
   function makeCardRow(t, selected) {
@@ -150,21 +144,22 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
 
     const title = document.createElement("div");
     title.style.fontWeight = "900";
-    const tTitle = normStr(t && t.title);
-    title.textContent = tTitle ? tTitle : composeFallbackTitle(t);
+    title.textContent = normStr(t && t.title) || "(utan titel)";
     left.appendChild(title);
 
     const meta = document.createElement("div");
     meta.className = "muted2";
     meta.style.textAlign = "left";
 
-    // P0: Full info efter save: status • modul • område • kapitel • steg
     const st = normStr(t && t.status) || "draft";
-    const mod = asDash(t && t.module);
-    const area = asDash(t && t.area);
-    const chapter = asDash(t && t.courseTitle);
-    const step = normStep(t && t.courseStep);
-    meta.textContent = `${st} • ${mod} • ${area} • ${chapter} • Steg ${step}`;
+    const mod = normStr(t && t.module) || "—";
+    const area = normStr(t && t.area) || "—";
+
+    // P0: Kapitellogik: ta kursfält om de finns (06-page skriver courseTitle/courseStep)
+    const chapter = normStr(t && (t.courseTitle != null ? t.courseTitle : "")) || "—";
+    const stepLabel = formatStep(t && (t.courseStep != null ? t.courseStep : ""));
+
+    meta.textContent = `${st} • ${mod} • ${area} • ${chapter} • ${stepLabel}`;
     left.appendChild(meta);
 
     const right = document.createElement("div");
@@ -298,7 +293,6 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
       const meta = document.createElement("div");
       meta.className = "muted2";
       meta.style.textAlign = "left";
-      // P1: plural
       meta.textContent = `${items.length} ${items.length === 1 ? "item" : "items"}`;
       left.appendChild(meta);
 
@@ -483,3 +477,4 @@ PATCH v1.0.2 (PP-SC-010-05) (AUTOPATCH):
     }
   };
 })();
+
