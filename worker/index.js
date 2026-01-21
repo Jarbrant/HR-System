@@ -1,12 +1,10 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-PUBLIC-TOKEN-CORS-01 (PROD v1.3)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.4)
 // FIL: worker/index.js
-// PATCH: AO-WORKER-AI-ITEMS-01 (HOTFIX v1.3.1)
-//
-// Mål (P0):
-// - Returnera data.items[] (UI/pages/trainings/04-contract.js kräver items)
-// - Generera "riktiga" frågor som kan auto-rättas (MCQ: choices + correctChoiceId)
-// - Behåll legacy: data.blocks + root.blocks för bakåtkomp.
+// Mål: Lås worker-output till training-blocks + question-format så UI får:
+// - riktiga svarsalternativ (choices) + correctChoiceId
+// - stabil struktur för modul/område/kapitel/steg (subject)
+// - bakåtkompabilitet: res.blocks finns kvar på toppnivå
 //
 // POLICY (LÅST):
 // - Stateless (ingen lagring)
@@ -15,41 +13,46 @@
 // - Max payload 64KB
 // - Logga aldrig payload (endast requestId + felkod)
 // - CORS strikt: aldrig wildcard
+// - ENV:
+//   - ALLOWED_ORIGIN (MUST)
+//   - REQUIRE_AUTH ("true"/"false")
+//   - WORKER_TOKEN (secret, om REQUIRE_AUTH=true)
+//   - AI_ENABLED ("true"/"false")  // just nu påverkar text (mock), inte extern AI-call
 //
-// Endpoints (MUST) — versionerade:
+// Endpoints (versionerade):
 // - GET  /v1/health
 // - GET  /v1/version
 // - POST /v1/ai/generate
-// - POST /v1/ai/training (alias)
-// - POST /v1/ai/document (alias)
-// - OPTIONS * (CORS preflight)
-//
-// Ändringslogg (max 8 rader):
-// - v1.3.1: data.items[] läggs till (UI-kontrakt kräver items).
-// - v1.3.1: question-items blir MCQ (choices + correctChoiceId + answer/correct).
-// - v1.3.1: items mappas deterministiskt från blocks (legacy kvar).
+// - POST /v1/ai/training   (alias)
+// - POST /v1/ai/document   (alias)
+// - OPTIONS *              (CORS preflight)
 // ============================================================
 
 /**
- * OBS: JSON-importer kräver Wrangler "modules" (vilket du kör).
- * Om någon av dessa saknas i repo får du "Could not resolve" vid deploy.
+ * OBS: JSON-importer kräver Wrangler "modules".
+ * Om någon import saknas i repo får du "Could not resolve" vid deploy.
  */
 import INDEX from "../ai-rules/index.json";
 import GLOBAL from "../ai-rules/v1/global.json";
+import MODULES from "../ai-rules/v1/modules.json";
 
 import SWEDISH from "../ai-rules/v1/subjects/swedish.json";
 import MATH from "../ai-rules/v1/subjects/math.json";
+import GENERIC from "../ai-rules/v1/subjects/generic.json";
 
-import QUESTION from "../ai-rules/v1/formats/question.json";
-import TASK from "../ai-rules/v1/formats/task.json";
-import TRAINING_BLOCKS from "../ai-rules/v1/formats/training-blocks.json";
+import QUESTION_FORMAT from "../ai-rules/v1/formats/question.json";
+import TASK_FORMAT from "../ai-rules/v1/formats/task.json";
+import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json";
 
 // Valfri: om du har denna fil, behåll importen. Om du INTE har den: kommentera bort raden.
-import DOCUMENT from "../ai-rules/v1/formats/document.json";
+// import DOCUMENT_FORMAT from "../ai-rules/v1/formats/document.json";
 
-const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.3.1";
+export const MAX_BODY_BYTES = 64 * 1024;
+const VERSION = "1.4";
 
+// ------------------------------
+// Fetch
+// ------------------------------
 export default {
   async fetch(request, env) {
     const requestId = makeRequestId();
@@ -118,7 +121,8 @@ export default {
             service: "hr-worker",
             version: VERSION,
             build: "wrangler",
-            rulesBase: "worker/ai-rules"
+            rulesBase: "ai-rules",
+            outputContract: "training-blocks@v1 + question@v1"
           }
         },
         corsHeaders
@@ -130,6 +134,7 @@ export default {
       return errorJSON(405, requestId, "METHOD_NOT_ALLOWED", "Endast POST tillåtet för AI-endpoints", corsHeaders, true);
     }
 
+    // v1 AI endpoints + aliases
     const isAIPath =
       path === "/v1/ai/generate" ||
       path === "/v1/ai/training" ||
@@ -147,7 +152,7 @@ export default {
     // ---------- AUTH (Bearer) ----------
     if (requireAuth) {
       const token = extractBearerToken(request.headers.get("Authorization") || "");
-      const expected = safeStr(env.WORKER_TOKEN);
+      const expected = safeStr(env.WORKER_TOKEN).trim();
       if (!token || !expected || token !== expected) {
         return errorJSON(401, requestId, "UNAUTHORIZED", "Ogiltig eller saknad token", corsHeaders, true);
       }
@@ -192,69 +197,85 @@ export default {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "Body måste vara ett JSON-objekt", corsHeaders, true);
     }
 
-    // ---------- BACKWARD TOLERANT INPUT ----------
-    const modeRaw = safeStr(body.mode || body.type).trim();
+    // ---------- INPUT (backward tolerant) ----------
+    // mode|type + path alias
+    let modeRaw = safeStr(body.mode || body.type).trim();
+    if (path === "/v1/ai/training") modeRaw = "training";
+    if (path === "/v1/ai/document") modeRaw = "document";
     const mode = normalizeMode(modeRaw);
 
-    const countRaw = body.count ?? body.n;
-    const context = safeStr(body.context || body.prompt || "").trim();
-    const language = safeStr(body.language || "sv").trim();
+    const countRaw = body.count ?? body.n;                     // count|n
+    const language = safeStr(body.language || "sv").trim();    // sv|en
+    const context = safeStr(body.context || body.prompt || "").trim(); // context|prompt
 
-    // optional
-    const format = safeStr(body.format || "").trim();
-    const subject = safeStr(body.subject || "").trim();
-    const difficultyHint = body.difficultyHint ?? body.difficulty;
+    // new (optional)
+    const format = safeStr(body.format || "").trim();          // training-blocks|question|task|document
+    const subjectId = safeStr(body.subjectId || body.subject || "").trim(); // generic|math|swedish|...
+    const difficultyHint = body.difficultyHint ?? body.difficulty; // intro|normal|advanced|auto|1..5
+
+    // new (preferred): subject object for course structure
+    const subjectObj = isPlainObject(body.subjectObj) ? body.subjectObj : (isPlainObject(body.subject) ? body.subject : null);
+    const course = normalizeCourseSubject(subjectObj);
 
     // ---------- VALIDATION ----------
-    if (mode !== "training" && mode !== "document") {
+    if (!(mode === "training" || mode === "document")) {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "mode måste vara training eller document", corsHeaders, true);
     }
 
-    let count = Number(countRaw ?? 4);
-    if (!Number.isInteger(count) || count < 1 || count > 12) {
+    const count = normalizeCount(countRaw);
+    if (count === null) {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "count måste vara mellan 1 och 12", corsHeaders, true);
     }
 
-    if (language !== "sv" && language !== "en") {
+    if (!(language === "sv" || language === "en")) {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "language måste vara sv eller en", corsHeaders, true);
     }
 
-    // Behåll 4000 här (SDK trunkar 4000). Harmoniseras i senare AO.
     if (context.length > 4000) {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "context max 4000 tecken", corsHeaders, true);
     }
 
-    // ---------- AI (ruleset-driven generator / mock) ----------
-    let data;
+    // course subject är valfritt i v1 (UI kan börja skicka det när ni vill)
+    // men om det finns ska det vara rimligt
+    const courseCheck = validateCourseSubject(course);
+    if (!courseCheck.ok) {
+      return errorJSON(400, requestId, "VALIDATION_ERROR", courseCheck.message, corsHeaders, true);
+    }
+
+    // ---------- BUILD (ruleset + stable output) ----------
+    let training;
     try {
-      data = buildRulesetDrivenMock({
+      training = buildTrainingBlocks({
+        requestId,
         mode,
         count,
         language,
         context,
-        requestId,
         aiEnabled,
         format,
-        subject,
-        difficultyHint
+        subjectId,
+        difficultyHint,
+        course
       });
     } catch {
       console.error("ERR", requestId, "UPSTREAM_ERROR");
       return errorJSON(502, requestId, "UPSTREAM_ERROR", "AI-tjänsten svarade inte", corsHeaders, false);
     }
 
-    // P0: UI-kontrakt kräver data.items[]
-    const items = blocksToItems(data && Array.isArray(data.blocks) ? data.blocks : []);
-
-    // Fail-closed: om items saknas => validation error
-    if (!Array.isArray(items) || items.length <= 0) {
-      return errorJSON(400, requestId, "VALIDATION_ERROR", "AI-resultat saknar items[]", corsHeaders, true);
-    }
-
-    const outData = { ...(data || {}), items };
-
-    // Legacy: root.blocks + data.blocks kvar
-    return okJSON(200, { ok: true, requestId, data: outData, blocks: outData.blocks, mode }, corsHeaders);
+    // ---------- RESPONSE (stable + backward compatible) ----------
+    // Backward: blocks + mode på toppnivå (som din UI redan använder)
+    return okJSON(
+      200,
+      {
+        ok: true,
+        requestId,
+        data: { training },
+        training,
+        blocks: Array.isArray(training.blocks) ? training.blocks : [],
+        mode: training.mode
+      },
+      corsHeaders
+    );
   }
 };
 
@@ -284,12 +305,12 @@ function okJSON(status, payload, corsHeaders) {
 
 function errorJSON(status, requestId, code, message, corsHeaders, logIt) {
   if (logIt) console.error("ERR", requestId, code);
-  return okJSON(status, { ok: false, requestId, error: { code, message } }, corsHeaders);
+  return okJSON(status, { ok: false, requestId, error: { code: safeStr(code), message: safeStr(message) } }, corsHeaders);
 }
 
 function extractBearerToken(authHeader) {
-  if (!authHeader) return "";
-  const h = authHeader.trim();
+  const h = safeStr(authHeader).trim();
+  if (!h) return "";
   if (!h.toLowerCase().startsWith("bearer ")) return "";
   return h.slice(7).trim();
 }
@@ -310,12 +331,13 @@ function makeRequestId() {
   }
 }
 
-function pickDifficulty(difficultyHint, seedN) {
-  const s = safeStr(difficultyHint).toLowerCase().trim();
-  if (s === "auto" || s === "") return 1 + (seedN % 5);
-  const n = Number(difficultyHint);
-  if (Number.isInteger(n) && n >= 1 && n <= 5) return n;
-  return 1 + (seedN % 5);
+function normalizeCount(v) {
+  const n = (v === null || v === undefined || v === "") ? 4 : Number(v);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.trunc(n);
+  if (i !== n) return null;
+  if (i < 1 || i > 12) return null;
+  return i;
 }
 
 function hash32(str) {
@@ -339,17 +361,6 @@ function normalizeMode(modeRaw) {
   return s;
 }
 
-// ============================================================
-// RULESET-DRIVEN GENERATOR
-// ============================================================
-
-function normalizeSubject(subject) {
-  const s = safeStr(subject).toLowerCase().trim();
-  if (s === "swedish" || s === "svenska") return "swedish";
-  if (s === "math" || s === "matte") return "math";
-  return "generic";
-}
-
 function normalizeFormat(format, mode) {
   const f = safeStr(format).toLowerCase().trim();
   if (f === "question" || f === "questions") return "question";
@@ -359,270 +370,371 @@ function normalizeFormat(format, mode) {
   return (mode === "document") ? "document" : "training-blocks";
 }
 
-function getRulesetBundle(subject) {
-  const s = normalizeSubject(subject);
-  const subj = (s === "math") ? (MATH || {}) : (s === "swedish") ? (SWEDISH || {}) : {};
+function normalizeSubjectId(subjectId) {
+  const s = safeStr(subjectId).toLowerCase().trim();
+  if (s === "swedish" || s === "svenska") return "swedish";
+  if (s === "math" || s === "matte") return "math";
+  if (s) return s;
+  return "generic";
+}
+
+function pickDifficultyLabel(difficultyHint, seedN) {
+  const s = safeStr(difficultyHint).toLowerCase().trim();
+  if (s === "intro" || s === "normal" || s === "advanced") return s;
+
+  // UI kan skicka auto eller 1..5 — mappa till intro/normal/advanced
+  if (!s || s === "auto") {
+    const lvl = 1 + (seedN % 5); // 1..5
+    return (lvl <= 2) ? "intro" : (lvl <= 4) ? "normal" : "advanced";
+  }
+
+  const n = Number(difficultyHint);
+  if (Number.isInteger(n) && n >= 1 && n <= 5) {
+    return (n <= 2) ? "intro" : (n <= 4) ? "normal" : "advanced";
+  }
+
+  return "normal";
+}
+
+// ------------------------------------------------------------
+// Course Subject (module/area/chapter/step)
+// ------------------------------------------------------------
+function normalizeCourseSubject(subjectObj) {
+  if (!isPlainObject(subjectObj)) return null;
+  const module = safeStr(subjectObj.module || "").trim();
+  const area = safeStr(subjectObj.area || "").trim();
+  const chapter = safeStr(subjectObj.chapter || "").trim();
+  const step = safeStr(subjectObj.step || "").trim();
+
+  // Tillåt även id-fält om UI skickar ids (framtid)
+  const moduleId = safeStr(subjectObj.moduleId || "").trim();
+  const areaId = safeStr(subjectObj.areaId || "").trim();
+  const chapterId = safeStr(subjectObj.chapterId || "").trim();
+  const stepId = safeStr(subjectObj.stepId || "").trim();
+
+  return {
+    module: module || "",
+    area: area || "",
+    chapter: chapter || "",
+    step: (step || stepId || ""),
+    moduleId,
+    areaId,
+    chapterId,
+    stepId
+  };
+}
+
+function validateCourseSubject(course) {
+  if (course === null) return { ok: true };
+
+  // Om man börjar skicka course subject: tillåt tomma fält i v1,
+  // MEN om step finns måste det vara 1..7 eller 1..5 (du har båda i filer).
+  const step = safeStr(course.step).trim();
+  if (step) {
+    const allow = new Set(["1", "2", "3", "4", "5", "6", "7"]);
+    if (!allow.has(step)) return { ok: false, message: "subject.step måste vara 1–7" };
+  }
+  return { ok: true };
+}
+
+function resolveCourseLabelFallback(course, mode) {
+  // Om UI inte skickar modul/område ännu, fallback blir “Generic”
+  if (!course) {
+    return {
+      module: "Generic",
+      area: (mode === "document") ? "Dokument" : "Utbildning",
+      chapter: "Introduktion",
+      step: "1"
+    };
+  }
+
+  const out = {
+    module: course.module || "Generic",
+    area: course.area || ((mode === "document") ? "Dokument" : "Utbildning"),
+    chapter: course.chapter || "Introduktion",
+    step: safeStr(course.step).trim() || "1"
+  };
+
+  return out;
+}
+
+// ============================================================
+// RULES BUNDLE (för framtida styrning)
+// ============================================================
+function getRulesBundle(subjectId) {
+  const s = normalizeSubjectId(subjectId);
+  const subj =
+    (s === "math") ? (MATH || {}) :
+    (s === "swedish") ? (SWEDISH || {}) :
+    (s === "generic") ? (GENERIC || {}) :
+    (GENERIC || {});
 
   return {
     index: INDEX || {},
     global: GLOBAL || {},
+    modules: MODULES || {},
     subject: subj,
     formats: {
-      question: QUESTION || {},
-      task: TASK || {},
-      "training-blocks": TRAINING_BLOCKS || {},
-      document: (typeof DOCUMENT !== "undefined" && DOCUMENT) ? DOCUMENT : {}
+      question: QUESTION_FORMAT || {},
+      task: TASK_FORMAT || {},
+      "training-blocks": TRAINING_BLOCKS_FORMAT || {}
+      // document: (typeof DOCUMENT_FORMAT !== "undefined" && DOCUMENT_FORMAT) ? DOCUMENT_FORMAT : {}
     }
   };
 }
 
-function buildRulesetDrivenMock({ mode, count, language, context, requestId, aiEnabled, format, subject, difficultyHint }) {
-  const seed = hash32(`${requestId}|${mode}|${count}|${language}|${context.slice(0, 96)}|${format}|${subject}|${safeStr(difficultyHint)}`);
-
+// ============================================================
+// OUTPUT BUILDER — training-blocks + question-format (choices)
+// ============================================================
+function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnabled, format, subjectId, difficultyHint, course }) {
   const fmt = normalizeFormat(format, mode);
-  const subj = normalizeSubject(subject);
+  const subjId = normalizeSubjectId(subjectId);
+  const bundle = getRulesBundle(subjId);
 
-  // Laddat (för vidareutbyggnad)
-  const bundle = getRulesetBundle(subj);
+  const seed = hash32(`${requestId}|${mode}|${count}|${language}|${context.slice(0, 96)}|${fmt}|${subjId}|${safeStr(difficultyHint)}`);
+
+  const courseLabel = resolveCourseLabelFallback(course, mode);
+  const difficulty = pickDifficultyLabel(difficultyHint, seed);
 
   const title =
-    mode === "training"
-      ? (language === "sv" ? "Ny utbildning" : "New training")
-      : (language === "sv" ? "Nytt dokument" : "New document");
+    (mode === "document")
+      ? (language === "sv" ? `${courseLabel.module} – ${courseLabel.area} (Dokument)` : `${courseLabel.module} – ${courseLabel.area} (Document)`)
+      : (language === "sv" ? `${courseLabel.module} – ${courseLabel.area} (Steg ${courseLabel.step})` : `${courseLabel.module} – ${courseLabel.area} (Step ${courseLabel.step})`);
 
-  const description =
+  const summary =
     language === "sv"
-      ? (aiEnabled ? "Regelstyrt genererat innehåll." : "AI avstängd (mock).")
-      : (aiEnabled ? "Ruleset-driven generated content." : "AI disabled (mock).");
+      ? (aiEnabled ? "Regelstyrt genererat innehåll (mock)." : "AI avstängd (mock).")
+      : (aiEnabled ? "Ruleset-driven content (mock)." : "AI disabled (mock).");
 
-  const goals =
-    mode === "training"
+  const objectives =
+    (mode === "training")
       ? (language === "sv"
-        ? ["Förstå grunderna", "Tillämpa korrekt", "Reflektera över varför"]
-        : ["Understand basics", "Apply correctly", "Reflect on why"])
+        ? ["Förstå grunderna", "Tillämpa i vardagen", "Kunna göra en snabb självkontroll"]
+        : ["Understand basics", "Apply in practice", "Do a quick self-check"])
       : [];
 
   const blocks = [];
   for (let i = 0; i < count; i++) {
     const n = (seed + i * 2654435761) >>> 0;
-    const diff = pickDifficulty(difficultyHint, n);
-    const mins = 3 + (n % 8);
 
+    // i training-blocks: varva info/task/question
+    // i format=question: bara question-blocks
+    // i document-mode: inga question-blocks
     if (fmt === "question") {
-      blocks.push(genQuestionBlock({ i, language, context, subj, diff, mins, n, bundle }));
-      continue;
-    }
-    if (fmt === "task") {
-      blocks.push(genTaskBlock({ i, language, context, subj, diff, mins, n, bundle }));
-      continue;
-    }
-    if (fmt === "document" || mode === "document") {
-      blocks.push(genInfoBlock({ i, language, context, subj, diff, mins, n, bundle, docMode: true }));
+      blocks.push(genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
       continue;
     }
 
-    // training-blocks: varva info/task/question
+    if (fmt === "task") {
+      blocks.push(genTaskBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
+      continue;
+    }
+
+    if (fmt === "document" || mode === "document") {
+      blocks.push(genDocumentBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
+      continue;
+    }
+
     const pick = n % 3;
-    if (pick === 0) blocks.push(genInfoBlock({ i, language, context, subj, diff, mins, n, bundle, docMode: false }));
-    else if (pick === 1) blocks.push(genTaskBlock({ i, language, context, subj, diff, mins, n, bundle }));
-    else blocks.push(genQuestionBlock({ i, language, context, subj, diff, mins, n, bundle }));
+    if (pick === 0) blocks.push(genInfoBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
+    else if (pick === 1) blocks.push(genTaskBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
+    else blocks.push(genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
   }
 
-  return { title, description, goals, blocks };
+  // training-blocks root
+  return {
+    id: `tr_${subjId}_${hash32(requestId).toString(16)}`.slice(0, 24),
+    mode,
+    subject: {
+      module: courseLabel.module,
+      area: courseLabel.area,
+      chapter: courseLabel.chapter,
+      step: courseLabel.step
+    },
+    difficulty,
+    title,
+    summary,
+    objectives,
+    blocks,
+    meta: {
+      createdAt: Date.now(),
+      createdBy: "worker",
+      source: "mock-v1.4"
+    }
+  };
 }
 
-function genInfoBlock({ i, language, context, subj, diff, mins }) {
-  const topicSv =
-    subj === "math" ? "Matematik" :
-    subj === "swedish" ? "Svenska" :
-    "Kunskap";
+// ------------------------------
+// Block generators
+// ------------------------------
+function genInfoBlock({ i, language, context, courseLabel, difficulty, subjId }) {
+  const blockId = `b_info_${i + 1}_${subjId}`.slice(0, 32);
 
-  const title = language === "sv" ? `Teori ${i + 1}: ${topicSv}` : `Theory ${i + 1}`;
+  const title =
+    language === "sv"
+      ? `Teori: ${courseLabel.area}`
+      : `Theory: ${courseLabel.area}`;
+
   const text =
     language === "sv"
-      ? `Kort teori kopplad till ämnet (${topicSv}).\n\nUtgå från detta sammanhang:\n${context || "—"}`
-      : `Short theory.\n\nContext:\n${context || "—"}`;
+      ? `Kort teori kopplad till ${courseLabel.module} → ${courseLabel.area}.\n\nSammanhang:\n${context || "—"}`
+      : `Short theory for ${courseLabel.module} → ${courseLabel.area}.\n\nContext:\n${context || "—"}`;
 
   return {
-    type: "info",
+    blockId,
+    kind: "info",
     title,
-    text,
-    meta: { difficulty: diff, mins, tags: ["info", subj] }
+    items: [
+      { type: "text", text }
+    ],
+    scoring: { points: 0 },
+    meta: { tags: ["info", subjId], difficulty }
   };
 }
 
-function genTaskBlock({ i, language, context, subj, diff, mins }) {
-  const title = language === "sv" ? `Uppgift ${i + 1}` : `Task ${i + 1}`;
+function genTaskBlock({ i, language, context, courseLabel, difficulty, subjId }) {
+  const blockId = `b_task_${i + 1}_${subjId}`.slice(0, 32);
+
+  const title =
+    language === "sv"
+      ? `Uppgift: ${courseLabel.area}`
+      : `Task: ${courseLabel.area}`;
+
   const instruction =
     language === "sv"
-      ? (subj === "math"
-        ? "Räkna ut och visa dina steg. Svara tydligt."
-        : subj === "swedish"
-          ? "Skriv en kort text och motivera dina val."
-          : "Utför uppgiften och beskriv hur du tänkte.")
-      : "Complete the task and explain your reasoning.";
+      ? `Gör en kort uppgift kopplad till ${courseLabel.area}.\n\nUtgå från detta sammanhang:\n${context || "—"}`
+      : `Complete a short task for ${courseLabel.area}.\n\nContext:\n${context || "—"}`;
 
-  const deliverable =
-    language === "sv"
-      ? "Lämna in: (1) ditt svar, (2) en kort motivering, (3) ev. mellanled."
-      : "Submit: (1) your answer, (2) brief reasoning, (3) intermediate steps if any.";
-
-  const hint =
-    language === "sv"
-      ? `Utgå från detta sammanhang:\n${context || "—"}`
-      : `Context:\n${context || "—"}`;
-
+  // Vi håller allt renderbart via items[] (UI-safe)
   return {
-    type: "task",
+    blockId,
+    kind: "task",
     title,
-    instruction: `${instruction}\n\n${hint}`,
-    deliverable,
-    meta: { difficulty: diff, mins, tags: ["task", subj] }
+    items: [
+      { type: "text", text: instruction },
+      {
+        type: "bullets",
+        bullets: language === "sv"
+          ? ["Skriv 2–4 punkter", "Var konkret", "Koppla till vardag"]
+          : ["Write 2–4 bullets", "Be concrete", "Connect to practice"],
+        tone: "neutral"
+      }
+    ],
+    scoring: { points: 0 },
+    meta: { tags: ["task", subjId], difficulty }
   };
 }
 
-function genQuestionBlock({ i, language, context, subj, diff, mins, n }) {
-  const title = language === "sv" ? `Fråga ${i + 1}` : `Question ${i + 1}`;
+function genDocumentBlock({ i, language, context, courseLabel, difficulty, subjId }) {
+  const blockId = `b_doc_${i + 1}_${subjId}`.slice(0, 32);
 
-  // MCQ (auto-rättningsbar)
-  let qText = "";
-  let choices = [];
-  let correctChoiceId = "c1";
-  let rationale = "";
-
-  if (language === "sv") {
-    if (subj === "math") {
-      qText = "Vad blir 7 + 5?";
-      choices = [
-        { id: "c1", text: "12" },
-        { id: "c2", text: "11" },
-        { id: "c3", text: "13" }
-      ];
-      correctChoiceId = "c1";
-      rationale = "7 + 5 = 12.";
-    } else if (subj === "swedish") {
-      qText = "Vilket ord är ett verb i meningen: 'Hon springer snabbt'?";
-      choices = [
-        { id: "c1", text: "springer" },
-        { id: "c2", text: "snabbt" },
-        { id: "c3", text: "hon" }
-      ];
-      correctChoiceId = "c1";
-      rationale = "Verbet beskriver handlingen (springer).";
-    } else {
-      qText = "Vilket är ett bra första steg när du ska coacha en medarbetare?";
-      choices = [
-        { id: "c1", text: "Ställa öppna frågor och lyssna" },
-        { id: "c2", text: "Ge direkt order utan dialog" },
-        { id: "c3", text: "Undvika att prata om målet" }
-      ];
-      correctChoiceId = "c1";
-      rationale = "Coachning börjar ofta med att förstå nuläge och behov.";
-    }
-  } else {
-    qText = "What is the best first step in coaching?";
-    choices = [
-      { id: "c1", text: "Ask open questions and listen" },
-      { id: "c2", text: "Give orders without dialogue" },
-      { id: "c3", text: "Avoid discussing goals" }
-    ];
-    correctChoiceId = "c1";
-    rationale = "Coaching starts by understanding the situation.";
-  }
-
-  // Kontext (kort, utan att “svälla”)
-  const ctxLine =
+  const title =
     language === "sv"
-      ? (context ? `\n\n(Kontext: ${context.slice(0, 240)})` : "")
-      : (context ? `\n\n(Context: ${context.slice(0, 240)})` : "");
+      ? `Dokument: ${courseLabel.area}`
+      : `Document: ${courseLabel.area}`;
 
-  // Legacy/raw block format (fortfarande type:"question")
-  // Vi behåller question + answerKey men lägger även MCQ-fält.
-  const answerKey = (choices.find(c => c.id === correctChoiceId) || {}).text || "";
+  const text =
+    language === "sv"
+      ? `Detta är ett informativt dokument om ${courseLabel.area}.\n\nSammanhang:\n${context || "—"}`
+      : `This is an informational document about ${courseLabel.area}.\n\nContext:\n${context || "—"}`;
 
   return {
-    type: "question",
+    blockId,
+    kind: "document",
     title,
-    question: qText + ctxLine,
+    items: [
+      { type: "text", text },
+      {
+        type: "callout",
+        text: language === "sv" ? "Kom ihåg: håll det enkelt och praktiskt." : "Remember: keep it simple and practical.",
+        tone: "info"
+      }
+    ],
+    scoring: { points: 0 },
+    meta: { tags: ["document", subjId], difficulty }
+  };
+}
+
+function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId }) {
+  const blockId = `b_q_${i + 1}_${subjId}`.slice(0, 32);
+
+  const title =
+    language === "sv"
+      ? `Kontrollfråga: ${courseLabel.area}`
+      : `Check question: ${courseLabel.area}`;
+
+  // Bygg en MCQ enligt formats/question.json:
+  // { kind:"question", text, choices:[{id,text}...], correctChoiceId, rationale?, difficulty?, tags? }
+  const q = makeQuestion({ n, language, context, courseLabel, difficulty, subjId });
+
+  return {
+    blockId,
+    kind: "question",
+    title,
+    items: [
+      {
+        type: "questionInline",
+        question: q
+      }
+    ],
+    scoring: { points: 1 },
+    meta: { tags: ["question", subjId], difficulty }
+  };
+}
+
+function makeQuestion({ n, language, context, courseLabel, difficulty, subjId }) {
+  // Enkel men riktig: 3–5 alternativ, exakt 1 korrekt
+  const choiceCount = 3 + (n % 3); // 3..5
+
+  const baseTextSv = `Vad är den bästa första åtgärden i ${courseLabel.area} i en vardagssituation?`;
+  const baseTextEn = `What is the best first action in ${courseLabel.area} in a practical situation?`;
+
+  const text =
+    (language === "sv")
+      ? `${baseTextSv}\n\n(Använd detta sammanhang om relevant: ${context || "—"})`
+      : `${baseTextEn}\n\n(Context: ${context || "—"})`;
+
+  // Skapa distractors + 1 korrekt (mock).
+  // Senare byter vi detta till riktig AI-call, men formatet förblir identiskt.
+  const correctIdx = n % choiceCount;
+
+  const poolSv = [
+    "Klargör målet och ställ en öppen fråga",
+    "Ge en snabb order utan förklaring",
+    "Byt ämne för att undvika konflikt",
+    "Dokumentera och följ upp enligt rutin",
+    "Lyssna klart och spegla det du hört"
+  ];
+  const poolEn = [
+    "Clarify the goal and ask an open question",
+    "Give a quick order without explanation",
+    "Change the subject to avoid conflict",
+    "Document and follow up per routine",
+    "Listen fully and reflect what you heard"
+  ];
+
+  const pool = (language === "sv") ? poolSv : poolEn;
+
+  const choices = [];
+  for (let i = 0; i < choiceCount; i++) {
+    const txt = pool[(n + i) % pool.length];
+    choices.push({ id: `c${i + 1}`, text: txt });
+  }
+
+  const correctChoiceId = `c${correctIdx + 1}`;
+
+  const rationale =
+    (language === "sv")
+      ? "En bra start är att skapa tydlighet och få fram den andres perspektiv innan man styr mot lösning."
+      : "A strong start is to create clarity and understand the other person’s perspective before moving to solutions.";
+
+  return {
+    kind: "question",
+    text,
     choices,
     correctChoiceId,
-    answerKey,
     rationale,
-    meta: { difficulty: diff, mins, tags: ["question", subj, "mcq"], seed: n >>> 0 }
+    difficulty,
+    tags: [subjId, "scenario"]
   };
-}
-
-// ============================================================
-// P0: Map blocks[] => items[] (UI-kontrakt kräver data.items[])
-// ============================================================
-
-function blocksToItems(blocks) {
-  const out = [];
-  for (const b of Array.isArray(blocks) ? blocks : []) {
-    if (!b) continue;
-    const t = safeStr(b.type).toLowerCase().trim() || "info";
-
-    if (t === "info") {
-      out.push({
-        type: "info",
-        title: safeStr(b.title || ""),
-        text: safeStr(b.text || ""),
-        meta: isPlainObject(b.meta) ? b.meta : undefined
-      });
-      continue;
-    }
-
-    if (t === "task") {
-      out.push({
-        type: "task",
-        title: safeStr(b.title || ""),
-        instruction: safeStr(b.instruction || ""),
-        deliverable: safeStr(b.deliverable || ""),
-        meta: isPlainObject(b.meta) ? b.meta : undefined
-      });
-      continue;
-    }
-
-    if (t === "question") {
-      // För UI-problemfilter: lägg både answer och correct (valfri redundans)
-      const correctId = safeStr(b.correctChoiceId || "");
-      const choices = Array.isArray(b.choices) ? b.choices : [];
-      const correctText =
-        (choices.find(c => c && safeStr(c.id) === correctId) || {}).text || safeStr(b.answerKey || "");
-
-      out.push({
-        type: "question",
-        title: safeStr(b.title || ""),
-        question: safeStr(b.question || ""),
-        choices,
-        correctChoiceId: correctId,
-        correct: correctText || correctId || safeStr(b.answerKey || ""),
-        answer: correctText || safeStr(b.answerKey || "") || correctId,
-        rationale: safeStr(b.rationale || ""),
-        meta: isPlainObject(b.meta) ? b.meta : undefined
-      });
-      continue;
-    }
-
-    if (t === "document") {
-      out.push({
-        type: "document",
-        title: safeStr(b.title || ""),
-        text: safeStr(b.text || ""),
-        meta: isPlainObject(b.meta) ? b.meta : undefined
-      });
-      continue;
-    }
-
-    // fallback
-    out.push({
-      type: "info",
-      title: safeStr(b.title || ""),
-      text: safeStr(b.text || b.instruction || b.question || ""),
-      meta: isPlainObject(b.meta) ? b.meta : undefined
-    });
-  }
-
-  // Fail-closed: kräver minst 1 item
-  return out.length ? out : [];
 }
