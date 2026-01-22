@@ -14,11 +14,9 @@ POLICY (LÅST):
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
 PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
-- P0 FIX (R1): renderBlocksList kräver opts.onOpenBlock → skicka no-op för att undvika crash ("opts.onOpenBlock is not a function"),
-               men utan auto-öppning. Endast onOpenItem öppnar item-modal.
-- P0 FIX (R2): normalize questionType: "Auto" skickas INTE som "Auto" till worker (omnormaliseras till ""), mappar vanliga svenska labels till worker-koder.
-- P0 FIX (R3): Om AI-innehåll ser ut som prov/quiz/frågor och questionType är tom → default "mcq" + hints preferQuestions/requestedItemType.
-- DEBUG (runtime-only): page.__LAST_AI_REQUEST / __LAST_AI_RAW för felsökning (ingen storage).
+- P0 FIX (R0): renderBlocksList kräver opts.onOpenBlock som funktion → vi skickar alltid noop för att undvika krasch.
+               Samtidigt bibehåller vi policy: INGEN auto-öppning; endast item-klick (onOpenItem) öppnar modal.
+- P0 FIX (Q0): Normalisera UI-questionType (ex "MCQ (ett rätt)") till worker-tokens (ex "mcq_single").
 ============================================================ */
 (function () {
   "use strict";
@@ -239,26 +237,28 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     return "training"; // fail-safe
   }
 
-  // P0: fråga-typ normalisering (Auto ska INTE skickas som "Auto")
+  // P0 (Q0): normalisera UI-questionType till worker-tokens
+  // (Säker: om okänd -> return "" => worker default/auto)
   function normalizeQuestionType(qt) {
-    const s = String(qt ?? "").trim().toLowerCase();
-    if (!s) return "";
+    const raw = normStr(qt);
+    if (!raw) return "";
+    const s = raw.toLowerCase();
+
+    // Vanliga tokens (om UI redan skickar dessa)
     if (s === "auto") return "";
+    if (s === "mcq_single" || s === "mcq-single" || s === "mcq1" || s === "single") return "mcq_single";
+    if (s === "mcq_multi" || s === "mcq-multi" || s === "mcq_multiple" || s === "multi") return "mcq_multi";
+    if (s === "true_false" || s === "true-false" || s === "tf") return "true_false";
+    if (s === "short_answer" || s === "short-answer" || s === "free" || s === "fritext") return "short_answer";
 
-    // Vanliga svenska labels / varianter
-    if (s.includes("flerval") || s.includes("multiple") || s.includes("mcq")) return "mcq";
-    if (s.includes("sant") || s.includes("fals") || s.includes("true") || s.includes("false")) return "truefalse";
-    if (s.includes("fritext") || s.includes("kort") || s.includes("short")) return "short";
-    if (s.includes("match")) return "match";
-    if (s.includes("ordna") || s.includes("ordning") || s.includes("order")) return "order";
+    // Svenska UI-etiketter
+    if (s.includes("mcq") && (s.includes("ett") || s.includes("1") || s.includes("single"))) return "mcq_single";
+    if (s.includes("mcq") && (s.includes("flera") || s.includes("multi") || s.includes("multiple"))) return "mcq_multi";
+    if (s.includes("sant") || s.includes("falskt") || s.includes("true") || s.includes("false")) return "true_false";
+    if (s.includes("fritext") || s.includes("kort") || s.includes("short")) return "short_answer";
 
-    // Default: skicka “safe” lower-case sträng
-    return s;
-  }
-
-  function aiContentLooksLikeQuiz(contentRaw) {
-    const s = String(contentRaw ?? "").toLowerCase();
-    return /prov|quiz|fråga|frågor|test/i.test(s);
+    // Okänd: låt worker välja
+    return "";
   }
 
   // ------------------------------------------------------------
@@ -820,7 +820,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
     DEPS.render.openItemModal({
       title: itemTitleForModal(blockIdx, itemIdx, item),
-      item: deepClone(item),
+      item: deepClone(item), // skydda draft tills onSave
       canWrite: canWrite,
       onSave: function (updated) {
         if (!isWriterAllowed()) return;
@@ -887,15 +887,17 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
     const blocks = currentBlocks();
 
-    // P0 FIX (R1): renderBlocksList får INTE krascha om den förväntar onOpenBlock.
-    // Vi skickar en no-op (öppnar inget) + onOpenItem för explicita klick.
+    // P0 FIX (R0): renderBlocksList förväntar onOpenBlock som funktion → alltid noop.
+    // Policy: INGEN auto-öppning; endast item-klick (onOpenItem) ska öppna item-modal.
     DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
       blocks,
       onEdit: function (idx) { openBlockEditor(idx); },
       onDelete: function (idx) { deleteBlock(idx); },
 
-      onOpenBlock: function () { /* no-op (viktigt: ingen auto-öppning) */ },
+      // Krävs av render (annars krasch i UI-04-WORKER-SDK / render-lager):
+      onOpenBlock: function () { /* noop (anti-crash, anti-autoopen) */ },
 
+      // PP-SC-010-07: klickbara previews öppnar item-modal
       onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); }
     });
   }
@@ -1232,71 +1234,18 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
   }
 
   function readAiControls() {
-    const contentRaw = normStr(dom && dom.aiContent && dom.aiContent.value);
-    const modeRaw = contentRaw || "training";
+    const modeRaw = normStr(dom && dom.aiContent && dom.aiContent.value) || "training";
     const mode = normalizeMode(modeRaw);
 
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
     const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
 
     const qtRaw = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
-    const questionType = normalizeQuestionType(qtRaw);
+    const questionType = normalizeQuestionType(qtRaw); // P0 (Q0)
 
     const feedbackEnabled = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked === true));
 
-    return { mode, count, questionType, feedbackEnabled, contentRaw };
-  }
-
-  function extractItemsFromAi(raw, norm) {
-    const nItems = norm && Array.isArray(norm.items) ? norm.items : [];
-    if (nItems.length) return { items: nItems, source: "norm.items" };
-
-    const rItems = raw && Array.isArray(raw.items) ? raw.items : [];
-    if (rItems.length) return { items: rItems, source: "raw.items" };
-
-    const blocks = raw && Array.isArray(raw.blocks) ? raw.blocks : [];
-    if (blocks.length) {
-      const b0 = blocks[0];
-
-      if (b0 && Array.isArray(b0.items)) {
-        const out = [];
-        for (const b of blocks) {
-          if (b && Array.isArray(b.items)) out.push.apply(out, b.items);
-        }
-        if (out.length) return { items: out, source: "raw.blocks[].items" };
-        return { items: [], source: "raw.blocks(wrappers-empty-items)" };
-      }
-
-      const looksLikeItems = blocks.some(b =>
-        b && (typeof b.type === "string" || typeof b.text === "string" || typeof b.instruction === "string")
-      );
-      if (looksLikeItems) return { items: blocks, source: "raw.blocks(as-items)" };
-
-      return { items: [], source: "raw.blocks(unknown-shape)" };
-    }
-
-    const db = raw && raw.data && Array.isArray(raw.data.blocks) ? raw.data.blocks : [];
-    if (db.length) {
-      const d0 = db[0];
-
-      if (d0 && Array.isArray(d0.items)) {
-        const out2 = [];
-        for (const b of db) {
-          if (b && Array.isArray(b.items)) out2.push.apply(out2, b.items);
-        }
-        if (out2.length) return { items: out2, source: "raw.data.blocks[].items" };
-        return { items: [], source: "raw.data.blocks(wrappers-empty-items)" };
-      }
-
-      const looksLikeItems2 = db.some(b =>
-        b && (typeof b.type === "string" || typeof b.text === "string" || typeof b.instruction === "string")
-      );
-      if (looksLikeItems2) return { items: db, source: "raw.data.blocks(as-items)" };
-
-      return { items: [], source: "raw.data.blocks(unknown-shape)" };
-    }
-
-    return { items: [], source: "none" };
+    return { mode, count, questionType, feedbackEnabled };
   }
 
   function normalizeItemsArray(itemsIn) {
@@ -1377,29 +1326,14 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         language: "sv"
       };
 
-      // P0 FIX (R2/R3): skickar inte "Auto" som questionType. Om content ser ut som quiz och qt saknas → default mcq.
-      const wantsQuiz = aiContentLooksLikeQuiz(ctl.contentRaw);
+      // P0 (Q0): skicka endast om vi har en känd token
       if (ctl.questionType) req.questionType = ctl.questionType;
-      else if (wantsQuiz) req.questionType = "mcq";
-
       if (ctl.feedbackEnabled) req.feedbackEnabled = true;
-
-      // Hints (ok att ignoreras av worker)
-      if (wantsQuiz) {
-        req.preferQuestions = true;
-        req.requestedItemType = "question";
-      }
-
-      // DEBUG (runtime-only)
-      page.__LAST_AI_REQUEST = deepClone(req);
 
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI jobbar…", "warn");
       DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
 
       const raw = await window.HRWorkerSDK.aiGenerate(req);
-
-      // DEBUG (runtime-only)
-      page.__LAST_AI_RAW = raw;
 
       const sdkBlocks = getSdkBlocks(raw);
       if (sdkBlocks && sdkBlocks.length) {
@@ -1417,8 +1351,9 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         ? (DEPS.core.normalizeAiResult(raw) || {})
         : (raw && typeof raw === "object" ? raw : {});
 
-      const pick = extractItemsFromAi(raw, norm);
-      const itemsIn = Array.isArray(pick.items) ? pick.items : [];
+      const itemsIn = (norm && Array.isArray(norm.items)) ? norm.items
+        : (raw && Array.isArray(raw.items)) ? raw.items
+          : [];
 
       if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
         const v = DEPS.contract.validateAiResult({ items: itemsIn });
@@ -1432,7 +1367,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
       if (!itemsIn.length) {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items (källa: " + pick.source + ").");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items.");
         return;
       }
 
