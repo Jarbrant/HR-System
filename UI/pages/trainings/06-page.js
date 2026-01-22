@@ -14,18 +14,11 @@ POLICY (LÅST):
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
 PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
-- P0 FIX (2A): Val av utbildning i vänsterlistan ska INTE auto-öppna item-modal.
-               Endast klick på item-preview i blockslistan (höger) öppnar modal.
-               (Vi tar bort auto-open genom att aldrig koppla en "öppna block"-handler.)
-- P0 FIX (2B): Vid byte av utbildning stänger vi ev. öppen item-modal om render erbjuder close/hide.
-- P0 FIX (A):  UI-städning: tar bort hela frasen "Utgå från detta sammanhang: …" när den bara innehåller
-               "(kontext dolt)" eller "[object Object]" (inte bara token-replace).
-- P0 FIX (R1): Render-stabilitet: vissa renderBlocksList-implementationer anropar opts.onOpenBlock_toggle
-               utan typcheck. Vi skickar alltid en NOOP-funktion så UI inte kraschar.
-- P0 FIX (AI1): Om worker/SDK returnerar {ok:false,...} visar vi tydlig orsak i UI istället för “AI gav inget”.
-- P0 FIX (AI2): Fail-closed men inte "drop-all": om validering failar för ett block så skippar vi det blocket
-               och tar resten. Om allt skippar → stoppar med tydlig hint.
-- Debug: state.lastAiMeta (runtime-only, ingen payloaddump, inga storage-keys).
+- P0 FIX (R1): renderBlocksList kräver opts.onOpenBlock → skicka no-op för att undvika crash ("opts.onOpenBlock is not a function"),
+               men utan auto-öppning. Endast onOpenItem öppnar item-modal.
+- P0 FIX (R2): normalize questionType: "Auto" skickas INTE som "Auto" till worker (omnormaliseras till ""), mappar vanliga svenska labels till worker-koder.
+- P0 FIX (R3): Om AI-innehåll ser ut som prov/quiz/frågor och questionType är tom → default "mcq" + hints preferQuestions/requestedItemType.
+- DEBUG (runtime-only): page.__LAST_AI_REQUEST / __LAST_AI_RAW för felsökning (ingen storage).
 ============================================================ */
 (function () {
   "use strict";
@@ -151,9 +144,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     catalogStatus: "pending", // pending|ok|missing|error
     catalogErr: "",
 
-    // Runtime-only AI meta (NO STORAGE, NO payload dump)
-    lastAiMeta: null,
-
     defaults: {
       // Fallback (om catalog saknas) — minimal men fungerande
       modules: [
@@ -249,6 +239,28 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     return "training"; // fail-safe
   }
 
+  // P0: fråga-typ normalisering (Auto ska INTE skickas som "Auto")
+  function normalizeQuestionType(qt) {
+    const s = String(qt ?? "").trim().toLowerCase();
+    if (!s) return "";
+    if (s === "auto") return "";
+
+    // Vanliga svenska labels / varianter
+    if (s.includes("flerval") || s.includes("multiple") || s.includes("mcq")) return "mcq";
+    if (s.includes("sant") || s.includes("fals") || s.includes("true") || s.includes("false")) return "truefalse";
+    if (s.includes("fritext") || s.includes("kort") || s.includes("short")) return "short";
+    if (s.includes("match")) return "match";
+    if (s.includes("ordna") || s.includes("ordning") || s.includes("order")) return "order";
+
+    // Default: skicka “safe” lower-case sträng
+    return s;
+  }
+
+  function aiContentLooksLikeQuiz(contentRaw) {
+    const s = String(contentRaw ?? "").toLowerCase();
+    return /prov|quiz|fråga|frågor|test/i.test(s);
+  }
+
   // ------------------------------------------------------------
   // P0: UI-sanerare för "[object Object]" + kontext-malltext (fail-closed)
   // ------------------------------------------------------------
@@ -258,7 +270,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
     out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*(\(\s*kontext\s*dolt\s*\)|\[object\s+Object\])\s*/gi, " ");
     out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*$/gmi, "");
-
     out = out.replace(/[ \t]{2,}/g, " ");
     out = out.replace(/\n{3,}/g, "\n\n");
     return out.trim();
@@ -382,22 +393,15 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
   function updateDebug() {
     try {
       if (!dom || !dom.debugPre || !dom.setText) return;
-
-      const d = state.draft ? state.draft : null;
-      const blocksLen = (d && Array.isArray(d.blocks)) ? d.blocks.length : 0;
-
       const payload = {
         version: page.__VERSION,
         locked: !!state.locked,
         lockReason: state.lockReason || "",
         selectedId: state.selectedId || "",
-        draft: d,
-        draftBlocksLen: blocksLen,
+        draft: state.draft ? state.draft : null,
         trainingsCount: Array.isArray(state.trainings) ? state.trainings.length : 0,
-        catalogStatus: state.catalogStatus,
-        lastAiMeta: state.lastAiMeta
+        trainings: Array.isArray(state.trainings) ? state.trainings : []
       };
-
       dom.setText(dom.debugPre, JSON.stringify(payload, null, 2));
     } catch (_) {
       // fail-closed: skriv inget
@@ -857,6 +861,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         if (!again.ok) return;
 
         again.block.items.splice(itemIdx, 1);
+
         setDirty(true);
         updateUiAll();
       }
@@ -882,22 +887,16 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
     const blocks = currentBlocks();
 
-    // P0 FIX (2A): renderBlocksList får INTE auto-öppna något item/block.
-    // Vissa render-implementationer anropar dock opts.onOpenBlock_toggle utan typcheck.
-    // Därför: vi skickar alltid en NOOP-funktion som aldrig öppnar modal (ingen auto-open, ingen crash).
-    const noopOpenBlock = function () { /* NOOP: medvetet */ };
-
+    // P0 FIX (R1): renderBlocksList får INTE krascha om den förväntar onOpenBlock.
+    // Vi skickar en no-op (öppnar inget) + onOpenItem för explicita klick.
     DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
       blocks,
       onEdit: function (idx) { openBlockEditor(idx); },
       onDelete: function (idx) { deleteBlock(idx); },
 
-      // PP-SC-010-07: klickbara previews öppnar item-modal
-      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); },
+      onOpenBlock: function () { /* no-op (viktigt: ingen auto-öppning) */ },
 
-      // P0 (R1): NOOP så render aldrig kraschar om den förväntar sig funktionen.
-      onOpenBlock: noopOpenBlock,
-      onOpenBlock_toggle: noopOpenBlock
+      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); }
     });
   }
 
@@ -1233,16 +1232,19 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
   }
 
   function readAiControls() {
-    const modeRaw = normStr(dom && dom.aiContent && dom.aiContent.value) || "training";
+    const contentRaw = normStr(dom && dom.aiContent && dom.aiContent.value);
+    const modeRaw = contentRaw || "training";
     const mode = normalizeMode(modeRaw);
 
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
     const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
 
-    const questionType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
+    const qtRaw = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
+    const questionType = normalizeQuestionType(qtRaw);
+
     const feedbackEnabled = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked === true));
 
-    return { mode, count, questionType, feedbackEnabled };
+    return { mode, count, questionType, feedbackEnabled, contentRaw };
   }
 
   function extractItemsFromAi(raw, norm) {
@@ -1312,19 +1314,9 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     return null;
   }
 
-  function setLastAiMeta(meta) {
-    try {
-      state.lastAiMeta = meta && typeof meta === "object" ? meta : null;
-    } catch (_) { state.lastAiMeta = null; }
-  }
-
   function applySdkBlocksToDraft(sdkBlocks, wantCount) {
     const take = Math.min(sdkBlocks.length, (Number(wantCount) || sdkBlocks.length));
     if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
-
-    let added = 0;
-    let skipped = 0;
-    const skipReasons = [];
 
     for (let bi = 0; bi < take; bi++) {
       const b = sdkBlocks[bi];
@@ -1335,10 +1327,10 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
         const v = DEPS.contract.validateAiResult({ items: itemsIn });
         if (!v || v.ok !== true) {
-          skipped++;
           const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
-          skipReasons.push("Block " + (bi + 1) + ": " + reasons.join(" "));
-          continue; // P0 (AI2): skippa blocket, behåll resten
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
+          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
+          return { ok: false, stopped: true };
         }
       }
 
@@ -1349,24 +1341,9 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       const title = bTitle || ("AI-block " + (bi + 1) + " • " + tDraft);
 
       state.draft.blocks.push({ title: title, items: itemsNorm });
-      added++;
     }
 
-    if (added > 0) {
-      if (skipped > 0) {
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Vissa AI-block skippades: " + skipped + " st. (se debug)");
-      }
-      return { ok: true, added: added, skipped: skipped, skipReasons: skipReasons };
-    }
-
-    // Allt skippat => fail-closed stop
-    if (skipped > 0) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
-      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Alla block skippades av validering. (se debug)");
-      return { ok: false, stopped: true, skipped: skipped, skipReasons: skipReasons };
-    }
-
-    return { ok: false, stopped: true, skipped: 0, skipReasons: [] };
+    return { ok: true, added: take };
   }
 
   async function generateAi() {
@@ -1376,8 +1353,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     try {
       if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
-        setLastAiMeta({ ts: Date.now(), ok: false, stage: "precheck", errorCode: "SDK_MISSING" });
-        updateDebug();
         return;
       }
 
@@ -1389,8 +1364,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         } else {
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
         }
-        setLastAiMeta({ ts: Date.now(), ok: false, stage: "init", errorCode: code });
-        updateDebug();
         return;
       }
 
@@ -1404,57 +1377,40 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         language: "sv"
       };
 
+      // P0 FIX (R2/R3): skickar inte "Auto" som questionType. Om content ser ut som quiz och qt saknas → default mcq.
+      const wantsQuiz = aiContentLooksLikeQuiz(ctl.contentRaw);
       if (ctl.questionType) req.questionType = ctl.questionType;
+      else if (wantsQuiz) req.questionType = "mcq";
+
       if (ctl.feedbackEnabled) req.feedbackEnabled = true;
+
+      // Hints (ok att ignoreras av worker)
+      if (wantsQuiz) {
+        req.preferQuestions = true;
+        req.requestedItemType = "question";
+      }
+
+      // DEBUG (runtime-only)
+      page.__LAST_AI_REQUEST = deepClone(req);
 
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI jobbar…", "warn");
       DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
 
       const raw = await window.HRWorkerSDK.aiGenerate(req);
 
-      // P0 (AI1): om SDK/worker markerar ok:false -> visa orsak, ingen tyst fallthrough
-      if (raw && typeof raw === "object" && raw.ok === false) {
-        const ec = (raw.error && (raw.error.code || raw.error.errorCode)) ? String(raw.error.code || raw.error.errorCode) : "WORKER_NOT_OK";
-        const msg = (raw.error && (raw.error.message || raw.error.msg)) ? String(raw.error.message || raw.error.msg) : "AI stoppad av regler/guard.";
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(msg);
-
-        setLastAiMeta({
-          ts: Date.now(),
-          ok: false,
-          stage: "aiGenerate",
-          errorCode: ec,
-          message: msg,
-          hasBlocks: !!getSdkBlocks(raw),
-          blocksLen: (getSdkBlocks(raw) || []).length
-        });
-        updateDebug();
-        return;
-      }
+      // DEBUG (runtime-only)
+      page.__LAST_AI_RAW = raw;
 
       const sdkBlocks = getSdkBlocks(raw);
       if (sdkBlocks && sdkBlocks.length) {
         const r = applySdkBlocksToDraft(sdkBlocks, ctl.count);
-
-        setLastAiMeta({
-          ts: Date.now(),
-          ok: !!(r && r.ok),
-          stage: "applySdkBlocks",
-          blocksLen: sdkBlocks.length,
-          added: r && r.added ? r.added : 0,
-          skipped: r && r.skipped ? r.skipped : 0
-        });
-
         if (r && r.ok) {
           setDirty(true);
           updateUiAll();
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
           return;
         }
-        if (r && r.stopped) {
-          updateUiAll();
-          return;
-        }
+        if (r && r.stopped) return;
       }
 
       const norm = (DEPS.core && typeof DEPS.core.normalizeAiResult === "function")
@@ -1464,30 +1420,19 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       const pick = extractItemsFromAi(raw, norm);
       const itemsIn = Array.isArray(pick.items) ? pick.items : [];
 
-      setLastAiMeta({
-        ts: Date.now(),
-        ok: true,
-        stage: "fallbackExtract",
-        source: pick.source,
-        itemsLen: itemsIn.length
-      });
-
       if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
         const v = DEPS.contract.validateAiResult({ items: itemsIn });
         if (!v || v.ok !== true) {
           const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
           DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
-          setLastAiMeta({ ts: Date.now(), ok: false, stage: "fallbackValidate", reasons: reasons.slice(0, 6) });
-          updateDebug();
           return;
         }
       }
 
       if (!itemsIn.length) {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav 0 items (källa: " + pick.source + ").");
-        updateDebug();
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items (källa: " + pick.source + ").");
         return;
       }
 
@@ -1500,10 +1445,8 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       setDirty(true);
       updateUiAll();
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
-    } catch (e) {
-      setLastAiMeta({ ts: Date.now(), ok: false, stage: "exception", message: String(e && e.message ? e.message : e) });
+    } catch (_) {
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
-      updateDebug();
     }
   }
 
@@ -1579,6 +1522,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       if (!state.draft) return;
 
       syncDraftFromInputs();
+
       renderAreaDatalist();
       syncDraftTitleFromFields();
 
@@ -1666,6 +1610,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
           renderChapterAndStepPickers();
 
           syncDraftFromInputs();
+
           updateUiAll();
         } else {
           updateUiAll();
