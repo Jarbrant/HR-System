@@ -14,9 +14,18 @@ POLICY (LÅST):
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
 PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
-- P0 FIX (2C): renderBlocksList förväntar sig opts.onOpenBlock → skicka NO-OP för att undvika crash.
-- P0 FIX (2D): Boot dead-state (showAll=false + selectedId tom) → auto-välj första training efter load.
-- Behåller P0 2A/2B/A från v1.2.2: ingen auto-modal vid select, stäng modal vid byte, scrub kontext-boilerplate.
+- P0 FIX (2A): Val av utbildning i vänsterlistan ska INTE auto-öppna item-modal.
+               Endast klick på item-preview i blockslistan (höger) öppnar modal.
+               (Vi tar bort auto-open genom att aldrig koppla en "öppna block"-handler.)
+- P0 FIX (2B): Vid byte av utbildning stänger vi ev. öppen item-modal om render erbjuder close/hide.
+- P0 FIX (A):  UI-städning: tar bort hela frasen "Utgå från detta sammanhang: …" när den bara innehåller
+               "(kontext dolt)" eller "[object Object]" (inte bara token-replace).
+- P0 FIX (R1): Render-stabilitet: vissa renderBlocksList-implementationer anropar opts.onOpenBlock_toggle
+               utan typcheck. Vi skickar alltid en NOOP-funktion så UI inte kraschar.
+- P0 FIX (AI1): Om worker/SDK returnerar {ok:false,...} visar vi tydlig orsak i UI istället för “AI gav inget”.
+- P0 FIX (AI2): Fail-closed men inte "drop-all": om validering failar för ett block så skippar vi det blocket
+               och tar resten. Om allt skippar → stoppar med tydlig hint.
+- Debug: state.lastAiMeta (runtime-only, ingen payloaddump, inga storage-keys).
 ============================================================ */
 (function () {
   "use strict";
@@ -142,6 +151,9 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     catalogStatus: "pending", // pending|ok|missing|error
     catalogErr: "",
 
+    // Runtime-only AI meta (NO STORAGE, NO payload dump)
+    lastAiMeta: null,
+
     defaults: {
       // Fallback (om catalog saknas) — minimal men fungerande
       modules: [
@@ -244,14 +256,9 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     if (typeof s !== "string") return s;
     let out = s;
 
-    // Ta bort exakt mallfrasen när den bara bär "dolt"/objekt-token.
-    // Ex: "Utgå från detta sammanhang: (kontext dolt)" eller "Utgå från detta sammanhang: [object Object]"
     out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*(\(\s*kontext\s*dolt\s*\)|\[object\s+Object\])\s*/gi, " ");
-
-    // Ta bort en tom "Utgå från detta sammanhang:" om den står ensam i slutet av rad/sträng
     out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*$/gmi, "");
 
-    // Normalisera whitespace lite försiktigt
     out = out.replace(/[ \t]{2,}/g, " ");
     out = out.replace(/\n{3,}/g, "\n\n");
     return out.trim();
@@ -261,7 +268,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     if (typeof s !== "string") return s;
     let out = s;
     if (out.indexOf("[object Object]") !== -1) {
-      // Behåll fail-closed (ingen dump av objekt), men gör texten renare
       out = out.replace(/\[object Object\]/g, "(kontext dolt)");
     }
     return stripContextBoilerplate(out);
@@ -360,7 +366,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
   function syncDraftFromInputs() {
     if (!state.draft) return;
 
-    // OBS: vi rör bara metadatafält; blocks hanteras separat
     if (dom && dom.mod) state.draft.module = normStr(dom.mod.value);
     if (dom && dom.area) state.draft.area = normStr(dom.area.value);
 
@@ -377,15 +382,22 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
   function updateDebug() {
     try {
       if (!dom || !dom.debugPre || !dom.setText) return;
+
+      const d = state.draft ? state.draft : null;
+      const blocksLen = (d && Array.isArray(d.blocks)) ? d.blocks.length : 0;
+
       const payload = {
         version: page.__VERSION,
         locked: !!state.locked,
         lockReason: state.lockReason || "",
         selectedId: state.selectedId || "",
-        draft: state.draft ? state.draft : null,
+        draft: d,
+        draftBlocksLen: blocksLen,
         trainingsCount: Array.isArray(state.trainings) ? state.trainings.length : 0,
-        trainings: Array.isArray(state.trainings) ? state.trainings : []
+        catalogStatus: state.catalogStatus,
+        lastAiMeta: state.lastAiMeta
       };
+
       dom.setText(dom.debugPre, JSON.stringify(payload, null, 2));
     } catch (_) {
       // fail-closed: skriv inget
@@ -722,7 +734,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         const blob = (normStr(t.title) + " " + normStr(t.module) + " " + normStr(t.area)).toLowerCase();
         if (!blob.includes(q)) continue;
       } else if (!state.showAll) {
-        // P0 (1A): i "inte showAll"-läge och utan sök visar vi endast selected.
         const tid = normStr(t.id);
         if (!selectedId || tid !== selectedId) continue;
       }
@@ -805,22 +816,19 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
     DEPS.render.openItemModal({
       title: itemTitleForModal(blockIdx, itemIdx, item),
-      item: deepClone(item), // skydda draft tills onSave
+      item: deepClone(item),
       canWrite: canWrite,
       onSave: function (updated) {
         if (!isWriterAllowed()) return;
 
-        // fail-closed: måste finnas kvar när vi sparar
         const again = getDraftBlockAndItem(blockIdx, itemIdx);
         if (!again.ok) return;
 
         const original = again.item;
 
-        // Sanera ev "[object Object]" + kontext-malltext
         if (updated && typeof updated === "object") sanitizeAiItemInPlace(updated);
         if (typeof updated === "string") updated = scrubObjectObjectToken(updated);
 
-        // Bevara string-items som string om original var string (minimerar modellskift)
         if (typeof original === "string") {
           if (typeof updated === "string") {
             again.block.items[itemIdx] = updated;
@@ -834,7 +842,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
             return;
           }
         } else {
-          // Objekt -> spara objekt (deepClone)
           if (updated && typeof updated === "object") again.block.items[itemIdx] = deepClone(updated);
           else if (typeof updated === "string") again.block.items[itemIdx] = { type: "info", text: normStr(updated) };
           else return;
@@ -850,8 +857,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         if (!again.ok) return;
 
         again.block.items.splice(itemIdx, 1);
-
-        // om block blev tomt -> behåll block men tomt (ingen auto-rensning här)
         setDirty(true);
         updateUiAll();
       }
@@ -878,7 +883,10 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     const blocks = currentBlocks();
 
     // P0 FIX (2A): renderBlocksList får INTE auto-öppna något item/block.
-    // Endast explicita item-klick (onOpenItem) ska öppna item-modal.
+    // Vissa render-implementationer anropar dock opts.onOpenBlock_toggle utan typcheck.
+    // Därför: vi skickar alltid en NOOP-funktion som aldrig öppnar modal (ingen auto-open, ingen crash).
+    const noopOpenBlock = function () { /* NOOP: medvetet */ };
+
     DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
       blocks,
       onEdit: function (idx) { openBlockEditor(idx); },
@@ -887,8 +895,9 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       // PP-SC-010-07: klickbara previews öppnar item-modal
       onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); },
 
-      // P0 FIX (2C): vissa render-versioner kräver denna callback -> NO-OP (ingen auto-modal)
-      onOpenBlock: function () { /* NO-OP */ }
+      // P0 (R1): NOOP så render aldrig kraschar om den förväntar sig funktionen.
+      onOpenBlock: noopOpenBlock,
+      onOpenBlock_toggle: noopOpenBlock
     });
   }
 
@@ -917,7 +926,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     refreshList();
     fillEditorFromDraft();
     updateButtons();
-    updateDebug(); // P0: alltid uppdatera debug när UI uppdateras
+    updateDebug();
   }
 
   page._recalc = updateUiAll;
@@ -931,12 +940,10 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       if (!DEPS.render) return;
       if (typeof DEPS.render.closeItemModal === "function") { DEPS.render.closeItemModal(); return; }
       if (typeof DEPS.render.hideItemModal === "function") { DEPS.render.hideItemModal(); return; }
-      if (typeof DEPS.render.closeModal === "function") { /* kan vara generell modal, men stäng inte allt här */ }
     } catch (_) { /* ignore */ }
   }
 
   function selectTraining(id) {
-    // P0 (2B): stäng ev. öppen item-modal vid byte av utbildning
     tryCloseItemModal();
 
     const idx = findTrainingIndexById(id);
@@ -993,8 +1000,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       return;
     }
 
-    // P0 (1A): Skapa ny ska inte trigga mass-lista.
-    // Vi håller showAll=false och listan visar då endast selected (se visibleTrainings).
     state.showAll = false;
 
     setDirty(false);
@@ -1060,7 +1065,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
 
-    // P0 (1B): alltid synka draft från inputs precis före save
     syncDraftFromInputs();
 
     syncDraftTitleFromFields();
@@ -1133,7 +1137,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       if (!state.draft.blocks) state.draft.blocks = blocks;
       const bb = state.draft.blocks[idx];
       if (bb && Array.isArray(bb.items) && bb.items[0]) {
-        // Baseline: skriv till första relevanta textfältet (utan att skapa nya keys)
         const it0 = bb.items[0];
         if (it0 && typeof it0 === "object") {
           if (typeof it0.text === "string") it0.text = txt;
@@ -1242,7 +1245,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     return { mode, count, questionType, feedbackEnabled };
   }
 
-  // P0 helper: extrahera items ur både "items[]" och "blocks[]"
   function extractItemsFromAi(raw, norm) {
     const nItems = norm && Array.isArray(norm.items) ? norm.items : [];
     if (nItems.length) return { items: nItems, source: "norm.items" };
@@ -1304,17 +1306,25 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     return itemsNorm;
   }
 
-  // P0: Hämta blocks[] från flera möjliga platser (SDK + ev wrapper)
   function getSdkBlocks(raw) {
     if (raw && Array.isArray(raw.blocks)) return raw.blocks;
     if (raw && raw.data && Array.isArray(raw.data.blocks)) return raw.data.blocks;
     return null;
   }
 
-  // P0: Skapa UI-block från sdkBlocks oavsett shape
+  function setLastAiMeta(meta) {
+    try {
+      state.lastAiMeta = meta && typeof meta === "object" ? meta : null;
+    } catch (_) { state.lastAiMeta = null; }
+  }
+
   function applySdkBlocksToDraft(sdkBlocks, wantCount) {
     const take = Math.min(sdkBlocks.length, (Number(wantCount) || sdkBlocks.length));
     if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
+
+    let added = 0;
+    let skipped = 0;
+    const skipReasons = [];
 
     for (let bi = 0; bi < take; bi++) {
       const b = sdkBlocks[bi];
@@ -1322,14 +1332,13 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       const isWrapper = !!(b && typeof b === "object" && Array.isArray(b.items));
       const itemsIn = isWrapper ? safeArr(b.items) : [b];
 
-      // Validera alltid items-arrayen (fail-closed)
       if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
         const v = DEPS.contract.validateAiResult({ items: itemsIn });
         if (!v || v.ok !== true) {
+          skipped++;
           const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
-          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
-          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
-          return { ok: false, stopped: true };
+          skipReasons.push("Block " + (bi + 1) + ": " + reasons.join(" "));
+          continue; // P0 (AI2): skippa blocket, behåll resten
         }
       }
 
@@ -1340,9 +1349,24 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       const title = bTitle || ("AI-block " + (bi + 1) + " • " + tDraft);
 
       state.draft.blocks.push({ title: title, items: itemsNorm });
+      added++;
     }
 
-    return { ok: true, added: take };
+    if (added > 0) {
+      if (skipped > 0) {
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Vissa AI-block skippades: " + skipped + " st. (se debug)");
+      }
+      return { ok: true, added: added, skipped: skipped, skipReasons: skipReasons };
+    }
+
+    // Allt skippat => fail-closed stop
+    if (skipped > 0) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
+      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Alla block skippades av validering. (se debug)");
+      return { ok: false, stopped: true, skipped: skipped, skipReasons: skipReasons };
+    }
+
+    return { ok: false, stopped: true, skipped: 0, skipReasons: [] };
   }
 
   async function generateAi() {
@@ -1352,6 +1376,8 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     try {
       if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
+        setLastAiMeta({ ts: Date.now(), ok: false, stage: "precheck", errorCode: "SDK_MISSING" });
+        updateDebug();
         return;
       }
 
@@ -1363,6 +1389,8 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         } else {
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
         }
+        setLastAiMeta({ ts: Date.now(), ok: false, stage: "init", errorCode: code });
+        updateDebug();
         return;
       }
 
@@ -1384,21 +1412,51 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
       const raw = await window.HRWorkerSDK.aiGenerate(req);
 
-      // P0: Huvudväg — blocks[] => 1 UI-block per blocks[i] (oavsett shape)
+      // P0 (AI1): om SDK/worker markerar ok:false -> visa orsak, ingen tyst fallthrough
+      if (raw && typeof raw === "object" && raw.ok === false) {
+        const ec = (raw.error && (raw.error.code || raw.error.errorCode)) ? String(raw.error.code || raw.error.errorCode) : "WORKER_NOT_OK";
+        const msg = (raw.error && (raw.error.message || raw.error.msg)) ? String(raw.error.message || raw.error.msg) : "AI stoppad av regler/guard.";
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(msg);
+
+        setLastAiMeta({
+          ts: Date.now(),
+          ok: false,
+          stage: "aiGenerate",
+          errorCode: ec,
+          message: msg,
+          hasBlocks: !!getSdkBlocks(raw),
+          blocksLen: (getSdkBlocks(raw) || []).length
+        });
+        updateDebug();
+        return;
+      }
+
       const sdkBlocks = getSdkBlocks(raw);
       if (sdkBlocks && sdkBlocks.length) {
         const r = applySdkBlocksToDraft(sdkBlocks, ctl.count);
+
+        setLastAiMeta({
+          ts: Date.now(),
+          ok: !!(r && r.ok),
+          stage: "applySdkBlocks",
+          blocksLen: sdkBlocks.length,
+          added: r && r.added ? r.added : 0,
+          skipped: r && r.skipped ? r.skipped : 0
+        });
+
         if (r && r.ok) {
           setDirty(true);
           updateUiAll();
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
           return;
         }
-        // fail-closed: apply stoppade pga validering
-        if (r && r.stopped) return;
+        if (r && r.stopped) {
+          updateUiAll();
+          return;
+        }
       }
 
-      // Fallback: äldre/annan shape => behåll tidigare beteende (1 block)
       const norm = (DEPS.core && typeof DEPS.core.normalizeAiResult === "function")
         ? (DEPS.core.normalizeAiResult(raw) || {})
         : (raw && typeof raw === "object" ? raw : {});
@@ -1406,19 +1464,30 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       const pick = extractItemsFromAi(raw, norm);
       const itemsIn = Array.isArray(pick.items) ? pick.items : [];
 
+      setLastAiMeta({
+        ts: Date.now(),
+        ok: true,
+        stage: "fallbackExtract",
+        source: pick.source,
+        itemsLen: itemsIn.length
+      });
+
       if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
         const v = DEPS.contract.validateAiResult({ items: itemsIn });
         if (!v || v.ok !== true) {
           const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
           DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
+          setLastAiMeta({ ts: Date.now(), ok: false, stage: "fallbackValidate", reasons: reasons.slice(0, 6) });
+          updateDebug();
           return;
         }
       }
 
       if (!itemsIn.length) {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items (källa: " + pick.source + ").");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav 0 items (källa: " + pick.source + ").");
+        updateDebug();
         return;
       }
 
@@ -1431,8 +1500,10 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       setDirty(true);
       updateUiAll();
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
-    } catch (_) {
+    } catch (e) {
+      setLastAiMeta({ ts: Date.now(), ok: false, stage: "exception", message: String(e && e.message ? e.message : e) });
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
+      updateDebug();
     }
   }
 
@@ -1507,9 +1578,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     const onEditorChange = function () {
       if (!state.draft) return;
 
-      // P0 (1B): synka draft direkt när användaren ändrar inputs
       syncDraftFromInputs();
-
       renderAreaDatalist();
       syncDraftTitleFromFields();
 
@@ -1571,15 +1640,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       clearLock();
     }
 
-    // P0 FIX (2D): undvik dead-state (showAll=false + selectedId tom => tom vänsterlista)
-    if (!state.locked && !state.selectedId && Array.isArray(state.trainings) && state.trainings.length) {
-      const firstId = normStr(state.trainings[0] && state.trainings[0].id);
-      if (firstId) {
-        state.selectedId = firstId;
-        state.draft = deepClone(state.trainings[0]);
-      }
-    }
-
     renderModuleDatalist();
     renderAreaDatalist();
     renderChapterAndStepPickers();
@@ -1605,9 +1665,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
           renderAreaDatalist();
           renderChapterAndStepPickers();
 
-          // P0 (1B): om användaren redan börjat skriva – behåll inputs genom draft-sync
           syncDraftFromInputs();
-
           updateUiAll();
         } else {
           updateUiAll();
