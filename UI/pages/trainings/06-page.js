@@ -14,11 +14,9 @@ POLICY (LÅST):
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
 PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
-- P0 FIX (Q1): Om questionType (t.ex. mcq_single) begärs men AI-svar saknar question-items → fail-closed:
-               stoppa import, visa tydlig hint "AI gav inga provfrågor" (inte lägga in info/task).
-- P0 FIX (Q2): Spara debug: page._LAST_AI_REQUEST / _LAST_AI_RAW / _LAST_AI_NORM / _LAST_AI_PICK så DevTools alltid kan se.
-- P0 FIX (Q3): Om questionType begärs och AI faktiskt skickar "question" men saknar MCQ-krav (options + correctIndex) →
-               fail-closed: stoppa import och visa tydlig hint "AI gav question utan svarsalternativ".
+- P0 FIX (Q3): Om questionType=MCQ begärs men AI-svar saknar svarsalternativ/correctIndex → fail-closed.
+               Stoppa import och visa tydlig hint "Worker måste returnera options + correctIndex".
+- P0 FIX (Q2 kvar): Spara debug: page._LAST_AI_REQUEST / _LAST_AI_RAW / _LAST_AI_NORM / _LAST_AI_PICK så DevTools alltid kan se.
 ============================================================ */
 (function () {
   "use strict";
@@ -249,16 +247,12 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
     const s = normStr(qt).toLowerCase();
     if (!s) return false;
     if (s === "auto") return false;
-    // ex: mcq_single, mcq_multi, tf, short, etc.
     return true;
   }
 
-  function normalizeQuestionType(qt) {
+  function isMcqType(qt) {
     const s = normStr(qt).toLowerCase();
-    if (!s) return "";
-    if (s === "auto") return "";
-    // kompat: mcq (ett rätt) kan råka vara "mcq_single"
-    return s;
+    return (s === "mcq_single" || s === "mcq_multi" || s.indexOf("mcq") === 0);
   }
 
   // ------------------------------------------------------------
@@ -268,13 +262,8 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
     if (typeof s !== "string") return s;
     let out = s;
 
-    // Ta bort exakt mallfrasen när den bara bär "dolt"/objekt-token.
     out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*(\(\s*kontext\s*dolt\s*\)|\[object\s+Object\])\s*/gi, " ");
-
-    // Ta bort en tom "Utgå från detta sammanhang:" om den står ensam i slutet av rad/sträng
     out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*$/gmi, "");
-
-    // Normalisera whitespace lite försiktigt
     out = out.replace(/[ \t]{2,}/g, " ");
     out = out.replace(/\n{3,}/g, "\n\n");
     return out.trim();
@@ -284,7 +273,6 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
     if (typeof s !== "string") return s;
     let out = s;
     if (out.indexOf("[object Object]") !== -1) {
-      // Behåll fail-closed (ingen dump av objekt), men gör texten renare
       out = out.replace(/\[object Object\]/g, "(kontext dolt)");
     }
     return stripContextBoilerplate(out);
@@ -320,7 +308,7 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
         const w = DEPS.core.getWho();
         if (w && typeof w === "object") return w;
       }
-    } catch (_) { /* ignore */ }
+    } catch (_) { }
 
     try {
       if (window.HRApp && typeof window.HRApp.getRole === "function") {
@@ -337,7 +325,7 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
           return { role, empNo, canWrite };
         }
       }
-    } catch (_) { /* ignore */ }
+    } catch (_) { }
 
     return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
   }
@@ -383,406 +371,6 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
   function syncDraftFromInputs() {
     if (!state.draft) return;
 
-    // OBS: vi rör bara metadatafält; blocks hanteras separat
-    if (dom && dom.mod) state.draft.module = normStr(dom.mod.value);
-    if (dom && dom.area) state.draft.area = normStr(dom.area.value);
-
-    if (dom && dom.courseTitle) state.draft.courseTitle = normStr(dom.courseTitle.value) || "Introduktion";
-    if (dom && dom.courseStep) state.draft.courseStep = parseCourseStep(dom.courseStep.value);
-
-    if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value) || "normal";
-    if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
-  }
-
-  // ------------------------------------------------------------
-  // Debug render (P0) — visar vad som faktiskt finns (XSS-safe)
-  // ------------------------------------------------------------
-  function updateDebug() {
-    try {
-      if (!dom || !dom.debugPre || !dom.setText) return;
-      const payload = {
-        version: page.__VERSION,
-        locked: !!state.locked,
-        lockReason: state.lockReason || "",
-        selectedId: state.selectedId || "",
-        draft: state.draft ? state.draft : null,
-        trainingsCount: Array.is
-/* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-07) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
-Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Bootstrap + state + event wiring för trainings (ADMIN create/edit).
-      Nu: Koppla in ai-rules/v1/modules.json → Modul/Område/Kapitel/Steg.
-      + AI-generate via HRWorkerSDK (fail-closed) utan att skicka "Mål" till AI.
-      + PP-SC-010-07: Klick på item i blocklistan öppnar modal (view/edit/delete/save).
-
-POLICY (LÅST):
-- UI-only • Fail-closed
-- Inga nya storage-keys (endast AO-057_TRAININGS_V1 skrivs via 03-store)
-- XSS-safe: render via 05-render.js + dom.setText (textContent)
-- ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
-- AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
-
-PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
-- P0 FIX (Q1): Om questionType (t.ex. mcq_single) begärs men AI-svar saknar question-items → fail-closed:
-               stoppa import, visa tydlig hint "AI gav inga provfrågor" (inte lägga in info/task).
-- P0 FIX (Q2): Spara debug: page._LAST_AI_REQUEST / _LAST_AI_RAW / _LAST_AI_NORM / _LAST_AI_PICK så DevTools alltid kan se.
-============================================================ */
-(function () {
-  "use strict";
-
-  const NS = (window.Trainings = window.Trainings || {});
-  let dom = NS.dom;
-
-  const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.2.3-PP-SC-010-07B";
-
-  // DevTools debug hooks (NO STORAGE)
-  page._LAST_AI_REQUEST = null;
-  page._LAST_AI_RAW = null;
-  page._LAST_AI_NORM = null;
-  page._LAST_AI_PICK = null;
-
-  // ------------------------------------------------------------
-  // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
-  // ------------------------------------------------------------
-  const DEPS = { core: null, store: null, contract: null, render: null };
-  function refreshDeps() {
-    DEPS.core = NS.core || null;
-    DEPS.store = NS.store || null;
-    DEPS.contract = NS.contract || null;
-    DEPS.render = NS.render || null;
-    return DEPS;
-  }
-  function depsReady() {
-    refreshDeps();
-    return !!(DEPS.core && DEPS.store && DEPS.contract && DEPS.render && dom);
-  }
-
-  // ------------------------------------------------------------
-  // Minimal DOM fallback (om 01-dom saknas / är ofullständig)
-  // ------------------------------------------------------------
-  function byId(id) { return document.getElementById(String(id || "")); }
-
-  function buildDomFallback() {
-    const D = {};
-
-    // Elements (måste matcha befintliga id i trainings.html)
-    D.btnNew = byId("btnNew");
-    D.btnDelete = byId("btnDelete");
-    D.btnPurge = byId("btnPurge");
-    D.btnRevert = byId("btnRevert");
-
-    D.btnSaveDraft = byId("btnSaveDraft");
-    D.btnSavePublish = byId("btnSavePublish");
-
-    D.btnGenAI = byId("btnGenAI");
-    D.btnTestAI = byId("btnTestAI");
-
-    D.btnModAll = byId("btnModAll");
-    D.btnModClear = byId("btnModClear");
-
-    D.btnShowAll = byId("btnShowAll");
-    D.btnClear = byId("btnClear");
-
-    D.btnLogout = byId("btnLogout");
-
-    D.q = byId("q");
-    D.fStatus = byId("fStatus");
-    D.onlyProblems = byId("onlyProblems");
-
-    D.mod = byId("mod");
-    D.area = byId("area");
-    D.modList = byId("modList");
-    D.areaList = byId("areaList");
-
-    D.courseTitle = byId("courseTitle");
-    D.courseStep = byId("courseStep");
-
-    D.goalsLevel = byId("goalsLevel");
-    D.goals = byId("goals");
-
-    D.titleDisplay = byId("titleDisplay");
-    D.subjectIdText = byId("subjectIdText");
-    D.revertHint = byId("revertHint");
-
-    D.aiContent = byId("aiContent");
-    D.aiCount = byId("aiCount");
-    D.aiQuestionType = byId("aiQuestionType");
-    D.aiFeedbackEnabled = byId("aiFeedbackEnabled");
-    D.questionControls = byId("questionControls");
-
-    // Debug
-    D.debugBox = byId("debugBox");
-    D.debugPre = byId("debugPre");
-
-    // Helpers
-    D.setText = function (el, txt) { if (!el) return; el.textContent = String(txt ?? ""); };
-    D.disable = function (el, disabled) {
-      if (!el) return;
-      el.disabled = !!disabled;
-      if (el.classList) el.classList.toggle("disabled", !!disabled);
-    };
-    D.on = function (el, ev, fn) { if (!el || !ev || !fn) return; el.addEventListener(ev, fn); };
-    D.show = function (el) { if (!el) return; el.style.display = ""; };
-    D.hide = function (el) { if (!el) return; el.style.display = "none"; };
-
-    return D;
-  }
-
-  if (!dom) dom = (NS.dom = buildDomFallback());
-  if (dom && typeof dom.disable !== "function") dom.disable = buildDomFallback().disable;
-  if (dom && typeof dom.on !== "function") dom.on = buildDomFallback().on;
-  if (dom && typeof dom.setText !== "function") dom.setText = buildDomFallback().setText;
-  if (dom && typeof dom.show !== "function") dom.show = buildDomFallback().show;
-  if (dom && typeof dom.hide !== "function") dom.hide = buildDomFallback().hide;
-
-  // ------------------------------------------------------------
-  // State
-  // ------------------------------------------------------------
-  const state = {
-    who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false },
-    locked: true,
-    lockReason: "BOOT: väntar på moduler…",
-    trainings: [],
-    selectedId: "",
-    draft: null,
-    dirty: false,
-    showAll: false,
-    q: "",
-    fStatus: "",
-    onlyProblems: false,
-
-    // Catalog (ai-rules/v1/modules.json)
-    catalog: null,
-    catalogStatus: "pending", // pending|ok|missing|error
-    catalogErr: "",
-
-    defaults: {
-      // Fallback (om catalog saknas) — minimal men fungerande
-      modules: [
-        "Kvalitet",
-        "Säkerhet & arbetsmiljö",
-        "Miljö",
-        "Livsmedel",
-        "Informationssäkerhet",
-        "HR – vardag",
-        "Ledarskap",
-        "DISC-modellen",
-        "Matematik",
-        "Svenska"
-      ],
-      areasByModule: {
-        "Kvalitet": ["ISO 9001", "Avvikelsehantering", "CAPA (åtgärder)", "Internrevision", "Mål & KPI"],
-        "Säkerhet & arbetsmiljö": ["Skyddsrond", "Incident & tillbud", "Riskbedömning", "Ergonomi", "Psykosocial arbetsmiljö"],
-        "Miljö": ["ISO 14001", "Avfall", "Energi", "Transport", "Kemikalier"],
-        "Livsmedel": ["HACCP", "Kylkedja", "Hygien", "Allergen", "Spårbarhet"],
-        "Informationssäkerhet": ["Lösenord & konton", "Phishing & bedrägeri", "Behörighet & roller", "Enheter & arbetsdator", "Säkerhetsincident"],
-        "HR – vardag": ["Onboarding", "Policy & regler", "Feedback & samtal", "Konflikthantering", "Frånvaro & rutiner"],
-        "Ledarskap": ["Planering", "Delegering", "Uppföljning", "Coachning", "Förändringsledning"],
-        "DISC-modellen": ["D – Driv", "I – Inflytande", "S – Stabilitet", "C – Korrekthet", "Team & kommunikation"],
-        "Matematik": ["Procent", "Grundräkning", "Enheter & omvandling", "Diagram & tolkning", "Problemlösning"],
-        "Svenska": ["Läsförståelse", "Skriva tydligt", "Ton & bemötande", "Språkregler", "Sammanfatta"]
-      },
-      chapterLabels: [
-        "Introduktion",
-        "Grundläggande",
-        "Rutiner & arbetssätt",
-        "Scenario & tillämpning",
-        "Avvikelser & risk",
-        "Fördjupning",
-        "Kontroll & test"
-      ],
-      steps: [
-        { id: "1", label: "Kurs 1" },
-        { id: "2", label: "Kurs 2" },
-        { id: "3", label: "Kurs 3" },
-        { id: "4", label: "Kurs 4" },
-        { id: "5", label: "Kurs 5" }
-      ]
-    }
-  };
-
-  page._state = state;
-
-  // ------------------------------------------------------------
-  // Utils
-  // ------------------------------------------------------------
-  function normStr(v) {
-    return (DEPS.core && DEPS.core.normStr) ? DEPS.core.normStr(v) : String(v ?? "").trim();
-  }
-  function safeArr(a) { return Array.isArray(a) ? a : []; }
-  function lowerKey(v) { return normStr(v).toLowerCase(); }
-  function isObj(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
-
-  function deepClone(obj) {
-    try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
-  }
-
-  function findTrainingIndexById(id) {
-    const tid = normStr(id);
-    if (!tid) return -1;
-    for (let i = 0; i < state.trainings.length; i++) {
-      if (normStr(state.trainings[i] && state.trainings[i].id) === tid) return i;
-    }
-    return -1;
-  }
-
-  function currentBlocks() {
-    const d = state.draft || {};
-    if (Array.isArray(d.blocks)) return d.blocks;
-    if (Array.isArray(d.items)) return [{ title: d.title || "(block)", items: d.items }];
-    return [];
-  }
-
-  function hasAnyItems() {
-    const blocks = currentBlocks();
-    let n = 0;
-    for (const b of blocks) if (b && Array.isArray(b.items)) n += b.items.length;
-    return n > 0;
-  }
-
-  function upper(v) { return String(v ?? "").toUpperCase(); }
-
-  // P0: mode-normalisering (worker kräver training|document)
-  function normalizeMode(m) {
-    const s = String(m ?? "").trim().toLowerCase();
-    if (s === "training" || s === "document") return s;
-    if (s === "blocks" || s === "utbildning" || s === "kurs" || s === "train" || s === "trainings" || s === "training-v1" || s === "training_v1") return "training";
-    if (s === "doc" || s === "dokument" || s === "documents" || s === "document-v1" || s === "document_v1") return "document";
-    return "training"; // fail-safe
-  }
-
-  function isQuestionTypeSelected(qt) {
-    const s = normStr(qt).toLowerCase();
-    if (!s) return false;
-    if (s === "auto") return false;
-    // ex: mcq_single, mcq_multi, tf, short, etc.
-    return true;
-  }
-
-  // ------------------------------------------------------------
-  // P0: UI-sanerare för "[object Object]" + kontext-malltext (fail-closed)
-  // ------------------------------------------------------------
-  function stripContextBoilerplate(s) {
-    if (typeof s !== "string") return s;
-    let out = s;
-
-    // Ta bort exakt mallfrasen när den bara bär "dolt"/objekt-token.
-    out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*(\(\s*kontext\s*dolt\s*\)|\[object\s+Object\])\s*/gi, " ");
-
-    // Ta bort en tom "Utgå från detta sammanhang:" om den står ensam i slutet av rad/sträng
-    out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*$/gmi, "");
-
-    // Normalisera whitespace lite försiktigt
-    out = out.replace(/[ \t]{2,}/g, " ");
-    out = out.replace(/\n{3,}/g, "\n\n");
-    return out.trim();
-  }
-
-  function scrubObjectObjectToken(s) {
-    if (typeof s !== "string") return s;
-    let out = s;
-    if (out.indexOf("[object Object]") !== -1) {
-      // Behåll fail-closed (ingen dump av objekt), men gör texten renare
-      out = out.replace(/\[object Object\]/g, "(kontext dolt)");
-    }
-    return stripContextBoilerplate(out);
-  }
-
-  function sanitizeAiItemInPlace(item) {
-    if (!item || typeof item !== "object") return item;
-    const keys = ["text", "instruction", "prompt", "question", "explanation", "feedback", "rationale", "reason", "title", "heading"];
-    for (let i = 0; i < keys.length; i++) {
-      const k = keys[i];
-      if (typeof item[k] === "string") item[k] = scrubObjectObjectToken(item[k]);
-    }
-    return item;
-  }
-
-  function getItemPrimaryTextForEditor(it) {
-    try {
-      if (!it || typeof it !== "object") return "";
-      const cand = (typeof it.text === "string" && it.text) ? it.text
-        : (typeof it.instruction === "string" && it.instruction) ? it.instruction
-          : (typeof it.prompt === "string" && it.prompt) ? it.prompt
-            : (typeof it.question === "string" && it.question) ? it.question
-              : "";
-      return scrubObjectObjectToken(String(cand || ""));
-    } catch (_) {
-      return "";
-    }
-  }
-
-  function getWhoFresh() {
-    try {
-      if (DEPS.core && typeof DEPS.core.getWho === "function") {
-        const w = DEPS.core.getWho();
-        if (w && typeof w === "object") return w;
-      }
-    } catch (_) { /* ignore */ }
-
-    try {
-      if (window.HRApp && typeof window.HRApp.getRole === "function") {
-        const r = window.HRApp.getRole();
-        if (typeof r === "string") {
-          const role = upper(r);
-          return { role, empNo: "", canWrite: role === "ADMIN" };
-        }
-        if (r && typeof r === "object") {
-          const role = upper(r.roleId || r.role || "SYSTEM_ADMIN");
-          const empNo = String(r.empNo || r.emp || r.employeeNo || "");
-          const hasCanWrite = Object.prototype.hasOwnProperty.call(r, "canWrite");
-          const canWrite = hasCanWrite ? !!r.canWrite : (role === "ADMIN");
-          return { role, empNo, canWrite };
-        }
-      }
-    } catch (_) { /* ignore */ }
-
-    return { role: "SYSTEM_ADMIN", empNo: "", canWrite: false };
-  }
-
-  function isWriterAllowed() {
-    if (state.locked) return false;
-
-    const who = getWhoFresh();
-    state.who = who;
-
-    const role = upper(who.role || "SYSTEM_ADMIN");
-    if (role !== "ADMIN") return false;
-
-    if (who.canWrite === false) return false;
-    return true;
-  }
-
-  function setDirty(v) {
-    state.dirty = !!v;
-    if (dom && dom.setText) dom.setText(dom.revertHint, state.dirty ? "Osparade ändringar" : "");
-    if (dom && dom.disable) dom.disable(dom.btnRevert, !state.dirty || !isWriterAllowed());
-  }
-
-  function setLock(reason) {
-    state.locked = true;
-    state.lockReason = reason || "Låst (fail-closed).";
-  }
-  function clearLock() {
-    state.locked = false;
-    state.lockReason = "";
-  }
-
-  // ------------------------------------------------------------
-  // P0 (1B): Synka draft från inputs så async refresh inte nollställer fält
-  // ------------------------------------------------------------
-  function parseCourseStep(rawVal) {
-    const raw = normStr(rawVal);
-    if (!raw) return "1";
-    const m = raw.match(/(\d+)/);
-    return m ? String(m[1]) : (raw || "1");
-  }
-
-  function syncDraftFromInputs() {
-    if (!state.draft) return;
-
-    // OBS: vi rör bara metadatafält; blocks hanteras separat
     if (dom && dom.mod) state.draft.module = normStr(dom.mod.value);
     if (dom && dom.area) state.draft.area = normStr(dom.area.value);
 
@@ -809,13 +397,13 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         trainings: Array.isArray(state.trainings) ? state.trainings : [],
         lastAi: {
           request: page._LAST_AI_REQUEST || null,
-          raw: page._LAST_AI_RAW || null
+          raw: page._LAST_AI_RAW || null,
+          norm: page._LAST_AI_NORM || null,
+          pick: page._LAST_AI_PICK || null
         }
       };
       dom.setText(dom.debugPre, JSON.stringify(payload, null, 2));
-    } catch (_) {
-      // fail-closed: skriv inget
-    }
+    } catch (_) { }
   }
 
   // ------------------------------------------------------------
@@ -938,7 +526,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
           state.defaults = buildDefaultsFromCatalog(json);
           state.catalogStatus = "ok";
           return { ok: true, url };
-        } catch (_) { /* try next */ }
+        } catch (_) { }
       }
 
       state.catalogStatus = "missing";
@@ -1148,7 +736,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         const blob = (normStr(t.title) + " " + normStr(t.module) + " " + normStr(t.area)).toLowerCase();
         if (!blob.includes(q)) continue;
       } else if (!state.showAll) {
-        // P0 (1A): i "inte showAll"-läge och utan sök visar vi endast selected.
         const tid = normStr(t.id);
         if (!selectedId || tid !== selectedId) continue;
       }
@@ -1231,22 +818,19 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
     DEPS.render.openItemModal({
       title: itemTitleForModal(blockIdx, itemIdx, item),
-      item: deepClone(item), // skydda draft tills onSave
+      item: deepClone(item),
       canWrite: canWrite,
       onSave: function (updated) {
         if (!isWriterAllowed()) return;
 
-        // fail-closed: måste finnas kvar när vi sparar
         const again = getDraftBlockAndItem(blockIdx, itemIdx);
         if (!again.ok) return;
 
         const original = again.item;
 
-        // Sanera ev "[object Object]" + kontext-malltext
         if (updated && typeof updated === "object") sanitizeAiItemInPlace(updated);
         if (typeof updated === "string") updated = scrubObjectObjectToken(updated);
 
-        // Bevara string-items som string om original var string (minimerar modellskift)
         if (typeof original === "string") {
           if (typeof updated === "string") {
             again.block.items[itemIdx] = updated;
@@ -1260,7 +844,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
             return;
           }
         } else {
-          // Objekt -> spara objekt (deepClone)
           if (updated && typeof updated === "object") again.block.items[itemIdx] = deepClone(updated);
           else if (typeof updated === "string") again.block.items[itemIdx] = { type: "info", text: normStr(updated) };
           else return;
@@ -1277,7 +860,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
         again.block.items.splice(itemIdx, 1);
 
-        // om block blev tomt -> behåll block men tomt (ingen auto-rensning här)
         setDirty(true);
         updateUiAll();
       }
@@ -1303,17 +885,11 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
     const blocks = currentBlocks();
 
-    // P0 FIX (2A): renderBlocksList får INTE auto-öppna något item/block.
-    // Endast explicita item-klick (onOpenItem) ska öppna item-modal.
     DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
       blocks,
       onEdit: function (idx) { openBlockEditor(idx); },
       onDelete: function (idx) { deleteBlock(idx); },
-
-      // PP-SC-010-07: klickbara previews öppnar item-modal
       onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); }
-
-      // OBS: vi skickar INTE onOpenBlock längre (var "valfritt" och kunde triggas automatiskt)
     });
   }
 
@@ -1342,7 +918,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     refreshList();
     fillEditorFromDraft();
     updateButtons();
-    updateDebug(); // P0: alltid uppdatera debug när UI uppdateras
+    updateDebug();
   }
 
   page._recalc = updateUiAll;
@@ -1356,12 +932,10 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       if (!DEPS.render) return;
       if (typeof DEPS.render.closeItemModal === "function") { DEPS.render.closeItemModal(); return; }
       if (typeof DEPS.render.hideItemModal === "function") { DEPS.render.hideItemModal(); return; }
-      if (typeof DEPS.render.closeModal === "function") { /* kan vara generell modal, men stäng inte allt här */ }
-    } catch (_) { /* ignore */ }
+    } catch (_) { }
   }
 
   function selectTraining(id) {
-    // P0 (2B): stäng ev. öppen item-modal vid byte av utbildning
     tryCloseItemModal();
 
     const idx = findTrainingIndexById(id);
@@ -1418,7 +992,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       return;
     }
 
-    // P0 (1A): Skapa ny ska inte trigga mass-lista.
     state.showAll = false;
 
     setDirty(false);
@@ -1484,9 +1057,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
 
-    // P0 (1B): alltid synka draft från inputs precis före save
     syncDraftFromInputs();
-
     syncDraftTitleFromFields();
     state.draft.status = (status === "published") ? "published" : "draft";
 
@@ -1557,7 +1128,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       if (!state.draft.blocks) state.draft.blocks = blocks;
       const bb = state.draft.blocks[idx];
       if (bb && Array.isArray(bb.items) && bb.items[0]) {
-        // Baseline: skriv till första relevanta textfältet (utan att skapa nya keys)
         const it0 = bb.items[0];
         if (it0 && typeof it0 === "object") {
           if (typeof it0.text === "string") it0.text = txt;
@@ -1741,11 +1311,27 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       if (typeof x === "string") return false;
       const t = normStr(x.type).toLowerCase();
       if (t === "question") return true;
-      // defensivt: om worker glömmer type men har question/options
       if (typeof x.question === "string" && x.question) return true;
       if (Array.isArray(x.options) && x.options.length) return true;
       if (Array.isArray(x.choices) && x.choices.length) return true;
       return false;
+    } catch (_) { return false; }
+  }
+
+  function looksLikeMcqQuestionItem(x) {
+    try {
+      if (!x || typeof x !== "object") return false;
+      const t = normStr(x.type).toLowerCase();
+      if (t !== "question" && !(typeof x.question === "string" && x.question)) return false;
+
+      const opts = Array.isArray(x.options) ? x.options : (Array.isArray(x.choices) ? x.choices : null);
+      if (!opts || opts.length < 2) return false;
+
+      const hasCorrectIndex = (typeof x.correctIndex === "number" && isFinite(x.correctIndex));
+      const hasCorrectIndices = Array.isArray(x.correctIndices) && x.correctIndices.length > 0;
+      const hasCorrectAnswer = (typeof x.correct === "string" && x.correct) || (typeof x.answer === "string" && x.answer);
+
+      return !!(hasCorrectIndex || hasCorrectIndices || hasCorrectAnswer);
     } catch (_) { return false; }
   }
 
@@ -1765,6 +1351,22 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     return false;
   }
 
+  function rawContainsAnyMcq(raw) {
+    const blocks = getSdkBlocks(raw) || [];
+    if (!blocks.length) return false;
+
+    for (const b of blocks) {
+      if (!b) continue;
+
+      if (looksLikeMcqQuestionItem(b)) return true;
+
+      if (b && typeof b === "object" && Array.isArray(b.items)) {
+        for (const it of b.items) if (looksLikeMcqQuestionItem(it)) return true;
+      }
+    }
+    return false;
+  }
+
   // P0: Skapa UI-block från sdkBlocks oavsett shape
   function applySdkBlocksToDraft(sdkBlocks, wantCount) {
     const take = Math.min(sdkBlocks.length, (Number(wantCount) || sdkBlocks.length));
@@ -1776,7 +1378,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       const isWrapper = !!(b && typeof b === "object" && Array.isArray(b.items));
       const itemsIn = isWrapper ? safeArr(b.items) : [b];
 
-      // Validera alltid items-arrayen (fail-closed)
       if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
         const v = DEPS.contract.validateAiResult({ items: itemsIn });
         if (!v || v.ok !== true) {
@@ -1797,6 +1398,12 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     }
 
     return { ok: true, added: take };
+  }
+
+  function failClosedAiHint(title, body) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill(title, "bad");
+    DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(body || "");
+    updateDebug();
   }
 
   async function generateAi() {
@@ -1833,7 +1440,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       if (ctl.questionType) req.questionType = ctl.questionType;
       if (ctl.feedbackEnabled) req.feedbackEnabled = true;
 
-      // DevTools: alltid spara request innan call (NO STORAGE)
       page._LAST_AI_REQUEST = deepClone(req);
       page._LAST_AI_RAW = null;
       page._LAST_AI_NORM = null;
@@ -1843,20 +1449,29 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
 
       const raw = await window.HRWorkerSDK.aiGenerate(req);
-
-      // DevTools: alltid spara raw
       page._LAST_AI_RAW = raw && typeof raw === "object" ? raw : raw;
 
       const questionRequested = isQuestionTypeSelected(req.questionType);
+      const mcqRequested = questionRequested && isMcqType(req.questionType);
 
-      // P0 FIX (Q1): Om questionType valts men AI inte levererar question → stoppa import (fail-closed)
+      // P0 FIX (Q1): questionType vald men inga question-items → stoppa
       if (questionRequested && !rawContainsAnyQuestion(raw)) {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inga provfrågor", "bad");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(
+        failClosedAiHint(
+          "Status: AI gav inga provfrågor",
           "Du valde provfrågor (" + normStr(req.questionType) + ") men AI-svaret innehöll inga question-items (bara teori/uppgift). " +
-          "Detta behöver fixas i worker ruleset så att questionType respekteras."
+          "Worker ruleset måste respektera questionType och returnera type:'question'."
         );
-        updateDebug();
+        return;
+      }
+
+      // P0 FIX (Q3): MCQ vald men saknar options + correctIndex → stoppa (det här är det du ser just nu)
+      if (mcqRequested && !rawContainsAnyMcq(raw)) {
+        failClosedAiHint(
+          "Status: AI gav inga svarsalternativ",
+          "Du valde MCQ (" + normStr(req.questionType) + ") men AI-svaret saknade giltiga svarsalternativ. " +
+          "Worker måste returnera: type:'question', question:'…', options:['A','B','C','D'], correctIndex:0..n-1 " +
+          "(ev. correctIndices för multi). Import stoppad (fail-closed) så du inte får 'tomma' frågor i UI."
+        );
         return;
       }
 
@@ -1870,7 +1485,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
           return;
         }
-        // fail-closed: apply stoppade pga validering
         if (r && r.stopped) return;
       }
 
@@ -1886,16 +1500,27 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
       const itemsIn = Array.isArray(pick.items) ? pick.items : [];
 
-      // P0 FIX (Q1) fallback: questionType begärd men items saknar question → stoppa
+      // fallback: MCQ vald men items saknar MCQ → stoppa
+      if (mcqRequested) {
+        const anyMcq = itemsIn.some(looksLikeMcqQuestionItem);
+        if (!anyMcq) {
+          failClosedAiHint(
+            "Status: AI gav inga svarsalternativ",
+            "Du valde MCQ (" + normStr(req.questionType) + ") men AI-svaret saknade options + correctIndex (källa: " + pick.source + "). " +
+            "Worker måste returnera en riktig MCQ-struktur. Import stoppad (fail-closed)."
+          );
+          return;
+        }
+      }
+
       if (questionRequested) {
         const anyQ = itemsIn.some(looksLikeQuestionItem);
         if (!anyQ) {
-          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inga provfrågor", "bad");
-          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(
+          failClosedAiHint(
+            "Status: AI gav inga provfrågor",
             "Du valde provfrågor (" + normStr(req.questionType) + ") men AI-svaret saknade question-items (källa: " + pick.source + "). " +
-            "Worker behöver returnera type:'question' + options + correctIndex."
+            "Worker behöver returnera type:'question' (och för MCQ även options + correctIndex)."
           );
-          updateDebug();
           return;
         }
       }
@@ -2001,9 +1626,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     const onEditorChange = function () {
       if (!state.draft) return;
 
-      // P0 (1B): synka draft direkt när användaren ändrar inputs
       syncDraftFromInputs();
-
       renderAreaDatalist();
       syncDraftTitleFromFields();
 
@@ -2090,9 +1713,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
           renderAreaDatalist();
           renderChapterAndStepPickers();
 
-          // P0 (1B): om användaren redan börjat skriva – behåll inputs genom draft-sync
           syncDraftFromInputs();
-
           updateUiAll();
         } else {
           updateUiAll();
