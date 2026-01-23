@@ -14,9 +14,10 @@ POLICY (LÅST):
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
 PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
-- P0 FIX (R0): renderBlocksList kräver opts.onOpenBlock som funktion → vi skickar alltid noop för att undvika krasch.
-               Samtidigt bibehåller vi policy: INGEN auto-öppning; endast item-klick (onOpenItem) öppnar modal.
-- P0 FIX (Q0): Normalisera UI-questionType (ex "MCQ (ett rätt)") till worker-tokens (ex "mcq_single").
+- P0 FIX (DBG): Lägg till runtime-only debug hooks: page._LAST_AI_REQUEST + page._LAST_AI_RAW + page._LAST_AI_NORM + page._LAST_AI_PICK.
+- P0 FIX (UI): Förhindra crash i renderBlocksList när render förväntar opts.onOpenBlock (skicka no-op).
+- P0 FIX (BOOT): Om trainings finns men inget selectedId (och showAll=false), auto-välj första training (utan att öppna modal).
+- Behåller tidigare P0-fixar (2A/2B/A): ingen auto-item-modal, stäng modal vid byte, sanera "[object Object]" + mallfras.
 ============================================================ */
 (function () {
   "use strict";
@@ -26,6 +27,14 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
   const page = (NS.page = NS.page || {});
   page.__VERSION = "v1.2.3-PP-SC-010-07B";
+
+  // Runtime-only debug (NO STORAGE, NO LOG)
+  page._LAST_AI_REQUEST = page._LAST_AI_REQUEST || null;
+  page._LAST_AI_RAW = page._LAST_AI_RAW || null;
+  page._LAST_AI_NORM = page._LAST_AI_NORM || null;
+  page._LAST_AI_PICK = page._LAST_AI_PICK || null;
+  page._LAST_AI_HEALTH = page._LAST_AI_HEALTH || null;
+  page._LAST_AI_ERROR = page._LAST_AI_ERROR || null;
 
   // ------------------------------------------------------------
   // Deps (late-bind) — undvik att "fånga" NS.core innan den finns
@@ -237,30 +246,6 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     return "training"; // fail-safe
   }
 
-  // P0 (Q0): normalisera UI-questionType till worker-tokens
-  // (Säker: om okänd -> return "" => worker default/auto)
-  function normalizeQuestionType(qt) {
-    const raw = normStr(qt);
-    if (!raw) return "";
-    const s = raw.toLowerCase();
-
-    // Vanliga tokens (om UI redan skickar dessa)
-    if (s === "auto") return "";
-    if (s === "mcq_single" || s === "mcq-single" || s === "mcq1" || s === "single") return "mcq_single";
-    if (s === "mcq_multi" || s === "mcq-multi" || s === "mcq_multiple" || s === "multi") return "mcq_multi";
-    if (s === "true_false" || s === "true-false" || s === "tf") return "true_false";
-    if (s === "short_answer" || s === "short-answer" || s === "free" || s === "fritext") return "short_answer";
-
-    // Svenska UI-etiketter
-    if (s.includes("mcq") && (s.includes("ett") || s.includes("1") || s.includes("single"))) return "mcq_single";
-    if (s.includes("mcq") && (s.includes("flera") || s.includes("multi") || s.includes("multiple"))) return "mcq_multi";
-    if (s.includes("sant") || s.includes("falskt") || s.includes("true") || s.includes("false")) return "true_false";
-    if (s.includes("fritext") || s.includes("kort") || s.includes("short")) return "short_answer";
-
-    // Okänd: låt worker välja
-    return "";
-  }
-
   // ------------------------------------------------------------
   // P0: UI-sanerare för "[object Object]" + kontext-malltext (fail-closed)
   // ------------------------------------------------------------
@@ -268,8 +253,14 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     if (typeof s !== "string") return s;
     let out = s;
 
+    // Ta bort exakt mallfrasen när den bara bär "dolt"/objekt-token.
+    // Ex: "Utgå från detta sammanhang: (kontext dolt)" eller "Utgå från detta sammanhang: [object Object]"
     out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*(\(\s*kontext\s*dolt\s*\)|\[object\s+Object\])\s*/gi, " ");
+
+    // Ta bort en tom "Utgå från detta sammanhang:" om den står ensam i slutet av rad/sträng
     out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*$/gmi, "");
+
+    // Normalisera whitespace lite försiktigt
     out = out.replace(/[ \t]{2,}/g, " ");
     out = out.replace(/\n{3,}/g, "\n\n");
     return out.trim();
@@ -279,6 +270,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     if (typeof s !== "string") return s;
     let out = s;
     if (out.indexOf("[object Object]") !== -1) {
+      // Behåll fail-closed (ingen dump av objekt), men gör texten renare
       out = out.replace(/\[object Object\]/g, "(kontext dolt)");
     }
     return stripContextBoilerplate(out);
@@ -377,6 +369,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
   function syncDraftFromInputs() {
     if (!state.draft) return;
 
+    // OBS: vi rör bara metadatafält; blocks hanteras separat
     if (dom && dom.mod) state.draft.module = normStr(dom.mod.value);
     if (dom && dom.area) state.draft.area = normStr(dom.area.value);
 
@@ -400,7 +393,14 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         selectedId: state.selectedId || "",
         draft: state.draft ? state.draft : null,
         trainingsCount: Array.isArray(state.trainings) ? state.trainings.length : 0,
-        trainings: Array.isArray(state.trainings) ? state.trainings : []
+        trainings: Array.isArray(state.trainings) ? state.trainings : [],
+        lastAi: {
+          hasRequest: !!page._LAST_AI_REQUEST,
+          hasRaw: !!page._LAST_AI_RAW,
+          hasNorm: !!page._LAST_AI_NORM,
+          pick: page._LAST_AI_PICK || null,
+          error: page._LAST_AI_ERROR || null
+        }
       };
       dom.setText(dom.debugPre, JSON.stringify(payload, null, 2));
     } catch (_) {
@@ -738,6 +738,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         const blob = (normStr(t.title) + " " + normStr(t.module) + " " + normStr(t.area)).toLowerCase();
         if (!blob.includes(q)) continue;
       } else if (!state.showAll) {
+        // P0 (1A): i "inte showAll"-läge och utan sök visar vi endast selected.
         const tid = normStr(t.id);
         if (!selectedId || tid !== selectedId) continue;
       }
@@ -825,14 +826,17 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       onSave: function (updated) {
         if (!isWriterAllowed()) return;
 
+        // fail-closed: måste finnas kvar när vi sparar
         const again = getDraftBlockAndItem(blockIdx, itemIdx);
         if (!again.ok) return;
 
         const original = again.item;
 
+        // Sanera ev "[object Object]" + kontext-malltext
         if (updated && typeof updated === "object") sanitizeAiItemInPlace(updated);
         if (typeof updated === "string") updated = scrubObjectObjectToken(updated);
 
+        // Bevara string-items som string om original var string (minimerar modellskift)
         if (typeof original === "string") {
           if (typeof updated === "string") {
             again.block.items[itemIdx] = updated;
@@ -846,6 +850,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
             return;
           }
         } else {
+          // Objekt -> spara objekt (deepClone)
           if (updated && typeof updated === "object") again.block.items[itemIdx] = deepClone(updated);
           else if (typeof updated === "string") again.block.items[itemIdx] = { type: "info", text: normStr(updated) };
           else return;
@@ -862,6 +867,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
         again.block.items.splice(itemIdx, 1);
 
+        // om block blev tomt -> behåll block men tomt (ingen auto-rensning här)
         setDirty(true);
         updateUiAll();
       }
@@ -887,18 +893,19 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
 
     const blocks = currentBlocks();
 
-    // P0 FIX (R0): renderBlocksList förväntar onOpenBlock som funktion → alltid noop.
-    // Policy: INGEN auto-öppning; endast item-klick (onOpenItem) ska öppna item-modal.
+    // P0 FIX (2A): renderBlocksList får INTE auto-öppna något item/block.
+    // Endast explicita item-klick (onOpenItem) ska öppna item-modal.
+    // P0 FIX (UI): vissa render-implementationer anropar opts.onOpenBlock utan guard -> skicka no-op.
     DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
       blocks,
       onEdit: function (idx) { openBlockEditor(idx); },
       onDelete: function (idx) { deleteBlock(idx); },
 
-      // Krävs av render (annars krasch i UI-04-WORKER-SDK / render-lager):
-      onOpenBlock: function () { /* noop (anti-crash, anti-autoopen) */ },
-
       // PP-SC-010-07: klickbara previews öppnar item-modal
-      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); }
+      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); },
+
+      // no-op (för kompatibilitet, får aldrig öppna modal)
+      onOpenBlock: function () { /* NOOP: kompat */ }
     });
   }
 
@@ -927,7 +934,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     refreshList();
     fillEditorFromDraft();
     updateButtons();
-    updateDebug();
+    updateDebug(); // P0: alltid uppdatera debug när UI uppdateras
   }
 
   page._recalc = updateUiAll;
@@ -941,10 +948,12 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       if (!DEPS.render) return;
       if (typeof DEPS.render.closeItemModal === "function") { DEPS.render.closeItemModal(); return; }
       if (typeof DEPS.render.hideItemModal === "function") { DEPS.render.hideItemModal(); return; }
+      if (typeof DEPS.render.closeModal === "function") { /* kan vara generell modal, men stäng inte allt här */ }
     } catch (_) { /* ignore */ }
   }
 
   function selectTraining(id) {
+    // P0 (2B): stäng ev. öppen item-modal vid byte av utbildning
     tryCloseItemModal();
 
     const idx = findTrainingIndexById(id);
@@ -1001,6 +1010,8 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       return;
     }
 
+    // P0 (1A): Skapa ny ska inte trigga mass-lista.
+    // Vi håller showAll=false och listan visar då endast selected (se visibleTrainings).
     state.showAll = false;
 
     setDirty(false);
@@ -1066,6 +1077,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
 
+    // P0 (1B): alltid synka draft från inputs precis före save
     syncDraftFromInputs();
 
     syncDraftTitleFromFields();
@@ -1138,6 +1150,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       if (!state.draft.blocks) state.draft.blocks = blocks;
       const bb = state.draft.blocks[idx];
       if (bb && Array.isArray(bb.items) && bb.items[0]) {
+        // Baseline: skriv till första relevanta textfältet (utan att skapa nya keys)
         const it0 = bb.items[0];
         if (it0 && typeof it0 === "object") {
           if (typeof it0.text === "string") it0.text = txt;
@@ -1171,6 +1184,8 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
   // ------------------------------------------------------------
   async function testAi() {
     try {
+      page._LAST_AI_ERROR = null;
+
       if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
         return;
@@ -1184,14 +1199,22 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         } else {
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "warn");
         }
+        page._LAST_AI_ERROR = { at: "health.init", code: code, detail: initR && initR.error ? initR.error : null };
+        updateDebug();
         return;
       }
 
       const r = await window.HRWorkerSDK.health();
+      page._LAST_AI_HEALTH = r && typeof r === "object" ? deepClone(r) : r;
+
       if (r && r.ok) DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI OK", "ok");
       else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "warn");
-    } catch (_) {
+
+      updateDebug();
+    } catch (e) {
+      page._LAST_AI_ERROR = { at: "health.exception", detail: String(e && e.message ? e.message : e) };
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
+      updateDebug();
     }
   }
 
@@ -1240,12 +1263,63 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
     const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
 
-    const qtRaw = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
-    const questionType = normalizeQuestionType(qtRaw); // P0 (Q0)
-
+    const questionType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
     const feedbackEnabled = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked === true));
 
     return { mode, count, questionType, feedbackEnabled };
+  }
+
+  // P0 helper: extrahera items ur både "items[]" och "blocks[]"
+  function extractItemsFromAi(raw, norm) {
+    const nItems = norm && Array.isArray(norm.items) ? norm.items : [];
+    if (nItems.length) return { items: nItems, source: "norm.items" };
+
+    const rItems = raw && Array.isArray(raw.items) ? raw.items : [];
+    if (rItems.length) return { items: rItems, source: "raw.items" };
+
+    const blocks = raw && Array.isArray(raw.blocks) ? raw.blocks : [];
+    if (blocks.length) {
+      const b0 = blocks[0];
+
+      if (b0 && Array.isArray(b0.items)) {
+        const out = [];
+        for (const b of blocks) {
+          if (b && Array.isArray(b.items)) out.push.apply(out, b.items);
+        }
+        if (out.length) return { items: out, source: "raw.blocks[].items" };
+        return { items: [], source: "raw.blocks(wrappers-empty-items)" };
+      }
+
+      const looksLikeItems = blocks.some(b =>
+        b && (typeof b.type === "string" || typeof b.text === "string" || typeof b.instruction === "string")
+      );
+      if (looksLikeItems) return { items: blocks, source: "raw.blocks(as-items)" };
+
+      return { items: [], source: "raw.blocks(unknown-shape)" };
+    }
+
+    const db = raw && raw.data && Array.isArray(raw.data.blocks) ? raw.data.blocks : [];
+    if (db.length) {
+      const d0 = db[0];
+
+      if (d0 && Array.isArray(d0.items)) {
+        const out2 = [];
+        for (const b of db) {
+          if (b && Array.isArray(b.items)) out2.push.apply(out2, b.items);
+        }
+        if (out2.length) return { items: out2, source: "raw.data.blocks[].items" };
+        return { items: [], source: "raw.data.blocks(wrappers-empty-items)" };
+      }
+
+      const looksLikeItems2 = db.some(b =>
+        b && (typeof b.type === "string" || typeof b.text === "string" || typeof b.instruction === "string")
+      );
+      if (looksLikeItems2) return { items: db, source: "raw.data.blocks(as-items)" };
+
+      return { items: [], source: "raw.data.blocks(unknown-shape)" };
+    }
+
+    return { items: [], source: "none" };
   }
 
   function normalizeItemsArray(itemsIn) {
@@ -1257,12 +1331,14 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     return itemsNorm;
   }
 
+  // P0: Hämta blocks[] från flera möjliga platser (SDK + ev wrapper)
   function getSdkBlocks(raw) {
     if (raw && Array.isArray(raw.blocks)) return raw.blocks;
     if (raw && raw.data && Array.isArray(raw.data.blocks)) return raw.data.blocks;
     return null;
   }
 
+  // P0: Skapa UI-block från sdkBlocks oavsett shape
   function applySdkBlocksToDraft(sdkBlocks, wantCount) {
     const take = Math.min(sdkBlocks.length, (Number(wantCount) || sdkBlocks.length));
     if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
@@ -1273,6 +1349,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       const isWrapper = !!(b && typeof b === "object" && Array.isArray(b.items));
       const itemsIn = isWrapper ? safeArr(b.items) : [b];
 
+      // Validera alltid items-arrayen (fail-closed)
       if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
         const v = DEPS.contract.validateAiResult({ items: itemsIn });
         if (!v || v.ok !== true) {
@@ -1300,8 +1377,12 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     if (!state.draft) return;
 
     try {
+      page._LAST_AI_ERROR = null;
+
       if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
+        page._LAST_AI_ERROR = { at: "aiGenerate.missing", code: "SDK_MISSING" };
+        updateDebug();
         return;
       }
 
@@ -1313,6 +1394,8 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         } else {
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
         }
+        page._LAST_AI_ERROR = { at: "aiGenerate.init", code: code, detail: initR && initR.error ? initR.error : null };
+        updateDebug();
         return;
       }
 
@@ -1326,15 +1409,25 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
         language: "sv"
       };
 
-      // P0 (Q0): skicka endast om vi har en känd token
       if (ctl.questionType) req.questionType = ctl.questionType;
       if (ctl.feedbackEnabled) req.feedbackEnabled = true;
+
+      // Runtime-only debug snapshot
+      page._LAST_AI_REQUEST = deepClone(req);
+      page._LAST_AI_RAW = null;
+      page._LAST_AI_NORM = null;
+      page._LAST_AI_PICK = null;
+      updateDebug();
 
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI jobbar…", "warn");
       DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
 
       const raw = await window.HRWorkerSDK.aiGenerate(req);
 
+      // Runtime-only debug snapshot
+      page._LAST_AI_RAW = (raw && typeof raw === "object") ? deepClone(raw) : raw;
+
+      // P0: Huvudväg — blocks[] => 1 UI-block per blocks[i] (oavsett shape)
       const sdkBlocks = getSdkBlocks(raw);
       if (sdkBlocks && sdkBlocks.length) {
         const r = applySdkBlocksToDraft(sdkBlocks, ctl.count);
@@ -1344,16 +1437,25 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
           return;
         }
-        if (r && r.stopped) return;
+        // fail-closed: apply stoppade pga validering
+        if (r && r.stopped) {
+          page._LAST_AI_ERROR = { at: "aiGenerate.applySdkBlocks", code: "VALIDATION_STOP" };
+          updateDebug();
+          return;
+        }
       }
 
+      // Fallback: äldre/annan shape => behåll tidigare beteende (1 block)
       const norm = (DEPS.core && typeof DEPS.core.normalizeAiResult === "function")
         ? (DEPS.core.normalizeAiResult(raw) || {})
         : (raw && typeof raw === "object" ? raw : {});
 
-      const itemsIn = (norm && Array.isArray(norm.items)) ? norm.items
-        : (raw && Array.isArray(raw.items)) ? raw.items
-          : [];
+      page._LAST_AI_NORM = (norm && typeof norm === "object") ? deepClone(norm) : norm;
+
+      const pick = extractItemsFromAi(raw, norm);
+      page._LAST_AI_PICK = deepClone(pick);
+
+      const itemsIn = Array.isArray(pick.items) ? pick.items : [];
 
       if (DEPS.contract && typeof DEPS.contract.validateAiResult === "function") {
         const v = DEPS.contract.validateAiResult({ items: itemsIn });
@@ -1361,13 +1463,17 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
           const reasons = (v && Array.isArray(v.reasons)) ? v.reasons : ["AI-resultat kunde inte valideras."];
           DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI stoppad", "bad");
           DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint(reasons.join(" "));
+          page._LAST_AI_ERROR = { at: "aiGenerate.validate", code: "AI_INVALID", reasons: reasons };
+          updateDebug();
           return;
         }
       }
 
       if (!itemsIn.length) {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI gav inget", "warn");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items.");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("AI gav inga items (källa: " + pick.source + ").");
+        page._LAST_AI_ERROR = { at: "aiGenerate.empty", code: "EMPTY", source: pick.source };
+        updateDebug();
         return;
       }
 
@@ -1380,8 +1486,11 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       setDirty(true);
       updateUiAll();
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI klart", "ok");
-    } catch (_) {
+      updateDebug();
+    } catch (e) {
+      page._LAST_AI_ERROR = { at: "aiGenerate.exception", detail: String(e && e.message ? e.message : e) };
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
+      updateDebug();
     }
   }
 
@@ -1456,6 +1565,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
     const onEditorChange = function () {
       if (!state.draft) return;
 
+      // P0 (1B): synka draft direkt när användaren ändrar inputs
       syncDraftFromInputs();
 
       renderAreaDatalist();
@@ -1519,6 +1629,18 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
       clearLock();
     }
 
+    // P0 FIX (BOOT): om vi har data men saknar selectedId => välj första,
+    // annars kan listan bli tom när showAll=false och q=""
+    if (!state.selectedId && state.trainings.length) {
+      const first = state.trainings[0];
+      const fid = normStr(first && first.id);
+      if (fid) {
+        state.selectedId = fid;
+        state.draft = deepClone(first);
+        setDirty(false);
+      }
+    }
+
     renderModuleDatalist();
     renderAreaDatalist();
     renderChapterAndStepPickers();
@@ -1544,6 +1666,7 @@ PATCH v1.2.3-PP-SC-010-07B (AUTOPATCH):
           renderAreaDatalist();
           renderChapterAndStepPickers();
 
+          // P0 (1B): om användaren redan börjat skriva – behåll inputs genom draft-sync
           syncDraftFromInputs();
 
           updateUiAll();
