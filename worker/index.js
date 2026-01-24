@@ -1,10 +1,10 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.4)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5 PATCH)
 // FIL: worker/index.js
-// Mål: Lås worker-output till training-blocks + question-format så UI får:
-// - riktiga svarsalternativ (choices) + correctChoiceId
-// - stabil struktur för modul/område/kapitel/steg (subject)
-// - bakåtkompabilitet: res.blocks finns kvar på toppnivå
+// Mål: UI ska få riktiga MCQ-frågor när questionType=mcq_*:
+// - UI-kontrakt: type:"question", question, options[], correctIndex (ev. correctIndices)
+// - Fail-closed om vi inte kan leverera UI-kontraktet
+// - Bakåtkompabilitet: training finns kvar + res.blocks på toppnivå
 //
 // POLICY (LÅST):
 // - Stateless (ingen lagring)
@@ -48,7 +48,7 @@ import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json"
 // import DOCUMENT_FORMAT from "../ai-rules/v1/formats/document.json";
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.4";
+const VERSION = "1.5";
 
 // ------------------------------
 // Fetch
@@ -122,7 +122,7 @@ export default {
             version: VERSION,
             build: "wrangler",
             rulesBase: "ai-rules",
-            outputContract: "training-blocks@v1 + question@v1"
+            outputContract: "training-blocks@v1 + question@v1 + ui-mcq@v1"
           }
         },
         corsHeaders
@@ -213,6 +213,9 @@ export default {
     const subjectId = safeStr(body.subjectId || body.subject || "").trim(); // generic|math|swedish|...
     const difficultyHint = body.difficultyHint ?? body.difficulty; // intro|normal|advanced|auto|1..5
 
+    // UI: frågetyp (P0)
+    const questionType = normalizeQuestionType(body.questionType || body.qType || body.question_kind || "");
+
     // new (preferred): subject object for course structure
     const subjectObj = isPlainObject(body.subjectObj) ? body.subjectObj : (isPlainObject(body.subject) ? body.subject : null);
     const course = normalizeCourseSubject(subjectObj);
@@ -236,7 +239,6 @@ export default {
     }
 
     // course subject är valfritt i v1 (UI kan börja skicka det när ni vill)
-    // men om det finns ska det vara rimligt
     const courseCheck = validateCourseSubject(course);
     if (!courseCheck.ok) {
       return errorJSON(400, requestId, "VALIDATION_ERROR", courseCheck.message, corsHeaders, true);
@@ -255,15 +257,29 @@ export default {
         format,
         subjectId,
         difficultyHint,
-        course
+        course,
+        questionType
       });
     } catch {
       console.error("ERR", requestId, "UPSTREAM_ERROR");
       return errorJSON(502, requestId, "UPSTREAM_ERROR", "AI-tjänsten svarade inte", corsHeaders, false);
     }
 
+    // ---------- UI BLOCKS (P0) ----------
+    // När UI ber om MCQ/TF: blocks måste vara i UI-kontraktet (options + correctIndex)
+    const wantUiQuestions = isUiQuestionRequest(questionType);
+
+    let topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
+    if (wantUiQuestions) {
+      const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, language);
+      if (!mapped.ok) {
+        // Fail-closed: UI ska inte få tomma/trasiga frågor
+        return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
+      }
+      topBlocks = mapped.blocks;
+    }
+
     // ---------- RESPONSE (stable + backward compatible) ----------
-    // Backward: blocks + mode på toppnivå (som din UI redan använder)
     return okJSON(
       200,
       {
@@ -271,7 +287,7 @@ export default {
         requestId,
         data: { training },
         training,
-        blocks: Array.isArray(training.blocks) ? training.blocks : [],
+        blocks: topBlocks,
         mode: training.mode
       },
       corsHeaders
@@ -350,7 +366,7 @@ function hash32(str) {
 }
 
 // ------------------------------------------------------------
-// MODE NORMALIZER (fixar "ai training" etc)
+// MODE NORMALIZER
 // ------------------------------------------------------------
 function normalizeMode(modeRaw) {
   const s = safeStr(modeRaw).toLowerCase().trim();
@@ -361,7 +377,10 @@ function normalizeMode(modeRaw) {
   return s;
 }
 
-function normalizeFormat(format, mode) {
+function normalizeFormat(format, mode, questionType) {
+  // P0: om UI ber om en frågetyp → vi måste leverera frågor (inte mix)
+  if (isUiQuestionRequest(questionType)) return "question";
+
   const f = safeStr(format).toLowerCase().trim();
   if (f === "question" || f === "questions") return "question";
   if (f === "task" || f === "tasks") return "task";
@@ -382,7 +401,6 @@ function pickDifficultyLabel(difficultyHint, seedN) {
   const s = safeStr(difficultyHint).toLowerCase().trim();
   if (s === "intro" || s === "normal" || s === "advanced") return s;
 
-  // UI kan skicka auto eller 1..5 — mappa till intro/normal/advanced
   if (!s || s === "auto") {
     const lvl = 1 + (seedN % 5); // 1..5
     return (lvl <= 2) ? "intro" : (lvl <= 4) ? "normal" : "advanced";
@@ -406,7 +424,6 @@ function normalizeCourseSubject(subjectObj) {
   const chapter = safeStr(subjectObj.chapter || "").trim();
   const step = safeStr(subjectObj.step || "").trim();
 
-  // Tillåt även id-fält om UI skickar ids (framtid)
   const moduleId = safeStr(subjectObj.moduleId || "").trim();
   const areaId = safeStr(subjectObj.areaId || "").trim();
   const chapterId = safeStr(subjectObj.chapterId || "").trim();
@@ -427,8 +444,6 @@ function normalizeCourseSubject(subjectObj) {
 function validateCourseSubject(course) {
   if (course === null) return { ok: true };
 
-  // Om man börjar skicka course subject: tillåt tomma fält i v1,
-  // MEN om step finns måste det vara 1..7 eller 1..5 (du har båda i filer).
   const step = safeStr(course.step).trim();
   if (step) {
     const allow = new Set(["1", "2", "3", "4", "5", "6", "7"]);
@@ -438,7 +453,6 @@ function validateCourseSubject(course) {
 }
 
 function resolveCourseLabelFallback(course, mode) {
-  // Om UI inte skickar modul/område ännu, fallback blir “Generic”
   if (!course) {
     return {
       module: "Generic",
@@ -448,18 +462,16 @@ function resolveCourseLabelFallback(course, mode) {
     };
   }
 
-  const out = {
+  return {
     module: course.module || "Generic",
     area: course.area || ((mode === "document") ? "Dokument" : "Utbildning"),
     chapter: course.chapter || "Introduktion",
     step: safeStr(course.step).trim() || "1"
   };
-
-  return out;
 }
 
 // ============================================================
-// RULES BUNDLE (för framtida styrning)
+// RULES BUNDLE
 // ============================================================
 function getRulesBundle(subjectId) {
   const s = normalizeSubjectId(subjectId);
@@ -478,7 +490,6 @@ function getRulesBundle(subjectId) {
       question: QUESTION_FORMAT || {},
       task: TASK_FORMAT || {},
       "training-blocks": TRAINING_BLOCKS_FORMAT || {}
-      // document: (typeof DOCUMENT_FORMAT !== "undefined" && DOCUMENT_FORMAT) ? DOCUMENT_FORMAT : {}
     }
   };
 }
@@ -486,12 +497,12 @@ function getRulesBundle(subjectId) {
 // ============================================================
 // OUTPUT BUILDER — training-blocks + question-format (choices)
 // ============================================================
-function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnabled, format, subjectId, difficultyHint, course }) {
-  const fmt = normalizeFormat(format, mode);
+function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnabled, format, subjectId, difficultyHint, course, questionType }) {
+  const fmt = normalizeFormat(format, mode, questionType);
   const subjId = normalizeSubjectId(subjectId);
   const bundle = getRulesBundle(subjId);
 
-  const seed = hash32(`${requestId}|${mode}|${count}|${language}|${context.slice(0, 96)}|${fmt}|${subjId}|${safeStr(difficultyHint)}`);
+  const seed = hash32(`${requestId}|${mode}|${count}|${language}|${context.slice(0, 96)}|${fmt}|${subjId}|${safeStr(difficultyHint)}|${safeStr(questionType)}`);
 
   const courseLabel = resolveCourseLabelFallback(course, mode);
   const difficulty = pickDifficultyLabel(difficultyHint, seed);
@@ -517,11 +528,8 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
   for (let i = 0; i < count; i++) {
     const n = (seed + i * 2654435761) >>> 0;
 
-    // i training-blocks: varva info/task/question
-    // i format=question: bara question-blocks
-    // i document-mode: inga question-blocks
     if (fmt === "question") {
-      blocks.push(genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
+      blocks.push(genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle, questionType }));
       continue;
     }
 
@@ -538,10 +546,9 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     const pick = n % 3;
     if (pick === 0) blocks.push(genInfoBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
     else if (pick === 1) blocks.push(genTaskBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
-    else blocks.push(genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
+    else blocks.push(genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle, questionType }));
   }
 
-  // training-blocks root
   return {
     id: `tr_${subjId}_${hash32(requestId).toString(16)}`.slice(0, 24),
     mode,
@@ -559,7 +566,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.4"
+      source: "mock-v1.5"
     }
   };
 }
@@ -605,7 +612,6 @@ function genTaskBlock({ i, language, context, courseLabel, difficulty, subjId })
       ? `Gör en kort uppgift kopplad till ${courseLabel.area}.\n\nUtgå från detta sammanhang:\n${context || "—"}`
       : `Complete a short task for ${courseLabel.area}.\n\nContext:\n${context || "—"}`;
 
-  // Vi håller allt renderbart via items[] (UI-safe)
   return {
     blockId,
     kind: "task",
@@ -655,7 +661,7 @@ function genDocumentBlock({ i, language, context, courseLabel, difficulty, subjI
   };
 }
 
-function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId }) {
+function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, questionType }) {
   const blockId = `b_q_${i + 1}_${subjId}`.slice(0, 32);
 
   const title =
@@ -663,9 +669,7 @@ function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, su
       ? `Kontrollfråga: ${courseLabel.area}`
       : `Check question: ${courseLabel.area}`;
 
-  // Bygg en MCQ enligt formats/question.json:
-  // { kind:"question", text, choices:[{id,text}...], correctChoiceId, rationale?, difficulty?, tags? }
-  const q = makeQuestion({ n, language, context, courseLabel, difficulty, subjId });
+  const q = makeQuestion({ n, language, context, courseLabel, difficulty, subjId, questionType });
 
   return {
     blockId,
@@ -682,9 +686,14 @@ function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, su
   };
 }
 
-function makeQuestion({ n, language, context, courseLabel, difficulty, subjId }) {
-  // Enkel men riktig: 3–5 alternativ, exakt 1 korrekt
-  const choiceCount = 3 + (n % 3); // 3..5
+function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, questionType }) {
+  const qt = normalizeQuestionType(questionType);
+
+  // TF (Sant/Falskt) ska alltid ha 2 alternativ
+  const isTf = (qt === "tf" || qt === "true_false");
+  const isMulti = (qt === "mcq_multi");
+
+  const choiceCount = isTf ? 2 : (3 + (n % 3)); // TF=2, annars 3..5
 
   const baseTextSv = `Vad är den bästa första åtgärden i ${courseLabel.area} i en vardagssituation?`;
   const baseTextEn = `What is the best first action in ${courseLabel.area} in a practical situation?`;
@@ -693,10 +702,6 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId })
     (language === "sv")
       ? `${baseTextSv}\n\n(Använd detta sammanhang om relevant: ${context || "—"})`
       : `${baseTextEn}\n\n(Context: ${context || "—"})`;
-
-  // Skapa distractors + 1 korrekt (mock).
-  // Senare byter vi detta till riktig AI-call, men formatet förblir identiskt.
-  const correctIdx = n % choiceCount;
 
   const poolSv = [
     "Klargör målet och ställ en öppen fråga",
@@ -716,12 +721,26 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId })
   const pool = (language === "sv") ? poolSv : poolEn;
 
   const choices = [];
-  for (let i = 0; i < choiceCount; i++) {
-    const txt = pool[(n + i) % pool.length];
-    choices.push({ id: `c${i + 1}`, text: txt });
+
+  if (isTf) {
+    choices.push({ id: "c1", text: (language === "sv") ? "Sant" : "True" });
+    choices.push({ id: "c2", text: (language === "sv") ? "Falskt" : "False" });
+  } else {
+    for (let i = 0; i < choiceCount; i++) {
+      const txt = pool[(n + i) % pool.length];
+      choices.push({ id: `c${i + 1}`, text: txt });
+    }
   }
 
+  const correctIdx = n % choiceCount;
   const correctChoiceId = `c${correctIdx + 1}`;
+
+  // Multi: välj två "rätta" deterministiskt (utan att logga payload)
+  let correctChoiceIds = null;
+  if (isMulti && choiceCount >= 3) {
+    const idx2 = (correctIdx + 2) % choiceCount;
+    correctChoiceIds = [`c${correctIdx + 1}`, `c${idx2 + 1}`];
+  }
 
   const rationale =
     (language === "sv")
@@ -733,8 +752,136 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId })
     text,
     choices,
     correctChoiceId,
+    ...(correctChoiceIds ? { correctChoiceIds } : {}),
     rationale,
     difficulty,
     tags: [subjId, "scenario"]
   };
 }
+
+// ============================================================
+// P0: UI-kontrakt (options + correctIndex)
+// ============================================================
+
+function normalizeQuestionType(v) {
+  const s = safeStr(v).toLowerCase().trim();
+  if (!s) return "";
+  if (s === "mcq_single" || s === "single" || s === "mcq") return "mcq_single";
+  if (s === "mcq_multi" || s === "multi") return "mcq_multi";
+  if (s === "tf" || s === "truefalse" || s === "true_false") return "tf";
+  if (s === "short" || s === "short_answer") return "short";
+  return s;
+}
+
+function isUiQuestionRequest(questionType) {
+  const qt = normalizeQuestionType(questionType);
+  return qt === "mcq_single" || qt === "mcq_multi" || qt === "tf";
+}
+
+function mapTrainingBlocksToUiQuestions(trainingBlocks, questionType, language) {
+  const qt = normalizeQuestionType(questionType);
+  const blocks = Array.isArray(trainingBlocks) ? trainingBlocks : [];
+  const out = [];
+
+  for (const b of blocks) {
+    if (!b || b.kind !== "question") continue;
+
+    const q = extractQuestionFromBlock(b);
+    if (!q.ok) continue;
+
+    const mapped = mapChoiceQuestionToUi(q.question, qt, language);
+    if (mapped.ok) out.push(mapped.item);
+  }
+
+  if (out.length === 0) {
+    return {
+      ok: false,
+      errorCode: "Q_SCHEMA_INVALID",
+      message: "Kunde inte skapa giltiga svarsalternativ för frågan"
+    };
+  }
+
+  return { ok: true, blocks: out };
+}
+
+function extractQuestionFromBlock(block) {
+  const items = Array.isArray(block.items) ? block.items : [];
+  for (const it of items) {
+    if (it && it.type === "questionInline" && isPlainObject(it.question)) {
+      return { ok: true, question: it.question };
+    }
+  }
+  return { ok: false };
+}
+
+function mapChoiceQuestionToUi(q, questionType, language) {
+  const text = safeStr(q.text).trim();
+  const choices = Array.isArray(q.choices) ? q.choices : [];
+
+  if (!text || choices.length < 2) return { ok: false };
+
+  const options = [];
+  for (const c of choices) {
+    const t = safeStr(c && c.text).trim();
+    if (t) options.push(t);
+  }
+  if (options.length < 2) return { ok: false };
+
+  // TF: tvinga exakt två, i rätt språk (UI ska inte få blandat)
+  if (questionType === "tf") {
+    const a = (language === "sv") ? "Sant" : "True";
+    const b = (language === "sv") ? "Falskt" : "False";
+    const fixed = [a, b];
+    const correctIndex = 0;
+    return {
+      ok: true,
+      item: { type: "question", question: text, options: fixed, correctIndex }
+    };
+  }
+
+  // mcq_single
+  if (questionType === "mcq_single") {
+    const correctId = safeStr(q.correctChoiceId).trim();
+    const idx = indexOfChoiceId(choices, correctId);
+    if (idx < 0 || idx >= options.length) return { ok: false };
+    return {
+      ok: true,
+      item: { type: "question", question: text, options, correctIndex: idx }
+    };
+  }
+
+  // mcq_multi
+  if (questionType === "mcq_multi") {
+    const ids = Array.isArray(q.correctChoiceIds) ? q.correctChoiceIds : [];
+    const indices = [];
+    for (const id of ids) {
+      const idx = indexOfChoiceId(choices, safeStr(id).trim());
+      if (idx >= 0 && idx < options.length && !indices.includes(idx)) indices.push(idx);
+    }
+    if (indices.length === 0) {
+      // fallback: använd single som minst 1 rätt
+      const correctId = safeStr(q.correctChoiceId).trim();
+      const idx = indexOfChoiceId(choices, correctId);
+      if (idx < 0 || idx >= options.length) return { ok: false };
+      indices.push(idx);
+    }
+    return {
+      ok: true,
+      item: { type: "question", question: text, options, correctIndices: indices }
+    };
+  }
+
+  return { ok: false };
+}
+
+function indexOfChoiceId(choices, id) {
+  if (!id) return -1;
+  for (let i = 0; i < choices.length; i++) {
+    if (safeStr(choices[i] && choices[i].id).trim() === id) return i;
+  }
+  return -1;
+}
+
+// ============================================================
+// (Resten oförändrat)
+// ============================================================
