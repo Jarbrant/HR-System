@@ -1,10 +1,13 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5 PATCH)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5 FIX)
 // FIL: worker/index.js
-// Mål: UI ska få riktiga MCQ-frågor när questionType=mcq_*:
-// - UI-kontrakt: type:"question", question, options[], correctIndex (ev. correctIndices)
-// - Fail-closed om vi inte kan leverera UI-kontraktet
-// - Bakåtkompabilitet: training finns kvar + res.blocks på toppnivå
+// Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ begärs.
+//
+// UI kräver vid MCQ:
+// - type: "question"
+// - question: string
+// - options: string[]
+// - correctIndex: number (eller correctIndices: number[])
 //
 // POLICY (LÅST):
 // - Stateless (ingen lagring)
@@ -28,10 +31,6 @@
 // - OPTIONS *              (CORS preflight)
 // ============================================================
 
-/**
- * OBS: JSON-importer kräver Wrangler "modules".
- * Om någon import saknas i repo får du "Could not resolve" vid deploy.
- */
 import INDEX from "../ai-rules/index.json";
 import GLOBAL from "../ai-rules/v1/global.json";
 import MODULES from "../ai-rules/v1/modules.json";
@@ -44,8 +43,7 @@ import QUESTION_FORMAT from "../ai-rules/v1/formats/question.json";
 import TASK_FORMAT from "../ai-rules/v1/formats/task.json";
 import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json";
 
-// Valfri: om du har denna fil, behåll importen. Om du INTE har den: kommentera bort raden.
-// import DOCUMENT_FORMAT from "../ai-rules/v1/formats/document.json";
+// import DOCUMENT_FORMAT from "../ai-rules/v1/formats/document.json"; // valfri
 
 export const MAX_BODY_BYTES = 64 * 1024;
 const VERSION = "1.5";
@@ -86,7 +84,6 @@ export default {
     const path = url.pathname || "/";
 
     // ---------- GET /v1/health ----------
-    // Tillåt utan Origin, men om Origin finns måste matcha
     if (request.method === "GET" && path === "/v1/health") {
       if (origin && origin !== allowedOrigin) {
         return errorJSON(403, requestId, "CORS_FORBIDDEN", "Origin är inte tillåten", corsHeaders, true);
@@ -122,7 +119,7 @@ export default {
             version: VERSION,
             build: "wrangler",
             rulesBase: "ai-rules",
-            outputContract: "training-blocks@v1 + question@v1 + ui-mcq@v1"
+            outputContract: "training-blocks@v1 + ui-mcq@v1"
           }
         },
         corsHeaders
@@ -134,7 +131,6 @@ export default {
       return errorJSON(405, requestId, "METHOD_NOT_ALLOWED", "Endast POST tillåtet för AI-endpoints", corsHeaders, true);
     }
 
-    // v1 AI endpoints + aliases
     const isAIPath =
       path === "/v1/ai/generate" ||
       path === "/v1/ai/training" ||
@@ -198,26 +194,25 @@ export default {
     }
 
     // ---------- INPUT (backward tolerant) ----------
-    // mode|type + path alias
     let modeRaw = safeStr(body.mode || body.type).trim();
     if (path === "/v1/ai/training") modeRaw = "training";
     if (path === "/v1/ai/document") modeRaw = "document";
     const mode = normalizeMode(modeRaw);
 
-    const countRaw = body.count ?? body.n;                     // count|n
-    const language = safeStr(body.language || "sv").trim();    // sv|en
-    const context = safeStr(body.context || body.prompt || "").trim(); // context|prompt
+    const countRaw = body.count ?? body.n;
+    const language = safeStr(body.language || "sv").trim();
+    const context = safeStr(body.context || body.prompt || "").trim();
 
-    // new (optional)
-    const format = safeStr(body.format || "").trim();          // training-blocks|question|task|document
-    const subjectId = safeStr(body.subjectId || body.subject || "").trim(); // generic|math|swedish|...
-    const difficultyHint = body.difficultyHint ?? body.difficulty; // intro|normal|advanced|auto|1..5
+    const format = safeStr(body.format || "").trim();
+    const subjectId = safeStr(body.subjectId || body.subject || "").trim();
+    const difficultyHint = body.difficultyHint ?? body.difficulty;
 
-    // UI: frågetyp (P0)
-    const questionType = normalizeQuestionType(body.questionType || body.qType || body.question_kind || "");
+    // UI: frågetyp (det är detta som triggar MCQ-kontraktet)
+    const questionType = normalizeQuestionType(body.questionType || body.qType || "");
 
-    // new (preferred): subject object for course structure
-    const subjectObj = isPlainObject(body.subjectObj) ? body.subjectObj : (isPlainObject(body.subject) ? body.subject : null);
+    const subjectObj = isPlainObject(body.subjectObj)
+      ? body.subjectObj
+      : (isPlainObject(body.subject) ? body.subject : null);
     const course = normalizeCourseSubject(subjectObj);
 
     // ---------- VALIDATION ----------
@@ -238,13 +233,12 @@ export default {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "context max 4000 tecken", corsHeaders, true);
     }
 
-    // course subject är valfritt i v1 (UI kan börja skicka det när ni vill)
     const courseCheck = validateCourseSubject(course);
     if (!courseCheck.ok) {
       return errorJSON(400, requestId, "VALIDATION_ERROR", courseCheck.message, corsHeaders, true);
     }
 
-    // ---------- BUILD (ruleset + stable output) ----------
+    // ---------- BUILD ----------
     let training;
     try {
       training = buildTrainingBlocks({
@@ -265,21 +259,19 @@ export default {
       return errorJSON(502, requestId, "UPSTREAM_ERROR", "AI-tjänsten svarade inte", corsHeaders, false);
     }
 
-    // ---------- UI BLOCKS (P0) ----------
-    // När UI ber om MCQ/TF: blocks måste vara i UI-kontraktet (options + correctIndex)
-    const wantUiQuestions = isUiQuestionRequest(questionType);
-
+    // ---------- TOPP-NIVÅ blocks ----------
+    // Default: behåll training.blocks
     let topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
-    if (wantUiQuestions) {
+
+    // Om UI ber om MCQ/TF: bygg UI-frågeblock i rätt format
+    if (isUiQuestionRequest(questionType)) {
       const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, language);
       if (!mapped.ok) {
-        // Fail-closed: UI ska inte få tomma/trasiga frågor
         return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
       }
       topBlocks = mapped.blocks;
     }
 
-    // ---------- RESPONSE (stable + backward compatible) ----------
     return okJSON(
       200,
       {
@@ -296,7 +288,7 @@ export default {
 };
 
 // ============================================================
-// HELPERS (Fail-closed, no payload logs)
+// HELPERS
 // ============================================================
 
 function buildCorsHeaders(origin, allowedOrigin) {
@@ -365,9 +357,6 @@ function hash32(str) {
   return h >>> 0;
 }
 
-// ------------------------------------------------------------
-// MODE NORMALIZER
-// ------------------------------------------------------------
 function normalizeMode(modeRaw) {
   const s = safeStr(modeRaw).toLowerCase().trim();
   if (!s) return "";
@@ -378,7 +367,6 @@ function normalizeMode(modeRaw) {
 }
 
 function normalizeFormat(format, mode, questionType) {
-  // P0: om UI ber om en frågetyp → vi måste leverera frågor (inte mix)
   if (isUiQuestionRequest(questionType)) return "question";
 
   const f = safeStr(format).toLowerCase().trim();
@@ -443,7 +431,6 @@ function normalizeCourseSubject(subjectObj) {
 
 function validateCourseSubject(course) {
   if (course === null) return { ok: true };
-
   const step = safeStr(course.step).trim();
   if (step) {
     const allow = new Set(["1", "2", "3", "4", "5", "6", "7"]);
@@ -591,9 +578,7 @@ function genInfoBlock({ i, language, context, courseLabel, difficulty, subjId })
     blockId,
     kind: "info",
     title,
-    items: [
-      { type: "text", text }
-    ],
+    items: [{ type: "text", text }],
     scoring: { points: 0 },
     meta: { tags: ["info", subjId], difficulty }
   };
@@ -676,10 +661,7 @@ function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, su
     kind: "question",
     title,
     items: [
-      {
-        type: "questionInline",
-        question: q
-      }
+      { type: "questionInline", question: q }
     ],
     scoring: { points: 1 },
     meta: { tags: ["question", subjId], difficulty }
@@ -688,12 +670,10 @@ function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, su
 
 function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, questionType }) {
   const qt = normalizeQuestionType(questionType);
-
-  // TF (Sant/Falskt) ska alltid ha 2 alternativ
-  const isTf = (qt === "tf" || qt === "true_false");
+  const isTf = (qt === "tf");
   const isMulti = (qt === "mcq_multi");
 
-  const choiceCount = isTf ? 2 : (3 + (n % 3)); // TF=2, annars 3..5
+  const choiceCount = isTf ? 2 : (3 + (n % 3)); // TF=2 annars 3..5
 
   const baseTextSv = `Vad är den bästa första åtgärden i ${courseLabel.area} i en vardagssituation?`;
   const baseTextEn = `What is the best first action in ${courseLabel.area} in a practical situation?`;
@@ -703,29 +683,28 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
       ? `${baseTextSv}\n\n(Använd detta sammanhang om relevant: ${context || "—"})`
       : `${baseTextEn}\n\n(Context: ${context || "—"})`;
 
-  const poolSv = [
-    "Klargör målet och ställ en öppen fråga",
-    "Ge en snabb order utan förklaring",
-    "Byt ämne för att undvika konflikt",
-    "Dokumentera och följ upp enligt rutin",
-    "Lyssna klart och spegla det du hört"
-  ];
-  const poolEn = [
-    "Clarify the goal and ask an open question",
-    "Give a quick order without explanation",
-    "Change the subject to avoid conflict",
-    "Document and follow up per routine",
-    "Listen fully and reflect what you heard"
-  ];
-
-  const pool = (language === "sv") ? poolSv : poolEn;
-
   const choices = [];
 
   if (isTf) {
     choices.push({ id: "c1", text: (language === "sv") ? "Sant" : "True" });
     choices.push({ id: "c2", text: (language === "sv") ? "Falskt" : "False" });
   } else {
+    const poolSv = [
+      "Klargör målet och ställ en öppen fråga",
+      "Ge en snabb order utan förklaring",
+      "Byt ämne för att undvika konflikt",
+      "Dokumentera och följ upp enligt rutin",
+      "Lyssna klart och spegla det du hört"
+    ];
+    const poolEn = [
+      "Clarify the goal and ask an open question",
+      "Give a quick order without explanation",
+      "Change the subject to avoid conflict",
+      "Document and follow up per routine",
+      "Listen fully and reflect what you heard"
+    ];
+    const pool = (language === "sv") ? poolSv : poolEn;
+
     for (let i = 0; i < choiceCount; i++) {
       const txt = pool[(n + i) % pool.length];
       choices.push({ id: `c${i + 1}`, text: txt });
@@ -735,7 +714,6 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
   const correctIdx = n % choiceCount;
   const correctChoiceId = `c${correctIdx + 1}`;
 
-  // Multi: välj två "rätta" deterministiskt (utan att logga payload)
   let correctChoiceIds = null;
   if (isMulti && choiceCount >= 3) {
     const idx2 = (correctIdx + 2) % choiceCount;
@@ -760,7 +738,7 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
 }
 
 // ============================================================
-// P0: UI-kontrakt (options + correctIndex)
+// UI-frågeformat (options + correctIndex)
 // ============================================================
 
 function normalizeQuestionType(v) {
@@ -785,7 +763,6 @@ function mapTrainingBlocksToUiQuestions(trainingBlocks, questionType, language) 
 
   for (const b of blocks) {
     if (!b || b.kind !== "question") continue;
-
     const q = extractQuestionFromBlock(b);
     if (!q.ok) continue;
 
@@ -815,10 +792,9 @@ function extractQuestionFromBlock(block) {
 }
 
 function mapChoiceQuestionToUi(q, questionType, language) {
-  const text = safeStr(q.text).trim();
+  const question = safeStr(q.text).trim();
   const choices = Array.isArray(q.choices) ? q.choices : [];
-
-  if (!text || choices.length < 2) return { ok: false };
+  if (!question || choices.length < 2) return { ok: false };
 
   const options = [];
   for (const c of choices) {
@@ -827,30 +803,19 @@ function mapChoiceQuestionToUi(q, questionType, language) {
   }
   if (options.length < 2) return { ok: false };
 
-  // TF: tvinga exakt två, i rätt språk (UI ska inte få blandat)
   if (questionType === "tf") {
     const a = (language === "sv") ? "Sant" : "True";
     const b = (language === "sv") ? "Falskt" : "False";
-    const fixed = [a, b];
-    const correctIndex = 0;
-    return {
-      ok: true,
-      item: { type: "question", question: text, options: fixed, correctIndex }
-    };
+    return { ok: true, item: { type: "question", question, options: [a, b], correctIndex: 0 } };
   }
 
-  // mcq_single
   if (questionType === "mcq_single") {
     const correctId = safeStr(q.correctChoiceId).trim();
     const idx = indexOfChoiceId(choices, correctId);
     if (idx < 0 || idx >= options.length) return { ok: false };
-    return {
-      ok: true,
-      item: { type: "question", question: text, options, correctIndex: idx }
-    };
+    return { ok: true, item: { type: "question", question, options, correctIndex: idx } };
   }
 
-  // mcq_multi
   if (questionType === "mcq_multi") {
     const ids = Array.isArray(q.correctChoiceIds) ? q.correctChoiceIds : [];
     const indices = [];
@@ -859,16 +824,12 @@ function mapChoiceQuestionToUi(q, questionType, language) {
       if (idx >= 0 && idx < options.length && !indices.includes(idx)) indices.push(idx);
     }
     if (indices.length === 0) {
-      // fallback: använd single som minst 1 rätt
       const correctId = safeStr(q.correctChoiceId).trim();
       const idx = indexOfChoiceId(choices, correctId);
       if (idx < 0 || idx >= options.length) return { ok: false };
       indices.push(idx);
     }
-    return {
-      ok: true,
-      item: { type: "question", question: text, options, correctIndices: indices }
-    };
+    return { ok: true, item: { type: "question", question, options, correctIndices: indices } };
   }
 
   return { ok: false };
@@ -881,7 +842,3 @@ function indexOfChoiceId(choices, id) {
   }
   return -1;
 }
-
-// ============================================================
-// (Resten oförändrat)
-// ============================================================
