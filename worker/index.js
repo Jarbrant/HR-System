@@ -1,12 +1,12 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.1 FIX)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.2 FIX)
 // FIL: worker/index.js
 // Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ begärs.
 //
 // UI kräver vid MCQ:
 // - type: "question"
 // - question: string
-// - options: string[]   (EXAKT 5 för MCQ i denna patch)
+// - options: string[]
 // - correctIndex: number (eller correctIndices: number[])
 //
 // POLICY (LÅST):
@@ -33,9 +33,8 @@
 // PATCH (CORS FIX):
 // - Tillåt UI headers: X-Hr-Sdk + X-Hr-Client i Access-Control-Allow-Headers
 //
-// PATCH (MCQ FIX v1.5.1d):
-// - MCQ (mcq_single/mcq_multi) genererar ALLTID exakt 5 svarsalternativ.
-// - UI-mappning fail-closed om options inte blir exakt 5 för MCQ.
+// PATCH v1.5.2:
+// - MCQ: alltid exakt 5 svarsalternativ (TF=2). Stabil correctIndex.
 // ============================================================
 
 import INDEX from "../ai-rules/index.json";
@@ -53,7 +52,7 @@ import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json"
 // import DOCUMENT_FORMAT from "../ai-rules/v1/formats/document.json"; // valfri
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5.1";
+const VERSION = "1.5.2";
 
 // ------------------------------
 // Fetch
@@ -126,7 +125,7 @@ export default {
             version: VERSION,
             build: "wrangler",
             rulesBase: "ai-rules",
-            outputContract: "training-blocks@v1 + ui-mcq@v1.1 (mcq=5 options)"
+            outputContract: "training-blocks@v1 + ui-mcq@v1.1"
           }
         },
         corsHeaders
@@ -386,7 +385,6 @@ function normalizeMode(modeRaw) {
 }
 
 function normalizeFormat(format, mode, questionType) {
-  // GUARD: om UI begär provfrågor, tvinga question-format (oavsett "mix")
   if (isUiQuestionRequest(questionType)) return "question";
 
   const f = safeStr(format).toLowerCase().trim();
@@ -453,7 +451,6 @@ function validateCourseSubject(course) {
   if (course === null) return { ok: true };
   const step = safeStr(course.step).trim();
   if (step) {
-    // NOTE: UI-katalogen använder 1–5, men vi accepterar här även 6–7 för backward-kompatibilitet.
     const allow = new Set(["1", "2", "3", "4", "5", "6", "7"]);
     if (!allow.has(step)) return { ok: false, message: "subject.step måste vara 1–7" };
   }
@@ -574,7 +571,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.5.1"
+      source: "mock-v1.5.2"
     }
   };
 }
@@ -691,9 +688,10 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
   const qt = normalizeQuestionType(questionType);
   const isTf = (qt === "tf");
   const isMulti = (qt === "mcq_multi");
+  const isMcq = (qt === "mcq_single" || qt === "mcq_multi");
 
-  // PATCH: MCQ ska alltid ha exakt 5 options
-  const choiceCount = isTf ? 2 : 5;
+  // PATCH v1.5.2: lås MCQ till exakt 5 alternativ (TF=2)
+  const choiceCount = isTf ? 2 : (isMcq ? 5 : (3 + (n % 3))); // TF=2, MCQ=5, annars 3..5
 
   const baseTextSv = `Vad är den bästa första åtgärden i ${courseLabel.area} i en vardagssituation?`;
   const baseTextEn = `What is the best first action in ${courseLabel.area} in a practical situation?`;
@@ -709,7 +707,6 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
     choices.push({ id: "c1", text: (language === "sv") ? "Sant" : "True" });
     choices.push({ id: "c2", text: (language === "sv") ? "Falskt" : "False" });
   } else {
-    // PATCH: pool har exakt 5 texter -> 5 unika val (i roterande ordning)
     const poolSv = [
       "Klargör målet och ställ en öppen fråga",
       "Ge en snabb order utan förklaring",
@@ -726,20 +723,23 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
     ];
     const pool = (language === "sv") ? poolSv : poolEn;
 
+    // MCQ=5 innebär att vi alltid använder hela poolen (det är exakt 5)
     for (let i = 0; i < choiceCount; i++) {
       const txt = pool[(n + i) % pool.length];
       choices.push({ id: `c${i + 1}`, text: txt });
     }
   }
 
-  const correctIdx = n % choiceCount;
+  const correctIdx = (choiceCount > 0) ? (n % choiceCount) : 0;
   const correctChoiceId = `c${correctIdx + 1}`;
 
   let correctChoiceIds = null;
-  if (isMulti) {
-    // multi: minst 2 korrekta (väljer 2 st bland 5)
+  if (isMulti && choiceCount >= 3) {
     const idx2 = (correctIdx + 2) % choiceCount;
-    correctChoiceIds = [`c${correctIdx + 1}`, `c${idx2 + 1}`];
+    // garantera två olika
+    correctChoiceIds = (idx2 === correctIdx)
+      ? [`c${correctIdx + 1}`, `c${((correctIdx + 1) % choiceCount) + 1}`]
+      : [`c${correctIdx + 1}`, `c${idx2 + 1}`];
   }
 
   const rationale =
@@ -767,7 +767,6 @@ function normalizeQuestionType(v) {
   const s0 = safeStr(v).toLowerCase().trim();
   if (!s0) return "";
 
-  // mycket tolerant: fånga "MCQ (ett rätt)" etc
   const s = s0
     .replace(/\s+/g, "_")
     .replace(/[()]/g, "")
@@ -842,13 +841,11 @@ function mapChoiceQuestionToUi(q, questionType, language) {
   if (questionType === "tf") {
     const a = (language === "sv") ? "Sant" : "True";
     const b = (language === "sv") ? "Falskt" : "False";
+    // Stabilt: correctIndex 0 (Sant) i mock. (UI kan randomisera senare om ni vill.)
     return { ok: true, item: { type: "question", question, options: [a, b], correctIndex: 0 } };
   }
 
   if (questionType === "mcq_single") {
-    // PATCH: fail-closed om MCQ inte blev exakt 5
-    if (options.length !== 5) return { ok: false };
-
     const correctId = safeStr(q.correctChoiceId).trim();
     const idx = indexOfChoiceId(choices, correctId);
     if (idx < 0 || idx >= options.length) return { ok: false };
@@ -856,9 +853,6 @@ function mapChoiceQuestionToUi(q, questionType, language) {
   }
 
   if (questionType === "mcq_multi") {
-    // PATCH: fail-closed om MCQ inte blev exakt 5
-    if (options.length !== 5) return { ok: false };
-
     const ids = Array.isArray(q.correctChoiceIds) ? q.correctChoiceIds : [];
     const indices = [];
     for (const id of ids) {
