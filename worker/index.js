@@ -6,7 +6,7 @@
 // UI kräver vid MCQ:
 // - type: "question"
 // - question: string
-// - options: string[]
+// - options: string[]   (EXAKT 5 för MCQ i denna patch)
 // - correctIndex: number (eller correctIndices: number[])
 //
 // POLICY (LÅST):
@@ -32,6 +32,10 @@
 //
 // PATCH (CORS FIX):
 // - Tillåt UI headers: X-Hr-Sdk + X-Hr-Client i Access-Control-Allow-Headers
+//
+// PATCH (MCQ FIX v1.5.1d):
+// - MCQ (mcq_single/mcq_multi) genererar ALLTID exakt 5 svarsalternativ.
+// - UI-mappning fail-closed om options inte blir exakt 5 för MCQ.
 // ============================================================
 
 import INDEX from "../ai-rules/index.json";
@@ -122,7 +126,7 @@ export default {
             version: VERSION,
             build: "wrangler",
             rulesBase: "ai-rules",
-            outputContract: "training-blocks@v1 + ui-mcq@v1.1"
+            outputContract: "training-blocks@v1 + ui-mcq@v1.1 (mcq=5 options)"
           }
         },
         corsHeaders
@@ -382,6 +386,7 @@ function normalizeMode(modeRaw) {
 }
 
 function normalizeFormat(format, mode, questionType) {
+  // GUARD: om UI begär provfrågor, tvinga question-format (oavsett "mix")
   if (isUiQuestionRequest(questionType)) return "question";
 
   const f = safeStr(format).toLowerCase().trim();
@@ -448,6 +453,7 @@ function validateCourseSubject(course) {
   if (course === null) return { ok: true };
   const step = safeStr(course.step).trim();
   if (step) {
+    // NOTE: UI-katalogen använder 1–5, men vi accepterar här även 6–7 för backward-kompatibilitet.
     const allow = new Set(["1", "2", "3", "4", "5", "6", "7"]);
     if (!allow.has(step)) return { ok: false, message: "subject.step måste vara 1–7" };
   }
@@ -686,7 +692,8 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
   const isTf = (qt === "tf");
   const isMulti = (qt === "mcq_multi");
 
-  const choiceCount = isTf ? 2 : (3 + (n % 3)); // TF=2 annars 3..5
+  // PATCH: MCQ ska alltid ha exakt 5 options
+  const choiceCount = isTf ? 2 : 5;
 
   const baseTextSv = `Vad är den bästa första åtgärden i ${courseLabel.area} i en vardagssituation?`;
   const baseTextEn = `What is the best first action in ${courseLabel.area} in a practical situation?`;
@@ -702,6 +709,7 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
     choices.push({ id: "c1", text: (language === "sv") ? "Sant" : "True" });
     choices.push({ id: "c2", text: (language === "sv") ? "Falskt" : "False" });
   } else {
+    // PATCH: pool har exakt 5 texter -> 5 unika val (i roterande ordning)
     const poolSv = [
       "Klargör målet och ställ en öppen fråga",
       "Ge en snabb order utan förklaring",
@@ -728,7 +736,8 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
   const correctChoiceId = `c${correctIdx + 1}`;
 
   let correctChoiceIds = null;
-  if (isMulti && choiceCount >= 3) {
+  if (isMulti) {
+    // multi: minst 2 korrekta (väljer 2 st bland 5)
     const idx2 = (correctIdx + 2) % choiceCount;
     correctChoiceIds = [`c${correctIdx + 1}`, `c${idx2 + 1}`];
   }
@@ -837,6 +846,9 @@ function mapChoiceQuestionToUi(q, questionType, language) {
   }
 
   if (questionType === "mcq_single") {
+    // PATCH: fail-closed om MCQ inte blev exakt 5
+    if (options.length !== 5) return { ok: false };
+
     const correctId = safeStr(q.correctChoiceId).trim();
     const idx = indexOfChoiceId(choices, correctId);
     if (idx < 0 || idx >= options.length) return { ok: false };
@@ -844,6 +856,9 @@ function mapChoiceQuestionToUi(q, questionType, language) {
   }
 
   if (questionType === "mcq_multi") {
+    // PATCH: fail-closed om MCQ inte blev exakt 5
+    if (options.length !== 5) return { ok: false };
+
     const ids = Array.isArray(q.correctChoiceIds) ? q.correctChoiceIds : [];
     const indices = [];
     for (const id of ids) {
