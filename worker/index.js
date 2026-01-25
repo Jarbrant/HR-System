@@ -1,5 +1,5 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5 FIX)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.1 FIX)
 // FIL: worker/index.js
 // Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ begärs.
 //
@@ -46,7 +46,7 @@ import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json"
 // import DOCUMENT_FORMAT from "../ai-rules/v1/formats/document.json"; // valfri
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5";
+const VERSION = "1.5.1";
 
 // ------------------------------
 // Fetch
@@ -119,7 +119,7 @@ export default {
             version: VERSION,
             build: "wrangler",
             rulesBase: "ai-rules",
-            outputContract: "training-blocks@v1 + ui-mcq@v1"
+            outputContract: "training-blocks@v1 + ui-mcq@v1.1"
           }
         },
         corsHeaders
@@ -207,8 +207,20 @@ export default {
     const subjectId = safeStr(body.subjectId || body.subject || "").trim();
     const difficultyHint = body.difficultyHint ?? body.difficulty;
 
-    // UI: frågetyp (det är detta som triggar MCQ-kontraktet)
-    const questionType = normalizeQuestionType(body.questionType || body.qType || "");
+    // UI: frågetyp (tolerant mot olika fältnamn)
+    const questionType = normalizeQuestionType(
+      body.questionType ??
+      body.qType ??
+      body.questionMode ??
+      body.question_mode ??
+      body.questionKind ??
+      body.question_kind ??
+      body.quizMode ??
+      body.mcqMode ??
+      body.mcq_type ??
+      body.question ??
+      ""
+    );
 
     const subjectObj = isPlainObject(body.subjectObj)
       ? body.subjectObj
@@ -260,10 +272,9 @@ export default {
     }
 
     // ---------- TOPP-NIVÅ blocks ----------
-    // Default: behåll training.blocks
     let topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
 
-    // Om UI ber om MCQ/TF: bygg UI-frågeblock i rätt format
+    // Om UI ber om MCQ/TF: returnera UI-frågeblock i exakt UI-format
     if (isUiQuestionRequest(questionType)) {
       const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, language);
       if (!mapped.ok) {
@@ -553,7 +564,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.5"
+      source: "mock-v1.5.1"
     }
   };
 }
@@ -660,9 +671,7 @@ function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, su
     blockId,
     kind: "question",
     title,
-    items: [
-      { type: "questionInline", question: q }
-    ],
+    items: [{ type: "questionInline", question: q }],
     scoring: { points: 1 },
     meta: { tags: ["question", subjId], difficulty }
   };
@@ -742,13 +751,27 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
 // ============================================================
 
 function normalizeQuestionType(v) {
-  const s = safeStr(v).toLowerCase().trim();
-  if (!s) return "";
+  const s0 = safeStr(v).toLowerCase().trim();
+  if (!s0) return "";
+
+  // mycket tolerant: fånga "MCQ (ett rätt)" etc
+  const s = s0
+    .replace(/\s+/g, "_")
+    .replace(/[()]/g, "")
+    .replace(/å/g, "a")
+    .replace(/ä/g, "a")
+    .replace(/ö/g, "o");
+
   if (s === "mcq_single" || s === "single" || s === "mcq") return "mcq_single";
   if (s === "mcq_multi" || s === "multi") return "mcq_multi";
-  if (s === "tf" || s === "truefalse" || s === "true_false") return "tf";
-  if (s === "short" || s === "short_answer") return "short";
-  return s;
+  if (s === "tf" || s === "truefalse" || s === "true_false" || s === "sant_falskt") return "tf";
+  if (s === "short" || s === "short_answer" || s === "kort") return "short";
+
+  if (s.includes("mcq") && s.includes("multi")) return "mcq_multi";
+  if (s.includes("mcq") && (s.includes("single") || s.includes("ett") || s.includes("one"))) return "mcq_single";
+  if (s.includes("true") || s.includes("false") || s.includes("tf") || s.includes("sant") || s.includes("falskt")) return "tf";
+
+  return s0;
 }
 
 function isUiQuestionRequest(questionType) {
