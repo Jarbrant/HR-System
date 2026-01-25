@@ -29,6 +29,9 @@
 // - POST /v1/ai/training   (alias)
 // - POST /v1/ai/document   (alias)
 // - OPTIONS *              (CORS preflight)
+//
+// PATCH (CORS FIX):
+// - Tillåt UI headers: X-Hr-Sdk + X-Hr-Client i Access-Control-Allow-Headers
 // ============================================================
 
 import INDEX from "../ai-rules/index.json";
@@ -307,7 +310,8 @@ function buildCorsHeaders(origin, allowedOrigin) {
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    // CORS FIX: UI skickar X-Hr-Sdk + X-Hr-Client (preflight kräver att de är tillåtna)
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client",
     "Vary": "Origin"
   };
 }
