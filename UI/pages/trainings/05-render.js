@@ -15,23 +15,26 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras (render visar, callbacks hanterar write)
 
-PATCH v1.1.4 (PP-SC-010-08C) (AUTOPATCH):
-- P0: Blockera “Spara” i item-modal för question om alternativen/facit saknas (håll modalen öppen).
-- P0: View-läge visar tydliga varningar för trasiga frågor (saknar alternativ/facit) och undviker “Rätt!”-känsla när data saknas.
-- P2: openModal stöder onSave() => false för att inte stänga (bakåtkompatibelt).
+PATCH v1.1.5 (PP-SC-010-08D) (AUTOPATCH):
+- P0: Visa “Förklaring” alltid om den finns (även när facit saknas) och undvik “—” som känns “klart”.
+- P0: Visa contextHint (om finns) precis under frågetexten för att göra frågan tydligare (minskar tvetydighet).
+- P1: Modal-edit: krav för question höjs till minst 3 svarsalternativ (fail-closed, håll modalen öppen).
+- P1: View: om fråga saknar förklaring -> visa neutral uppmaning (“Lägg till en kort förklaring…”) istället för “—”.
 
 Ändringslogg (≤8):
-- v1.1.4: openModal: respektera onSave()==false (stäng inte)
-- v1.1.4: openItemModal: validera question innan onSave + alert + håll öppen
-- v1.1.4: view(question): varning vid saknade alternativ/facit och “Rätt!” visas bara när det finns facit
+- v1.1.5: view(question): rendera contextHint under frågan (om finns)
+- v1.1.5: view(question): förklaring visas alltid om text finns; annars neutral uppmaning
+- v1.1.5: edit(question): kräver minst 3 svarsalternativ innan spara (fail-closed)
+- v1.1.5: små XSS-safe helpers för explanation/contextHint
 
 Testnoteringar:
-- Öppna fråga utan alternativ: “Spara” ska varna och inte stänga.
-- Öppna fråga med alternativ men inget korrekt valt: “Spara” ska varna och inte stänga.
-- View: fråga utan facit ska visa “Saknar facit” och inte kännas “klar”.
+- View: fråga med contextHint ska visa en “muted” rad under frågan.
+- View: fråga utan förklaring ska visa “Lägg till en kort förklaring…” (inte “—”).
+- Edit: <3 svarsalternativ => alert + modalen hålls öppen.
+- Edit: facit saknas => alert + modalen hålls öppen (som tidigare).
 
 Risk/edge cases:
-- openModal-beteendet ändras bara när onSave explicit returnerar false (övriga modaler påverkas ej).
+- Befintliga frågor med exakt 2 alternativ (som inte är Sant/Falskt) kan inte sparas om de öppnas i edit och man försöker spara.
 ============================================================ */
 (function () {
   "use strict";
@@ -40,7 +43,7 @@ Risk/edge cases:
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.1.4-PP-SC-010-08C";
+  render.__VERSION = "v1.1.5-PP-SC-010-08D";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
@@ -699,6 +702,16 @@ Risk/edge cases:
     return "other";
   }
 
+  function extractExplanation(it) {
+    if (!it || typeof it !== "object") return "";
+    return normStr(it.explanation || it.feedback || it.rationale || it.explain || "");
+  }
+
+  function extractContextHint(it) {
+    if (!it || typeof it !== "object") return "";
+    return normStr(it.contextHint || it.context || it.hint || "");
+  }
+
   function makeSectionTitle(txt) {
     const h = document.createElement("div");
     h.style.fontWeight = "900";
@@ -811,6 +824,17 @@ Risk/edge cases:
         q.textContent = primaryText(item) || "—";
         content.appendChild(q);
 
+        // P0: visa contextHint om finns (gör frågan tydligare)
+        const hintTxt = extractContextHint(item);
+        if (hintTxt) {
+          const ch = document.createElement("div");
+          ch.className = "muted2";
+          ch.style.textAlign = "left";
+          ch.style.marginTop = "6px";
+          ch.textContent = "Avgränsning: " + hintTxt;
+          content.appendChild(ch);
+        }
+
         const optsList = extractOptions(item);
         const correctSet = extractCorrect(item, optsList);
 
@@ -855,9 +879,9 @@ Risk/edge cases:
         content.appendChild(list);
         content.appendChild(makeHr());
 
-        // Visa “Rätt!” bara när facit faktiskt finns (annars blir det falsk trygghet)
-        const hasExpl = normStr(item.explanation || item.feedback || item.rationale || "").length > 0;
+        const explTxt = extractExplanation(item);
 
+        // Visa “Rätt!” bara när facit faktiskt finns (annars blir det falsk trygghet)
         if (hasCorrect) {
           content.appendChild(makeSectionTitle("Förklaring:"));
 
@@ -865,20 +889,25 @@ Risk/edge cases:
           okLine.style.fontWeight = "900";
           okLine.textContent = "Rätt!";
           content.appendChild(okLine);
-
-          const expl = document.createElement("div");
-          expl.className = "muted2";
-          expl.style.textAlign = "left";
-          expl.textContent = hasExpl ? normStr(item.explanation || item.feedback || item.rationale || "") : "—";
-          content.appendChild(expl);
         } else {
-          // Om facit saknas: visa neutral info istället
           content.appendChild(makeSectionTitle("Förklaring:"));
-          const expl = document.createElement("div");
-          expl.className = "muted2";
-          expl.style.textAlign = "left";
-          expl.textContent = hasExpl ? normStr(item.explanation || item.feedback || item.rationale || "") : "Saknar facit – lägg till korrekt svar för att få en riktig förklaring.";
-          content.appendChild(expl);
+        }
+
+        const expl = document.createElement("div");
+        expl.className = "muted2";
+        expl.style.textAlign = "left";
+        // P0/P1: undvik “—” (känns “klart”). Visa neutral uppmaning om tomt.
+        expl.textContent = explTxt ? explTxt : "Lägg till en kort förklaring så att eleven förstår varför svaret är rätt.";
+        content.appendChild(expl);
+
+        if (!hasCorrect && explTxt) {
+          // Om förklaring finns men facit saknas: var tydlig med att facit behövs för “Rätt!”-känslan
+          const n = document.createElement("div");
+          n.className = "muted2";
+          n.style.textAlign = "left";
+          n.style.marginTop = "8px";
+          n.textContent = "Obs: Facit saknas – markera korrekt svar för att kunna använda “Rätt!”-feedback i quiz.";
+          content.appendChild(n);
         }
       } else {
         const info = document.createElement("div");
@@ -941,9 +970,8 @@ Risk/edge cases:
         wrapOpts.style.flexDirection = "column";
         wrapOpts.style.gap = "8px";
 
-        // fail-soft: minst 2 rader att börja med
-        if (!optsList.length) optsList.push({ text: "" }, { text: "" });
-        if (optsList.length === 1) optsList.push({ text: "" });
+        // fail-soft: minst 3 rader att börja med (ny baseline)
+        while (optsList.length < 3) optsList.push({ text: "" });
 
         for (let i = 0; i < optsList.length; i++) {
           const row = document.createElement("div");
@@ -973,7 +1001,7 @@ Risk/edge cases:
 
         const taE = document.createElement("textarea");
         taE.className = "textarea";
-        taE.value = normStr(item.explanation || item.feedback || item.rationale || "");
+        taE.value = extractExplanation(item);
         content.appendChild(taE);
 
         content.__EDIT_REFS = { kind, taQ, taE, optRows };
@@ -1048,9 +1076,9 @@ Risk/edge cases:
           if (refs.optRows[i].cb.checked) correctIdxs.push(optOut.length - 1);
         }
 
-        // P0: fail-closed i modal-edit (håll öppen)
-        if (optOut.length < 2) {
-          try { window.alert("Frågan måste ha minst 2 svarsalternativ innan du sparar."); } catch (_) { }
+        // P1: fail-closed i modal-edit (håll öppen) — kräver minst 3 alternativ nu
+        if (optOut.length < 3) {
+          try { window.alert("Frågan måste ha minst 3 svarsalternativ innan du sparar."); } catch (_) { }
           return false;
         }
         if (correctIdxs.length < 1) {
@@ -1067,6 +1095,7 @@ Risk/edge cases:
           const expl = refs.taE ? normStr(refs.taE.value || "") : "";
           if (typeof updated.explanation === "string") updated.explanation = expl;
           else if (typeof updated.feedback === "string") updated.feedback = expl;
+          else if (typeof updated.rationale === "string") updated.rationale = expl;
           else updated.explanation = expl;
 
           if (typeof updated.correctIndex === "number" || updated.correctIndex === null) {
