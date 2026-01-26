@@ -1,7 +1,9 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.2 FIX)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.3 FIX)
 // FIL: worker/index.js
 // Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ begärs.
+//      FIX: Undvik “samma frågor”, förbjud placeholder-fraser, kräver förklaring,
+//           och gör batchen unik (dedupe) + bättre variation.
 //
 // UI kräver vid MCQ:
 // - type: "question"
@@ -35,6 +37,14 @@
 //
 // PATCH v1.5.2:
 // - MCQ: alltid exakt 5 svarsalternativ (TF=2). Stabil correctIndex.
+//
+// PATCH v1.5.3 (UNIQ + QUALITY):
+// - P0: Ta bort förbjudna placeholder-fraser i frågetext (ingen “Använd detta sammanhang …”/”kontext dolt”)
+// - P0: Unikhetskrav i batch (dedupe på frågetext) – fail-closed om inte går att generera unikt
+// - P0: Variation per item (requestId + itemIndex salt) så count>1 inte blir samma
+// - P1: Bättre MCQ-stems (tydligare scope: vardag/ej akut, rutinstart, dialogstart)
+// - P1: Require explanation + min-längd (enligt ruleset om finns)
+// - P2: UI-map inkluderar explanation (förklaring) så modal visar det
 // ============================================================
 
 import INDEX from "../ai-rules/index.json";
@@ -49,10 +59,12 @@ import QUESTION_FORMAT from "../ai-rules/v1/formats/question.json";
 import TASK_FORMAT from "../ai-rules/v1/formats/task.json";
 import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json";
 
-// import DOCUMENT_FORMAT from "../ai-rules/v1/formats/document.json"; // valfri
+// NYTT (Steg 1): ruleset för kvalitet (din fil)
+// LÄGG DEN HÄR: ai-rules/v1/rulesets/training_prompt.json
+import TRAINING_PROMPT from "../ai-rules/v1/rulesets/training_prompt.json";
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5.2";
+const VERSION = "1.5.3";
 
 // ------------------------------
 // Fetch
@@ -125,7 +137,7 @@ export default {
             version: VERSION,
             build: "wrangler",
             rulesBase: "ai-rules",
-            outputContract: "training-blocks@v1 + ui-mcq@v1.1"
+            outputContract: "training-blocks@v1 + ui-mcq@v1.2 (explanation+uniq)"
           }
         },
         corsHeaders
@@ -272,7 +284,8 @@ export default {
         course,
         questionType
       });
-    } catch {
+    } catch (e) {
+      // Fail-closed utan payload
       console.error("ERR", requestId, "UPSTREAM_ERROR");
       return errorJSON(502, requestId, "UPSTREAM_ERROR", "AI-tjänsten svarade inte", corsHeaders, false);
     }
@@ -482,21 +495,69 @@ function getRulesBundle(subjectId) {
   const s = normalizeSubjectId(subjectId);
   const subj =
     (s === "math") ? (MATH || {}) :
-    (s === "swedish") ? (SWEDISH || {}) :
-    (s === "generic") ? (GENERIC || {}) :
-    (GENERIC || {});
+      (s === "swedish") ? (SWEDISH || {}) :
+        (s === "generic") ? (GENERIC || {}) :
+          (GENERIC || {});
 
   return {
     index: INDEX || {},
     global: GLOBAL || {},
     modules: MODULES || {},
     subject: subj,
+    rulesets: {
+      training_prompt: TRAINING_PROMPT || {}
+    },
     formats: {
       question: QUESTION_FORMAT || {},
       task: TASK_FORMAT || {},
       "training-blocks": TRAINING_BLOCKS_FORMAT || {}
     }
   };
+}
+
+function getQuestionQuality(bundle) {
+  const qp = bundle && bundle.rulesets && bundle.rulesets.training_prompt;
+  const q = (qp && qp.questionQuality) ? qp.questionQuality : null;
+
+  const forbiddenPhrases = safeArr(q && q.general && q.general.forbiddenPhrases).filter(Boolean);
+  const forbidContextPlaceholderText = !!(q && q.general && q.general.forbidContextPlaceholderText);
+  const requireExplanation = !!(q && q.general && q.general.requireExplanation);
+  const explanationMinChars = Number(q && q.general && q.general.explanationMinChars) || 40;
+
+  const minOptions = Number(q && q.mcq && q.mcq.minOptions) || 4;
+  const maxOptions = Number(q && q.mcq && q.mcq.maxOptions) || 6;
+
+  return {
+    forbidContextPlaceholderText,
+    forbiddenPhrases,
+    requireExplanation,
+    explanationMinChars,
+    mcq: { minOptions, maxOptions }
+  };
+}
+
+function safeArr(a) {
+  return Array.isArray(a) ? a : [];
+}
+
+function containsForbiddenPhrase(text, forbiddenPhrases) {
+  const t = safeStr(text).toLowerCase();
+  for (const p of safeArr(forbiddenPhrases)) {
+    const ph = safeStr(p).toLowerCase().trim();
+    if (ph && t.includes(ph)) return true;
+  }
+  return false;
+}
+
+function stripAnyBracketedContext(s) {
+  // Fail-soft: plocka bort typiska "(...)" eller "[...]" som kan vara placeholder
+  const txt = safeStr(s);
+  return txt
+    .replace(/\(\s*kontext[^)]*\)/gi, "")
+    .replace(/\(\s*använd[^)]*\)/gi, "")
+    .replace(/\[\s*object\s+object\s*\]/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 // ============================================================
@@ -530,11 +591,17 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
       : [];
 
   const blocks = [];
+  const seenQuestionStems = new Set(); // P0: dedupe i batch
+
   for (let i = 0; i < count; i++) {
-    const n = (seed + i * 2654435761) >>> 0;
+    // P0: variation per item (salt med index)
+    const n = (seed ^ hash32(`${requestId}#${i}`) ^ (i * 2654435761)) >>> 0;
 
     if (fmt === "question") {
-      blocks.push(genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle, questionType }));
+      blocks.push(genQuestionBlock({
+        i, n, language, context, courseLabel, difficulty, subjId, bundle, questionType,
+        seenQuestionStems
+      }));
       continue;
     }
 
@@ -551,7 +618,10 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     const pick = n % 3;
     if (pick === 0) blocks.push(genInfoBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
     else if (pick === 1) blocks.push(genTaskBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
-    else blocks.push(genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle, questionType }));
+    else blocks.push(genQuestionBlock({
+      i, n, language, context, courseLabel, difficulty, subjId, bundle, questionType,
+      seenQuestionStems
+    }));
   }
 
   return {
@@ -571,7 +641,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.5.2"
+      source: "mock-v1.5.3"
     }
   };
 }
@@ -589,8 +659,8 @@ function genInfoBlock({ i, language, context, courseLabel, difficulty, subjId })
 
   const text =
     language === "sv"
-      ? `Kort teori kopplad till ${courseLabel.module} → ${courseLabel.area}.\n\nSammanhang:\n${context || "—"}`
-      : `Short theory for ${courseLabel.module} → ${courseLabel.area}.\n\nContext:\n${context || "—"}`;
+      ? `Kort teori kopplad till ${courseLabel.module} → ${courseLabel.area}.\n\nSammanhang (valfritt):\n${context || "—"}`
+      : `Short theory for ${courseLabel.module} → ${courseLabel.area}.\n\nContext (optional):\n${context || "—"}`;
 
   return {
     blockId,
@@ -610,10 +680,11 @@ function genTaskBlock({ i, language, context, courseLabel, difficulty, subjId })
       ? `Uppgift: ${courseLabel.area}`
       : `Task: ${courseLabel.area}`;
 
+  // OBS: task kan visa kontext, men undvik förbjudna fraser i rubriken.
   const instruction =
     language === "sv"
-      ? `Gör en kort uppgift kopplad till ${courseLabel.area}.\n\nUtgå från detta sammanhang:\n${context || "—"}`
-      : `Complete a short task for ${courseLabel.area}.\n\nContext:\n${context || "—"}`;
+      ? `Gör en kort uppgift kopplad till ${courseLabel.area}.\n\nUtgångspunkt (om relevant):\n${context || "—"}`
+      : `Complete a short task for ${courseLabel.area}.\n\nStarting point (if relevant):\n${context || "—"}`;
 
   return {
     blockId,
@@ -644,8 +715,8 @@ function genDocumentBlock({ i, language, context, courseLabel, difficulty, subjI
 
   const text =
     language === "sv"
-      ? `Detta är ett informativt dokument om ${courseLabel.area}.\n\nSammanhang:\n${context || "—"}`
-      : `This is an informational document about ${courseLabel.area}.\n\nContext:\n${context || "—"}`;
+      ? `Detta är ett informativt dokument om ${courseLabel.area}.\n\nBakgrund (valfritt):\n${context || "—"}`
+      : `This is an informational document about ${courseLabel.area}.\n\nBackground (optional):\n${context || "—"}`;
 
   return {
     blockId,
@@ -664,7 +735,7 @@ function genDocumentBlock({ i, language, context, courseLabel, difficulty, subjI
   };
 }
 
-function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, questionType }) {
+function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle, questionType, seenQuestionStems }) {
   const blockId = `b_q_${i + 1}_${subjId}`.slice(0, 32);
 
   const title =
@@ -672,7 +743,26 @@ function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, su
       ? `Kontrollfråga: ${courseLabel.area}`
       : `Check question: ${courseLabel.area}`;
 
-  const q = makeQuestion({ n, language, context, courseLabel, difficulty, subjId, questionType });
+  // P0: försök generera unik fråga (fail-closed om vi misslyckas)
+  let q = null;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const nn = (n ^ (attempt * 0x9e3779b9)) >>> 0;
+    const cand = makeQuestion({ n: nn, language, context, courseLabel, difficulty, subjId, questionType, bundle, i });
+
+    const stemKey = safeStr(cand && (cand.text || cand.question || "")).trim().toLowerCase();
+    if (!stemKey) continue;
+
+    if (seenQuestionStems && seenQuestionStems.has(stemKey)) continue;
+
+    if (seenQuestionStems) seenQuestionStems.add(stemKey);
+    q = cand;
+    break;
+  }
+
+  // Fail-closed: om vi inte lyckas skapa unikt (hellre fel än duplicat i batch)
+  if (!q) {
+    throw new Error("DUPLICATE_QUESTION_IN_BATCH");
+  }
 
   return {
     blockId,
@@ -684,68 +774,158 @@ function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, su
   };
 }
 
-function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, questionType }) {
+// ------------------------------
+// QUESTION (choice-format, ruleset-quality)
+// ------------------------------
+function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, questionType, bundle, i }) {
   const qt = normalizeQuestionType(questionType);
   const isTf = (qt === "tf");
   const isMulti = (qt === "mcq_multi");
   const isMcq = (qt === "mcq_single" || qt === "mcq_multi");
 
+  const qq = getQuestionQuality(bundle);
+
   // PATCH v1.5.2: lås MCQ till exakt 5 alternativ (TF=2)
   const choiceCount = isTf ? 2 : (isMcq ? 5 : (3 + (n % 3))); // TF=2, MCQ=5, annars 3..5
 
-  const baseTextSv = `Vad är den bästa första åtgärden i ${courseLabel.area} i en vardagssituation?`;
-  const baseTextEn = `What is the best first action in ${courseLabel.area} in a practical situation?`;
+  // P1: tydligare scope/stem så inte “allt kan vara rätt”
+  // OBS: Vi visar INTE kontext-placeholder i frågetext (förbjudet i ruleset)
+  const scopeSv = [
+    "i en vardagssituation (inte akut)",
+    "när du ska starta en dialog",
+    "när du ska välja första steg i en rutin",
+    "när du vill förebygga fel innan de uppstår",
+    "när du behöver få samma bild i teamet"
+  ];
+  const scopeEn = [
+    "in a normal situation (not urgent)",
+    "when you need to start a dialogue",
+    "when you choose the first step in a routine",
+    "when you want to prevent issues early",
+    "when you need alignment in the team"
+  ];
+  const scope = (language === "sv" ? scopeSv : scopeEn)[(n + (i || 0)) % 5];
 
-  const text =
-    (language === "sv")
-      ? `${baseTextSv}\n\n(Använd detta sammanhang om relevant: ${context || "—"})`
-      : `${baseTextEn}\n\n(Context: ${context || "—"})`;
+  const stemsSv = [
+    (area, sc) => `Vilken åtgärd är bäst att börja med i ${area} ${sc}?`,
+    (area, sc) => `Vad är ett bra första steg i ${area} ${sc}?`,
+    (area, sc) => `När du jobbar med ${area} ${sc}, vad gör du först?`,
+    (area, sc) => `Vilket förstaval hjälper dig komma igång i ${area} ${sc}?`,
+    (area, sc) => `Vilket steg ger bäst start i ${area} ${sc}?`
+  ];
+  const stemsEn = [
+    (area, sc) => `What is the best first action in ${area} ${sc}?`,
+    (area, sc) => `What is a good first step in ${area} ${sc}?`,
+    (area, sc) => `When working with ${area} ${sc}, what do you do first?`,
+    (area, sc) => `Which first choice helps you get started in ${area} ${sc}?`,
+    (area, sc) => `Which step gives the best start in ${area} ${sc}?`
+  ];
+  const stemFn = (language === "sv" ? stemsSv : stemsEn)[n % 5];
+  let text = stemFn(courseLabel.area, scope);
 
+  // P0: ruleset forbjuder placeholder-fraser
+  // Vi använder kontext ENDAST för variation i generering (inte utskrift).
+  if (qq.forbidContextPlaceholderText) {
+    text = stripAnyBracketedContext(text);
+    if (containsForbiddenPhrase(text, qq.forbiddenPhrases)) {
+      // fail-soft: ersätt med en ren version
+      text = (language === "sv")
+        ? `Vad är ett bra första steg i ${courseLabel.area} ${scope}?`
+        : `What is a good first step in ${courseLabel.area} ${scope}?`;
+    }
+  }
+
+  // --- choices ---
   const choices = [];
 
   if (isTf) {
     choices.push({ id: "c1", text: (language === "sv") ? "Sant" : "True" });
     choices.push({ id: "c2", text: (language === "sv") ? "Falskt" : "False" });
   } else {
+    // P1: större pool + sampling så batchen inte blir samma (utan att bli “för lätt”)
     const poolSv = [
       "Klargör målet och ställ en öppen fråga",
-      "Ge en snabb order utan förklaring",
-      "Byt ämne för att undvika konflikt",
-      "Dokumentera och följ upp enligt rutin",
-      "Lyssna klart och spegla det du hört"
+      "Lyssna klart och spegla det du hört",
+      "Samla fakta snabbt innan du bestämmer åtgärd",
+      "Följ rutinens första steg och dokumentera vid behov",
+      "Säkra att rätt person/roll kopplas in",
+      "Kontrollera risk och avgränsa situationen",
+      "Stäm av förväntningar och nästa steg",
+      "Gör en enkel kontroll mot checklista",
+      "Ta en kort paus och prioritera ordning",
+      "Verifiera att du har rätt underlag"
     ];
     const poolEn = [
       "Clarify the goal and ask an open question",
-      "Give a quick order without explanation",
-      "Change the subject to avoid conflict",
-      "Document and follow up per routine",
-      "Listen fully and reflect what you heard"
+      "Listen fully and reflect what you heard",
+      "Gather key facts before deciding",
+      "Follow the first step of the routine and document if needed",
+      "Make sure the right role is involved",
+      "Check risk and scope the situation",
+      "Align expectations and agree on next step",
+      "Do a quick checklist check",
+      "Pause briefly and prioritize order",
+      "Verify you have the right basis"
     ];
     const pool = (language === "sv") ? poolSv : poolEn;
 
-    // MCQ=5 innebär att vi alltid använder hela poolen (det är exakt 5)
-    for (let i = 0; i < choiceCount; i++) {
-      const txt = pool[(n + i) % pool.length];
-      choices.push({ id: `c${i + 1}`, text: txt });
+    // Sampling: välj 5 unika alternativ från poolen, deterministiskt av n+i
+    const need = choiceCount; // MCQ=5
+    const picked = new Set();
+    let cursor = (n ^ hash32(safeStr(context).slice(0, 64))) >>> 0;
+
+    while (picked.size < need && picked.size < pool.length) {
+      cursor = (cursor * 1664525 + 1013904223) >>> 0; // LCG
+      picked.add(cursor % pool.length);
+    }
+
+    const idxs = Array.from(picked);
+    for (let k = 0; k < idxs.length && choices.length < need; k++) {
+      choices.push({ id: `c${choices.length + 1}`, text: pool[idxs[k]] });
+    }
+
+    // Fallback om något blev kort (ska inte hända, men fail-soft)
+    while (choices.length < need) {
+      const t = pool[(n + choices.length) % pool.length];
+      choices.push({ id: `c${choices.length + 1}`, text: t });
     }
   }
 
+  // Correct (stabil men varierad)
   const correctIdx = (choiceCount > 0) ? (n % choiceCount) : 0;
   const correctChoiceId = `c${correctIdx + 1}`;
 
   let correctChoiceIds = null;
   if (isMulti && choiceCount >= 3) {
     const idx2 = (correctIdx + 2) % choiceCount;
-    // garantera två olika
     correctChoiceIds = (idx2 === correctIdx)
       ? [`c${correctIdx + 1}`, `c${((correctIdx + 1) % choiceCount) + 1}`]
       : [`c${correctIdx + 1}`, `c${idx2 + 1}`];
   }
 
-  const rationale =
+  // P1: explanation/rationale enligt ruleset-krav
+  let rationale =
     (language === "sv")
-      ? "En bra start är att skapa tydlighet och få fram den andres perspektiv innan man styr mot lösning."
-      : "A strong start is to create clarity and understand the other person’s perspective before moving to solutions.";
+      ? "I en normal situation är en bra start att skapa tydlighet (mål, avgränsning och nästa steg) innan du går in på åtgärd. Då blir valet mer träffsäkert och lättare att följa upp."
+      : "In a normal situation, a strong start is to create clarity (goal, scope, and next step) before acting. That makes the choice more accurate and easier to follow up.";
+
+  if (qq.requireExplanation) {
+    // Fail-soft: om för kort – gör den längre
+    if (safeStr(rationale).trim().length < qq.explanationMinChars) {
+      rationale = (language === "sv")
+        ? "Förklaring: Börja med att skapa tydlighet om mål och läge. När du förstår vad som faktiskt ska uppnås kan du välja rätt åtgärd och följa upp enligt rutin."
+        : "Explanation: Start by clarifying the goal and the situation. Once you know what needs to be achieved, you can choose the right action and follow up properly.";
+    }
+  }
+
+  // Final ruleset-sanity (fail-soft)
+  if (qq.forbidContextPlaceholderText) {
+    if (containsForbiddenPhrase(text, qq.forbiddenPhrases)) {
+      text = (language === "sv")
+        ? `Vad är ett bra första steg i ${courseLabel.area} ${scope}?`
+        : `What is a good first step in ${courseLabel.area} ${scope}?`;
+    }
+  }
 
   return {
     kind: "question",
@@ -838,18 +1018,20 @@ function mapChoiceQuestionToUi(q, questionType, language) {
   }
   if (options.length < 2) return { ok: false };
 
+  // P2: skicka med explanation så UI kan visa "Förklaring" direkt
+  const explanation = safeStr(q.rationale || q.explanation || q.feedback || "").trim();
+
   if (questionType === "tf") {
     const a = (language === "sv") ? "Sant" : "True";
     const b = (language === "sv") ? "Falskt" : "False";
-    // Stabilt: correctIndex 0 (Sant) i mock. (UI kan randomisera senare om ni vill.)
-    return { ok: true, item: { type: "question", question, options: [a, b], correctIndex: 0 } };
+    return { ok: true, item: { type: "question", question, options: [a, b], correctIndex: 0, explanation } };
   }
 
   if (questionType === "mcq_single") {
     const correctId = safeStr(q.correctChoiceId).trim();
     const idx = indexOfChoiceId(choices, correctId);
     if (idx < 0 || idx >= options.length) return { ok: false };
-    return { ok: true, item: { type: "question", question, options, correctIndex: idx } };
+    return { ok: true, item: { type: "question", question, options, correctIndex: idx, explanation } };
   }
 
   if (questionType === "mcq_multi") {
@@ -865,7 +1047,7 @@ function mapChoiceQuestionToUi(q, questionType, language) {
       if (idx < 0 || idx >= options.length) return { ok: false };
       indices.push(idx);
     }
-    return { ok: true, item: { type: "question", question, options, correctIndices: indices } };
+    return { ok: true, item: { type: "question", question, options, correctIndices: indices, explanation } };
   }
 
   return { ok: false };
