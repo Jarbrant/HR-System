@@ -13,23 +13,23 @@ POLICY (LÅST):
 API (LÅST):
 - HRWorkerSDK.init({ baseUrl, requireAuth, getToken })
 - HRWorkerSDK.health()
-- HRWorkerSDK.aiGenerate({ mode, count, context, language })
+- HRWorkerSDK.aiGenerate({ mode, count, context, language, questionType, feedbackEnabled })
 
 Kontrakt (return-format):
 - { ok:true,  data, requestId? }
 - { ok:false, error:{ code, message, details? }, requestId? }
 
-PATCH v1.1.1 (LOAD/EXPORT-HARDENING):
-- Robust export även om tidigare HRWorkerSDK är låst (non-configurable/non-writable).
-- Sätter window.HRWorkerSDK via “merge/upgrade” istället för att fastna i defineProperty.
-- Safe console-trace (en rad) för att snabbt se att filen verkligen körs.
+PATCH v1.1.2 (AI-PAYLOAD-FIX):
+- Skickar med questionType + feedbackEnabled (var saknade)
+- Skickar context som riktig JSON (inte "[object Object]")
+- Fail-closed om payload blir för stor (≈64KB)
 ============================================================ */
 
 (function(){
   "use strict";
 
   const SDK = {};
-  SDK.VERSION = "1.1.1";
+  SDK.VERSION = "1.1.2";
 
   const STATE = {
     inited: false,
@@ -128,6 +128,32 @@ PATCH v1.1.1 (LOAD/EXPORT-HARDENING):
       headers["X-HR-SDK"] = "UI-04-WORKER-SDK.js@" + SDK.VERSION;
     }catch(_){}
     return headers;
+  }
+
+  // PATCH: normalisera context till JSON-objekt/array (inte "[object Object]")
+  function normalizeContext(input){
+    try{
+      if (input === null || input === undefined) return {};
+      if (isObj(input) || Array.isArray(input)) return input;
+
+      if (typeof input === "string"){
+        const s = trimStr(input);
+        if (!s) return {};
+        // Om någon skickar JSON-sträng, försök parsa
+        try{
+          const parsed = JSON.parse(s);
+          if (isObj(parsed) || Array.isArray(parsed)) return parsed;
+          return { text: s };
+        }catch(_){
+          return { text: s };
+        }
+      }
+
+      // number/bool/etc
+      return { value: safeStr(input) };
+    }catch(_){
+      return {};
+    }
   }
 
   async function safeFetchJson(url, opts){
@@ -258,7 +284,13 @@ PATCH v1.1.1 (LOAD/EXPORT-HARDENING):
     const mode = trimStr(p.mode || "training");
     const count = (typeof p.count === "number" && isFinite(p.count)) ? p.count : parseInt(p.count, 10);
     const language = trimStr(p.language || "sv");
-    const context = safeStr(p.context || "");
+
+    // PATCH: skicka dessa vidare (var saknade i network body)
+    const questionType = trimStr(p.questionType || "auto");
+    const feedbackEnabled = !!p.feedbackEnabled;
+
+    // PATCH: context som riktig JSON
+    const ctxObj = normalizeContext(p.context);
 
     if (!(mode === "training" || mode === "document")){
       return mkErr("VALIDATION_ERROR", "mode måste vara 'training' eller 'document'", { mode });
@@ -269,8 +301,6 @@ PATCH v1.1.1 (LOAD/EXPORT-HARDENING):
     if (!language){
       return mkErr("VALIDATION_ERROR", "language saknas", {});
     }
-
-    const ctx = (context.length > 4000) ? context.slice(0, 4000) : context;
 
     const url = STATE.baseUrl + "/v1/ai/generate";
     let headers = {
@@ -283,12 +313,26 @@ PATCH v1.1.1 (LOAD/EXPORT-HARDENING):
 
     headers = addClientTraceHeaders(headers);
 
-    const body = JSON.stringify({
+    // Bygg body som JSON (inte sträng)
+    const bodyObj = {
       mode,
       count,
       language,
-      context: ctx
-    });
+      questionType,
+      feedbackEnabled,
+      context: ctxObj
+    };
+
+    // Fail-closed om payload blir för stor (~64KB)
+    let body = "";
+    try{
+      body = JSON.stringify(bodyObj);
+      if (body.length > (64 * 1024)){
+        return mkErr("PAYLOAD_TOO_LARGE", "Payload för stor (max ~64KB)", { bytes: body.length });
+      }
+    }catch(e){
+      return mkErr("VALIDATION_ERROR", "Kunde inte serialisera payload", { message: safeStr(e && e.message) });
+    }
 
     return await safeFetchJson(url, {
       method: "POST",
@@ -300,11 +344,10 @@ PATCH v1.1.1 (LOAD/EXPORT-HARDENING):
 
   // ---------- Export (hardened) ----------
   (function exportSDK(){
-    // 1) Sätt/uppgradera via merge (fungerar även om tidigare property är låst)
+    // 1) Sätt/uppgradera via merge (fungerar även om tidigare HRWorkerSDK är låst)
     try{
       const existing = window.HRWorkerSDK;
       if (existing && typeof existing === "object"){
-        // Uppgradera in-place (minskar risk att fastna på låst defineProperty)
         existing.VERSION = SDK.VERSION;
         existing.init = SDK.init;
         existing.health = SDK.health;
@@ -330,7 +373,6 @@ PATCH v1.1.1 (LOAD/EXPORT-HARDENING):
 
     // 3) Minimal trace så du ser att filen verkligen körts (inte bara laddats)
     try{
-      // En rad, ofarligt
       console.info("[UI-04-WORKER-SDK] loaded v" + SDK.VERSION);
     }catch(_){}
   })();
