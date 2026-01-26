@@ -13,10 +13,10 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.2.5-PP-SC-010-07D (AUTOPATCH):
-- P0 FIX: AI-request ska ALLTID skicka feedbackEnabled (true/false) + questionType (auto eller valt) till worker.
-- P0 FIX: LEVEL ska alltid komma från UI-svårighet (goalsLevel) och normaliseras till intro/normal/advanced.
-- P0 FIX: Minska "Generic" i worker genom att sätta context.subject.title (area → module → "") i request (ingen storage).
+PATCH v1.2.6-PP-SC-010-07E (AUTOPATCH):
+- P0 FIX: Skicka subjectObj (module/area/chapter/step) separat till worker så modul/steg faktiskt påverkar output (slutar falla tillbaka till "Utbildning").
+- P0 FIX: Skicka context som STRÄNG (inte objekt) för att undvika "[object Object]" och få stabil, användbar prompt-ram (utan goals).
+- P0 FIX: Skicka difficultyHint = intro/normal/advanced (från goalsLevel) för att påverka variation.
 - LÅS: goals skickas alltid som "" till AI (oförändrat).
 ============================================================ */
 (function () {
@@ -26,7 +26,7 @@ PATCH v1.2.5-PP-SC-010-07D (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.2.5-PP-SC-010-07D";
+  page.__VERSION = "v1.2.6-PP-SC-010-07E";
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -1250,6 +1250,48 @@ PATCH v1.2.5-PP-SC-010-07D (AUTOPATCH):
     };
   }
 
+  // P0: bygg en stabil context-sträng (ingen goals, ingen objekt -> "[object Object]")
+  function buildWorkerContextStringFromSnapshot(s) {
+    try {
+      const module = normStr(s && s.module);
+      const area = normStr(s && s.area);
+      const chapter = normStr(s && s.courseTitle) || "Introduktion";
+      const step = parseCourseStep(s && s.courseStep);
+
+      const parts = [];
+      if (module) parts.push("Modul: " + module);
+      if (area) parts.push("Område: " + area);
+      if (chapter) parts.push("Kapitel: " + chapter);
+      if (step) parts.push("Steg: " + step);
+
+      // En kort ram som hjälper variation utan att bli “mål/goals”
+      // (låg risk: ren metadata/ram, ingen persondata, inga goals)
+      let out = parts.join(" • ");
+      if (!out) out = "Utbildning";
+
+      // Hård cap för worker validation (context max 4000)
+      if (out.length > 4000) out = out.slice(0, 4000);
+      return out;
+    } catch (_) {
+      return "Utbildning";
+    }
+  }
+
+  // P0: explicit subjectObj till worker (för att modul/steg ska påverka output deterministiskt)
+  function buildWorkerSubjectObjFromSnapshot(s) {
+    const module = normStr(s && s.module);
+    const area = normStr(s && s.area);
+    const chapter = normStr(s && s.courseTitle) || "Introduktion";
+    const step = parseCourseStep(s && s.courseStep);
+
+    return {
+      module: module || "",
+      area: area || "",
+      chapter: chapter || "",
+      step: step || "1"
+    };
+  }
+
   function readAiControls() {
     const modeRaw = normStr(dom && dom.aiContent && dom.aiContent.value) || "training";
     const mode = normalizeMode(modeRaw);
@@ -1457,17 +1499,28 @@ PATCH v1.2.5-PP-SC-010-07D (AUTOPATCH):
         return;
       }
 
-      const ctx = buildAiContextNoGoals();
+      const s = snapshotEditorStateForAi();
+      const ctx = buildAiContextNoGoals(); // behåll för debug/kompat, men skicka INTE som request.context (P0)
       const ctl = readAiControls();
 
+      const level = normalizeLevel(s.goalsLevel);
+      const subjectObj = buildWorkerSubjectObjFromSnapshot(s);
+      const contextStr = buildWorkerContextStringFromSnapshot(s);
+
       // P0: ALLTID med questionType + feedbackEnabled (true/false) i request
+      // P0: context måste vara STRÄNG (worker/index.js safeStr → annars "[object Object]" + fallback)
       const req = {
         mode: ctl.mode,
         count: ctl.count,
-        context: ctx,
+        context: contextStr,
+        subjectObj: subjectObj,       // <-- detta gör att modul/område/kapitel/steg påverkar output (P0)
+        difficultyHint: level,        // <-- intro/normal/advanced (P0)
         language: "sv",
         questionType: ctl.questionType || "auto",
-        feedbackEnabled: !!ctl.feedbackEnabled
+        feedbackEnabled: !!ctl.feedbackEnabled,
+
+        // Debug-only (worker ignorerar okända fält): behåll minimal spårbarhet utan goals
+        _ui: { version: page.__VERSION, ctxPreview: (ctx && ctx.subject) ? { subject: ctx.subject } : null }
       };
 
       page._LAST_AI_REQUEST = deepClone(req);
