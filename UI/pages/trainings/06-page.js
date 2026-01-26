@@ -13,10 +13,11 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
-- P0 FIX (Q3): Om questionType=MCQ begärs men AI-svar saknar svarsalternativ/correctIndex → fail-closed.
-               Stoppa import och visa tydlig hint "Worker måste returnera options + correctIndex".
-- P0 FIX (Q2 kvar): Spara debug: page._LAST_AI_REQUEST / _LAST_AI_RAW / _LAST_AI_NORM / _LAST_AI_PICK så DevTools alltid kan se.
+PATCH v1.2.5-PP-SC-010-07D (AUTOPATCH):
+- P0 FIX: AI-request ska ALLTID skicka feedbackEnabled (true/false) + questionType (auto eller valt) till worker.
+- P0 FIX: LEVEL ska alltid komma från UI-svårighet (goalsLevel) och normaliseras till intro/normal/advanced.
+- P0 FIX: Minska "Generic" i worker genom att sätta context.subject.title (area → module → "") i request (ingen storage).
+- LÅS: goals skickas alltid som "" till AI (oförändrat).
 ============================================================ */
 (function () {
   "use strict";
@@ -25,7 +26,7 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.2.4-PP-SC-010-07C";
+  page.__VERSION = "v1.2.5-PP-SC-010-07D";
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -241,6 +242,14 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
     if (s === "blocks" || s === "utbildning" || s === "kurs" || s === "train" || s === "trainings" || s === "training-v1" || s === "training_v1") return "training";
     if (s === "doc" || s === "dokument" || s === "documents" || s === "document-v1" || s === "document_v1") return "document";
     return "training"; // fail-safe
+  }
+
+  // P0: level-normalisering (UI → worker: intro/normal/advanced)
+  function normalizeLevel(v) {
+    const s = normStr(v).toLowerCase();
+    if (s === "intro" || s === "inledning" || s === "introduktion") return "intro";
+    if (s === "advanced" || s === "avancerat" || s === "svår" || s === "hard") return "advanced";
+    return "normal";
   }
 
   function isQuestionTypeSelected(qt) {
@@ -1204,21 +1213,39 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
 
   function buildAiContextNoGoals() {
     const s = snapshotEditorStateForAi();
+    const level = normalizeLevel(s.goalsLevel);
+
+    // Förbättra subject-title för att minska "Generic" i worker (utan storage)
+    const subjectTitle = normStr(s.area) || normStr(s.module) || "";
 
     if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
       const ctx = DEPS.core.buildAiContext(s) || {};
-      try { ctx.goals = ""; } catch (_) { }
+      try {
+        // LÅST
+        ctx.goals = "";
+        // P0: nivå från UI (A)
+        ctx.level = level;
+        // P0: hjälp worker att hitta subjectTitle
+        if (!ctx.subject || typeof ctx.subject !== "object") ctx.subject = {};
+        if (!ctx.subject.title && subjectTitle) ctx.subject.title = subjectTitle;
+      } catch (_) { }
       return ctx;
     }
 
     return {
-      subject: { module: s.module, area: s.area },
+      subject: {
+        module: s.module,
+        area: s.area,
+        title: subjectTitle
+      },
       course: {
         chapter: s.courseTitle,
         step: s.courseStep,
-        title: (DEPS.core && DEPS.core.composeTitle) ? DEPS.core.composeTitle(s.courseTitle, s.courseStep, s.area || "—") : (s.courseTitle + " • Steg " + s.courseStep + " • " + (s.area || "—"))
+        title: (DEPS.core && DEPS.core.composeTitle)
+          ? DEPS.core.composeTitle(s.courseTitle, s.courseStep, s.area || "—")
+          : (s.courseTitle + " • Steg " + s.courseStep + " • " + (s.area || "—"))
       },
-      level: s.goalsLevel,
+      level: level,
       goals: "" // LÅST
     };
   }
@@ -1230,7 +1257,10 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
     const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
 
-    const questionType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
+    // P0: alltid en sträng, default "auto"
+    const questionType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value) || "auto";
+
+    // P0: alltid boolean (true/false) i request, inte "undefined"
     const feedbackEnabled = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked === true));
 
     return { mode, count, questionType, feedbackEnabled };
@@ -1430,15 +1460,15 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
       const ctx = buildAiContextNoGoals();
       const ctl = readAiControls();
 
+      // P0: ALLTID med questionType + feedbackEnabled (true/false) i request
       const req = {
         mode: ctl.mode,
         count: ctl.count,
         context: ctx,
-        language: "sv"
+        language: "sv",
+        questionType: ctl.questionType || "auto",
+        feedbackEnabled: !!ctl.feedbackEnabled
       };
-
-      if (ctl.questionType) req.questionType = ctl.questionType;
-      if (ctl.feedbackEnabled) req.feedbackEnabled = true;
 
       page._LAST_AI_REQUEST = deepClone(req);
       page._LAST_AI_RAW = null;
@@ -1464,7 +1494,7 @@ PATCH v1.2.4-PP-SC-010-07C (AUTOPATCH):
         return;
       }
 
-      // P0 FIX (Q3): MCQ vald men saknar options + correctIndex → stoppa (det här är det du ser just nu)
+      // P0 FIX (Q3): MCQ vald men saknar options + correctIndex → stoppa
       if (mcqRequested && !rawContainsAnyMcq(raw)) {
         failClosedAiHint(
           "Status: AI gav inga svarsalternativ",
