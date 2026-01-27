@@ -322,17 +322,19 @@ export default {
     }
 
     // ---------- TOPP-NIVÅ blocks ----------
-    let topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
+    const topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
 
-    // Om UI ber om MCQ/TF: returnera UI-frågeblock i exakt UI-format
+    // V1-items: default = blocks (för training-blocks consumers)
     let items = topBlocks;
+
+    // Om UI ber om MCQ/TF: returnera items[] som question.json-kompatibla frågor
+    // MEN: Lämna blocks/training.blocks som training-blocks så legacy/UI inte bryts.
     if (isUiQuestionRequest(questionType)) {
       const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, language);
       if (!mapped.ok) {
         return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
       }
-      topBlocks = mapped.blocks;
-      items = topBlocks;
+      items = mapped.items;
     }
 
     // V1-envelope (utan att bryta legacy): inkludera `items`
@@ -1174,7 +1176,7 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   const qt0 = normalizeQuestionType(questionType);
   const qt = (qt0 === "auto") ? "mcq_single" : qt0;
 
-  const isTf = (qt === "tf");
+  const isTf = (qt === "true_false");
   const isMulti = (qt === "mcq_multi");
   const isMcq = (qt === "mcq_single" || qt === "mcq_multi");
 
@@ -1734,22 +1736,24 @@ function normalizeQuestionType(v) {
     .replace(/ä/g, "a")
     .replace(/ö/g, "o");
 
+  // Canonical (ai-rules/v1)
   if (s === "auto") return "auto";
   if (s === "mcq_single" || s === "single" || s === "mcq") return "mcq_single";
   if (s === "mcq_multi" || s === "multi") return "mcq_multi";
-  if (s === "tf" || s === "truefalse" || s === "true_false" || s === "sant_falskt") return "tf";
-  if (s === "short" || s === "short_answer" || s === "kort") return "short";
+  if (s === "truefalse" || s === "true_false" || s === "sant_falskt" || s === "tf") return "true_false";
+  if (s === "short_answer" || s === "short" || s === "kort") return "short_answer";
+  if (s === "numeric" || s === "number" || s === "tal") return "numeric";
 
   if (s.includes("mcq") && s.includes("multi")) return "mcq_multi";
   if (s.includes("mcq") && (s.includes("single") || s.includes("ett") || s.includes("one"))) return "mcq_single";
-  if (s.includes("true") || s.includes("false") || s.includes("tf") || s.includes("sant") || s.includes("falskt")) return "tf";
+  if (s.includes("true") || s.includes("false") || s.includes("sant") || s.includes("falskt")) return "true_false";
 
   return s0;
 }
 
 function isUiQuestionRequest(questionType) {
   const qt = normalizeQuestionType(questionType);
-  return qt === "mcq_single" || qt === "mcq_multi" || qt === "tf";
+  return qt === "mcq_single" || qt === "mcq_multi" || qt === "true_false";
 }
 
 function mapTrainingBlocksToUiQuestions(trainingBlocks, questionType, language) {
@@ -1766,15 +1770,17 @@ function mapTrainingBlocksToUiQuestions(trainingBlocks, questionType, language) 
     if (mapped.ok) out.push(mapped.item);
   }
 
-  if (out.length === 0) {
+  // Fail-closed: om vi genererade 0, eller om vi tappade frågor (mappningen ska vara 1:1)
+  const expected = blocks.filter(x => x && x.kind === "question").length;
+  if (out.length === 0 || out.length !== expected) {
     return {
       ok: false,
       errorCode: "Q_SCHEMA_INVALID",
-      message: "Kunde inte skapa giltiga svarsalternativ för frågan"
+      message: "Kunde inte skapa giltiga provfrågor (items) för hela batchen"
     };
   }
 
-  return { ok: true, blocks: out };
+  return { ok: true, items: out };
 }
 
 function extractQuestionFromBlock(block) {
@@ -1803,20 +1809,49 @@ function mapChoiceQuestionToUi(q, questionType, language) {
   let explanation = safeStr(q.rationale || q.explanation || q.feedback || "").trim();
   explanation = stripDomainWordsFromQuestion(explanation, language);
 
-  if (questionType === "tf") {
+  const difficulty = safeStr(q.difficulty).trim() || undefined;
+  const tags = Array.isArray(q.tags) ? q.tags.slice(0, 8) : undefined;
+
+  if (questionType === "true_false") {
     const a = (language === "sv") ? "Sant" : "True";
     const b = (language === "sv") ? "Falskt" : "False";
     const correctId = safeStr(q.correctChoiceId).trim();
     const idx = indexOfChoiceId(choices, correctId);
     const correctIndex = (idx >= 0 && idx <= 1) ? idx : 0;
-    return { ok: true, item: { type: "question", question, options: [a, b], correctIndex, explanation } };
+
+    return {
+      ok: true,
+      item: {
+        type: "question",
+        questionType: "true_false",
+        ...(difficulty ? { difficulty } : {}),
+        question,
+        options: [a, b],
+        correctIndex,
+        ...(explanation ? { explanation } : {}),
+        ...(tags ? { tags } : {})
+      }
+    };
   }
 
   if (questionType === "mcq_single") {
     const correctId = safeStr(q.correctChoiceId).trim();
     const idx = indexOfChoiceId(choices, correctId);
     if (idx < 0 || idx >= options.length) return { ok: false };
-    return { ok: true, item: { type: "question", question, options, correctIndex: idx, explanation } };
+
+    return {
+      ok: true,
+      item: {
+        type: "question",
+        questionType: "mcq_single",
+        ...(difficulty ? { difficulty } : {}),
+        question,
+        options,
+        correctIndex: idx,
+        ...(explanation ? { explanation } : {}),
+        ...(tags ? { tags } : {})
+      }
+    };
   }
 
   if (questionType === "mcq_multi") {
@@ -1832,7 +1867,20 @@ function mapChoiceQuestionToUi(q, questionType, language) {
       if (idx < 0 || idx >= options.length) return { ok: false };
       indices.push(idx);
     }
-    return { ok: true, item: { type: "question", question, options, correctIndices: indices, explanation } };
+
+    return {
+      ok: true,
+      item: {
+        type: "question",
+        questionType: "mcq_multi",
+        ...(difficulty ? { difficulty } : {}),
+        question,
+        options,
+        correctIndices: indices,
+        ...(explanation ? { explanation } : {}),
+        ...(tags ? { tags } : {})
+      }
+    };
   }
 
   return { ok: false };
