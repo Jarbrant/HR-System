@@ -3,10 +3,12 @@
   "type": "ruleset",
   "name": "question-quality-v2",
   "updatedAt": "2026-01-27",
+  "patch": "v2.1.0",
   "purpose": [
     "Kvalitets- och hygienregler för AI-genererade provfrågor (contentType=questions).",
     "Styr variation, unikhet och semantisk hygien (förbjud kurs-/format-språk i question/options).",
-    "Avsedd att användas 'ovanpå' training_prompt som ett extra kvalitetslager."
+    "Avsedd att användas 'ovanpå' training_prompt som ett extra kvalitetslager.",
+    "Patch v2.1.0: stoppar ISO/standard-etiketter i frågetext, stärker variation i batch och kräver beslut+konsekvens."
   ],
   "appliesTo": {
     "contentType": ["questions"],
@@ -41,7 +43,20 @@
       "kapitel",
       "lektion",
       "steget",
-      "steg"
+      "steg",
+
+      "iso",
+      "iso9001",
+      "iso 9001",
+      "iso-9001",
+      "iso14001",
+      "iso 14001",
+      "iso-14001",
+      "iso 22000",
+      "haccp",
+      "certifiering",
+      "certifierad",
+      "standardnummer"
     ],
     "forbiddenPhrases": [
       "i den här utbildningen",
@@ -52,15 +67,25 @@
       "i det här steget",
       "i det här kapitlet",
       "i den här modulen",
-      "den här modulen handlar om"
+      "den här modulen handlar om",
+
+      "enligt iso",
+      "enligt iso 9001",
+      "enligt iso 14001",
+      "enligt standarden iso",
+      "krav enligt iso",
+      "uppfyller iso",
+      "iso säger att"
     ],
     "notes": [
       "Förbjudna domän-termer gäller endast i fråga/alternativ/feedback, inte i UI runtom.",
       "Workern ska göra post-check efter parsing/mappning men före response (fail-closed).",
-      "Ingen auto-rewrite i worker vid match (stoppa hellre än att ändra meaning)."
+      "Ingen auto-rewrite i worker vid match (stoppa hellre än att ändra meaning).",
+      "Syfte: frågorna ska kännas arbetsnära och inte låsas till ett standardnamn i själva frågetexten."
     ],
     "modelInstruction": [
       "Använd aldrig kurs-/format-ord (t.ex. utbildning, kurs, modul, kapitel, steg, lektion) i frågetexten eller svarsalternativen.",
+      "Undvik att nämna standardnamn/standardnummer (t.ex. ISO 9001/14001) i frågetext, alternativ och feedback. Skriv i stället om rutiner, arbetssätt, avvikelse, uppföljning.",
       "Skriv som om det händer i verkligheten: roll, situation, arbetsmoment, risk, konsekvens.",
       "Undvik meta-språk som 'i den här...' eller 'denna modul handlar om...'."
     ]
@@ -70,16 +95,97 @@
       "enabled": true,
       "notes": [
         "Variation ska uttryckas i frågaformulering och i scenario/roll.",
-        "Undvik identiska öppningar i samma batch."
-      ]
+        "Undvik identiska öppningar i samma batch.",
+        "Patch: styr 'starter-variation' så att batchen inte får samma rytm."
+      ],
+      "starterVariation": {
+        "enabled": true,
+        "failClosedOnViolation": true,
+        "errorCode": "ERR_Q_LOW_VARIATION",
+        "maxSameStarterInBatch": 1,
+        "starterNormalization": {
+          "lowercase": true,
+          "stripPunctuation": true,
+          "stripLeadingStopwords": ["i", "vid", "på", "när", "om"]
+        },
+        "starterBuckets": [
+          {
+            "id": "best_choice",
+            "examples": ["Vilket alternativ", "Vilken åtgärd", "Vilket val"]
+          },
+          {
+            "id": "first_step",
+            "examples": ["Vad är bästa första steget", "Vad gör du först"]
+          },
+          {
+            "id": "deviation",
+            "examples": ["Om något avviker", "När något blir fel"]
+          },
+          {
+            "id": "risk",
+            "examples": ["Vilken risk", "Vad ökar risken", "Vilken konsekvens"]
+          },
+          {
+            "id": "responsibility",
+            "examples": ["Vem bör ta ansvar", "Vem kontaktar du", "Vem startar"]
+          }
+        ],
+        "modelInstruction": [
+          "I en batch om 4–12 frågor: använd olika öppningar (t.ex. varva 'Vilket alternativ', 'Vad gör du först', 'Vilken risk', 'Om något avviker', 'Vem tar ansvar').",
+          "Undvik att två frågor börjar med exakt samma fras."
+        ]
+      }
     },
     "uniqueness": {
       "enabled": true,
       "notes": [
         "Inga två frågor i samma batch ska ha nära-identisk frågestam.",
-        "Dedupe bör göras på normalized question-text."
+        "Dedupe bör göras på normalized question-text.",
+        "Patch: komplettera gärna med dedupe på korrekt svar-text om workern stödjer det."
       ]
+    },
+    "decisionWithConsequence": {
+      "enabled": true,
+      "failClosedOnViolation": true,
+      "errorCode": "ERR_Q_NOT_DECISIONAL",
+      "applyToQuestionTypes": ["mcq_single", "mcq_multi", "true_false"],
+      "requirements": {
+        "questionMustBeDecision": true,
+        "questionMustIndicateOutcome": true,
+        "questionMustIncludeAny": [
+          "bästa",
+          "mest korrekt",
+          "första",
+          "risk",
+          "konsekvens",
+          "för att",
+          "så att"
+        ],
+        "forbidPureDefinitionPatterns": [
+          "Vad är",
+          "Definiera",
+          "Beskriv"
+        ],
+        "notes": [
+          "Frågan ska leda till ett val i en arbetssituation (inte en ren definition).",
+          "Minimikrav är att frågan antyder varför valet spelar roll (risk/konsekvens/effekt)."
+        ]
+      },
+      "optionsQuality": {
+        "enabled": true,
+        "failClosedOnViolation": true,
+        "errorCode": "ERR_Q_WEAK_OPTIONS",
+        "rules": {
+          "requirePlausibleDistractors": true,
+          "forbidJokeOrObviouslyWrong": true,
+          "forbidSameOptionRephrases": true
+        },
+        "modelInstruction": [
+          "Gör distraktorer plausibla (vanliga misstag), inte trams.",
+          "Undvik att alternativen bara är omskrivningar av varandra.",
+          "Se till att exakt ett alternativ är tydligt bäst givet frågans avgränsning."
+        ]
+      }
     }
   }
 }
-
