@@ -1,9 +1,16 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.3 FIX)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.4 QUALITY)
 // FIL: worker/index.js
 // Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ begärs.
 //      FIX: Undvik “samma frågor”, förbjud placeholder-fraser, kräver förklaring,
 //           och gör batchen unik (dedupe) + bättre variation.
+//
+// NYTT v1.5.4 (QUALITY CORE):
+// - P0: Facit blir semantiskt korrekt (best answer + plausibla distraktorer)
+// - P0: Rationale kopplas till valt facit (inte generisk mall)
+// - P1: Steg 1–5 styr dimension-rotation (stepProfile)
+// - P1: Parse Modul/Område/Kapitel/Steg från context.text när subjectObj saknas
+// - P2: Batch-unikhet även på “best answer text” (inte bara stem)
 //
 // UI kräver vid MCQ:
 // - type: "question"
@@ -34,17 +41,6 @@
 //
 // PATCH (CORS FIX):
 // - Tillåt UI headers: X-Hr-Sdk + X-Hr-Client i Access-Control-Allow-Headers
-//
-// PATCH v1.5.2:
-// - MCQ: alltid exakt 5 svarsalternativ (TF=2). Stabil correctIndex.
-//
-// PATCH v1.5.3 (UNIQ + QUALITY):
-// - P0: Ta bort förbjudna placeholder-fraser i frågetext (ingen “Använd detta sammanhang …”/”kontext dolt”)
-// - P0: Unikhetskrav i batch (dedupe på frågetext) – fail-closed om inte går att generera unikt
-// - P0: Variation per item (requestId + itemIndex salt) så count>1 inte blir samma
-// - P1: Bättre MCQ-stems (tydligare scope: vardag/ej akut, rutinstart, dialogstart)
-// - P1: Require explanation + min-längd (enligt ruleset om finns)
-// - P2: UI-map inkluderar explanation (förklaring) så modal visar det
 // ============================================================
 
 import INDEX from "../ai-rules/index.json";
@@ -64,7 +60,7 @@ import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json"
 import TRAINING_PROMPT from "../ai-rules/v1/rulesets/training_prompt.json";
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5.3";
+const VERSION = "1.5.4";
 
 // ------------------------------
 // Fetch
@@ -137,7 +133,7 @@ export default {
             version: VERSION,
             build: "wrangler",
             rulesBase: "ai-rules",
-            outputContract: "training-blocks@v1 + ui-mcq@v1.2 (explanation+uniq)"
+            outputContract: "training-blocks@v1 + ui-mcq@v1.2 (explanation+uniq+semantic-facit)"
           }
         },
         corsHeaders
@@ -247,6 +243,8 @@ export default {
     const subjectObj = isPlainObject(body.subjectObj)
       ? body.subjectObj
       : (isPlainObject(body.subject) ? body.subject : null);
+
+    // NOTE: ofta saknas subjectObj → då infererar vi från context.text
     const course = normalizeCourseSubject(subjectObj);
 
     // ---------- VALIDATION ----------
@@ -500,8 +498,39 @@ function validateCourseSubject(course) {
   return { ok: true };
 }
 
-function resolveCourseLabelFallback(course, mode) {
-  if (!course) {
+function inferCourseFromContextText(contextText) {
+  // Förväntad sträng från UI:
+  // "Modul: Kvalitet • Område: ISO 9001 • Kapitel: Introduktion • Steg: 1"
+  const t = safeStr(contextText);
+
+  function pick(label) {
+    const re = new RegExp(`${label}\\s*:\\s*([^•\\n\\r]+)`, "i");
+    const m = t.match(re);
+    return m ? safeStr(m[1]).trim() : "";
+  }
+
+  const module = pick("Modul");
+  const area = pick("Område");
+  const chapter = pick("Kapitel");
+
+  let step = "";
+  const mStep = t.match(/Steg\s*:\s*([0-9]+)/i);
+  if (mStep) step = safeStr(mStep[1]).trim();
+
+  if (!module && !area && !chapter && !step) return null;
+
+  return {
+    module: module || "",
+    area: area || "",
+    chapter: chapter || "",
+    step: step || ""
+  };
+}
+
+function resolveCourseLabelFallback(course, mode, contextText) {
+  const inferred = (!course) ? inferCourseFromContextText(contextText) : null;
+
+  if (!course && !inferred) {
     return {
       module: "Generic",
       area: (mode === "document") ? "Dokument" : "Utbildning",
@@ -510,11 +539,12 @@ function resolveCourseLabelFallback(course, mode) {
     };
   }
 
+  const src = course || inferred || {};
   return {
-    module: course.module || "Generic",
-    area: course.area || ((mode === "document") ? "Dokument" : "Utbildning"),
-    chapter: course.chapter || "Introduktion",
-    step: safeStr(course.step).trim() || "1"
+    module: safeStr(src.module).trim() || "Generic",
+    area: safeStr(src.area).trim() || ((mode === "document") ? "Dokument" : "Utbildning"),
+    chapter: safeStr(src.chapter).trim() || "Introduktion",
+    step: safeStr(src.step).trim() || "1"
   };
 }
 
@@ -584,7 +614,6 @@ function containsForbiddenPhrase(text, forbiddenPhrases) {
 }
 
 function stripAnyBracketedContext(s) {
-  // Fail-soft: plocka bort typiska "(...)" eller "[...]" som kan vara placeholder
   const txt = safeStr(s);
   return txt
     .replace(/\(\s*kontext[^)]*\)/gi, "")
@@ -597,7 +626,6 @@ function stripAnyBracketedContext(s) {
 function sanitizeContextForDisplay(contextText, qq) {
   const c = safeStr(contextText).trim();
   if (!c) return "—";
-  // P0: aldrig visa placeholder-kontext
   if (qq && qq.forbidContextPlaceholderText) {
     if (containsForbiddenPhrase(c, qq.forbiddenPhrases)) return "—";
     if (/\(kontext\s+dolt\)/i.test(c)) return "—";
@@ -613,8 +641,7 @@ function tokenizeForSimilarity(s) {
     .trim();
   if (!t) return [];
   const parts = t.split(/\s+/g).filter(Boolean);
-  // korta stop-ord (minimal, för att inte bli för aggressiv)
-  const stop = new Set(["i", "en", "ett", "att", "och", "du", "när", "vad", "vilket", "vilken", "är", "ska", "för", "på", "om", "som", "det", "de", "den"]);
+  const stop = new Set(["i", "en", "ett", "att", "och", "du", "när", "vad", "vilket", "vilken", "är", "ska", "för", "på", "om", "som", "det", "de", "den", "ni"]);
   return parts.filter(w => w.length >= 3 && !stop.has(w));
 }
 
@@ -629,6 +656,29 @@ function jaccardSimilarity(a, b) {
   return uni ? (inter / uni) : 0;
 }
 
+function normKey(s) {
+  return safeStr(s)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// ============================================================
+// STEP PROFILE (1–5) → styr frågedimensioner
+// ============================================================
+function getStepProfile(step) {
+  const s = safeStr(step).trim();
+  // Klassrumstanke:
+  // 1) vad/varför  2) roller/rutin  3) tillämpning  4) risk  5) avvikelse/uppföljning
+  if (s === "1") return ["definition_or_concept", "routine_first_step", "scenario_application"];
+  if (s === "2") return ["roles_and_responsibility", "routine_first_step", "scenario_application"];
+  if (s === "3") return ["scenario_application", "routine_first_step", "roles_and_responsibility"];
+  if (s === "4") return ["risk_consequence", "scenario_application", "routine_first_step"];
+  if (s === "5") return ["deviation_and_action", "risk_consequence", "roles_and_responsibility"];
+  return [];
+}
+
 // ============================================================
 // OUTPUT BUILDER — training-blocks + question-format (choices)
 // ============================================================
@@ -640,7 +690,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
 
   const seed = hash32(`${requestId}|${mode}|${count}|${language}|${safeStr(context).slice(0, 96)}|${fmt}|${subjId}|${safeStr(difficultyHint)}|${safeStr(questionType)}`);
 
-  const courseLabel = resolveCourseLabelFallback(course, mode);
+  const courseLabel = resolveCourseLabelFallback(course, mode, context);
   const difficulty = pickDifficultyLabel(difficultyHint, seed);
 
   const title =
@@ -666,6 +716,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
   const batch = {
     seenStems: [],
     seenDims: new Set(),
+    seenBestAnswers: [], // P2: unikhet på korrekt svar-text (semantic)
     seenCorrectSlots: new Set()
   };
 
@@ -715,7 +766,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.5.3"
+      source: "mock-v1.5.4"
     }
   };
 }
@@ -758,7 +809,6 @@ function genTaskBlock({ i, language, context, courseLabel, difficulty, subjId, q
 
   const ctx = sanitizeContextForDisplay(context, qq);
 
-  // OBS: task kan visa kontext, men aldrig placeholder-text
   const instruction =
     language === "sv"
       ? `Gör en kort uppgift kopplad till ${courseLabel.area}.\n\nUtgångspunkt (om relevant):\n${ctx}`
@@ -825,7 +875,7 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
 
   // P0: försök generera unik fråga (fail-closed om vi misslyckas)
   let q = null;
-  for (let attempt = 0; attempt < 10; attempt++) {
+  for (let attempt = 0; attempt < 12; attempt++) {
     const nn = (n ^ (attempt * 0x9e3779b9)) >>> 0;
 
     const cand = makeQuestion({
@@ -864,6 +914,17 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
     }
     if (nearDup) continue;
 
+    // P2: batch-unikhet på best answer text (semantic)
+    const bestText = safeStr(cand && cand.bestAnswerText).trim();
+    if (bestText) {
+      let bestDup = false;
+      for (const prevBest of safeArr(batch && batch.seenBestAnswers)) {
+        if (normKey(prevBest) === normKey(bestText)) { bestDup = true; break; }
+      }
+      if (bestDup) continue;
+      if (batch && Array.isArray(batch.seenBestAnswers)) batch.seenBestAnswers.push(bestText);
+    }
+
     if (batch && Array.isArray(batch.seenStems)) batch.seenStems.push(stem);
     q = cand;
     break;
@@ -874,11 +935,15 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
     throw new Error("DUPLICATE_QUESTION_IN_BATCH");
   }
 
+  // ta bort internfält innan lagring
+  const qOut = { ...q };
+  delete qOut.bestAnswerText;
+
   return {
     blockId,
     kind: "question",
     title,
-    items: [{ type: "questionInline", question: q }],
+    items: [{ type: "questionInline", question: qOut }],
     scoring: { points: 1 },
     meta: { tags: ["question", subjId], difficulty }
   };
@@ -893,10 +958,10 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   const isMulti = (qt === "mcq_multi");
   const isMcq = (qt === "mcq_single" || qt === "mcq_multi");
 
-  // PATCH v1.5.2: lås MCQ till exakt 5 alternativ (TF=2)
-  const choiceCount = isTf ? 2 : (isMcq ? 5 : (3 + (n % 3))); // TF=2, MCQ=5, annars 3..5
+  // PATCH: lås MCQ till exakt 5 alternativ (TF=2)
+  const choiceCount = isTf ? 2 : (isMcq ? 5 : (3 + (n % 3)));
 
-  // ---- VariationPlan (P1): rotera dimensioner så batchen inte blir "bara första steg" ----
+  // ---- Dimension rotation (StepProfile först) ----
   const dimsDefault = [
     "definition_or_concept",
     "routine_first_step",
@@ -906,19 +971,19 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     "deviation_and_action"
   ];
 
-  const rotate = (qq && qq.variation && qq.variation.rotateDims && qq.variation.rotateDims.length)
+  const rotateBase = (qq && qq.variation && qq.variation.rotateDims && qq.variation.rotateDims.length)
     ? qq.variation.rotateDims
     : dimsDefault;
 
-  // Försök garantera minst 3 dimensioner när count>1 (enkel deterministisk rotation)
+  const stepDims = getStepProfile(courseLabel.step);
+  const rotate = (stepDims && stepDims.length) ? stepDims.concat(rotateBase.filter(d => !stepDims.includes(d))) : rotateBase;
+
   const dimIndex = (i + (n % rotate.length)) % rotate.length;
   let dim = rotate[dimIndex] || "scenario_application";
 
   if (batch && batch.seenDims && count > 1) {
-    // om vi redan har för många av samma dim tidigt, byt dim
     const minDistinct = (qq && qq.variation && qq.variation.minDistinctDims) ? qq.variation.minDistinctDims : 3;
     if (batch.seenDims.size < Math.min(minDistinct, count)) {
-      // försök hitta en dim som inte är använd än
       for (let t = 0; t < rotate.length; t++) {
         const d2 = rotate[(dimIndex + t) % rotate.length];
         if (d2 && !batch.seenDims.has(d2)) { dim = d2; break; }
@@ -927,7 +992,7 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     batch.seenDims.add(dim);
   }
 
-  // ---- Scenario-variation (P1): plats/roll/händelse skiftar ----
+  // ---- Scenario-variation ----
   const scenariosSv = [
     { place: "på morgonmötet", role: "du som medarbetare", event: "ni ska enas om vad som gäller" },
     { place: "i köket", role: "du som ansvarig", event: "en rutin ska följas direkt" },
@@ -944,56 +1009,31 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   ];
   const sc = (language === "sv" ? scenariosSv : scenariosEn)[(n + i) % 5];
 
-  // ---- Stems per dimension (P1) ----
   const area = courseLabel.area || (language === "sv" ? "utbildning" : "training");
 
   function stemForDimension() {
     if (language === "sv") {
-      if (dim === "definition_or_concept") {
-        return `Vad beskriver bäst kärnan i ${area} när ni vill ha tydlighet ${sc.place}?`;
-      }
-      if (dim === "routine_first_step") {
-        return `När ${sc.event} i ${area} ${sc.place} – vad är bästa första steget?`;
-      }
-      if (dim === "risk_consequence") {
-        return `Vilken risk ökar mest om ni hoppar över första steget i ${area} ${sc.place}?`;
-      }
-      if (dim === "roles_and_responsibility") {
-        return `I ${area} ${sc.place}, vem bör ta första ansvaret för att starta rätt rutin – och varför?`;
-      }
-      if (dim === "deviation_and_action") {
-        return `Om något avviker i ${area} ${sc.place}, vilket första agerande är mest korrekt?`;
-      }
-      // scenario_application (default)
+      if (dim === "definition_or_concept") return `Vad beskriver bäst kärnan i ${area} när ni vill ha tydlighet ${sc.place}?`;
+      if (dim === "routine_first_step") return `När ${sc.event} i ${area} ${sc.place} – vad är bästa första steget?`;
+      if (dim === "risk_consequence") return `Vilken risk ökar mest om ni hoppar över första steget i ${area} ${sc.place}?`;
+      if (dim === "roles_and_responsibility") return `I ${area} ${sc.place}, vem bör ta första ansvaret för att starta rätt rutin – och varför?`;
+      if (dim === "deviation_and_action") return `Om något avviker i ${area} ${sc.place}, vilket första agerande är mest korrekt?`;
       return `I ${area} ${sc.place}, vilket val leder till bäst start för ${sc.role}?`;
     }
 
-    // EN
-    if (dim === "definition_or_concept") {
-      return `Which option best captures the core of ${area} when you need clarity ${sc.place}?`;
-    }
-    if (dim === "routine_first_step") {
-      return `When ${sc.event} in ${area} ${sc.place}, what is the best first step?`;
-    }
-    if (dim === "risk_consequence") {
-      return `Which risk increases most if you skip the first step in ${area} ${sc.place}?`;
-    }
-    if (dim === "roles_and_responsibility") {
-      return `In ${area} ${sc.place}, who should take the first responsibility to start the right routine—and why?`;
-    }
-    if (dim === "deviation_and_action") {
-      return `If something deviates in ${area} ${sc.place}, what first action is most correct?`;
-    }
+    if (dim === "definition_or_concept") return `Which option best captures the core of ${area} when you need clarity ${sc.place}?`;
+    if (dim === "routine_first_step") return `When ${sc.event} in ${area} ${sc.place}, what is the best first step?`;
+    if (dim === "risk_consequence") return `Which risk increases most if you skip the first step in ${area} ${sc.place}?`;
+    if (dim === "roles_and_responsibility") return `In ${area} ${sc.place}, who should take the first responsibility to start the right routine—and why?`;
+    if (dim === "deviation_and_action") return `If something deviates in ${area} ${sc.place}, what first action is most correct?`;
     return `In ${area} ${sc.place}, which choice gives the best start for ${sc.role}?`;
   }
 
   let text = stemForDimension();
 
-  // P0: ruleset forbjuder placeholder-fraser
   if (qq && qq.forbidContextPlaceholderText) {
     text = stripAnyBracketedContext(text);
     if (containsForbiddenPhrase(text, qq.forbiddenPhrases)) {
-      // fail-soft: ren variant utan riskfraser
       text = (language === "sv")
         ? `I ${area} ${sc.place}, vilket val ger tydligast start?`
         : `In ${area} ${sc.place}, which choice gives the clearest start?`;
@@ -1007,174 +1047,345 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     choices.push({ id: "c1", text: (language === "sv") ? "Sant" : "True" });
     choices.push({ id: "c2", text: (language === "sv") ? "Falskt" : "False" });
   } else {
-    // Pool per dimension (gör distraktorer mer "plausibla men sämre")
-    const poolSv = {
-      definition_or_concept: [
-        "En gemensam standard för hur ni arbetar och följer upp",
-        "En lista med valfria tips utan uppföljning",
-        "En snabb lösning som passar alla situationer",
-        "En personlig åsikt om vad som känns bäst",
-        "Ett verktyg för att säkra spårbarhet och förbättring"
-      ],
-      routine_first_step: [
-        "Klargör mål och avgränsning innan åtgärd",
-        "Samla fakta och kontrollera relevant rutin/checklista",
-        "Säkra att rätt roll/person kopplas in",
-        "Dokumentera kort vad som observerats",
-        "Starta åtgärd direkt utan att avgränsa"
-      ],
-      risk_consequence: [
-        "Missförstånd och olika tolkningar i teamet",
-        "Att allt går snabbare utan kontroll",
-        "Att uppföljning blir enklare av sig själv",
-        "Att spårbarhet förbättras automatiskt",
-        "Att avvikelser minskar utan åtgärd"
-      ],
-      scenario_application: [
-        "Ställ en öppen fråga och sammanfatta vad ni är överens om",
-        "Välj ett första steg i rutinen och bekräfta ansvar",
-        "Gör en snabb kontroll mot checklista innan beslut",
-        "Klargör nästa steg och hur ni följer upp",
-        "Låt bli att dokumentera för att spara tid"
-      ],
-      roles_and_responsibility: [
-        "Den som äger rutinen tar första initiativet och fördelar ansvar",
-        "Den som har mest tid tar ansvar oavsett roll",
-        "Alla gör sin egen tolkning utan samordning",
-        "Ingen tar ansvar förrän någon säger till",
-        "Den som sist såg problemet tar hela ansvaret"
-      ],
-      deviation_and_action: [
-        "Stoppa och avgränsa: vad avviker, hur stort, vem berörs?",
-        "Fortsätt som vanligt och hoppas att det löser sig",
-        "Ändra rutin direkt utan att dokumentera",
-        "Vänta tills nästa vecka och se om det återkommer",
-        "Informera ingen för att undvika oro"
-      ]
+    // P0: Semantiskt facit = välj best answer explicit per dimension (med flera varianter)
+    const pools = getChoicePools(language);
+
+    const bestVariants = safeArr(pools.bestByDim[dim] || pools.bestByDim.scenario_application);
+    const distractors = safeArr(pools.distractorsByDim[dim] || pools.distractorsByDim.scenario_application);
+
+    // välj best som inte redan används i batch (om möjligt)
+    let best = "";
+    const start = (n ^ hash32(`${dim}|${courseLabel.step}|${i}`)) >>> 0;
+    for (let t = 0; t < bestVariants.length; t++) {
+      const cand = bestVariants[(start + t) % bestVariants.length];
+      if (!cand) continue;
+      const dup = safeArr(batch && batch.seenBestAnswers).some(x => normKey(x) === normKey(cand));
+      if (!dup) { best = cand; break; }
+    }
+    if (!best) best = bestVariants[start % Math.max(1, bestVariants.length)] || (language === "sv" ? "Klargör mål och avgränsning innan åtgärd" : "Clarify goal and scope before acting");
+
+    // bygg alternativ: best + 4 distraktorer (plausibla men sämre givet scope)
+    const picked = [];
+    picked.push(best);
+
+    // deterministisk distraktor-sampling (unika texter)
+    const seen = new Set([normKey(best)]);
+    let cursor = (start ^ hash32(safeStr(context).slice(0, 96))) >>> 0;
+
+    while (picked.length < choiceCount && picked.length < 32) {
+      cursor = (cursor * 1664525 + 1013904223) >>> 0;
+      const cand = distractors[cursor % Math.max(1, distractors.length)] || "";
+      const k = normKey(cand);
+      if (!cand || !k || seen.has(k)) continue;
+      seen.add(k);
+      picked.push(cand);
+    }
+
+    // fail-soft: fyll om vi saknar
+    while (picked.length < choiceCount) {
+      const cand = distractors[(picked.length + (start % 7)) % Math.max(1, distractors.length)] || "";
+      const k = normKey(cand);
+      if (cand && k && !seen.has(k)) { seen.add(k); picked.push(cand); continue; }
+      // sista utväg
+      picked.push(language === "sv" ? "Be någon annan bestämma utan underlag" : "Let someone else decide without facts");
+    }
+
+    // blanda ordningen deterministiskt men spåra index för best
+    const order = shuffledIndices(choiceCount, start);
+    let bestIndex = -1;
+
+    for (let idx = 0; idx < choiceCount; idx++) {
+      const srcIndex = order[idx];
+      const txt = safeStr(picked[srcIndex]).trim();
+      if (!txt) continue;
+      if (normKey(txt) === normKey(best)) bestIndex = choices.length;
+      choices.push({ id: `c${choices.length + 1}`, text: txt });
+    }
+
+    // säkerställ count exakt
+    while (choices.length < choiceCount) {
+      choices.push({ id: `c${choices.length + 1}`, text: language === "sv" ? "Samla in mer fakta innan ni bestämmer" : "Collect more facts before deciding" });
+    }
+    while (choices.length > choiceCount) choices.pop();
+
+    // om best tappades (ska inte ske), sätt bestIndex till 0
+    if (bestIndex < 0) bestIndex = 0;
+
+    // Correct kopplas till best answer (P0)
+    const correctChoiceId = `c${bestIndex + 1}`;
+    const bestAnswerText = choices[bestIndex] ? choices[bestIndex].text : best;
+
+    // Multi: välj 2 “best-ish” (inte fokus just nu, men kontrakt finns)
+    let correctChoiceIds = null;
+    if (isMulti && choiceCount >= 3) {
+      const idx2 = (bestIndex + 1) % choiceCount;
+      correctChoiceIds = [`c${bestIndex + 1}`, `c${idx2 + 1}`];
+    }
+
+    // P0: Rationale kopplat till best answer + dim/scope
+    let rationale = buildRationale({
+      language,
+      dim,
+      area,
+      place: sc.place,
+      bestAnswerText,
+      step: courseLabel.step
+    });
+
+    if (qq && qq.requireExplanation) {
+      if (safeStr(rationale).trim().length < (qq.explanationMinChars || 40)) {
+        rationale = (language === "sv")
+          ? `Förklaring: Det bästa valet är "${bestAnswerText}" eftersom det skapar tydlighet om vad som gäller i just den här situationen, innan ni går vidare med åtgärd eller uppföljning.`
+          : `Explanation: The best choice is "${bestAnswerText}" because it creates clarity for this situation before you act or follow up.`;
+      }
+    }
+
+    return {
+      kind: "question",
+      text,
+      choices,
+      correctChoiceId,
+      ...(correctChoiceIds ? { correctChoiceIds } : {}),
+      rationale,
+      difficulty,
+      tags: [subjId, "scenario", dim, `step_${safeStr(courseLabel.step).trim() || "1"}`],
+      bestAnswerText // intern, används för batch-unikhet, tas bort i genQuestionBlock
     };
-
-    const poolEn = {
-      definition_or_concept: [
-        "A shared standard for how you work and follow up",
-        "A list of optional tips without follow-up",
-        "A quick fix that fits every situation",
-        "A personal opinion about what feels best",
-        "A way to ensure traceability and improvement"
-      ],
-      routine_first_step: [
-        "Clarify goal and scope before acting",
-        "Gather key facts and check the relevant routine/checklist",
-        "Ensure the right role/person is involved",
-        "Briefly document what was observed",
-        "Act immediately without scoping"
-      ],
-      risk_consequence: [
-        "Misunderstanding and different interpretations in the team",
-        "Everything becomes faster without checks",
-        "Follow-up becomes easier automatically",
-        "Traceability improves by itself",
-        "Deviations decrease without action"
-      ],
-      scenario_application: [
-        "Ask an open question and summarize agreement",
-        "Choose the first routine step and confirm responsibility",
-        "Do a quick checklist check before deciding",
-        "Clarify next step and how you will follow up",
-        "Avoid documenting to save time"
-      ],
-      roles_and_responsibility: [
-        "The routine owner starts and assigns responsibility",
-        "Whoever has time takes responsibility regardless of role",
-        "Everyone makes their own interpretation without alignment",
-        "No one takes responsibility until told",
-        "Whoever noticed last owns everything"
-      ],
-      deviation_and_action: [
-        "Stop and scope: what deviates, how big, who is affected?",
-        "Continue as usual and hope it resolves",
-        "Change the routine immediately without documenting",
-        "Wait until next week and see if it returns",
-        "Tell no one to avoid concern"
-      ]
-    };
-
-    const poolByDim = (language === "sv" ? poolSv : poolEn);
-    const pool = poolByDim[dim] || poolByDim.scenario_application;
-
-    // deterministisk sampling 5 unika
-    const need = choiceCount; // MCQ=5
-    const picked = new Set();
-    let cursor = (n ^ hash32(safeStr(context).slice(0, 64))) >>> 0;
-
-    while (picked.size < need && picked.size < pool.length) {
-      cursor = (cursor * 1664525 + 1013904223) >>> 0; // LCG
-      picked.add(cursor % pool.length);
-    }
-
-    const idxs = Array.from(picked);
-    for (let k = 0; k < idxs.length && choices.length < need; k++) {
-      choices.push({ id: `c${choices.length + 1}`, text: pool[idxs[k]] });
-    }
-    while (choices.length < need) {
-      const t = pool[(n + choices.length) % pool.length];
-      choices.push({ id: `c${choices.length + 1}`, text: t });
-    }
   }
 
-  // Correct (stabil men varierad) + batch-anti-dup på "slot"
-  let correctIdx = (choiceCount > 0) ? (n % choiceCount) : 0;
-
-  if (batch && batch.seenCorrectSlots && isMcq) {
-    const key = `${dim}|${correctIdx}`;
-    if (batch.seenCorrectSlots.has(key)) {
-      correctIdx = (correctIdx + 1) % choiceCount;
-    }
-    batch.seenCorrectSlots.add(`${dim}|${correctIdx}`);
-  }
-
-  const correctChoiceId = `c${correctIdx + 1}`;
-
-  let correctChoiceIds = null;
-  if (isMulti && choiceCount >= 3) {
-    const idx2 = (correctIdx + 2) % choiceCount;
-    correctChoiceIds = (idx2 === correctIdx)
-      ? [`c${correctIdx + 1}`, `c${((correctIdx + 1) % choiceCount) + 1}`]
-      : [`c${correctIdx + 1}`, `c${idx2 + 1}`];
-  }
-
-  // P1: explanation/rationale enligt ruleset-krav
-  let rationale =
+  // TF (behåll enkelhet)
+  const correctChoiceId = "c1";
+  const rationale =
     (language === "sv")
-      ? "Förklaring: Frågan är avgränsad till en specifik situation. Ett bra förstaval skapar tydlighet (mål, avgränsning, ansvar och nästa steg) så att ni kan agera konsekvent och följa upp enligt rutin."
-      : "Explanation: The question is scoped to a specific situation. A strong first choice creates clarity (goal, scope, responsibility, next step) so you can act consistently and follow up properly.";
-
-  if (qq && qq.requireExplanation) {
-    if (safeStr(rationale).trim().length < (qq.explanationMinChars || 40)) {
-      rationale = (language === "sv")
-        ? "Förklaring: Börja med att skapa tydlighet om mål och läge. När ni har samma bild kan ni välja rätt åtgärd och följa upp enligt rutin och ansvar."
-        : "Explanation: Start by clarifying goal and situation. Once aligned, you can choose the right action and follow up according to routine and responsibility.";
-    }
-  }
-
-  // Final ruleset-sanity (fail-soft)
-  if (qq && qq.forbidContextPlaceholderText) {
-    if (containsForbiddenPhrase(text, qq.forbiddenPhrases)) {
-      text = (language === "sv")
-        ? `I ${area} ${sc.place}, vilket val ger tydligast start?`
-        : `In ${area} ${sc.place}, which choice gives the clearest start?`;
-    }
-  }
+      ? "Förklaring: Bedöm påståendet strikt som sant eller falskt utan gråzoner."
+      : "Explanation: Evaluate strictly as true or false without gray areas.";
 
   return {
     kind: "question",
     text,
     choices,
     correctChoiceId,
-    ...(correctChoiceIds ? { correctChoiceIds } : {}),
     rationale,
     difficulty,
-    tags: [subjId, "scenario", dim]
+    tags: [subjId, "tf", dim, `step_${safeStr(courseLabel.step).trim() || "1"}`]
   };
+}
+
+function shuffledIndices(n, seed) {
+  const arr = [];
+  for (let i = 0; i < n; i++) arr.push(i);
+  let s = seed >>> 0;
+  // Fisher-Yates deterministisk
+  for (let i = n - 1; i > 0; i--) {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    const j = s % (i + 1);
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+  }
+  return arr;
+}
+
+function getChoicePools(language) {
+  if (language === "sv") {
+    return {
+      bestByDim: {
+        definition_or_concept: [
+          "En gemensam standard för hur ni arbetar och följer upp",
+          "Ett sätt att skapa spårbarhet och förbättring över tid",
+          "Tydliga arbetssätt som kan följas, mätas och förbättras"
+        ],
+        routine_first_step: [
+          "Klargör mål och avgränsning innan åtgärd",
+          "Samla fakta och kontrollera relevant rutin/checklista",
+          "Säkerställ vem som ansvarar för nästa steg"
+        ],
+        risk_consequence: [
+          "Missförstånd och olika tolkningar i teamet",
+          "Brist på spårbarhet när ni ska följa upp",
+          "Att fel åtgärd görs på fel problem"
+        ],
+        scenario_application: [
+          "Välj ett första steg i rutinen och bekräfta ansvar",
+          "Gör en snabb kontroll mot checklista innan beslut",
+          "Klargör nästa steg och hur ni följer upp"
+        ],
+        roles_and_responsibility: [
+          "Den som äger rutinen tar första initiativet och fördelar ansvar",
+          "Den utsedda ansvariga rollen startar och säkrar samordning",
+          "Den som har mandat för rutinen initierar och förankrar nästa steg"
+        ],
+        deviation_and_action: [
+          "Stoppa och avgränsa: vad avviker, hur stort, vem berörs?",
+          "Säkra fakta och dokumentera avvikelsen innan ni ändrar något",
+          "Informera rätt roller och starta en kontrollerad uppföljning"
+        ]
+      },
+      distractorsByDim: {
+        definition_or_concept: [
+          "En lista med valfria tips utan uppföljning",
+          "En snabb lösning som passar alla situationer",
+          "En personlig åsikt om vad som känns bäst",
+          "Att hoppa över dokumentation för att spara tid",
+          "Att alltid göra som man brukar utan kontroll"
+        ],
+        routine_first_step: [
+          "Starta åtgärd direkt utan att avgränsa",
+          "Vänta tills någon annan tar initiativ",
+          "Byt rutin direkt utan att kontrollera fakta",
+          "Fokusera på att det ska gå snabbt snarare än rätt",
+          "Diskutera länge utan att bestämma nästa steg"
+        ],
+        risk_consequence: [
+          "Att allt går snabbare utan kontroll",
+          "Att uppföljning blir enklare av sig själv",
+          "Att spårbarhet förbättras automatiskt",
+          "Att avvikelser minskar utan åtgärd",
+          "Att ansvar blir tydligt även utan beslut"
+        ],
+        scenario_application: [
+          "Låt bli att dokumentera för att spara tid",
+          "Gå direkt på en lösning utan att kontrollera scope",
+          "Låt varje person välja sin egen tolkning",
+          "Vänta tills problemet återkommer",
+          "Ignorera skillnader för att undvika konflikt"
+        ],
+        roles_and_responsibility: [
+          "Den som har mest tid tar ansvar oavsett roll",
+          "Alla gör sin egen tolkning utan samordning",
+          "Ingen tar ansvar förrän någon säger till",
+          "Den som sist såg problemet tar hela ansvaret",
+          "Den som pratar högst bestämmer"
+        ],
+        deviation_and_action: [
+          "Fortsätt som vanligt och hoppas att det löser sig",
+          "Ändra rutin direkt utan att dokumentera",
+          "Vänta tills nästa vecka och se om det återkommer",
+          "Informera ingen för att undvika oro",
+          "Gör en snabb fix utan att följa upp"
+        ]
+      }
+    };
+  }
+
+  return {
+    bestByDim: {
+      definition_or_concept: [
+        "A shared standard for how you work and follow up",
+        "A way to ensure traceability and improvement over time",
+        "Clear ways of working that can be measured and improved"
+      ],
+      routine_first_step: [
+        "Clarify goal and scope before acting",
+        "Gather key facts and check the relevant routine/checklist",
+        "Confirm who owns the next step"
+      ],
+      risk_consequence: [
+        "Misunderstanding and different interpretations in the team",
+        "Lack of traceability when you need to follow up",
+        "Doing the wrong action for the wrong problem"
+      ],
+      scenario_application: [
+        "Choose the first routine step and confirm responsibility",
+        "Do a quick checklist check before deciding",
+        "Clarify next step and how you will follow up"
+      ],
+      roles_and_responsibility: [
+        "The routine owner starts and assigns responsibility",
+        "The designated responsible role starts and coordinates",
+        "Whoever has mandate initiates and aligns the next step"
+      ],
+      deviation_and_action: [
+        "Stop and scope: what deviates, how big, who is affected?",
+        "Secure facts and document the deviation before changing anything",
+        "Inform the right roles and start controlled follow-up"
+      ]
+    },
+    distractorsByDim: {
+      definition_or_concept: [
+        "A list of optional tips without follow-up",
+        "A quick fix that fits every situation",
+        "A personal opinion about what feels best",
+        "Skip documentation to save time",
+        "Always do what you usually do"
+      ],
+      routine_first_step: [
+        "Act immediately without scoping",
+        "Wait until someone else takes initiative",
+        "Change the routine without checking facts",
+        "Focus on speed over correctness",
+        "Discuss a long time without deciding next step"
+      ],
+      risk_consequence: [
+        "Everything becomes faster without checks",
+        "Follow-up becomes easier automatically",
+        "Traceability improves by itself",
+        "Deviations decrease without action",
+        "Responsibility becomes clear without decision"
+      ],
+      scenario_application: [
+        "Avoid documenting to save time",
+        "Jump to a solution without checking scope",
+        "Let everyone choose their own interpretation",
+        "Wait until the problem returns",
+        "Ignore differences to avoid conflict"
+      ],
+      roles_and_responsibility: [
+        "Whoever has time takes responsibility regardless of role",
+        "Everyone makes their own interpretation without alignment",
+        "No one takes responsibility until told",
+        "Whoever noticed last owns everything",
+        "Whoever speaks loudest decides"
+      ],
+      deviation_and_action: [
+        "Continue as usual and hope it resolves",
+        "Change the routine immediately without documenting",
+        "Wait until next week and see if it returns",
+        "Tell no one to avoid concern",
+        "Do a quick fix without follow-up"
+      ]
+    }
+  };
+}
+
+function buildRationale({ language, dim, area, place, bestAnswerText, step }) {
+  const s = safeStr(step).trim() || "1";
+
+  if (language === "sv") {
+    if (dim === "definition_or_concept") {
+      return `Förklaring: "${bestAnswerText}" är rätt eftersom kärnan i ${area} är att ni arbetar likadant och kan följa upp på samma sätt. Det blir extra viktigt ${place} när ni behöver en gemensam tolkning innan ni går vidare.`;
+    }
+    if (dim === "routine_first_step") {
+      return `Förklaring: "${bestAnswerText}" är rätt eftersom ett bra förstasteg sätter ramarna (mål, avgränsning och nästa steg). Då blir efterföljande åtgärder relevanta, spårbara och lättare att följa upp. (Steg ${s})`;
+    }
+    if (dim === "risk_consequence") {
+      return `Förklaring: "${bestAnswerText}" är rätt eftersom den största risken när ni hoppar över startmomentet är att ni agerar på olika bilder av läget. Då blir beslut, ansvar och uppföljning spretiga – särskilt ${place}.`;
+    }
+    if (dim === "roles_and_responsibility") {
+      return `Förklaring: "${bestAnswerText}" är rätt eftersom den som äger/har mandat för rutinen kan säkra att ni följer samma arbetssätt och att ansvar fördelas tydligt. Det minskar “ingen tar tag i det” ${place}. (Steg ${s})`;
+    }
+    if (dim === "deviation_and_action") {
+      return `Förklaring: "${bestAnswerText}" är rätt eftersom första åtgärden vid avvikelse är att stoppa, avgränsa och säkra fakta. Annars riskerar ni att “fixa fel sak” och tappa spårbarhet när ni senare ska följa upp.`;
+    }
+    return `Förklaring: "${bestAnswerText}" är rätt eftersom det skapar tydlighet i situationen ${place}: vad som gäller nu, vem som gör nästa steg och hur ni följer upp.`;
+  }
+
+  if (dim === "definition_or_concept") {
+    return `Explanation: "${bestAnswerText}" is correct because the core of ${area} is consistent ways of working and follow-up. This matters ${place} when you need a shared interpretation before moving on.`;
+  }
+  if (dim === "routine_first_step") {
+    return `Explanation: "${bestAnswerText}" is correct because a strong first step sets the frame (goal, scope, next step). That makes later actions relevant, traceable, and easier to follow up. (Step ${s})`;
+  }
+  if (dim === "risk_consequence") {
+    return `Explanation: "${bestAnswerText}" is correct because skipping the start increases the risk of acting on different interpretations. Decisions and follow-up become inconsistent—especially ${place}.`;
+  }
+  if (dim === "roles_and_responsibility") {
+    return `Explanation: "${bestAnswerText}" is correct because the routine owner/mandated role can align the team and assign responsibility clearly. This reduces “no one owns it” behavior ${place}. (Step ${s})`;
+  }
+  if (dim === "deviation_and_action") {
+    return `Explanation: "${bestAnswerText}" is correct because the first action in a deviation is to stop, scope, and secure facts. Otherwise you risk fixing the wrong thing and losing traceability for follow-up.`;
+  }
+  return `Explanation: "${bestAnswerText}" is correct because it creates clarity ${place}: what applies now, who owns the next step, and how you will follow up.`;
 }
 
 // ============================================================
@@ -1256,7 +1467,6 @@ function mapChoiceQuestionToUi(q, questionType, language) {
   }
   if (options.length < 2) return { ok: false };
 
-  // P2: skicka med explanation så UI kan visa "Förklaring" direkt
   const explanation = safeStr(q.rationale || q.explanation || q.feedback || "").trim();
 
   if (questionType === "tf") {
