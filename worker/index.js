@@ -218,11 +218,12 @@ export default {
     const mode = normalizeMode(modeRaw);
 
     const countRaw = body.count ?? body.n;
-    const language = safeStr(body.language || "sv").trim();
 
-    // P0 FIX: UI skickar ofta context som object { text: "..." } eller ruleset-objekt.
-    // Vi normaliserar till ren text och SANITIZER:ar bort "(kontext dolt)" / "[object Object]" etc.
-    const context = sanitizeContextText(normalizeContextInput(body.context ?? body.prompt ?? ""));
+    // language: stöd för sv, sv-SE, sv_SE, en, en-US → normaliseras till "sv"|"en"
+    const language = normalizeLanguage(body.language || "sv");
+
+    // context: UI kan skicka string ELLER object {text:"..."} → normalisera
+    const context = normalizeContextText(body.context ?? body.prompt ?? "");
 
     const format = safeStr(body.format || "").trim();
     const subjectId = safeStr(body.subjectId || body.subject || "").trim();
@@ -258,8 +259,8 @@ export default {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "count måste vara mellan 1 och 12", corsHeaders, true);
     }
 
-    if (!(language === "sv" || language === "en" || language === "sv-SE")) {
-      return errorJSON(400, requestId, "VALIDATION_ERROR", "language måste vara sv, sv-SE eller en", corsHeaders, true);
+    if (!(language === "sv" || language === "en")) {
+      return errorJSON(400, requestId, "VALIDATION_ERROR", "language måste vara sv eller en", corsHeaders, true);
     }
 
     if (context.length > 4000) {
@@ -278,7 +279,7 @@ export default {
         requestId,
         mode,
         count,
-        language: (language === "sv-SE" ? "sv" : language),
+        language,
         context,
         aiEnabled,
         format,
@@ -298,7 +299,7 @@ export default {
 
     // Om UI ber om MCQ/TF: returnera UI-frågeblock i exakt UI-format
     if (isUiQuestionRequest(questionType)) {
-      const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, (language === "sv-SE" ? "sv" : language));
+      const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, language);
       if (!mapped.ok) {
         return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
       }
@@ -365,6 +366,32 @@ function safeStr(v) {
   return (v === null || v === undefined) ? "" : String(v);
 }
 
+function safeArr(a) {
+  return Array.isArray(a) ? a : [];
+}
+
+function normalizeLanguage(v) {
+  const s = safeStr(v).trim().toLowerCase();
+  if (!s) return "sv";
+  if (s === "sv" || s === "sv-se" || s === "sv_se" || s.startsWith("sv")) return "sv";
+  if (s === "en" || s === "en-us" || s === "en_gb" || s.startsWith("en")) return "en";
+  return "sv";
+}
+
+function normalizeContextText(v) {
+  // UI kan skicka:
+  // - string
+  // - object { text: "..." }
+  // - object { contextText: "..." } (framtida tolerant)
+  // Fail-soft: annars tom sträng (stateless, säker)
+  if (typeof v === "string") return v.trim();
+  if (isPlainObject(v)) {
+    const t = safeStr(v.text || v.contextText || v.value || "").trim();
+    return t;
+  }
+  return safeStr(v).trim();
+}
+
 function makeRequestId() {
   try {
     return "req_" + crypto.randomUUID();
@@ -398,51 +425,6 @@ function normalizeMode(modeRaw) {
   if (s.includes("train")) return "training";
   if (s.includes("doc")) return "document";
   return s;
-}
-
-// P0: Context kan komma som string, {text:"..."}, eller ruleset-context.
-// Vi normaliserar till ren text (och SANITIZER körs separat).
-function normalizeContextInput(v) {
-  if (typeof v === "string") return v;
-  if (isPlainObject(v)) {
-    // UI: { text: "Modul: ... • Steg: 1" }
-    const t = safeStr(v.text || "").trim();
-    if (t) return t;
-
-    // Ruleset-form: moduleId/areaId/... + labels
-    const ml = safeStr(v.moduleLabel || v.module || v.moduleId || "").trim();
-    const al = safeStr(v.areaLabel || v.area || v.areaId || "").trim();
-    const cl = safeStr(v.chapterLabel || v.chapter || v.chapterId || "").trim();
-    const st = safeStr(v.step || "").trim();
-    const df = safeStr(v.difficulty || "").trim();
-    const parts = [];
-    if (ml) parts.push(`Modul: ${ml}`);
-    if (al) parts.push(`Område: ${al}`);
-    if (cl) parts.push(`Kapitel: ${cl}`);
-    if (st) parts.push(`Steg: ${st}`);
-    if (df) parts.push(`Nivå: ${df}`);
-    const joined = parts.join(" • ");
-    return joined || "";
-  }
-  return "";
-}
-
-// P0: ta bort placeholder-text, "(kontext dolt)", "[object Object]" och förbjudna fraser
-function sanitizeContextText(s) {
-  let t = safeStr(s).trim();
-  if (!t) return "";
-  // vanliga UI-placeholders
-  t = t
-    .replace(/\(\s*kontext\s+dolt\s*\)/gi, "")
-    .replace(/\[\s*object\s+object\s*\]/gi, "")
-    .replace(/\s{2,}/g, " ")
-    .trim();
-  // om någon råkar skicka “Använd detta sammanhang …”
-  t = t
-    .replace(/använd\s+detta\s+sammanhang[^.]*\.?/gi, "")
-    .replace(/utgå\s+från\s+detta\s+sammanhang[^.]*\.?/gi, "")
-    .trim();
-  return t;
 }
 
 function normalizeFormat(format, mode, questionType) {
@@ -572,27 +554,24 @@ function getQuestionQuality(bundle) {
   const requireExplanation = !!(q && q.general && q.general.requireExplanation);
   const explanationMinChars = Number(q && q.general && q.general.explanationMinChars) || 40;
 
+  const nearDupThreshold = Number(q && q.general && q.general.batchUniqueness && q.general.batchUniqueness.forbidNearDuplicateThreshold);
+  const forbidNearDuplicateThreshold = Number.isFinite(nearDupThreshold) ? nearDupThreshold : 0.85;
+
+  const rotateDims = safeArr(q && q.general && q.general.variationPlan && q.general.variationPlan.rotateDimensions).filter(Boolean);
+  const minDistinctDims = Number(q && q.general && q.general.variationPlan && q.general.variationPlan.minimumDistinctDimensionsInBatch) || 3;
+
   const minOptions = Number(q && q.mcq && q.mcq.minOptions) || 4;
   const maxOptions = Number(q && q.mcq && q.mcq.maxOptions) || 6;
-
-  // VariationPlan (om finns)
-  const vp = (q && q.general && q.general.variationPlan) ? q.general.variationPlan : null;
-  const rotateDimensions = safeArr(vp && vp.rotateDimensions).filter(Boolean);
-  const minDistinct = Number(vp && vp.minimumDistinctDimensionsInBatch) || 3;
-  const vpEnabled = !!(vp && vp.enabled);
 
   return {
     forbidContextPlaceholderText,
     forbiddenPhrases,
     requireExplanation,
     explanationMinChars,
-    mcq: { minOptions, maxOptions },
-    variationPlan: { enabled: vpEnabled, rotateDimensions, minimumDistinctDimensionsInBatch: minDistinct }
+    forbidNearDuplicateThreshold,
+    variation: { rotateDims, minDistinctDims },
+    mcq: { minOptions, maxOptions }
   };
-}
-
-function safeArr(a) {
-  return Array.isArray(a) ? a : [];
 }
 
 function containsForbiddenPhrase(text, forbiddenPhrases) {
@@ -615,6 +594,41 @@ function stripAnyBracketedContext(s) {
     .trim();
 }
 
+function sanitizeContextForDisplay(contextText, qq) {
+  const c = safeStr(contextText).trim();
+  if (!c) return "—";
+  // P0: aldrig visa placeholder-kontext
+  if (qq && qq.forbidContextPlaceholderText) {
+    if (containsForbiddenPhrase(c, qq.forbiddenPhrases)) return "—";
+    if (/\(kontext\s+dolt\)/i.test(c)) return "—";
+    if (/\[object\s+object\]/i.test(c)) return "—";
+  }
+  return c;
+}
+
+function tokenizeForSimilarity(s) {
+  const t = safeStr(s)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  if (!t) return [];
+  const parts = t.split(/\s+/g).filter(Boolean);
+  // korta stop-ord (minimal, för att inte bli för aggressiv)
+  const stop = new Set(["i", "en", "ett", "att", "och", "du", "när", "vad", "vilket", "vilken", "är", "ska", "för", "på", "om", "som", "det", "de", "den"]);
+  return parts.filter(w => w.length >= 3 && !stop.has(w));
+}
+
+function jaccardSimilarity(a, b) {
+  const A = new Set(tokenizeForSimilarity(a));
+  const B = new Set(tokenizeForSimilarity(b));
+  if (A.size === 0 && B.size === 0) return 1;
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  const uni = A.size + B.size - inter;
+  return uni ? (inter / uni) : 0;
+}
+
 // ============================================================
 // OUTPUT BUILDER — training-blocks + question-format (choices)
 // ============================================================
@@ -622,8 +636,9 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
   const fmt = normalizeFormat(format, mode, questionType);
   const subjId = normalizeSubjectId(subjectId);
   const bundle = getRulesBundle(subjId);
+  const qq = getQuestionQuality(bundle);
 
-  const seed = hash32(`${requestId}|${mode}|${count}|${language}|${context.slice(0, 96)}|${fmt}|${subjId}|${safeStr(difficultyHint)}|${safeStr(questionType)}`);
+  const seed = hash32(`${requestId}|${mode}|${count}|${language}|${safeStr(context).slice(0, 96)}|${fmt}|${subjId}|${safeStr(difficultyHint)}|${safeStr(questionType)}`);
 
   const courseLabel = resolveCourseLabelFallback(course, mode);
   const difficulty = pickDifficultyLabel(difficultyHint, seed);
@@ -646,7 +661,13 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
       : [];
 
   const blocks = [];
-  const seenQuestionStems = new Set(); // P0: dedupe i batch
+
+  // Batch-state (stateless per request, men hjälper unikhet inom batchen)
+  const batch = {
+    seenStems: [],
+    seenDims: new Set(),
+    seenCorrectSlots: new Set()
+  };
 
   for (let i = 0; i < count; i++) {
     // P0: variation per item (salt med index)
@@ -654,28 +675,26 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
 
     if (fmt === "question") {
       blocks.push(genQuestionBlock({
-        i, n, language, context, courseLabel, difficulty, subjId, bundle, questionType,
-        seenQuestionStems
+        i, n, count, language, context, courseLabel, difficulty, subjId, bundle, questionType, qq, batch
       }));
       continue;
     }
 
     if (fmt === "task") {
-      blocks.push(genTaskBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
+      blocks.push(genTaskBlock({ i, n, language, context, courseLabel, difficulty, subjId, qq }));
       continue;
     }
 
     if (fmt === "document" || mode === "document") {
-      blocks.push(genDocumentBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
+      blocks.push(genDocumentBlock({ i, n, language, context, courseLabel, difficulty, subjId, qq }));
       continue;
     }
 
     const pick = n % 3;
-    if (pick === 0) blocks.push(genInfoBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
-    else if (pick === 1) blocks.push(genTaskBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle }));
+    if (pick === 0) blocks.push(genInfoBlock({ i, n, language, context, courseLabel, difficulty, subjId, qq }));
+    else if (pick === 1) blocks.push(genTaskBlock({ i, n, language, context, courseLabel, difficulty, subjId, qq }));
     else blocks.push(genQuestionBlock({
-      i, n, language, context, courseLabel, difficulty, subjId, bundle, questionType,
-      seenQuestionStems
+      i, n, count, language, context, courseLabel, difficulty, subjId, bundle, questionType, qq, batch
     }));
   }
 
@@ -704,7 +723,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
 // ------------------------------
 // Block generators
 // ------------------------------
-function genInfoBlock({ i, language, context, courseLabel, difficulty, subjId }) {
+function genInfoBlock({ i, language, context, courseLabel, difficulty, subjId, qq }) {
   const blockId = `b_info_${i + 1}_${subjId}`.slice(0, 32);
 
   const title =
@@ -712,12 +731,12 @@ function genInfoBlock({ i, language, context, courseLabel, difficulty, subjId })
       ? `Teori: ${courseLabel.area}`
       : `Theory: ${courseLabel.area}`;
 
-  const ctx = context ? context : "";
+  const ctx = sanitizeContextForDisplay(context, qq);
 
   const text =
     language === "sv"
-      ? `Kort teori kopplad till ${courseLabel.module} → ${courseLabel.area}.\n\nSammanhang (valfritt):\n${ctx || "—"}`
-      : `Short theory for ${courseLabel.module} → ${courseLabel.area}.\n\nContext (optional):\n${ctx || "—"}`;
+      ? `Kort teori kopplad till ${courseLabel.module} → ${courseLabel.area}.\n\nSammanhang (valfritt):\n${ctx}`
+      : `Short theory for ${courseLabel.module} → ${courseLabel.area}.\n\nContext (optional):\n${ctx}`;
 
   return {
     blockId,
@@ -729,7 +748,7 @@ function genInfoBlock({ i, language, context, courseLabel, difficulty, subjId })
   };
 }
 
-function genTaskBlock({ i, language, context, courseLabel, difficulty, subjId }) {
+function genTaskBlock({ i, language, context, courseLabel, difficulty, subjId, qq }) {
   const blockId = `b_task_${i + 1}_${subjId}`.slice(0, 32);
 
   const title =
@@ -737,13 +756,13 @@ function genTaskBlock({ i, language, context, courseLabel, difficulty, subjId })
       ? `Uppgift: ${courseLabel.area}`
       : `Task: ${courseLabel.area}`;
 
-  const ctx = context ? context : "";
+  const ctx = sanitizeContextForDisplay(context, qq);
 
-  // OBS: task kan visa kontext, men aldrig placeholders som "(kontext dolt)".
+  // OBS: task kan visa kontext, men aldrig placeholder-text
   const instruction =
     language === "sv"
-      ? `Gör en kort uppgift kopplad till ${courseLabel.area}.\n\nUtgångspunkt (om relevant):\n${ctx || "—"}`
-      : `Complete a short task for ${courseLabel.area}.\n\nStarting point (if relevant):\n${ctx || "—"}`;
+      ? `Gör en kort uppgift kopplad till ${courseLabel.area}.\n\nUtgångspunkt (om relevant):\n${ctx}`
+      : `Complete a short task for ${courseLabel.area}.\n\nStarting point (if relevant):\n${ctx}`;
 
   return {
     blockId,
@@ -764,7 +783,7 @@ function genTaskBlock({ i, language, context, courseLabel, difficulty, subjId })
   };
 }
 
-function genDocumentBlock({ i, language, context, courseLabel, difficulty, subjId }) {
+function genDocumentBlock({ i, language, context, courseLabel, difficulty, subjId, qq }) {
   const blockId = `b_doc_${i + 1}_${subjId}`.slice(0, 32);
 
   const title =
@@ -772,12 +791,12 @@ function genDocumentBlock({ i, language, context, courseLabel, difficulty, subjI
       ? `Dokument: ${courseLabel.area}`
       : `Document: ${courseLabel.area}`;
 
-  const ctx = context ? context : "";
+  const ctx = sanitizeContextForDisplay(context, qq);
 
   const text =
     language === "sv"
-      ? `Detta är ett informativt dokument om ${courseLabel.area}.\n\nBakgrund (valfritt):\n${ctx || "—"}`
-      : `This is an informational document about ${courseLabel.area}.\n\nBackground (optional):\n${ctx || "—"}`;
+      ? `Detta är ett informativt dokument om ${courseLabel.area}.\n\nBakgrund (valfritt):\n${ctx}`
+      : `This is an informational document about ${courseLabel.area}.\n\nBackground (optional):\n${ctx}`;
 
   return {
     blockId,
@@ -796,7 +815,7 @@ function genDocumentBlock({ i, language, context, courseLabel, difficulty, subjI
   };
 }
 
-function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, subjId, bundle, questionType, seenQuestionStems }) {
+function genQuestionBlock({ i, n, count, language, context, courseLabel, difficulty, subjId, bundle, questionType, qq, batch }) {
   const blockId = `b_q_${i + 1}_${subjId}`.slice(0, 32);
 
   const title =
@@ -806,21 +825,51 @@ function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, su
 
   // P0: försök generera unik fråga (fail-closed om vi misslyckas)
   let q = null;
-  for (let attempt = 0; attempt < 8; attempt++) {
+  for (let attempt = 0; attempt < 10; attempt++) {
     const nn = (n ^ (attempt * 0x9e3779b9)) >>> 0;
-    const cand = makeQuestion({ n: nn, language, context, courseLabel, difficulty, subjId, questionType, bundle, i });
 
-    const stemKey = safeStr(cand && (cand.text || cand.question || "")).trim().toLowerCase();
-    if (!stemKey) continue;
+    const cand = makeQuestion({
+      n: nn,
+      i,
+      count,
+      language,
+      context,
+      courseLabel,
+      difficulty,
+      subjId,
+      questionType,
+      bundle,
+      qq,
+      batch
+    });
 
-    if (seenQuestionStems && seenQuestionStems.has(stemKey)) continue;
+    const stem = safeStr(cand && (cand.text || cand.question || "")).trim();
+    if (!stem) continue;
 
-    if (seenQuestionStems) seenQuestionStems.add(stemKey);
+    // P0: forbid placeholders
+    if (qq && qq.forbidContextPlaceholderText) {
+      if (containsForbiddenPhrase(stem, qq.forbiddenPhrases)) continue;
+      if (/\(kontext\s+dolt\)/i.test(stem)) continue;
+      if (/\[object\s+object\]/i.test(stem)) continue;
+    }
+
+    // P0: near-duplicate check (semantic-ish via Jaccard)
+    let nearDup = false;
+    for (const prev of (batch && Array.isArray(batch.seenStems) ? batch.seenStems : [])) {
+      const sim = jaccardSimilarity(prev, stem);
+      if (sim >= (qq ? qq.forbidNearDuplicateThreshold : 0.85)) {
+        nearDup = true;
+        break;
+      }
+    }
+    if (nearDup) continue;
+
+    if (batch && Array.isArray(batch.seenStems)) batch.seenStems.push(stem);
     q = cand;
     break;
   }
 
-  // Fail-closed: om vi inte lyckas skapa unikt (hellre fel än duplicat i batch)
+  // Fail-closed: om vi inte lyckas skapa unik (hellre fel än duplicat i batch)
   if (!q) {
     throw new Error("DUPLICATE_QUESTION_IN_BATCH");
   }
@@ -838,18 +887,16 @@ function genQuestionBlock({ i, n, language, context, courseLabel, difficulty, su
 // ------------------------------
 // QUESTION (choice-format, ruleset-quality)
 // ------------------------------
-function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, questionType, bundle, i }) {
+function makeQuestion({ n, i, count, language, context, courseLabel, difficulty, subjId, questionType, bundle, qq, batch }) {
   const qt = normalizeQuestionType(questionType);
   const isTf = (qt === "tf");
   const isMulti = (qt === "mcq_multi");
   const isMcq = (qt === "mcq_single" || qt === "mcq_multi");
 
-  const qq = getQuestionQuality(bundle);
-
   // PATCH v1.5.2: lås MCQ till exakt 5 alternativ (TF=2)
   const choiceCount = isTf ? 2 : (isMcq ? 5 : (3 + (n % 3))); // TF=2, MCQ=5, annars 3..5
 
-  // P1: VariationPlan — skapa olika "dimensioner" i batchen
+  // ---- VariationPlan (P1): rotera dimensioner så batchen inte blir "bara första steg" ----
   const dimsDefault = [
     "definition_or_concept",
     "routine_first_step",
@@ -858,71 +905,98 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
     "roles_and_responsibility",
     "deviation_and_action"
   ];
-  const dims = (qq.variationPlan && qq.variationPlan.enabled && qq.variationPlan.rotateDimensions && qq.variationPlan.rotateDimensions.length)
-    ? qq.variationPlan.rotateDimensions
+
+  const rotate = (qq && qq.variation && qq.variation.rotateDims && qq.variation.rotateDims.length)
+    ? qq.variation.rotateDims
     : dimsDefault;
 
-  const dim = dims[((n + (i || 0)) >>> 0) % dims.length];
+  // Försök garantera minst 3 dimensioner när count>1 (enkel deterministisk rotation)
+  const dimIndex = (i + (n % rotate.length)) % rotate.length;
+  let dim = rotate[dimIndex] || "scenario_application";
 
-  // P1: tydligare scope (varierar också)
-  const scopeSv = [
-    "i en vardagssituation (inte akut)",
-    "när du ska starta en dialog",
-    "när du ska välja första steg i en rutin",
-    "när du vill förebygga fel innan de uppstår",
-    "när du behöver få samma bild i teamet"
-  ];
-  const scopeEn = [
-    "in a normal situation (not urgent)",
-    "when you need to start a dialogue",
-    "when you choose the first step in a routine",
-    "when you want to prevent issues early",
-    "when you need alignment in the team"
-  ];
-  const scope = (language === "sv" ? scopeSv : scopeEn)[(n + (i || 0)) % 5];
-
-  // -----------------------
-  // STEMS per dimension
-  // -----------------------
-  let text = "";
-  if (language === "sv") {
-    if (dim === "definition_or_concept") {
-      text = `Vilket alternativ beskriver bäst kärnan i ${courseLabel.area} ${scope}?`;
-    } else if (dim === "risk_consequence") {
-      text = `Vad är den vanligaste risken om man hoppar över grunderna i ${courseLabel.area} ${scope}?`;
-    } else if (dim === "scenario_application") {
-      text = `Du märker en oklarhet i ${courseLabel.area} ${scope}. Vilket val hjälper dig mest att reda ut läget?`;
-    } else if (dim === "roles_and_responsibility") {
-      text = `I ${courseLabel.area} ${scope}, vilket alternativ tydliggör ansvar och nästa steg bäst?`;
-    } else if (dim === "deviation_and_action") {
-      text = `Om något avviker i ${courseLabel.area} ${scope}, vilket första val är mest rimligt?`;
-    } else {
-      // routine_first_step
-      text = `Vad är ett bra första steg i ${courseLabel.area} ${scope}?`;
+  if (batch && batch.seenDims && count > 1) {
+    // om vi redan har för många av samma dim tidigt, byt dim
+    const minDistinct = (qq && qq.variation && qq.variation.minDistinctDims) ? qq.variation.minDistinctDims : 3;
+    if (batch.seenDims.size < Math.min(minDistinct, count)) {
+      // försök hitta en dim som inte är använd än
+      for (let t = 0; t < rotate.length; t++) {
+        const d2 = rotate[(dimIndex + t) % rotate.length];
+        if (d2 && !batch.seenDims.has(d2)) { dim = d2; break; }
+      }
     }
-  } else {
-    if (dim === "definition_or_concept") {
-      text = `Which option best captures the core of ${courseLabel.area} ${scope}?`;
-    } else if (dim === "risk_consequence") {
-      text = `What is the most common risk if you skip the basics in ${courseLabel.area} ${scope}?`;
-    } else if (dim === "scenario_application") {
-      text = `You notice uncertainty in ${courseLabel.area} ${scope}. Which choice helps you clarify the situation?`;
-    } else if (dim === "roles_and_responsibility") {
-      text = `In ${courseLabel.area} ${scope}, which option clarifies responsibility and next step best?`;
-    } else if (dim === "deviation_and_action") {
-      text = `If something deviates in ${courseLabel.area} ${scope}, which first choice is most reasonable?`;
-    } else {
-      text = `What is a good first step in ${courseLabel.area} ${scope}?`;
-    }
+    batch.seenDims.add(dim);
   }
 
+  // ---- Scenario-variation (P1): plats/roll/händelse skiftar ----
+  const scenariosSv = [
+    { place: "på morgonmötet", role: "du som medarbetare", event: "ni ska enas om vad som gäller" },
+    { place: "i köket", role: "du som ansvarig", event: "en rutin ska följas direkt" },
+    { place: "vid en leverans", role: "du som tar emot", event: "något avviker från förväntan" },
+    { place: "i en internkontroll", role: "du som kontrollerar", event: "du behöver säkerställa spårbarhet" },
+    { place: "i dialog med chef", role: "du som rapporterar", event: "en avvikelse ska hanteras korrekt" }
+  ];
+  const scenariosEn = [
+    { place: "in the morning briefing", role: "you as the employee", event: "you need shared understanding" },
+    { place: "in the kitchen", role: "you as the responsible person", event: "a routine must be followed" },
+    { place: "during a delivery", role: "you as receiver", event: "something deviates" },
+    { place: "in an internal check", role: "you as the checker", event: "you need traceability" },
+    { place: "in a manager dialogue", role: "you as reporter", event: "a deviation must be handled" }
+  ];
+  const sc = (language === "sv" ? scenariosSv : scenariosEn)[(n + i) % 5];
+
+  // ---- Stems per dimension (P1) ----
+  const area = courseLabel.area || (language === "sv" ? "utbildning" : "training");
+
+  function stemForDimension() {
+    if (language === "sv") {
+      if (dim === "definition_or_concept") {
+        return `Vad beskriver bäst kärnan i ${area} när ni vill ha tydlighet ${sc.place}?`;
+      }
+      if (dim === "routine_first_step") {
+        return `När ${sc.event} i ${area} ${sc.place} – vad är bästa första steget?`;
+      }
+      if (dim === "risk_consequence") {
+        return `Vilken risk ökar mest om ni hoppar över första steget i ${area} ${sc.place}?`;
+      }
+      if (dim === "roles_and_responsibility") {
+        return `I ${area} ${sc.place}, vem bör ta första ansvaret för att starta rätt rutin – och varför?`;
+      }
+      if (dim === "deviation_and_action") {
+        return `Om något avviker i ${area} ${sc.place}, vilket första agerande är mest korrekt?`;
+      }
+      // scenario_application (default)
+      return `I ${area} ${sc.place}, vilket val leder till bäst start för ${sc.role}?`;
+    }
+
+    // EN
+    if (dim === "definition_or_concept") {
+      return `Which option best captures the core of ${area} when you need clarity ${sc.place}?`;
+    }
+    if (dim === "routine_first_step") {
+      return `When ${sc.event} in ${area} ${sc.place}, what is the best first step?`;
+    }
+    if (dim === "risk_consequence") {
+      return `Which risk increases most if you skip the first step in ${area} ${sc.place}?`;
+    }
+    if (dim === "roles_and_responsibility") {
+      return `In ${area} ${sc.place}, who should take the first responsibility to start the right routine—and why?`;
+    }
+    if (dim === "deviation_and_action") {
+      return `If something deviates in ${area} ${sc.place}, what first action is most correct?`;
+    }
+    return `In ${area} ${sc.place}, which choice gives the best start for ${sc.role}?`;
+  }
+
+  let text = stemForDimension();
+
   // P0: ruleset forbjuder placeholder-fraser
-  if (qq.forbidContextPlaceholderText) {
+  if (qq && qq.forbidContextPlaceholderText) {
     text = stripAnyBracketedContext(text);
     if (containsForbiddenPhrase(text, qq.forbiddenPhrases)) {
+      // fail-soft: ren variant utan riskfraser
       text = (language === "sv")
-        ? `Vad är ett bra första steg i ${courseLabel.area} ${scope}?`
-        : `What is a good first step in ${courseLabel.area} ${scope}?`;
+        ? `I ${area} ${sc.place}, vilket val ger tydligast start?`
+        : `In ${area} ${sc.place}, which choice gives the clearest start?`;
     }
   }
 
@@ -933,112 +1007,101 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
     choices.push({ id: "c1", text: (language === "sv") ? "Sant" : "True" });
     choices.push({ id: "c2", text: (language === "sv") ? "Falskt" : "False" });
   } else {
-    // P1: pools per dimension så det inte blir samma semantik hela tiden
-    const poolsSv = {
+    // Pool per dimension (gör distraktorer mer "plausibla men sämre")
+    const poolSv = {
       definition_or_concept: [
-        "Att säkerställa tydlighet i mål, roller och arbetssätt",
-        "Att öka tempo genom att hoppa över dokumentation",
-        "Att fokusera på magkänsla i stället för rutin",
-        "Att undvika uppföljning för att spara tid",
-        "Att hålla information privat för att minska frågor",
-        "Att göra allt själv för att undvika misstag"
+        "En gemensam standard för hur ni arbetar och följer upp",
+        "En lista med valfria tips utan uppföljning",
+        "En snabb lösning som passar alla situationer",
+        "En personlig åsikt om vad som känns bäst",
+        "Ett verktyg för att säkra spårbarhet och förbättring"
       ],
       routine_first_step: [
-        "Klargör målet och ställ en öppen fråga",
-        "Samla fakta snabbt innan du bestämmer åtgärd",
-        "Gör en enkel kontroll mot checklista",
-        "Säkra att rätt person/roll kopplas in",
-        "Stäm av förväntningar och nästa steg",
-        "Lyssna klart och spegla det du hört"
+        "Klargör mål och avgränsning innan åtgärd",
+        "Samla fakta och kontrollera relevant rutin/checklista",
+        "Säkra att rätt roll/person kopplas in",
+        "Dokumentera kort vad som observerats",
+        "Starta åtgärd direkt utan att avgränsa"
       ],
       risk_consequence: [
-        "Att beslut tas på otydlig grund och blir svåra att följa upp",
-        "Att alla alltid blir nöjda oavsett hur man gör",
-        "Att inga avvikelser någonsin kan uppstå",
-        "Att processen automatiskt blir perfekt utan kontroll",
-        "Att kvaliteten ökar när man skippar steg",
-        "Att ansvar blir tydligare utan kommunikation"
+        "Missförstånd och olika tolkningar i teamet",
+        "Att allt går snabbare utan kontroll",
+        "Att uppföljning blir enklare av sig själv",
+        "Att spårbarhet förbättras automatiskt",
+        "Att avvikelser minskar utan åtgärd"
       ],
       scenario_application: [
-        "Ställ en öppen fråga för att få fram fakta innan du väljer åtgärd",
-        "Gå direkt på åtgärd utan att bekräfta läget",
-        "Vänta och hoppas att det löser sig av sig själv",
-        "Byt ämne för att undvika osäkerhet",
-        "Avsluta dialogen för att spara tid",
-        "Lägg ansvaret på någon annan utan överlämning"
+        "Ställ en öppen fråga och sammanfatta vad ni är överens om",
+        "Välj ett första steg i rutinen och bekräfta ansvar",
+        "Gör en snabb kontroll mot checklista innan beslut",
+        "Klargör nästa steg och hur ni följer upp",
+        "Låt bli att dokumentera för att spara tid"
       ],
       roles_and_responsibility: [
-        "Tydliggör vem som gör vad och vilket nästa steg som gäller",
-        "Låt alla göra lite av allt utan ansvarsfördelning",
-        "Undvik att utse ansvar för att minska press",
-        "Flytta ansvaret vid minsta oklarhet",
-        "Hoppa över avstämning för att inte störa",
-        "Skriv inget — det blir ändå tydligt senare"
+        "Den som äger rutinen tar första initiativet och fördelar ansvar",
+        "Den som har mest tid tar ansvar oavsett roll",
+        "Alla gör sin egen tolkning utan samordning",
+        "Ingen tar ansvar förrän någon säger till",
+        "Den som sist såg problemet tar hela ansvaret"
       ],
       deviation_and_action: [
-        "Avgränsa, samla fakta och följ rutinen för avvikelse/åtgärd",
-        "Ignorera avvikelsen om den inte känns stor",
-        "Ändra rutinen direkt utan att informera",
-        "Skyll på någon för att markera allvar",
-        "Gör en större ombyggnad innan du vet orsaken",
-        "Undvik att dokumentera för att slippa spår"
+        "Stoppa och avgränsa: vad avviker, hur stort, vem berörs?",
+        "Fortsätt som vanligt och hoppas att det löser sig",
+        "Ändra rutin direkt utan att dokumentera",
+        "Vänta tills nästa vecka och se om det återkommer",
+        "Informera ingen för att undvika oro"
       ]
     };
 
-    const poolsEn = {
+    const poolEn = {
       definition_or_concept: [
-        "Ensuring clarity in goals, roles, and ways of working",
-        "Increasing speed by skipping documentation",
-        "Relying on gut feeling instead of routine",
-        "Avoiding follow-up to save time",
-        "Keeping information private to reduce questions",
-        "Doing everything alone to avoid mistakes"
+        "A shared standard for how you work and follow up",
+        "A list of optional tips without follow-up",
+        "A quick fix that fits every situation",
+        "A personal opinion about what feels best",
+        "A way to ensure traceability and improvement"
       ],
       routine_first_step: [
-        "Clarify the goal and ask an open question",
-        "Gather key facts before deciding",
-        "Do a quick checklist check",
-        "Make sure the right role is involved",
-        "Align expectations and agree on next step",
-        "Listen fully and reflect what you heard"
+        "Clarify goal and scope before acting",
+        "Gather key facts and check the relevant routine/checklist",
+        "Ensure the right role/person is involved",
+        "Briefly document what was observed",
+        "Act immediately without scoping"
       ],
       risk_consequence: [
-        "Decisions are made on unclear grounds and become hard to follow up",
-        "Everyone will always be happy no matter what",
-        "No deviations can ever occur",
-        "The process becomes perfect automatically without checks",
-        "Quality increases when you skip steps",
-        "Responsibility becomes clearer without communication"
+        "Misunderstanding and different interpretations in the team",
+        "Everything becomes faster without checks",
+        "Follow-up becomes easier automatically",
+        "Traceability improves by itself",
+        "Deviations decrease without action"
       ],
       scenario_application: [
-        "Ask an open question to gather facts before choosing an action",
-        "Act immediately without confirming the situation",
-        "Wait and hope it fixes itself",
-        "Change topic to avoid uncertainty",
-        "End the dialogue to save time",
-        "Push responsibility to someone else without handover"
+        "Ask an open question and summarize agreement",
+        "Choose the first routine step and confirm responsibility",
+        "Do a quick checklist check before deciding",
+        "Clarify next step and how you will follow up",
+        "Avoid documenting to save time"
       ],
       roles_and_responsibility: [
-        "Clarify who does what and what the next step is",
-        "Let everyone do a bit of everything with no ownership",
-        "Avoid naming ownership to reduce pressure",
-        "Shift ownership at the first sign of uncertainty",
-        "Skip check-ins to avoid disturbance",
-        "Write nothing — it will become clear later"
+        "The routine owner starts and assigns responsibility",
+        "Whoever has time takes responsibility regardless of role",
+        "Everyone makes their own interpretation without alignment",
+        "No one takes responsibility until told",
+        "Whoever noticed last owns everything"
       ],
       deviation_and_action: [
-        "Scope it, gather facts, and follow the deviation/action routine",
-        "Ignore it if it doesn't feel big",
-        "Change the routine immediately without informing anyone",
-        "Blame someone to show seriousness",
-        "Do a major rebuild before knowing the cause",
-        "Avoid documenting to reduce traceability"
+        "Stop and scope: what deviates, how big, who is affected?",
+        "Continue as usual and hope it resolves",
+        "Change the routine immediately without documenting",
+        "Wait until next week and see if it returns",
+        "Tell no one to avoid concern"
       ]
     };
 
-    const pool = (language === "sv") ? (poolsSv[dim] || poolsSv.routine_first_step) : (poolsEn[dim] || poolsEn.routine_first_step);
+    const poolByDim = (language === "sv" ? poolSv : poolEn);
+    const pool = poolByDim[dim] || poolByDim.scenario_application;
 
-    // Deterministisk sampling -> välj exakt 5 unika alternativ
+    // deterministisk sampling 5 unika
     const need = choiceCount; // MCQ=5
     const picked = new Set();
     let cursor = (n ^ hash32(safeStr(context).slice(0, 64))) >>> 0;
@@ -1052,15 +1115,23 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
     for (let k = 0; k < idxs.length && choices.length < need; k++) {
       choices.push({ id: `c${choices.length + 1}`, text: pool[idxs[k]] });
     }
-
     while (choices.length < need) {
       const t = pool[(n + choices.length) % pool.length];
       choices.push({ id: `c${choices.length + 1}`, text: t });
     }
   }
 
-  // Correct (stabil men varierad)
-  const correctIdx = (choiceCount > 0) ? (n % choiceCount) : 0;
+  // Correct (stabil men varierad) + batch-anti-dup på "slot"
+  let correctIdx = (choiceCount > 0) ? (n % choiceCount) : 0;
+
+  if (batch && batch.seenCorrectSlots && isMcq) {
+    const key = `${dim}|${correctIdx}`;
+    if (batch.seenCorrectSlots.has(key)) {
+      correctIdx = (correctIdx + 1) % choiceCount;
+    }
+    batch.seenCorrectSlots.add(`${dim}|${correctIdx}`);
+  }
+
   const correctChoiceId = `c${correctIdx + 1}`;
 
   let correctChoiceIds = null;
@@ -1071,48 +1142,26 @@ function makeQuestion({ n, language, context, courseLabel, difficulty, subjId, q
       : [`c${correctIdx + 1}`, `c${idx2 + 1}`];
   }
 
-  // P1: explanation/rationale enligt ruleset-krav (dimension-specifik)
-  let rationale = "";
-  if (language === "sv") {
-    if (dim === "risk_consequence") {
-      rationale = "Att hoppa över grunderna gör att beslut tas på otydlig grund. Då blir det svårt att följa upp och lätt att missa viktiga detaljer som borde fångas tidigt.";
-    } else if (dim === "roles_and_responsibility") {
-      rationale = "När ansvar och nästa steg är tydliga minskar missförstånd. Det gör arbetet spårbart och lättare att koordinera i teamet.";
-    } else if (dim === "deviation_and_action") {
-      rationale = "Vid avvikelse är bästa start att avgränsa och samla fakta innan åtgärd. Då kan du följa rutin, välja rätt insats och dokumentera korrekt.";
-    } else if (dim === "definition_or_concept") {
-      rationale = "Kärnan är tydlighet: mål, roller och arbetssätt. Det skapar en stabil grund för att göra rätt saker i rätt ordning och kunna följa upp.";
-    } else {
-      rationale = "I en normal situation är en bra start att skapa tydlighet (mål, avgränsning och nästa steg) innan du går in på åtgärd. Då blir valet mer träffsäkert och lättare att följa upp.";
-    }
-  } else {
-    if (dim === "risk_consequence") {
-      rationale = "Skipping basics leads to decisions made on unclear grounds. That makes follow-up harder and increases the chance of missing important details.";
-    } else if (dim === "roles_and_responsibility") {
-      rationale = "Clear ownership and a clear next step reduce misunderstandings. It makes work traceable and easier to coordinate.";
-    } else if (dim === "deviation_and_action") {
-      rationale = "When something deviates, start by scoping and gathering facts before acting. That supports the routine, the right action, and correct documentation.";
-    } else if (dim === "definition_or_concept") {
-      rationale = "The core is clarity: goals, roles, and ways of working. That creates a stable basis for doing the right things in the right order and following up.";
-    } else {
-      rationale = "In a normal situation, a strong start is to create clarity (goal, scope, and next step) before acting. That makes the choice more accurate and easier to follow up.";
-    }
-  }
+  // P1: explanation/rationale enligt ruleset-krav
+  let rationale =
+    (language === "sv")
+      ? "Förklaring: Frågan är avgränsad till en specifik situation. Ett bra förstaval skapar tydlighet (mål, avgränsning, ansvar och nästa steg) så att ni kan agera konsekvent och följa upp enligt rutin."
+      : "Explanation: The question is scoped to a specific situation. A strong first choice creates clarity (goal, scope, responsibility, next step) so you can act consistently and follow up properly.";
 
-  if (qq.requireExplanation) {
-    if (safeStr(rationale).trim().length < qq.explanationMinChars) {
+  if (qq && qq.requireExplanation) {
+    if (safeStr(rationale).trim().length < (qq.explanationMinChars || 40)) {
       rationale = (language === "sv")
-        ? "Förklaring: Börja med att skapa tydlighet om mål och läge. När du förstår vad som faktiskt ska uppnås kan du välja rätt åtgärd och följa upp enligt rutin."
-        : "Explanation: Start by clarifying the goal and the situation. Once you know what needs to be achieved, you can choose the right action and follow up properly.";
+        ? "Förklaring: Börja med att skapa tydlighet om mål och läge. När ni har samma bild kan ni välja rätt åtgärd och följa upp enligt rutin och ansvar."
+        : "Explanation: Start by clarifying goal and situation. Once aligned, you can choose the right action and follow up according to routine and responsibility.";
     }
   }
 
   // Final ruleset-sanity (fail-soft)
-  if (qq.forbidContextPlaceholderText) {
+  if (qq && qq.forbidContextPlaceholderText) {
     if (containsForbiddenPhrase(text, qq.forbiddenPhrases)) {
       text = (language === "sv")
-        ? `Vad är ett bra första steg i ${courseLabel.area} ${scope}?`
-        : `What is a good first step in ${courseLabel.area} ${scope}?`;
+        ? `I ${area} ${sc.place}, vilket val ger tydligast start?`
+        : `In ${area} ${sc.place}, which choice gives the clearest start?`;
     }
   }
 
@@ -1143,7 +1192,6 @@ function normalizeQuestionType(v) {
     .replace(/ä/g, "a")
     .replace(/ö/g, "o");
 
-  if (s === "auto") return "auto";
   if (s === "mcq_single" || s === "single" || s === "mcq") return "mcq_single";
   if (s === "mcq_multi" || s === "multi") return "mcq_multi";
   if (s === "tf" || s === "truefalse" || s === "true_false" || s === "sant_falskt" || s === "true_false") return "tf";
