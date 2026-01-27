@@ -1,9 +1,16 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.5 QUALITY)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.6 QUALITY+V1-CONTRACT)
 // FIL: worker/index.js
-// Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ begärs.
+//
+// Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ/TF begärs.
 //      FIX: Undvik “samma frågor”, förbjud placeholder-fraser, kräver förklaring,
 //           och gör batchen unik (dedupe) + bättre variation.
+//
+// PATCH v1.5.6 (V1-CONTRACT + CORS + REQUESTID):
+// - Stödjer ai-rules/v1 ruleset-payload (contentType/context/output/formatRef + requestId från UI).
+// - Returnerar även `items[]` (envelope-friendly) utan att bryta befintligt UI.
+// - Lägger X-Request-Id + X-HR-Request-Id i svar (SDK kan plocka upp).
+// - CORS headers tillåter även X-HR-SDK / X-HR-Client (case-variant).
 //
 // PATCH v1.5.5 (HYG + VARIATION):
 // - P0: Slutar injicera courseLabel.area (t.ex. "ISO 9001") i question/options/explanation/feedback.
@@ -37,9 +44,6 @@
 // - POST /v1/ai/training   (alias)
 // - POST /v1/ai/document   (alias)
 // - OPTIONS *              (CORS preflight)
-//
-// PATCH (CORS FIX):
-// - Tillåt UI headers: X-Hr-Sdk + X-Hr-Client i Access-Control-Allow-Headers
 // ============================================================
 
 import INDEX from "../ai-rules/index.json";
@@ -54,19 +58,19 @@ import QUESTION_FORMAT from "../ai-rules/v1/formats/question.json";
 import TASK_FORMAT from "../ai-rules/v1/formats/task.json";
 import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json";
 
-// NYTT (Steg 1): ruleset för kvalitet
+// ruleset för kvalitet
 // LÄGG DEN HÄR: ai-rules/v1/rulesets/training_prompt.json
 import TRAINING_PROMPT from "../ai-rules/v1/rulesets/training_prompt.json";
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5.5";
+const VERSION = "1.5.6";
 
 // ------------------------------
 // Fetch
 // ------------------------------
 export default {
   async fetch(request, env) {
-    const requestId = makeRequestId();
+    let requestId = makeRequestId();
     const url = new URL(request.url);
 
     const allowedOrigin = safeStr(env.ALLOWED_ORIGIN).trim();
@@ -78,8 +82,9 @@ export default {
       console.error("ERR", requestId, "ENV_MISSING");
       return okJSON(
         500,
-        { ok: false, requestId, error: { code: "ENV_MISSING", message: "ALLOWED_ORIGIN saknas i env" } },
-        { "Content-Type": "application/json; charset=utf-8" }
+        { ok: false, requestId, errorCode: "ENV_MISSING", error: { code: "ENV_MISSING", message: "ALLOWED_ORIGIN saknas i env" } },
+        { "Content-Type": "application/json; charset=utf-8" },
+        requestId
       );
     }
 
@@ -113,7 +118,8 @@ export default {
             rulesets: { ok: true, base: "ai-rules" }
           }
         },
-        corsHeaders
+        corsHeaders,
+        requestId
       );
     }
 
@@ -132,10 +138,11 @@ export default {
             version: VERSION,
             build: "wrangler",
             rulesBase: "ai-rules",
-            outputContract: "training-blocks@v1 + ui-mcq@v1.2 (explanation+uniq+semantic-facit)"
+            outputContract: "training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6"
           }
         },
-        corsHeaders
+        corsHeaders,
+        requestId
       );
     }
 
@@ -206,26 +213,28 @@ export default {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "Body måste vara ett JSON-objekt", corsHeaders, true);
     }
 
-    // ---------- INPUT (backward tolerant) ----------
+    // ---------- requestId (UI-styrt om det finns) ----------
+    const incomingReqId = safeStr(body.requestId).trim();
+    if (incomingReqId) requestId = incomingReqId;
+
+    // ---------- INPUT (v1 ruleset eller legacy tolerant) ----------
+    const v1 = parseV1RulesetPayload(body);
+    const isV1 = !!v1;
+
     let modeRaw = safeStr(body.mode || body.type).trim();
     if (path === "/v1/ai/training") modeRaw = "training";
     if (path === "/v1/ai/document") modeRaw = "document";
-    const mode = normalizeMode(modeRaw);
 
-    const countRaw = body.count ?? body.n;
-
-    // language: stöd för sv, sv-SE, sv_SE, en, en-US → normaliseras till "sv"|"en"
-    const language = normalizeLanguage(body.language || "sv");
-
-    // context: UI kan skicka string ELLER object {text:"..."} → normalisera
-    const context = normalizeContextText(body.context ?? body.prompt ?? "");
-
-    const format = safeStr(body.format || "").trim();
-    const subjectId = safeStr(body.subjectId || body.subject || "").trim();
-    const difficultyHint = body.difficultyHint ?? body.difficulty;
+    let mode = normalizeMode(modeRaw);
+    let countRaw = body.count ?? body.n;
+    let languageRaw = body.language || "sv";
+    let contextText = normalizeContextText(body.context ?? body.prompt ?? "");
+    let format = safeStr(body.format || "").trim();
+    let subjectId = safeStr(body.subjectId || body.subject || "").trim();
+    let difficultyHint = body.difficultyHint ?? body.difficulty;
 
     // UI: frågetyp (tolerant mot olika fältnamn)
-    const questionType = normalizeQuestionType(
+    let questionType = normalizeQuestionType(
       body.questionType ??
       body.qType ??
       body.questionMode ??
@@ -239,12 +248,32 @@ export default {
       ""
     );
 
+    // subjectObj legacy
     const subjectObj = isPlainObject(body.subjectObj)
       ? body.subjectObj
       : (isPlainObject(body.subject) ? body.subject : null);
 
     // NOTE: ofta saknas subjectObj → då infererar vi från context.text
-    const course = normalizeCourseSubject(subjectObj);
+    let course = normalizeCourseSubject(subjectObj);
+
+    // ---- V1 override (ai-rules/v1) ----
+    if (isV1) {
+      // contentType -> mode/format
+      // questions => format "question" + questionType
+      // training_blocks => "training-blocks"
+      // document => "document"
+      mode = v1.mode;
+      format = v1.format;
+      countRaw = v1.count;
+      languageRaw = v1.language;
+      questionType = v1.questionType;
+      difficultyHint = v1.difficulty;
+      course = v1.course;
+      contextText = v1.contextText;
+    }
+
+    // language: stöd för sv, sv-SE, sv_SE, en, en-US → normaliseras till "sv"|"en"
+    const language = normalizeLanguage(languageRaw);
 
     // ---------- VALIDATION ----------
     if (!(mode === "training" || mode === "document")) {
@@ -260,7 +289,7 @@ export default {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "language måste vara sv eller en", corsHeaders, true);
     }
 
-    if (context.length > 4000) {
+    if (contextText.length > 4000) {
       return errorJSON(400, requestId, "VALIDATION_ERROR", "context max 4000 tecken", corsHeaders, true);
     }
 
@@ -277,7 +306,7 @@ export default {
         mode,
         count,
         language,
-        context,
+        context: contextText,
         aiEnabled,
         format,
         subjectId,
@@ -286,7 +315,6 @@ export default {
         questionType
       });
     } catch (e) {
-      // Fail-closed utan payload
       console.error("ERR", requestId, "UPSTREAM_ERROR");
       return errorJSON(502, requestId, "UPSTREAM_ERROR", "AI-tjänsten svarade inte", corsHeaders, false);
     }
@@ -295,25 +323,30 @@ export default {
     let topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
 
     // Om UI ber om MCQ/TF: returnera UI-frågeblock i exakt UI-format
+    let items = topBlocks;
     if (isUiQuestionRequest(questionType)) {
       const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, language);
       if (!mapped.ok) {
         return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
       }
       topBlocks = mapped.blocks;
+      items = topBlocks;
     }
 
+    // V1-envelope (utan att bryta legacy): inkludera `items`
     return okJSON(
       200,
       {
         ok: true,
         requestId,
+        items, // v1-friendly
         data: { training },
         training,
         blocks: topBlocks,
         mode: training.mode
       },
-      corsHeaders
+      corsHeaders,
+      requestId
     );
   }
 };
@@ -327,17 +360,19 @@ function buildCorsHeaders(origin, allowedOrigin) {
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-    // CORS FIX: UI skickar X-Hr-Sdk + X-Hr-Client (preflight kräver att de är tillåtna)
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client",
+    // CORS FIX: tillåt både varianter (preflight kräver match)
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
     "Vary": "Origin"
   };
 }
 
-function okJSON(status, payload, corsHeaders) {
+function okJSON(status, payload, corsHeaders, requestId) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
+      "X-Request-Id": safeStr(requestId || ""),
+      "X-HR-Request-Id": safeStr(requestId || ""),
       ...(corsHeaders || {})
     }
   });
@@ -345,7 +380,12 @@ function okJSON(status, payload, corsHeaders) {
 
 function errorJSON(status, requestId, code, message, corsHeaders, logIt) {
   if (logIt) console.error("ERR", requestId, code);
-  return okJSON(status, { ok: false, requestId, error: { code: safeStr(code), message: safeStr(message) } }, corsHeaders);
+  return okJSON(
+    status,
+    { ok: false, requestId, errorCode: safeStr(code), error: { code: safeStr(code), message: safeStr(message) } },
+    corsHeaders,
+    requestId
+  );
 }
 
 function extractBearerToken(authHeader) {
@@ -379,12 +419,28 @@ function normalizeContextText(v) {
   // UI kan skicka:
   // - string
   // - object { text: "..." }
-  // - object { contextText: "..." } (framtida tolerant)
-  // Fail-soft: annars tom sträng (stateless, säker)
+  // - object { contextText: "..." }
+  // - v1 object { moduleId, areaId, ... } (då bygger vi en kontrollerad text från labels)
   if (typeof v === "string") return v.trim();
   if (isPlainObject(v)) {
     const t = safeStr(v.text || v.contextText || v.value || "").trim();
-    return t;
+    if (t) return t;
+
+    // v1 context object (labels)
+    const ml = safeStr(v.moduleLabel || "").trim();
+    const al = safeStr(v.areaLabel || "").trim();
+    const cl = safeStr(v.chapterLabel || "").trim();
+    const st = safeStr(v.step || "").trim();
+    const df = safeStr(v.difficulty || "").trim();
+
+    // bygg “harmlös” kontext som kan hjälpa workplace-infer utan att tvingas in i Q-fält
+    const parts = [];
+    if (ml) parts.push(`Modul: ${ml}`);
+    if (al) parts.push(`Område: ${al}`);
+    if (cl) parts.push(`Kapitel: ${cl}`);
+    if (st) parts.push(`Steg: ${st}`);
+    if (df) parts.push(`Svårighet: ${df}`);
+    return parts.join(" • ");
   }
   return safeStr(v).trim();
 }
@@ -458,6 +514,72 @@ function pickDifficultyLabel(difficultyHint, seedN) {
   }
 
   return "normal";
+}
+
+// ------------------------------------------------------------
+// V1 ruleset payload (ai-rules/v1)
+// ------------------------------------------------------------
+function parseV1RulesetPayload(body) {
+  // Minimal detection: contentType + output.formatRef
+  const contentType = safeStr(body && body.contentType).trim();
+  const out = body && isPlainObject(body.output) ? body.output : null;
+  const formatRef = safeStr(out && out.formatRef).trim();
+
+  if (!contentType || !formatRef) return null;
+
+  const count = body.count ?? 4;
+  const language = body.language || "sv-SE";
+  const ctx = (body && isPlainObject(body.context)) ? body.context : {};
+
+  const step = safeStr(ctx.step || "").trim();
+  const difficulty = safeStr(ctx.difficulty || "").trim();
+
+  const course = {
+    module: safeStr(ctx.moduleLabel || "").trim(),
+    area: safeStr(ctx.areaLabel || "").trim(),
+    chapter: safeStr(ctx.chapterLabel || "").trim(),
+    step: step || "1",
+    moduleId: safeStr(ctx.moduleId || "").trim(),
+    areaId: safeStr(ctx.areaId || "").trim(),
+    chapterId: safeStr(ctx.chapterId || "").trim(),
+    stepId: safeStr(ctx.step || ctx.stepId || "").trim()
+  };
+
+  // contentType -> mode/format
+  let mode = "training";
+  let format = "training-blocks";
+
+  if (contentType === "document") {
+    mode = "document";
+    format = "document";
+  } else if (contentType === "questions") {
+    mode = "training";
+    format = "question";
+  } else if (contentType === "training_blocks") {
+    mode = "training";
+    format = "training-blocks";
+  } else {
+    // okänt => fail-closed via validation senare
+    mode = "";
+    format = "";
+  }
+
+  // questionType (gäller questions)
+  const questionType = normalizeQuestionType(safeStr(out && out.questionType).trim() || "auto");
+
+  // contextText: bygg från labels (workplace-infer kan använda om labels råkar innehålla t.ex. "kök")
+  const contextText = normalizeContextText(ctx);
+
+  return {
+    mode,
+    format,
+    count,
+    language,
+    questionType,
+    difficulty,
+    course,
+    contextText
+  };
 }
 
 // ------------------------------------------------------------
@@ -627,10 +749,7 @@ function stripDomainWordsFromQuestion(s, language) {
   const txt = safeStr(s);
   if (!txt) return txt;
 
-  // svenska ord + plural/böjning light
   const reSv = /\b(steg|steget|modul|modulen|kapitel|kapitlet|kurs|kursen|utbildning|utbildningen)\b/gi;
-
-  // engelska motsvarigheter (för robusthet om UI kör en)
   const reEn = /\b(step|module|chapter|course|training)\b/gi;
 
   const out = txt.replace(reSv, "").replace(reEn, "").replace(/\s{2,}/g, " ").trim();
@@ -686,7 +805,6 @@ function normKey(s) {
 // ============================================================
 function getStepProfile(step) {
   const s = safeStr(step).trim();
-  // 1) igenkänning  2) roller/rutin  3) tillämpning  4) risk  5) avvikelse/uppföljning
   if (s === "1") return ["definition_or_concept", "routine_start", "scenario_application"];
   if (s === "2") return ["roles_and_responsibility", "routine_start", "scenario_application"];
   if (s === "3") return ["scenario_application", "routine_start", "roles_and_responsibility"];
@@ -701,7 +819,6 @@ function getStepProfile(step) {
 function inferWorkplaceFromContext(contextText, language) {
   const t = safeStr(contextText).toLowerCase();
 
-  // SV-keywords
   if (t.includes("kök") || t.includes("restaurang") || t.includes("servering")) return (language === "sv") ? "i köket" : "in the kitchen";
   if (t.includes("leverans") || t.includes("mottagning") || t.includes("varumottag")) return (language === "sv") ? "vid varumottagningen" : "at receiving";
   if (t.includes("internkontroll") || t.includes("revision") || t.includes("audit")) return (language === "sv") ? "i en internkontroll" : "in an internal check";
@@ -743,12 +860,11 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
 
   const blocks = [];
 
-  // Batch-state (stateless per request, men hjälper unikhet inom batchen)
+  // Batch-state (unikhet inom batchen)
   const batch = {
     seenStems: [],
     seenDims: new Set(),
-    seenBestAnswers: [],
-    seenCorrectSlots: new Set()
+    seenBestAnswers: []
   };
 
   for (let i = 0; i < count; i++) {
@@ -796,7 +912,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.5.5"
+      source: "mock-v1.5.6"
     }
   };
 }
@@ -1011,12 +1127,17 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
 // QUESTION (choice-format, ruleset-quality)
 // ------------------------------
 function makeQuestion({ n, i, count, language, context, courseLabel, difficulty, subjId, questionType, bundle, qq, batch }) {
-  const qt = normalizeQuestionType(questionType);
+  const qt0 = normalizeQuestionType(questionType);
+  const qt = (qt0 === "auto") ? "mcq_single" : qt0;
+
   const isTf = (qt === "tf");
   const isMulti = (qt === "mcq_multi");
   const isMcq = (qt === "mcq_single" || qt === "mcq_multi");
 
-  const choiceCount = isTf ? 2 : (isMcq ? 5 : (3 + (n % 3)));
+  const minOpt = qq && qq.mcq ? qq.mcq.minOptions : 4;
+  const maxOpt = qq && qq.mcq ? qq.mcq.maxOptions : 6;
+
+  const choiceCount = isTf ? 2 : (isMcq ? clampInt(5, minOpt, maxOpt) : 4);
 
   const dimsDefault = [
     "definition_or_concept",
@@ -1071,8 +1192,6 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   ];
   const event = (language === "sv" ? eventsSv : eventsEn)[(n + i) % 5];
 
-  // NOTE (P0): INGA area/ISO-ord i question/options/explanation/feedback
-  // NOTE (P0): INGA "steg/steget/modul/kapitel/kurs/utbildning" i Q-fält
   function stemForDimension() {
     if (language === "sv") {
       if (dim === "definition_or_concept") return `Vilket alternativ beskriver bäst syftet med ett tydligt arbetssätt när ni behöver samsyn ${place}?`;
@@ -1108,7 +1227,6 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   const choices = [];
 
   if (isTf) {
-    // deterministiskt: ibland sant, ibland falskt
     const tfIsTrue = ((n ^ hash32(`${place}|${i}`)) & 1) === 0;
     choices.push({ id: "c1", text: (language === "sv") ? "Sant" : "True" });
     choices.push({ id: "c2", text: (language === "sv") ? "Falskt" : "False" });
@@ -1223,6 +1341,14 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     tags: [subjId, "scenario", dim, placeKey(place)],
     bestAnswerText
   };
+}
+
+function clampInt(v, min, max) {
+  const n = Math.trunc(Number(v));
+  const a = Math.trunc(Number(min));
+  const b = Math.trunc(Number(max));
+  if (!Number.isFinite(n)) return a;
+  return Math.max(a, Math.min(b, n));
 }
 
 function placeKey(place) {
@@ -1465,9 +1591,10 @@ function normalizeQuestionType(v) {
     .replace(/ä/g, "a")
     .replace(/ö/g, "o");
 
+  if (s === "auto") return "auto";
   if (s === "mcq_single" || s === "single" || s === "mcq") return "mcq_single";
   if (s === "mcq_multi" || s === "multi") return "mcq_multi";
-  if (s === "tf" || s === "truefalse" || s === "true_false" || s === "sant_falskt" || s === "true_false") return "tf";
+  if (s === "tf" || s === "truefalse" || s === "true_false" || s === "sant_falskt") return "tf";
   if (s === "short" || s === "short_answer" || s === "kort") return "short";
 
   if (s.includes("mcq") && s.includes("multi")) return "mcq_multi";
@@ -1518,7 +1645,6 @@ function extractQuestionFromBlock(block) {
 }
 
 function mapChoiceQuestionToUi(q, questionType, language) {
-  // P0: domänord bort från question (sista säkring)
   const question = stripDomainWordsFromQuestion(safeStr(q.text).trim(), language);
 
   const choices = Array.isArray(q.choices) ? q.choices : [];
@@ -1531,9 +1657,7 @@ function mapChoiceQuestionToUi(q, questionType, language) {
   }
   if (options.length < 2) return { ok: false };
 
-  // P0: courseLabel.area ska inte finnas i explanation — här kan vi bara leverera rationale som är “verklighetsspråk”
   let explanation = safeStr(q.rationale || q.explanation || q.feedback || "").trim();
-  // P0: domänord bort även här (för säkerhet)
   explanation = stripDomainWordsFromQuestion(explanation, language);
 
   if (questionType === "tf") {
