@@ -13,10 +13,11 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.2.6-PP-SC-010-07E (AUTOPATCH):
-- P0 FIX: Skicka subjectObj (module/area/chapter/step) separat till worker så modul/steg faktiskt påverkar output (slutar falla tillbaka till "Utbildning").
-- P0 FIX: Skicka context som STRÄNG (inte objekt) för att undvika "[object Object]" och få stabil, användbar prompt-ram (utan goals).
-- P0 FIX: Skicka difficultyHint = intro/normal/advanced (från goalsLevel) för att påverka variation.
+PATCH v1.2.7-PP-SC-010-07F (AUTOPATCH):
+- P0 FIX: Catalog URL: lägger ../../ai-rules/v1/modules.json först (så modules.json laddas från trainings-sidan).
+- P0 FIX: Fail-closed verifiering av question/MCQ skannar även raw.items/raw.data.items (inte bara blocks[]).
+- P0 FIX: SDK init kan nu retry:a: cachear inte init-promise vid BASE_URL_MISSING, och resetar init om baseUrl ändras.
+- P1: Bygger dom-fallback en gång och återanvänder helper-funktioner.
 - LÅS: goals skickas alltid som "" till AI (oförändrat).
 ============================================================ */
 (function () {
@@ -26,7 +27,7 @@ PATCH v1.2.6-PP-SC-010-07E (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.2.6-PP-SC-010-07E";
+  page.__VERSION = "v1.2.7-PP-SC-010-07F";
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -121,12 +122,14 @@ PATCH v1.2.6-PP-SC-010-07E (AUTOPATCH):
     return D;
   }
 
-  if (!dom) dom = (NS.dom = buildDomFallback());
-  if (dom && typeof dom.disable !== "function") dom.disable = buildDomFallback().disable;
-  if (dom && typeof dom.on !== "function") dom.on = buildDomFallback().on;
-  if (dom && typeof dom.setText !== "function") dom.setText = buildDomFallback().setText;
-  if (dom && typeof dom.show !== "function") dom.show = buildDomFallback().show;
-  if (dom && typeof dom.hide !== "function") dom.hide = buildDomFallback().hide;
+  // P1: bygg fallback EN gång och återanvänd helpers
+  const _fallbackDom = buildDomFallback();
+  if (!dom) dom = (NS.dom = _fallbackDom);
+  if (dom && typeof dom.disable !== "function") dom.disable = _fallbackDom.disable;
+  if (dom && typeof dom.on !== "function") dom.on = _fallbackDom.on;
+  if (dom && typeof dom.setText !== "function") dom.setText = _fallbackDom.setText;
+  if (dom && typeof dom.show !== "function") dom.show = _fallbackDom.show;
+  if (dom && typeof dom.hide !== "function") dom.hide = _fallbackDom.hide;
 
   // ------------------------------------------------------------
   // State
@@ -421,6 +424,9 @@ PATCH v1.2.6-PP-SC-010-07E (AUTOPATCH):
   page.__SDK_INIT_PROMISE = page.__SDK_INIT_PROMISE || null;
   page.__SDK_INIT_OK = page.__SDK_INIT_OK || false;
 
+  // P0: spåra vilken baseUrl init gjordes med (runtime-only)
+  page.__SDK_INIT_BASE_URL = page.__SDK_INIT_BASE_URL || "";
+
   function getWorkerBaseUrl() {
     const u = (window.__HR_WORKER_BASE_URL != null) ? String(window.__HR_WORKER_BASE_URL) : "";
     return normStr(u);
@@ -430,14 +436,21 @@ PATCH v1.2.6-PP-SC-010-07E (AUTOPATCH):
     if (!window.HRWorkerSDK) return { ok: false, error: { code: "SDK_MISSING", message: "HRWorkerSDK saknas" } };
     if (typeof window.HRWorkerSDK.init !== "function") return { ok: false, error: { code: "SDK_NO_INIT", message: "HRWorkerSDK.init saknas" } };
 
-    if (page.__SDK_INIT_OK === true) return { ok: true, data: { already: true } };
-    if (page.__SDK_INIT_PROMISE) return page.__SDK_INIT_PROMISE;
-
     const baseUrl = getWorkerBaseUrl();
     if (!baseUrl) {
-      page.__SDK_INIT_PROMISE = Promise.resolve({ ok: false, error: { code: "BASE_URL_MISSING", message: "Worker URL saknas (window.__HR_WORKER_BASE_URL)" } });
-      return page.__SDK_INIT_PROMISE;
+      // P0: cachea INTE ett "saknas"-resultat, så det kan retry:a när banner/konfig sätts.
+      return { ok: false, error: { code: "BASE_URL_MISSING", message: "Worker URL saknas (window.__HR_WORKER_BASE_URL)" } };
     }
+
+    // P0: om baseUrl ändrats sedan sist, reset init (runtime-only)
+    if (page.__SDK_INIT_BASE_URL && page.__SDK_INIT_BASE_URL !== baseUrl) {
+      page.__SDK_INIT_PROMISE = null;
+      page.__SDK_INIT_OK = false;
+    }
+    page.__SDK_INIT_BASE_URL = baseUrl;
+
+    if (page.__SDK_INIT_OK === true) return { ok: true, data: { already: true } };
+    if (page.__SDK_INIT_PROMISE) return page.__SDK_INIT_PROMISE;
 
     page.__SDK_INIT_PROMISE = (async function () {
       try {
@@ -456,7 +469,9 @@ PATCH v1.2.6-PP-SC-010-07E (AUTOPATCH):
   // ------------------------------------------------------------
   // Catalog loader (ai-rules/v1/modules.json)
   // ------------------------------------------------------------
+  // P0: rätt relativväg från UI/pages/trainings/... till UI/ai-rules/...
   const CATALOG_URLS = [
+    "../../ai-rules/v1/modules.json",
     "../ai-rules/v1/modules.json",
     "./ai-rules/v1/modules.json"
   ];
@@ -1358,6 +1373,9 @@ PATCH v1.2.6-PP-SC-010-07E (AUTOPATCH):
       return { items: [], source: "raw.data.blocks(unknown-shape)" };
     }
 
+    const di = raw && raw.data && Array.isArray(raw.data.items) ? raw.data.items : [];
+    if (di.length) return { items: di, source: "raw.data.items" };
+
     return { items: [], source: "none" };
   }
 
@@ -1407,36 +1425,51 @@ PATCH v1.2.6-PP-SC-010-07E (AUTOPATCH):
     } catch (_) { return false; }
   }
 
+  // P0: skanna både blocks[] och items[] (för att inte stoppa korrekta svar i annan shape)
   function rawContainsAnyQuestion(raw) {
-    const blocks = getSdkBlocks(raw) || [];
-    if (!blocks.length) return false;
+    try {
+      const sdkBlocks = getSdkBlocks(raw) || [];
+      const items = [];
 
-    for (const b of blocks) {
-      if (!b) continue;
+      if (Array.isArray(raw && raw.items)) items.push.apply(items, raw.items);
+      if (raw && raw.data && Array.isArray(raw.data.items)) items.push.apply(items, raw.data.items);
 
-      if (looksLikeQuestionItem(b)) return true;
-
-      if (b && typeof b === "object" && Array.isArray(b.items)) {
-        for (const it of b.items) if (looksLikeQuestionItem(it)) return true;
+      if (sdkBlocks.length) {
+        for (const b of sdkBlocks) {
+          if (!b) continue;
+          items.push(b);
+          if (b && typeof b === "object" && Array.isArray(b.items)) items.push.apply(items, b.items);
+        }
       }
+
+      for (const it of items) if (looksLikeQuestionItem(it)) return true;
+      return false;
+    } catch (_) {
+      return false;
     }
-    return false;
   }
 
   function rawContainsAnyMcq(raw) {
-    const blocks = getSdkBlocks(raw) || [];
-    if (!blocks.length) return false;
+    try {
+      const sdkBlocks = getSdkBlocks(raw) || [];
+      const items = [];
 
-    for (const b of blocks) {
-      if (!b) continue;
+      if (Array.isArray(raw && raw.items)) items.push.apply(items, raw.items);
+      if (raw && raw.data && Array.isArray(raw.data.items)) items.push.apply(items, raw.data.items);
 
-      if (looksLikeMcqQuestionItem(b)) return true;
-
-      if (b && typeof b === "object" && Array.isArray(b.items)) {
-        for (const it of b.items) if (looksLikeMcqQuestionItem(it)) return true;
+      if (sdkBlocks.length) {
+        for (const b of sdkBlocks) {
+          if (!b) continue;
+          items.push(b);
+          if (b && typeof b === "object" && Array.isArray(b.items)) items.push.apply(items, b.items);
+        }
       }
+
+      for (const it of items) if (looksLikeMcqQuestionItem(it)) return true;
+      return false;
+    } catch (_) {
+      return false;
     }
-    return false;
   }
 
   // P0: Skapa UI-block från sdkBlocks oavsett shape
