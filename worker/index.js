@@ -54,7 +54,7 @@ import QUESTION_FORMAT from "../ai-rules/v1/formats/question.json";
 import TASK_FORMAT from "../ai-rules/v1/formats/task.json";
 import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json";
 
-// NYTT (Steg 1): ruleset för kvalitet (din fil)
+// NYTT (Steg 1): ruleset för kvalitet
 // LÄGG DEN HÄR: ai-rules/v1/rulesets/training_prompt.json
 import TRAINING_PROMPT from "../ai-rules/v1/rulesets/training_prompt.json";
 
@@ -575,37 +575,13 @@ function getRulesBundle(subjectId) {
 }
 
 function getQuestionQuality(bundle) {
-  // FAIL-CLOSED DEFAULTS (v1.5.5): även om ruleset saknas ska vi:
-  // - kräva förklaring
-  // - förbjuda placeholder/kontext-artefakter
-  // - ha en default-lista förbjudna fraser
   const qp = bundle && bundle.rulesets && bundle.rulesets.training_prompt;
   const q = (qp && qp.questionQuality) ? qp.questionQuality : null;
 
-  const defaultForbidden = [
-    "(kontext dolt)",
-    "[object object]",
-    "lorem",
-    "placeholder",
-    "fyll i",
-    "exempeltext",
-    "todo",
-    "tbd",
-    "n/a"
-  ];
-
   const forbiddenPhrases = safeArr(q && q.general && q.general.forbiddenPhrases).filter(Boolean);
-  const mergedForbidden = (forbiddenPhrases.length ? forbiddenPhrases : defaultForbidden);
-
-  const forbidContextPlaceholderText = (q && q.general && typeof q.general.forbidContextPlaceholderText === "boolean")
-    ? !!q.general.forbidContextPlaceholderText
-    : true;
-
-  const requireExplanation = (q && q.general && typeof q.general.requireExplanation === "boolean")
-    ? !!q.general.requireExplanation
-    : true;
-
-  const explanationMinChars = (Number(q && q.general && q.general.explanationMinChars) || 60);
+  const forbidContextPlaceholderText = !!(q && q.general && q.general.forbidContextPlaceholderText);
+  const requireExplanation = !!(q && q.general && q.general.requireExplanation);
+  const explanationMinChars = Number(q && q.general && q.general.explanationMinChars) || 40;
 
   const nearDupThreshold = Number(q && q.general && q.general.batchUniqueness && q.general.batchUniqueness.forbidNearDuplicateThreshold);
   const forbidNearDuplicateThreshold = Number.isFinite(nearDupThreshold) ? nearDupThreshold : 0.85;
@@ -618,7 +594,7 @@ function getQuestionQuality(bundle) {
 
   return {
     forbidContextPlaceholderText,
-    forbiddenPhrases: mergedForbidden,
+    forbiddenPhrases,
     requireExplanation,
     explanationMinChars,
     forbidNearDuplicateThreshold,
@@ -644,6 +620,24 @@ function stripAnyBracketedContext(s) {
     .replace(/\[\s*object\s+object\s*\]/gi, "")
     .replace(/\s{2,}/g, " ")
     .trim();
+}
+
+// P0: ta bort domänord i själva Q-fältet (och som säkerhet även i rationale/options vid mapping)
+function stripDomainWordsFromQuestion(s, language) {
+  const txt = safeStr(s);
+  if (!txt) return txt;
+
+  // svenska ord + plural/böjning light
+  const reSv = /\b(steg|steget|modul|modulen|kapitel|kapitlet|kurs|kursen|utbildning|utbildningen)\b/gi;
+
+  // engelska motsvarigheter (för robusthet om UI kör en)
+  const reEn = /\b(step|module|chapter|course|training)\b/gi;
+
+  const out = txt.replace(reSv, "").replace(reEn, "").replace(/\s{2,}/g, " ").trim();
+  if (!out) {
+    return (language === "sv") ? "Vilket val är bäst i situationen?" : "Which choice is best in this situation?";
+  }
+  return out;
 }
 
 function sanitizeContextForDisplay(contextText, qq) {
@@ -685,118 +679,6 @@ function normKey(s) {
     .replace(/[^\p{L}\p{N}]+/gu, " ")
     .replace(/\s{2,}/g, " ")
     .trim();
-}
-
-function escapeRegExp(s) {
-  return safeStr(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function clampInt(n, min, max) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return min;
-  return Math.max(min, Math.min(max, Math.trunc(x)));
-}
-
-function removeWordTokens(text, words) {
-  let out = safeStr(text);
-  const list = safeArr(words).map(w => safeStr(w).trim()).filter(Boolean);
-  if (!out || list.length === 0) return out;
-
-  // Unicode-aware "word" removal without relying on \b.
-  // Replace occurrences where the token is separated by non-letter/number or edges.
-  for (const w of list) {
-    const re = new RegExp(`(^|[^\\p{L}\\p{N}])(${escapeRegExp(w)})(?=[^\\p{L}\\p{N}]|$)`, "giu");
-    out = out.replace(re, "$1");
-  }
-
-  out = out.replace(/\s{2,}/g, " ").trim();
-  return out;
-}
-
-function removeAreaInjection(text, courseLabel) {
-  const out0 = safeStr(text);
-  const area = safeStr(courseLabel && courseLabel.area).trim();
-  if (!out0 || !area) return out0;
-
-  // Remove exact area string occurrences (case-insens).
-  const re = new RegExp(escapeRegExp(area), "giu");
-  const out = out0.replace(re, "").replace(/\s{2,}/g, " ").trim();
-
-  return out;
-}
-
-function sanitizeQuestionPayload(q, courseLabel, qq, language, place) {
-  // P0: remove area injection + domain words from question/options/explanation/feedback.
-  // Also fail-closed against placeholder phrases.
-  const forbiddenDomainWords = ["steg", "steget", "modul", "kapitel", "kurs", "utbildning"];
-
-  function clean(s) {
-    let t = safeStr(s).trim();
-    if (!t) return "";
-
-    t = removeAreaInjection(t, courseLabel);
-    t = removeWordTokens(t, forbiddenDomainWords);
-    t = stripAnyBracketedContext(t);
-
-    // Avoid leftover double punctuation / spaces
-    t = t.replace(/\s{2,}/g, " ").trim();
-    t = t.replace(/\s+([?.!,;:])/g, "$1").trim();
-    t = t.replace(/([?.!,;:]){2,}/g, "$1").trim();
-
-    // Fail-closed: remove forbidden phrases by nuking to empty (caller will fallback)
-    if (qq && qq.forbidContextPlaceholderText) {
-      if (containsForbiddenPhrase(t, qq.forbiddenPhrases)) return "";
-      if (/\(kontext\s+dolt\)/i.test(t)) return "";
-      if (/\[object\s+object\]/i.test(t)) return "";
-    }
-
-    return t;
-  }
-
-  const out = { ...q };
-
-  out.text = clean(out.text);
-
-  if (Array.isArray(out.choices)) {
-    out.choices = out.choices
-      .map(c => {
-        const cc = isPlainObject(c) ? { ...c } : { id: "", text: "" };
-        cc.text = clean(cc.text);
-        return cc;
-      })
-      .filter(c => safeStr(c.text).trim().length > 0);
-  }
-
-  out.rationale = clean(out.rationale || out.explanation || out.feedback || "");
-
-  // If sanitization collapsed critical fields: fail-soft with safe minimal text
-  if (!safeStr(out.text).trim()) {
-    out.text = (language === "sv")
-      ? `Vilket val är mest korrekt ${safeStr(place).trim() || ""}?`.trim()
-      : `Which choice is most correct ${safeStr(place).trim() || ""}?`.trim();
-  }
-
-  // Ensure we still have choices for non-TF MCQ
-  if (Array.isArray(out.choices) && out.choices.length > 0) {
-    // Keep ids stable-ish if any were removed
-    for (let i = 0; i < out.choices.length; i++) {
-      if (!safeStr(out.choices[i].id).trim()) out.choices[i].id = `c${i + 1}`;
-    }
-  }
-
-  // Enforce minimum explanation length if required
-  if (qq && qq.requireExplanation) {
-    const minLen = Number(qq.explanationMinChars) || 60;
-    const r = safeStr(out.rationale).trim();
-    if (r.length < minLen) {
-      const bestText = safeStr(out.bestAnswerText || "").trim();
-      out.rationale = (language === "sv")
-        ? `Förklaring: Det bästa valet är "${bestText || "det mest tydliga alternativet"}" eftersom det skapar klarhet ${place} innan ni går vidare med åtgärd och uppföljning.`
-        : `Explanation: The best choice is "${bestText || "the clearest option"}" because it creates clarity ${place} before you act and follow up.`;
-    }
-  }
-
-  return out;
 }
 
 // ============================================================
@@ -1016,7 +898,7 @@ function genDocumentBlock({ i, language, context, courseLabel, difficulty, subjI
 function genQuestionBlock({ i, n, count, language, context, courseLabel, difficulty, subjId, bundle, questionType, qq, batch }) {
   const blockId = `b_q_${i + 1}_${subjId}`.slice(0, 32);
 
-  // Titel får gärna bära område (UI runtom), men själva question/options ska vara "verklighetsspråk"
+  // Titel får bära område (UI runtom), men själva question/options/explanation/feedback ska vara “verklighetsspråk”
   const title =
     language === "sv"
       ? `Kontrollfråga: ${courseLabel.area}`
@@ -1041,15 +923,44 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
       batch
     });
 
-    const stem = safeStr(cand && (cand.text || cand.question || "")).trim();
+    const stem0 = safeStr(cand && (cand.text || cand.question || "")).trim();
+    if (!stem0) continue;
+
+    // P0: domänord får inte finnas i Q-fältet
+    const stem = stripDomainWordsFromQuestion(stem0, language);
     if (!stem) continue;
 
-    if (qq && qq.forbidContextPlaceholderText) {
-      if (containsForbiddenPhrase(stem, qq.forbiddenPhrases)) continue;
-      if (/\(kontext\s+dolt\)/i.test(stem)) continue;
-      if (/\[object\s+object\]/i.test(stem)) continue;
+    // P0: stoppa även om området råkar läcka in i Q-fältet (extra guard)
+    if (courseLabel && courseLabel.area) {
+      const a = normKey(courseLabel.area);
+      if (a && normKey(stem).includes(a)) continue;
     }
 
+    // forbidden placeholders: applicera på stem + rationale + choices
+    if (qq && qq.forbidContextPlaceholderText) {
+      const rat = safeStr(cand && (cand.rationale || cand.explanation || cand.feedback || "")).trim();
+      if (containsForbiddenPhrase(stem, qq.forbiddenPhrases)) continue;
+      if (containsForbiddenPhrase(rat, qq.forbiddenPhrases)) continue;
+      if (/\(kontext\s+dolt\)/i.test(stem) || /\(kontext\s+dolt\)/i.test(rat)) continue;
+      if (/\[object\s+object\]/i.test(stem) || /\[object\s+object\]/i.test(rat)) continue;
+
+      const ch = Array.isArray(cand && cand.choices) ? cand.choices : [];
+      let badChoice = false;
+      for (const c of ch) {
+        const t = safeStr(c && c.text).trim();
+        if (!t) continue;
+        if (containsForbiddenPhrase(t, qq.forbiddenPhrases)) { badChoice = true; break; }
+        if (/\(kontext\s+dolt\)/i.test(t) || /\[object\s+object\]/i.test(t)) { badChoice = true; break; }
+        // P0 guard: ingen area-läcka i options
+        if (courseLabel && courseLabel.area) {
+          const a = normKey(courseLabel.area);
+          if (a && normKey(t).includes(a)) { badChoice = true; break; }
+        }
+      }
+      if (badChoice) continue;
+    }
+
+    // near-dup across batch
     let nearDup = false;
     for (const prev of (batch && Array.isArray(batch.seenStems) ? batch.seenStems : [])) {
       const sim = jaccardSimilarity(prev, stem);
@@ -1071,6 +982,10 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
     }
 
     if (batch && Array.isArray(batch.seenStems)) batch.seenStems.push(stem);
+
+    // Skriv tillbaka sanerad Q-text (P0)
+    cand.text = stem;
+
     q = cand;
     break;
   }
@@ -1101,12 +1016,7 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   const isMulti = (qt === "mcq_multi");
   const isMcq = (qt === "mcq_single" || qt === "mcq_multi");
 
-  const minOpt = qq && qq.mcq ? (Number(qq.mcq.minOptions) || 4) : 4;
-  const maxOpt = qq && qq.mcq ? (Number(qq.mcq.maxOptions) || 6) : 6;
-
-  const choiceCount = isTf
-    ? 2
-    : (isMcq ? clampInt(5, minOpt, maxOpt) : (3 + (n % 3)));
+  const choiceCount = isTf ? 2 : (isMcq ? 5 : (3 + (n % 3)));
 
   const dimsDefault = [
     "definition_or_concept",
@@ -1161,37 +1071,24 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   ];
   const event = (language === "sv" ? eventsSv : eventsEn)[(n + i) % 5];
 
-  // P1: scenlager (utan ny datamodell)
-  const triggersSv = ["precis innan ni drar igång", "när det är lite stress", "när en ny kollega är med", "när ni ska byta från plan till handling", "när ni måste bestämma snabbt"];
-  const triggersEn = ["right before you start", "when things are a bit stressful", "when a new colleague is involved", "when you move from plan to action", "when you must decide quickly"];
-  const trigger = (language === "sv" ? triggersSv : triggersEn)[(n ^ (i * 17)) % 5];
-
-  const constraintsSv = ["ni har 2 minuter", "ni saknar ett underlag", "ni har två olika tolkningar", "en liten detalj är oklar", "ni behöver undvika missförstånd"];
-  const constraintsEn = ["you have 2 minutes", "you are missing a supporting note", "you have two different interpretations", "a small detail is unclear", "you need to avoid misunderstandings"];
-  const constraint = (language === "sv" ? constraintsSv : constraintsEn)[(n ^ (i * 31)) % 5];
-
-  const artifactsSv = ["en checklista", "en anteckning", "en skylt", "en kort notis", "en enkel loggrad"];
-  const artifactsEn = ["a checklist", "a note", "a sign", "a short note", "a simple log line"];
-  const artifact = (language === "sv" ? artifactsSv : artifactsEn)[(n ^ (i * 47)) % 5];
-
   // NOTE (P0): INGA area/ISO-ord i question/options/explanation/feedback
   // NOTE (P0): INGA "steg/steget/modul/kapitel/kurs/utbildning" i Q-fält
   function stemForDimension() {
     if (language === "sv") {
-      if (dim === "definition_or_concept") return `Vilket alternativ beskriver bäst syftet med ett tydligt arbetssätt när ni behöver samsyn ${place} (${trigger})?`;
-      if (dim === "routine_start") return `När ${event} ${place} (${constraint}) – vad är den bästa startåtgärden?`;
-      if (dim === "risk_consequence") return `Vilken risk ökar mest om ni hoppar över startåtgärden ${place}, trots att ni har ${artifact}?`;
-      if (dim === "roles_and_responsibility") return `När ni ska få ordning på ett arbetssätt ${place} (${trigger}), vem bör ta första ansvaret – och varför?`;
-      if (dim === "deviation_and_action") return `Om något avviker ${place} (${constraint}), vilket första agerande är mest korrekt?`;
-      return `Vilket val ger bäst start för ${role} ${place} (${trigger})?`;
+      if (dim === "definition_or_concept") return `Vilket alternativ beskriver bäst syftet med ett tydligt arbetssätt när ni behöver samsyn ${place}?`;
+      if (dim === "routine_start") return `När ${event} ${place} – vad är den bästa startåtgärden?`;
+      if (dim === "risk_consequence") return `Vilken risk ökar mest om ni hoppar över startåtgärden ${place}?`;
+      if (dim === "roles_and_responsibility") return `När ni ska få ordning på ett arbetssätt ${place}, vem bör ta första ansvaret – och varför?`;
+      if (dim === "deviation_and_action") return `Om något avviker ${place}, vilket första agerande är mest korrekt?`;
+      return `Vilket val ger bäst start för ${role} ${place}?`;
     }
 
-    if (dim === "definition_or_concept") return `Which option best captures why a clear way of working matters when you need shared understanding ${place} (${trigger})?`;
-    if (dim === "routine_start") return `When ${event} ${place} (${constraint}), what is the best starting action?`;
-    if (dim === "risk_consequence") return `Which risk increases most if you skip the starting action ${place}, even though you have ${artifact}?`;
-    if (dim === "roles_and_responsibility") return `When you need to align how work is done ${place} (${trigger}), who should take first responsibility—and why?`;
-    if (dim === "deviation_and_action") return `If something deviates ${place} (${constraint}), what first action is most correct?`;
-    return `Which choice gives the best start for ${role} ${place} (${trigger})?`;
+    if (dim === "definition_or_concept") return `Which option best captures why a clear way of working matters when you need shared understanding ${place}?`;
+    if (dim === "routine_start") return `When ${event} ${place}, what is the best starting action?`;
+    if (dim === "risk_consequence") return `Which risk increases most if you skip the starting action ${place}?`;
+    if (dim === "roles_and_responsibility") return `When you need to align how work is done ${place}, who should take first responsibility—and why?`;
+    if (dim === "deviation_and_action") return `If something deviates ${place}, what first action is most correct?`;
+    return `Which choice gives the best start for ${role} ${place}?`;
   }
 
   let text = stemForDimension();
@@ -1204,6 +1101,9 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
         : `Which choice gives the clearest start ${place}?`;
     }
   }
+
+  // P0: rensa domänord i Q-fält
+  text = stripDomainWordsFromQuestion(text, language);
 
   const choices = [];
 
@@ -1223,24 +1123,15 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
       bestAnswerText
     });
 
-    const outTf = sanitizeQuestionPayload(
-      {
-        kind: "question",
-        text,
-        choices,
-        correctChoiceId,
-        rationale,
-        difficulty,
-        tags: [subjId, "tf", placeKey(place)],
-        bestAnswerText
-      },
-      courseLabel,
-      qq,
-      language,
-      place
-    );
-
-    return outTf;
+    return {
+      kind: "question",
+      text,
+      choices,
+      correctChoiceId,
+      rationale,
+      difficulty,
+      tags: [subjId, "tf", placeKey(place)]
+    };
   }
 
   const pools = getChoicePools(language);
@@ -1314,52 +1205,24 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   });
 
   if (qq && qq.requireExplanation) {
-    if (safeStr(rationale).trim().length < (qq.explanationMinChars || 60)) {
+    if (safeStr(rationale).trim().length < (qq.explanationMinChars || 40)) {
       rationale = (language === "sv")
         ? `Förklaring: Det bästa valet är "${bestAnswerText}" eftersom det skapar tydlighet i situationen ${place} innan ni går vidare med åtgärd och uppföljning.`
         : `Explanation: The best choice is "${bestAnswerText}" because it creates clarity ${place} before you act and follow up.`;
     }
   }
 
-  const out = sanitizeQuestionPayload(
-    {
-      kind: "question",
-      text,
-      choices,
-      correctChoiceId,
-      ...(correctChoiceIds ? { correctChoiceIds } : {}),
-      rationale,
-      difficulty,
-      tags: [subjId, "scenario", dim, placeKey(place)],
-      bestAnswerText
-    },
-    courseLabel,
-    qq,
-    language,
-    place
-  );
-
-  // Fail-closed: ensure correctChoiceId still points to an existing choice id after sanitization
-  const ids = new Set(safeArr(out.choices).map(c => safeStr(c && c.id).trim()).filter(Boolean));
-  if (!ids.has(safeStr(out.correctChoiceId).trim())) {
-    out.correctChoiceId = safeStr(out.choices && out.choices[0] && out.choices[0].id).trim() || "c1";
-  }
-  if (Array.isArray(out.correctChoiceIds)) {
-    out.correctChoiceIds = out.correctChoiceIds.filter(id => ids.has(safeStr(id).trim()));
-    if (out.correctChoiceIds.length === 0) out.correctChoiceIds = [out.correctChoiceId];
-  }
-
-  // Ensure we keep at least 2 choices (otherwise UI mapping fails)
-  if (!Array.isArray(out.choices) || out.choices.length < 2) {
-    out.choices = [
-      { id: "c1", text: (language === "sv") ? "Samla fakta innan beslut" : "Gather facts before deciding" },
-      { id: "c2", text: (language === "sv") ? "Bekräfta ansvar och nästa åtgärd" : "Confirm ownership and next action" }
-    ];
-    out.correctChoiceId = "c2";
-    if (isMulti) out.correctChoiceIds = ["c2"];
-  }
-
-  return out;
+  return {
+    kind: "question",
+    text,
+    choices,
+    correctChoiceId,
+    ...(correctChoiceIds ? { correctChoiceIds } : {}),
+    rationale,
+    difficulty,
+    tags: [subjId, "scenario", dim, placeKey(place)],
+    bestAnswerText
+  };
 }
 
 function placeKey(place) {
@@ -1655,18 +1518,23 @@ function extractQuestionFromBlock(block) {
 }
 
 function mapChoiceQuestionToUi(q, questionType, language) {
-  const question = safeStr(q.text).trim();
+  // P0: domänord bort från question (sista säkring)
+  const question = stripDomainWordsFromQuestion(safeStr(q.text).trim(), language);
+
   const choices = Array.isArray(q.choices) ? q.choices : [];
   if (!question || choices.length < 2) return { ok: false };
 
   const options = [];
   for (const c of choices) {
-    const t = safeStr(c && c.text).trim();
-    if (t) options.push(t);
+    const t0 = safeStr(c && c.text).trim();
+    if (t0) options.push(t0);
   }
   if (options.length < 2) return { ok: false };
 
-  const explanation = safeStr(q.rationale || q.explanation || q.feedback || "").trim();
+  // P0: courseLabel.area ska inte finnas i explanation — här kan vi bara leverera rationale som är “verklighetsspråk”
+  let explanation = safeStr(q.rationale || q.explanation || q.feedback || "").trim();
+  // P0: domänord bort även här (för säkerhet)
+  explanation = stripDomainWordsFromQuestion(explanation, language);
 
   if (questionType === "tf") {
     const a = (language === "sv") ? "Sant" : "True";
