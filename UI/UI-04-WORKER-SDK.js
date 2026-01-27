@@ -23,13 +23,18 @@ PATCH v1.1.2 (AI-PAYLOAD-FIX):
 - Skickar med questionType + feedbackEnabled (var saknade)
 - Skickar context som riktig JSON (inte "[object Object]")
 - Fail-closed om payload blir för stor (≈64KB)
+
+PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
+- Header-namn matchar CORS allowlist: X-Hr-Client + X-Hr-Sdk
+- Context normaliseras alltid till { text:"..." } (så Worker kan inferera + undvika tom context)
+- Payload size-check görs på UTF-8 bytes (inte string.length)
 ============================================================ */
 
 (function(){
   "use strict";
 
   const SDK = {};
-  SDK.VERSION = "1.1.2";
+  SDK.VERSION = "1.1.3";
 
   const STATE = {
     inited: false,
@@ -124,25 +129,78 @@ PATCH v1.1.2 (AI-PAYLOAD-FIX):
 
   function addClientTraceHeaders(headers){
     try{
-      headers["X-HR-Client"] = "HR-System";
-      headers["X-HR-SDK"] = "UI-04-WORKER-SDK.js@" + SDK.VERSION;
+      // Matchar Worker CORS allowlist (case-stabilt)
+      headers["X-Hr-Client"] = "HR-System";
+      headers["X-Hr-Sdk"] = "UI-04-WORKER-SDK.js@" + SDK.VERSION;
     }catch(_){}
     return headers;
   }
 
-  // PATCH: normalisera context till JSON-objekt/array (inte "[object Object]")
+  function utf8ByteLen(str){
+    try{
+      return new TextEncoder().encode(String(str || "")).length;
+    }catch(_){
+      // fallback: approx
+      return safeStr(str).length;
+    }
+  }
+
+  // PATCH: context normaliseras alltid till { text:"..." }
+  // - Worker läser context.text / contextText / value → vi säkrar text.
   function normalizeContext(input){
     try{
-      if (input === null || input === undefined) return {};
-      if (isObj(input) || Array.isArray(input)) return input;
+      if (input === null || input === undefined) return { text: "" };
+
+      // Already good
+      if (isObj(input)){
+        const direct = trimStr(input.text || input.contextText || "");
+        if (direct) return { text: direct };
+
+        // Känd shape från UI (utan ny datamodell): module/area/chapter/step
+        const module = trimStr(input.module || input.modul || "");
+        const area = trimStr(input.area || input.omrade || input.område || "");
+        const chapter = trimStr(input.chapter || input.kapitel || "");
+        const step = trimStr(input.step || input.steg || "");
+
+        if (module || area || chapter || step){
+          const parts = [];
+          if (module) parts.push("Modul: " + module);
+          if (area) parts.push("Område: " + area);
+          if (chapter) parts.push("Kapitel: " + chapter);
+          if (step) parts.push("Steg: " + step);
+          return { text: parts.join(" • ") };
+        }
+
+        // Sista utväg: försök fånga något men håll det kort
+        let s = "";
+        try{
+          s = JSON.stringify(input);
+        }catch(_){
+          s = "";
+        }
+        s = trimStr(s);
+        if (s) return { text: s.slice(0, 2000) };
+        return { text: "" };
+      }
+
+      if (Array.isArray(input)){
+        let s = "";
+        try{ s = JSON.stringify(input); }catch(_){ s = ""; }
+        s = trimStr(s);
+        return { text: s.slice(0, 2000) };
+      }
 
       if (typeof input === "string"){
         const s = trimStr(input);
-        if (!s) return {};
-        // Om någon skickar JSON-sträng, försök parsa
+        if (!s) return { text: "" };
+        // Om någon skickar JSON-sträng, försök parsa men behåll texten om det inte är {text:""}
         try{
           const parsed = JSON.parse(s);
-          if (isObj(parsed) || Array.isArray(parsed)) return parsed;
+          if (isObj(parsed)){
+            const t = trimStr(parsed.text || parsed.contextText || "");
+            if (t) return { text: t };
+          }
+          // annars behåll ursprungstexten (för worker-infer)
           return { text: s };
         }catch(_){
           return { text: s };
@@ -150,9 +208,9 @@ PATCH v1.1.2 (AI-PAYLOAD-FIX):
       }
 
       // number/bool/etc
-      return { value: safeStr(input) };
+      return { text: trimStr(input) || safeStr(input) };
     }catch(_){
-      return {};
+      return { text: "" };
     }
   }
 
@@ -285,11 +343,10 @@ PATCH v1.1.2 (AI-PAYLOAD-FIX):
     const count = (typeof p.count === "number" && isFinite(p.count)) ? p.count : parseInt(p.count, 10);
     const language = trimStr(p.language || "sv");
 
-    // PATCH: skicka dessa vidare (var saknade i network body)
     const questionType = trimStr(p.questionType || "auto");
     const feedbackEnabled = !!p.feedbackEnabled;
 
-    // PATCH: context som riktig JSON
+    // Context måste vara {text:"..."} så worker kan inferera + inte få tom context
     const ctxObj = normalizeContext(p.context);
 
     if (!(mode === "training" || mode === "document")){
@@ -313,7 +370,6 @@ PATCH v1.1.2 (AI-PAYLOAD-FIX):
 
     headers = addClientTraceHeaders(headers);
 
-    // Bygg body som JSON (inte sträng)
     const bodyObj = {
       mode,
       count,
@@ -323,12 +379,12 @@ PATCH v1.1.2 (AI-PAYLOAD-FIX):
       context: ctxObj
     };
 
-    // Fail-closed om payload blir för stor (~64KB)
     let body = "";
     try{
       body = JSON.stringify(bodyObj);
-      if (body.length > (64 * 1024)){
-        return mkErr("PAYLOAD_TOO_LARGE", "Payload för stor (max ~64KB)", { bytes: body.length });
+      const bytes = utf8ByteLen(body);
+      if (bytes > (64 * 1024)){
+        return mkErr("PAYLOAD_TOO_LARGE", "Payload för stor (max 64KB)", { bytes });
       }
     }catch(e){
       return mkErr("VALIDATION_ERROR", "Kunde inte serialisera payload", { message: safeStr(e && e.message) });
