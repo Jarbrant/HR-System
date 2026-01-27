@@ -13,12 +13,11 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.2.7-PP-SC-010-07F (AUTOPATCH):
-- P0 FIX: Catalog URL: lägger ../../ai-rules/v1/modules.json först (så modules.json laddas från trainings-sidan).
-- P0 FIX: Fail-closed verifiering av question/MCQ skannar även raw.items/raw.data.items (inte bara blocks[]).
-- P0 FIX: SDK init kan nu retry:a: cachear inte init-promise vid BASE_URL_MISSING, och resetar init om baseUrl ändras.
-- P1: Bygger dom-fallback en gång och återanvänder helper-funktioner.
-- LÅS: goals skickas alltid som "" till AI (oförändrat).
+PATCH v1.2.8-PP-SC-010-07G (AUTOPATCH):
+- P0 FIX: "auto*" questionType (t.ex. auto_mcq) är nu SOFT i UI: import stoppas inte fail-closed om AI inte returnerar question/MCQ.
+          Fail-closed stopp gäller endast när användaren väljer en EXPLICIT (hard) typ (mcq_single/mcq_multi/…).
+- P0: Behåller request.questionType till worker (worker kan fortfarande försöka följa preferensen).
+- Inga nya keys, ingen UX-redesign, endast logikjustering inom AO-scope.
 ============================================================ */
 (function () {
   "use strict";
@@ -27,7 +26,7 @@ PATCH v1.2.7-PP-SC-010-07F (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.2.7-PP-SC-010-07F";
+  page.__VERSION = "v1.2.8-PP-SC-010-07G";
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -255,11 +254,29 @@ PATCH v1.2.7-PP-SC-010-07F (AUTOPATCH):
     return "normal";
   }
 
-  function isQuestionTypeSelected(qt) {
+  // ------------------------------------------------------------
+  // P0 FIX (AUTO*): UI ska inte fail-closed stoppa på "auto_mcq/auto_*"
+  // ------------------------------------------------------------
+  function isAutoPreferredType(qt) {
+    const s = normStr(qt).toLowerCase();
+    if (!s) return true;
+    if (s === "auto") return true;
+    if (s.indexOf("auto") === 0) return true; // auto_mcq, auto_questions, etc.
+    return false;
+  }
+
+  function isHardQuestionTypeSelected(qt) {
+    // "hard" = användaren har explicit valt en frågetyp som MÅSTE matcha strukturen
     const s = normStr(qt).toLowerCase();
     if (!s) return false;
-    if (s === "auto") return false;
+    if (isAutoPreferredType(s)) return false;
     return true;
+  }
+
+  function isHardMcqTypeSelected(qt) {
+    const s = normStr(qt).toLowerCase();
+    if (!isHardQuestionTypeSelected(s)) return false;
+    return (s === "mcq_single" || s === "mcq_multi" || s.indexOf("mcq") === 0);
   }
 
   function isMcqType(qt) {
@@ -1567,11 +1584,13 @@ PATCH v1.2.7-PP-SC-010-07F (AUTOPATCH):
       const raw = await window.HRWorkerSDK.aiGenerate(req);
       page._LAST_AI_RAW = raw && typeof raw === "object" ? raw : raw;
 
-      const questionRequested = isQuestionTypeSelected(req.questionType);
-      const mcqRequested = questionRequested && isMcqType(req.questionType);
+      // P0 FIX: Endast "hard" typer triggar fail-closed stopp (auto* är soft)
+      const hardQuestionRequested = isHardQuestionTypeSelected(req.questionType);
+      const hardMcqRequested = isHardMcqTypeSelected(req.questionType);
 
-      // P0 FIX (Q1): questionType vald men inga question-items → stoppa
-      if (questionRequested && !rawContainsAnyQuestion(raw)) {
+      // Soft-läge: om auto* men output saknar question/mcq, stoppa inte — bara fortsätt importera det som finns.
+      // Hard-läge: stoppa om inte matchar.
+      if (hardQuestionRequested && !rawContainsAnyQuestion(raw)) {
         failClosedAiHint(
           "Status: AI gav inga provfrågor",
           "Du valde provfrågor (" + normStr(req.questionType) + ") men AI-svaret innehöll inga question-items (bara teori/uppgift). " +
@@ -1580,8 +1599,7 @@ PATCH v1.2.7-PP-SC-010-07F (AUTOPATCH):
         return;
       }
 
-      // P0 FIX (Q3): MCQ vald men saknar options + correctIndex → stoppa
-      if (mcqRequested && !rawContainsAnyMcq(raw)) {
+      if (hardMcqRequested && !rawContainsAnyMcq(raw)) {
         failClosedAiHint(
           "Status: AI gav inga svarsalternativ",
           "Du valde MCQ (" + normStr(req.questionType) + ") men AI-svaret saknade giltiga svarsalternativ. " +
@@ -1616,8 +1634,8 @@ PATCH v1.2.7-PP-SC-010-07F (AUTOPATCH):
 
       const itemsIn = Array.isArray(pick.items) ? pick.items : [];
 
-      // fallback: MCQ vald men items saknar MCQ → stoppa
-      if (mcqRequested) {
+      // Hard: MCQ vald men items saknar MCQ → stoppa
+      if (hardMcqRequested) {
         const anyMcq = itemsIn.some(looksLikeMcqQuestionItem);
         if (!anyMcq) {
           failClosedAiHint(
@@ -1629,7 +1647,8 @@ PATCH v1.2.7-PP-SC-010-07F (AUTOPATCH):
         }
       }
 
-      if (questionRequested) {
+      // Hard: question vald men items saknar question → stoppa
+      if (hardQuestionRequested) {
         const anyQ = itemsIn.some(looksLikeQuestionItem);
         if (!anyQ) {
           failClosedAiHint(
