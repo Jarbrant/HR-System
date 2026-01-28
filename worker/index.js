@@ -1,3 +1,4 @@
+
 // ============================================================
 // PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.9 VARIATION+ARC + V1-CONTRACT)
 // FIL: worker/index.js
