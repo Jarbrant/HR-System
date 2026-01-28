@@ -1,10 +1,17 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.8 HOTFIX + V1-CONTRACT)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.9 VARIATION+ARC + V1-CONTRACT)
 // FIL: worker/index.js
 //
 // Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ/TF begärs.
 //      FIX: Undvik “samma frågor”, förbjud placeholder-fraser, kräver förklaring,
 //           och gör batchen unik (dedupe) + bättre variation.
+//
+// PATCH v1.5.9 (SCENARIO-PACK + STORY-ARC + LENGTH+PREFIX-GUARD):
+// - P0: Scenario-pack väljs per batch (samma “värld” genom hela blocket när count>=6).
+// - P0: Story-arc (röd tråd) över 6–12 frågor: start → bevis → risk → avvikelse → ansvar → twist.
+// - P0: Längdstyrning: 70% 2 meningar, 20% 3 meningar (”konstverk”), 10% korta.
+// - P0: Prefix-guard: stoppar frågor som börjar med samma 4–6 ord i samma batch.
+// - P1: Variation i frågetyp inom MCQ (utan att ändra UI-contract): saknad info, minst risk, undvik, dokumentera.
 //
 // PATCH v1.5.8 (QTYPE-SOURCEGUARD + STABLE-DEFAULT):
 // - P0: Tar bort `body.question` från questionType-inferens (krockar med frågetext och kan slå av UI-items).
@@ -81,7 +88,7 @@ import TRAINING_PROMPT from "../ai-rules/v1/rulesets/training_prompt.json";
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5.8";
+const VERSION = "1.5.9";
 
 // ============================================================
 // BLOCK 03 — Fetch handler (routing + guards)
@@ -830,7 +837,10 @@ function tokenizeForSimilarity(s) {
     .trim();
   if (!t) return [];
   const parts = t.split(/\s+/g).filter(Boolean);
-  const stop = new Set(["i", "en", "ett", "att", "och", "du", "när", "vad", "vilket", "vilken", "är", "ska", "för", "på", "om", "som", "det", "de", "den", "ni"]);
+  const stop = new Set([
+    "i","en","ett","att","och","du","när","vad","vilket","vilken","är","ska","för","på","om","som","det","de","den","ni",
+    "innan","efter","bäst","mest","rätt","fel","gör","göra","behöver","måste","kan","vill","där","här","nu"
+  ]);
   return parts.filter(w => w.length >= 3 && !stop.has(w));
 }
 
@@ -895,6 +905,140 @@ function inferWorkplaceFromContext(contextText, language) {
 }
 
 // ============================================================
+// BLOCK 11B — Scenario-pack + story-arc (v1.5.9)
+// ============================================================
+
+function buildStoryArc(count) {
+  // En röd tråd som känns som “mini-berättelse” när man gör 6–12 frågor i samma block.
+  // 0: etablering, 1: saknad info, 2: bevis/logg, 3: risk, 4: avvikelse, 5: ansvar, 6: uppföljning, 7: twist
+  const base = [
+    "scenario_application",
+    "routine_start",
+    "traceability_and_evidence",
+    "risk_consequence",
+    "deviation_and_action",
+    "roles_and_responsibility",
+    "traceability_and_evidence",
+    "scenario_application"
+  ];
+  // Om count > 8: fortsätt med praktisk variation utan att tappa tråden
+  const tail = [
+    "risk_consequence",
+    "deviation_and_action",
+    "roles_and_responsibility",
+    "routine_start"
+  ];
+  const seq = [];
+  for (let i = 0; i < count; i++) {
+    if (i < base.length) seq.push(base[i]);
+    else seq.push(tail[(i - base.length) % tail.length]);
+  }
+  return seq;
+}
+
+function pickScenarioPack(contextText, place, language, seed) {
+  const t = safeStr(contextText).toLowerCase();
+  const isKitchen = t.includes("kök") || t.includes("restaurang") || t.includes("servering");
+  const isReceiving = t.includes("leverans") || t.includes("mottagning") || t.includes("varumottag");
+  const isAudit = t.includes("revision") || t.includes("internkontroll") || t.includes("audit");
+  const isBrief = t.includes("morgonmöte") || t.includes("brief") || t.includes("standup") || t.includes("avstämning");
+  const isCustomer = t.includes("kund") || t.includes("klagomål") || t.includes("reklamation");
+
+  const packs = [];
+  if (isReceiving) packs.push("receiving");
+  if (isKitchen) packs.push("kitchen");
+  if (isAudit) packs.push("audit");
+  if (isBrief) packs.push("brief");
+  if (isCustomer) packs.push("customer");
+  if (packs.length === 0) packs.push("generic");
+
+  const packId = packs[seed % packs.length];
+
+  const sv = (language === "sv");
+  const defs = {
+    receiving: {
+      setting: sv ? "En leverans har precis kommit in" : "A delivery has just arrived",
+      artifact: sv ? "en kvittens eller en notering i loggen" : "a receipt or a log note",
+      constraintA: sv ? "Ni har 10 minuter innan nästa moment startar." : "You have 10 minutes before the next step begins.",
+      constraintB: sv ? "Märkningen är ofullständig och två personer säger olika." : "The labeling is incomplete and two people give different answers.",
+      twist: sv ? "Efter 2 minuter kommer ny info som motsäger första beskedet." : "After 2 minutes, new info contradicts the first message."
+    },
+    kitchen: {
+      setting: sv ? "Ni är mitt i produktionen och tempot är högt" : "You’re mid-production and the pace is high",
+      artifact: sv ? "en checklista eller en sign-off" : "a checklist or sign-off",
+      constraintA: sv ? "Det är 15 minuter till servering." : "It’s 15 minutes until service.",
+      constraintB: sv ? "En kollega säger “vi gör som vanligt” men underlaget saknas." : "A colleague says “we do it as usual” but there’s no evidence.",
+      twist: sv ? "En detalj dyker upp som gör att “som vanligt” inte längre gäller." : "A detail appears that makes “as usual” no longer valid."
+    },
+    audit: {
+      setting: sv ? "Ni gör en snabb internkontroll" : "You’re doing a quick internal check",
+      artifact: sv ? "ett underlag som kan visas i efterhand" : "evidence you can show later",
+      constraintA: sv ? "Ni behöver kunna förklara beslutet imorgon." : "You need to be able to explain the decision tomorrow.",
+      constraintB: sv ? "Det finns en avvikelse, men ni vet inte ännu om den är liten eller stor." : "There’s a deviation, but you don’t yet know its scope.",
+      twist: sv ? "En ny observation gör att ni måste omvärdera vad som är “viktigast först”." : "A new observation forces you to reconsider what matters first."
+    },
+    brief: {
+      setting: sv ? "På ett kort avstämningsmöte ska ni få samsyn" : "In a short briefing you need alignment",
+      artifact: sv ? "en enkel beslutspunkt (vem-gör-vad)" : "a simple decision note (who-does-what)",
+      constraintA: sv ? "Ni har 5 minuter och alla tolkar läget olika." : "You have 5 minutes and everyone interprets differently.",
+      constraintB: sv ? "En person saknas men påverkas av beslutet." : "One person is absent but will be impacted by the decision.",
+      twist: sv ? "Efter mötet framkommer att en viktig detalj aldrig blev sagd." : "After the meeting, a key detail turns out to have been missing."
+    },
+    customer: {
+      setting: sv ? "En kund har hört av sig med ett klagomål" : "A customer has contacted you with a complaint",
+      artifact: sv ? "en notering som gör att ni kan följa upp" : "a note that enables follow-up",
+      constraintA: sv ? "Kunden vill ha svar nu, men ni saknar helhetsbild." : "The customer wants an answer now, but you lack the full picture.",
+      constraintB: sv ? "Det finns flera möjliga orsaker, och ni riskerar att gissa." : "There are multiple causes and you risk guessing.",
+      twist: sv ? "En kollega hittar en tidigare notering som ändrar bedömningen." : "A colleague finds a previous note that changes the assessment."
+    },
+    generic: {
+      setting: sv ? "Ni behöver skapa ordning i ett läge som riskerar att spåra ur" : "You need to create order in a situation that can drift",
+      artifact: sv ? "en kort notering som ger spårbarhet" : "a short note that gives traceability",
+      constraintA: sv ? "Ni har ont om tid och måste välja rätt första steg." : "You are short on time and must pick the right first step.",
+      constraintB: sv ? "Två personer har olika bild av vad som är “problemet”." : "Two people disagree on what the “problem” is.",
+      twist: sv ? "Någon säger något som låter rimligt – men saknar stöd." : "Someone says something that sounds right—without evidence."
+    }
+  };
+
+  const d = defs[packId] || defs.generic;
+  return {
+    id: packId,
+    place,
+    setting: d.setting,
+    artifact: d.artifact,
+    constraintA: d.constraintA,
+    constraintB: d.constraintB,
+    twist: d.twist
+  };
+}
+
+function pickLengthProfile(seed) {
+  // 70%: 2 meningar (med konkret constraint)
+  // 20%: 3 meningar (”konstverk”)
+  // 10%: 1 mening (kort kontroll)
+  const x = seed % 10;
+  if (x <= 6) return { minChars: 140, sentences: 2 };
+  if (x <= 8) return { minChars: 260, sentences: 3 };
+  return { minChars: 90, sentences: 1 };
+}
+
+function prefixKey(text, maxWords) {
+  const t = normKey(text);
+  if (!t) return "";
+  const parts = t.split(" ").filter(Boolean);
+  return parts.slice(0, Math.max(4, Math.min(6, maxWords || 5))).join(" ");
+}
+
+function joinSentences(sv, s1, s2, s3, count) {
+  const a = safeStr(s1).trim();
+  const b = safeStr(s2).trim();
+  const c = safeStr(s3).trim();
+  if (count <= 1) return a;
+  if (count === 2) return (a && b) ? `${a} ${b}` : (a || b);
+  return [a, b, c].filter(Boolean).join(" ");
+}
+
+// ============================================================
 // BLOCK 12 — OUTPUT BUILDER (training-blocks + question-format)
 // ============================================================
 
@@ -942,10 +1086,20 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
   const blocks = [];
 
   // Batch-state (unikhet inom batchen)
+  const place0 = inferWorkplaceFromContext(context, language);
+  const useArc = (fmt === "question" && isUiQuestionRequest(questionType) && count >= 6);
+
+  const scenario = pickScenarioPack(context, place0, language, seed);
+  const arcSeq = useArc ? buildStoryArc(count) : [];
+
   const batch = {
     seenStems: [],
     seenDims: new Set(),
-    seenBestAnswers: []
+    seenBestAnswers: [],
+    seenPrefixes: [], // v1.5.9
+    scenario,
+    arcSeq,
+    useArc
   };
 
   for (let i = 0; i < count; i++) {
@@ -993,7 +1147,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.5.8"
+      source: "mock-v1.5.9"
     }
   };
 }
@@ -1103,7 +1257,7 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
       : `Check question: ${courseLabel.area}`;
 
   let q = null;
-  for (let attempt = 0; attempt < 12; attempt++) {
+  for (let attempt = 0; attempt < 14; attempt++) {
     const nn = (n ^ (attempt * 0x9e3779b9)) >>> 0;
 
     const cand = makeQuestion({
@@ -1158,6 +1312,13 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
       if (badChoice) continue;
     }
 
+    // v1.5.9: prefix-guard (första ord) för att stoppa “samma fråga i ny kostym”
+    const pk = prefixKey(stem, 5);
+    if (pk) {
+      const prevP = safeArr(batch && batch.seenPrefixes);
+      if (prevP.some(x => x === pk)) continue;
+    }
+
     // near-dup across batch
     let nearDup = false;
     for (const prev of (batch && Array.isArray(batch.seenStems) ? batch.seenStems : [])) {
@@ -1180,6 +1341,7 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
     }
 
     if (batch && Array.isArray(batch.seenStems)) batch.seenStems.push(stem);
+    if (pk && batch && Array.isArray(batch.seenPrefixes)) batch.seenPrefixes.push(pk);
 
     // Skriv tillbaka sanerad Q-text (P0)
     cand.text = stem;
@@ -1239,18 +1401,24 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   const stepDims = getStepProfile(courseLabel.step);
   const rotate = (stepDims && stepDims.length) ? stepDims.concat(rotateBase.filter(d => !stepDims.includes(d))) : rotateBase;
 
-  const dimIndex = (i + (n % rotate.length)) % rotate.length;
-  let dim = rotate[dimIndex] || "scenario_application";
+  // v1.5.9: story-arc override när batch.useArc är aktiv
+  let dim = "scenario_application";
+  if (batch && batch.useArc && Array.isArray(batch.arcSeq) && batch.arcSeq.length) {
+    dim = batch.arcSeq[i % batch.arcSeq.length] || "scenario_application";
+  } else {
+    const dimIndex = (i + (n % rotate.length)) % rotate.length;
+    dim = rotate[dimIndex] || "scenario_application";
 
-  if (batch && batch.seenDims && count > 1) {
-    const minDistinct = (qq && qq.variation && qq.variation.minDistinctDims) ? qq.variation.minDistinctDims : 3;
-    if (batch.seenDims.size < Math.min(minDistinct, count)) {
-      for (let t = 0; t < rotate.length; t++) {
-        const d2 = rotate[(dimIndex + t) % rotate.length];
-        if (d2 && !batch.seenDims.has(d2)) { dim = d2; break; }
+    if (batch && batch.seenDims && count > 1) {
+      const minDistinct = (qq && qq.variation && qq.variation.minDistinctDims) ? qq.variation.minDistinctDims : 3;
+      if (batch.seenDims.size < Math.min(minDistinct, count)) {
+        for (let t = 0; t < rotate.length; t++) {
+          const d2 = rotate[(dimIndex + t) % rotate.length];
+          if (d2 && !batch.seenDims.has(d2)) { dim = d2; break; }
+        }
       }
+      batch.seenDims.add(dim);
     }
-    batch.seenDims.add(dim);
   }
 
   // P1: workplace-infer från context (utan ny datamodell)
@@ -1260,90 +1428,92 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   const rolesEn = ["you as the employee", "you as responsible", "you as receiver", "you as checker", "you as reporter"];
   const role = (language === "sv" ? rolesSv : rolesEn)[(n + i) % 5];
 
+  // v1.5.9: scenario-pack (samma per batch)
+  const scenario = (batch && batch.scenario) ? batch.scenario : pickScenarioPack(context, place, language, (n ^ i) >>> 0);
+
+  // v1.5.9: längdprofil per fråga
+  const lenProf = pickLengthProfile(n ^ hash32(`${i}|${dim}|${scenario.id}`));
+  const sv = (language === "sv");
+
   function stemForDimension() {
-    const seed2 = (n ^ hash32(`${dim}|${difficulty}|${i}`) ^ hash32(place)) >>> 0;
+    const seed2 = (n ^ hash32(`${dim}|${difficulty}|${i}`) ^ hash32(place) ^ hash32(scenario.id)) >>> 0;
 
-    if (language === "sv") {
-      const stems = {
-        definition_or_concept: [
-          `Vilket alternativ beskriver bäst varför ett tydligt arbetssätt behövs när ni vill ha samsyn ${place}?`,
-          `Ni märker att alla gör lite olika. Vad är huvudsyftet med ett gemensamt arbetssätt ${place}?`,
-          `Varför är det viktigt att arbeta på samma sätt när ni vill kunna följa upp och förbättra ${place}?`
-        ],
-        routine_start: [
-          `Ni ser att arbetet drar igång utan samsyn ${place}. Vad är den bästa startåtgärden?`,
-          `Innan ni gör något mer ${place}, vad behöver klargöras först för att undvika fel väg?`,
-          `Ni har bråttom ${place}. Vilket första beslut hjälper mest för att hålla det rätt och spårbart?`
-        ],
-        traceability_and_evidence: [
-          `Ni behöver kunna visa i efterhand vad som gjordes ${place}. Vad börjar ni med?`,
-          `Vilket val ger bäst spårbarhet när ni vill kunna följa upp ${place}?`,
-          `Om någon frågar “hur vet ni att det blev rätt?” ${place} — vad är första åtgärden?`
-        ],
-        risk_consequence: [
-          `Vilken risk ökar mest om ni hoppar över en tydlig start ${place}?`,
-          `Om ni kör på utan avgränsning ${place}, vad är den vanligaste konsekvensen?`,
-          `Vad är den största risken om ansvar och uppföljning inte blir tydligt från början ${place}?`
-        ],
-        roles_and_responsibility: [
-          `När ni behöver få ordning på hur ni gör ${place}, vem bör ta första ansvaret – och varför?`,
-          `Vem ska initiera och samordna när ni vill att alla gör lika ${place}?`,
-          `När något behöver styras upp ${place}, vilken roll bör starta och säkra att det händer?`
-        ],
-        deviation_and_action: [
-          `Om något avviker ${place}, vilket första agerande är mest korrekt?`,
-          `Ni upptäcker att något inte blev som väntat ${place}. Vad gör ni först?`,
-          `Vid avvikelse ${place} — vilket första steg minskar risken att ni åtgärdar fel sak?`
-        ],
-        scenario_application: [
-          `Vilket val ger bäst start för ${role} ${place}?`,
-          `Du ska skapa ordning i en situation ${place}. Vilket val hjälper mest just nu?`,
-          `Du vill undvika missförstånd ${place}. Vilket val är mest praktiskt att börja med?`
-        ]
-      };
+    // Variation i “frågesätt” utan att byta UI-contract:
+    const askStylesSv = [
+      "first_action",       // vad gör du först
+      "missing_info",       // vilken info saknas
+      "least_risky",        // minst risk
+      "must_document",      // måste dokumenteras
+      "avoid_first"         // vilket ska undvikas
+    ];
+    const askStylesEn = [
+      "first_action","missing_info","least_risky","must_document","avoid_first"
+    ];
+    const askStyle = (sv ? askStylesSv : askStylesEn)[seed2 % 5];
 
-      return pickOne(stems[dim] || stems.scenario_application, seed2) || `Vilket val är bäst ${place}?`;
-    }
+    const s1 = sv
+      ? `${scenario.setting} ${scenario.place}.`
+      : `${scenario.setting} ${scenario.place}.`;
 
-    const stemsEn = {
-      definition_or_concept: [
-        `Which option best explains why a clear way of working matters when you need shared understanding ${place}?`,
-        `People do things differently. What is the main purpose of a shared way of working ${place}?`,
-        `Why is consistency important if you want to follow up and improve ${place}?`
-      ],
-      routine_start: [
-        `Work starts without alignment ${place}. What is the best starting action?`,
-        `Before doing anything else ${place}, what should be clarified first to avoid the wrong path?`,
-        `You are under time pressure ${place}. Which first action helps most to keep it correct and traceable?`
-      ],
-      traceability_and_evidence: [
-        `You need to show later what was done ${place}. What do you start with?`,
-        `Which choice gives the best traceability for follow-up ${place}?`,
-        `If someone asks “how do you know it was correct?” ${place} — what is the first action?`
-      ],
-      risk_consequence: [
-        `Which risk increases most if you skip a clear start ${place}?`,
-        `If you proceed without scoping ${place}, what is the most common consequence?`,
-        `What is the biggest risk if ownership and follow-up are unclear from the start ${place}?`
-      ],
-      roles_and_responsibility: [
-        `When you need to align how work is done ${place}, who should take first responsibility—and why?`,
-        `Who should initiate and coordinate when you want consistency ${place}?`,
-        `When something needs to be brought under control ${place}, which role should start and ensure it happens?`
-      ],
-      deviation_and_action: [
-        `If something deviates ${place}, what first action is most correct?`,
-        `You notice something didn’t turn out as expected ${place}. What do you do first?`,
-        `In a deviation ${place}, what first action reduces the risk of fixing the wrong thing?`
-      ],
-      scenario_application: [
-        `Which choice gives the best start for ${role} ${place}?`,
-        `You need to create order in a situation ${place}. Which choice helps most right now?`,
-        `You want to avoid misunderstandings ${place}. Which choice is the most practical starting point?`
-      ]
+    // 2:a meningen: fråga + dim
+    const askSv = {
+      first_action: "Vilket första agerande är mest korrekt?",
+      missing_info: "Vilken information måste du säkra först innan du bestämmer dig?",
+      least_risky: "Vilket val är minst riskabelt just nu?",
+      must_document: "Vad behöver dokumenteras direkt för att ni ska kunna följa upp senare?",
+      avoid_first: "Vilket val bör du undvika först, även om det känns snabbt?"
+    };
+    const askEn = {
+      first_action: "What first action is most correct?",
+      missing_info: "Which information must you secure first before deciding?",
+      least_risky: "Which choice is the least risky right now?",
+      must_document: "What must be documented immediately so you can follow up later?",
+      avoid_first: "Which choice should you avoid first, even if it feels fast?"
     };
 
-    return pickOne(stemsEn[dim] || stemsEn.scenario_application, seed2) || `Which choice is best ${place}?`;
+    const dimSv = {
+      definition_or_concept: sv ? "Tänk på varför ni behöver ett gemensamt sätt att göra saker." : "",
+      routine_start: sv ? "Tänk på hur ni sätter ramar: mål, avgränsning, ansvar." : "",
+      traceability_and_evidence: sv ? `Tänk på underlag: ${scenario.artifact}.` : "",
+      risk_consequence: sv ? "Tänk på konsekvensen om ni gissar eller hoppar över kontroll." : "",
+      roles_and_responsibility: sv ? "Tänk på vem som har mandat att starta och samordna." : "",
+      deviation_and_action: sv ? "Tänk på hur ni stoppar, avgränsar och säkrar fakta." : "",
+      scenario_application: sv ? `Du är ${role}.` : ""
+    };
+
+    const dimEn = {
+      definition_or_concept: "Think about why a shared way of working matters.",
+      routine_start: "Think about setting boundaries: goal, scope, ownership.",
+      traceability_and_evidence: `Think about evidence: ${scenario.artifact}.`,
+      risk_consequence: "Think about consequences if you guess or skip checks.",
+      roles_and_responsibility: "Think about who has mandate to initiate and coordinate.",
+      deviation_and_action: "Think about stopping, scoping, and securing facts.",
+      scenario_application: `You are ${role}.`
+    };
+
+    // 3:e meningen (konkret constraint / twist) – bara om vi ska ha 3 meningar
+    const c2 = (seed2 & 1) === 0 ? scenario.constraintA : scenario.constraintB;
+
+    // “twist” på slutet i arcens senare del (ger röd tråd)
+    const useTwist = !!(batch && batch.useArc && i >= Math.min(6, Math.max(4, Math.floor(count / 2))) && (seed2 % 3 === 0));
+
+    const q2 = sv
+      ? `${askSv[askStyle]} ${safeStr(dimSv[dim] || "").trim()}`.trim()
+      : `${askEn[askStyle]} ${safeStr(dimEn[dim] || "").trim()}`.trim();
+
+    const q3 = useTwist ? scenario.twist : c2;
+
+    // bygg meningar enligt profil
+    const out = joinSentences(sv, s1, q2, q3, lenProf.sentences);
+
+    // säkerställ min-längd genom att lägga till en extra konkret rad om den blev kort
+    if (safeStr(out).length < lenProf.minChars) {
+      const add = sv
+        ? `Du behöver kunna förklara varför ni valde just detta, och vad nästa uppföljning blir.`
+        : `You need to be able to explain why you chose this and what the next follow-up will be.`;
+      return joinSentences(sv, out, add, "", 2);
+    }
+    return out;
   }
 
   let text = stemForDimension();
@@ -1406,7 +1576,7 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   picked.push(best);
 
   const seen = new Set([normKey(best)]);
-  let cursor = (start ^ hash32(safeStr(context).slice(0, 196))) >>> 0;
+  let cursor = (start ^ hash32(safeStr(context).slice(0, 196)) ^ hash32(scenario.id)) >>> 0;
 
   while (picked.length < choiceCount && picked.length < 32) {
     cursor = (cursor * 1664525 + 1013904223) >>> 0;
@@ -1474,7 +1644,7 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     ...(correctChoiceIds ? { correctChoiceIds } : {}),
     rationale,
     difficulty,
-    tags: [subjId, "scenario", dim, placeKey(place)],
+    tags: [subjId, "scenario", dim, placeKey(place), `pack_${scenario.id}`],
     bestAnswerText
   };
 }
