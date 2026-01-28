@@ -1,10 +1,14 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.7 QUALITY+V1-CONTRACT)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.8 HOTFIX + V1-CONTRACT)
 // FIL: worker/index.js
 //
 // Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ/TF begärs.
 //      FIX: Undvik “samma frågor”, förbjud placeholder-fraser, kräver förklaring,
 //           och gör batchen unik (dedupe) + bättre variation.
+//
+// PATCH v1.5.8 (QTYPE-SOURCEGUARD + STABLE-DEFAULT):
+// - P0: Tar bort `body.question` från questionType-inferens (krockar med frågetext och kan slå av UI-items).
+// - P0: Stabil default: om UI kör questions-format/contentType=questions men questionType saknas → sätt "auto".
 //
 // PATCH v1.5.7 (STEP-NORM + COURSE-SEED + TRACEABILITY-DIM + STEM-VARIANTS):
 // - P0: Normaliserar step till ren siffra (1–7) i v1 + legacy + infer från contextText.
@@ -77,7 +81,7 @@ import TRAINING_PROMPT from "../ai-rules/v1/rulesets/training_prompt.json";
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5.7";
+const VERSION = "1.5.8";
 
 // ============================================================
 // BLOCK 03 — Fetch handler (routing + guards)
@@ -249,6 +253,7 @@ export default {
     let difficultyHint = body.difficultyHint ?? body.difficulty;
 
     // UI: frågetyp (tolerant mot olika fältnamn)
+    // P0 HOTFIX: ta bort body.question (krockar ofta med frågetext och kan slå av UI-items)
     let questionType = normalizeQuestionType(
       body.questionType ??
       body.qType ??
@@ -259,7 +264,6 @@ export default {
       body.quizMode ??
       body.mcqMode ??
       body.mcq_type ??
-      body.question ??
       ""
     );
 
@@ -281,6 +285,14 @@ export default {
       difficultyHint = v1.difficulty;
       course = v1.course;
       contextText = v1.contextText;
+    }
+
+    // P0 HOTFIX: stabil default om UI tydligt kör questions men questionType saknas
+    // (Annars kan isUiQuestionRequest() bli false och items[] uteblir)
+    const fmtHint = safeStr(format).toLowerCase();
+    const ctHint = safeStr(body && body.contentType).trim();
+    if (!safeStr(questionType).trim() && (fmtHint.includes("question") || ctHint === "questions")) {
+      questionType = "auto";
     }
 
     // language: stöd för sv, sv-SE, sv_SE, en, en-US → normaliseras till "sv"|"en"
@@ -981,7 +993,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.5.7"
+      source: "mock-v1.5.8"
     }
   };
 }
@@ -1247,22 +1259,6 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   const rolesSv = ["du som medarbetare", "du som ansvarig", "du som tar emot", "du som kontrollerar", "du som rapporterar"];
   const rolesEn = ["you as the employee", "you as responsible", "you as receiver", "you as checker", "you as reporter"];
   const role = (language === "sv" ? rolesSv : rolesEn)[(n + i) % 5];
-
-  const eventsSv = [
-    "ni behöver bli överens om vad som gäller",
-    "en rutin behöver följas direkt",
-    "något avviker från det förväntade",
-    "ni behöver kunna följa upp i efterhand",
-    "en avvikelse behöver hanteras lugnt och korrekt"
-  ];
-  const eventsEn = [
-    "you need shared understanding",
-    "a routine must be followed",
-    "something deviates from expectations",
-    "you need to be able to follow up later",
-    "a deviation must be handled calmly and correctly"
-  ];
-  const event = (language === "sv" ? eventsSv : eventsEn)[(n + i) % 5];
 
   function stemForDimension() {
     const seed2 = (n ^ hash32(`${dim}|${difficulty}|${i}`) ^ hash32(place)) >>> 0;
