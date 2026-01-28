@@ -28,6 +28,10 @@
 // - Returnerar även `items[]` (envelope-friendly) utan att bryta befintligt UI.
 // - Lägger X-Request-Id + X-HR-Request-Id i svar (SDK kan plocka upp).
 // - CORS headers tillåter även X-HR-SDK / X-HR-Client (case-variant).
+//
+// PATCH v1.5.9a (FALLBACK-QUESTION + CORRECT-ERRORS):
+// - P0: Om batch-unikhet misslyckas: skapa fallback-fråga istället för att kasta och döda hela svaret.
+// - P0: Korrekt feltext vid interna build-fel (inte “AI svarade inte”).
 // ============================================================
 
 // ============================================================
@@ -55,7 +59,7 @@ import TRAINING_PROMPT from "../ai-rules/v1/rulesets/training_prompt.json";
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5.9";
+const VERSION = "1.5.9a";
 
 // ============================================================
 // BLOCK 03 — Fetch handler (routing + guards)
@@ -315,8 +319,9 @@ export default {
         questionType
       });
     } catch (e) {
-      console.error("ERR", requestId, "UPSTREAM_ERROR");
-      return errorJSON(502, requestId, "UPSTREAM_ERROR", "AI-tjänsten svarade inte", corsHeaders, false);
+      // PATCH v1.5.9a: korrekt feltext. Detta är intern bygglogik (inte “AI svarade inte”).
+      console.error("ERR", requestId, "WORKER_BUILD_FAILED");
+      return errorJSON(502, requestId, "WORKER_BUILD_FAILED", "Worker kunde inte bygga ett giltigt svar", corsHeaders, false);
     }
 
     // ---------- TOPP-NIVÅ blocks ----------
@@ -1114,7 +1119,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.5.9"
+      source: "mock-v1.5.9a"
     }
   };
 }
@@ -1317,8 +1322,17 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
     break;
   }
 
+  // PATCH v1.5.9a: ingen throw här. Skapa fallback-fråga så UI inte tappar allt.
   if (!q) {
-    throw new Error("DUPLICATE_QUESTION_IN_BATCH");
+    const fb = makeFallbackQuestion({
+      i,
+      language,
+      courseLabel,
+      batch
+    });
+    q = fb;
+    // logga kort (ingen payload)
+    console.error("ERR", "fallback_question", `i=${i + 1}`);
   }
 
   const qOut = { ...q };
@@ -1614,6 +1628,48 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     difficulty,
     tags: [subjId, "scenario", dim, placeKey(place), `pack_${scenario.id}`],
     bestAnswerText
+  };
+}
+
+function makeFallbackQuestion({ i, language, courseLabel, batch }) {
+  const sv = (language === "sv");
+  const scenario = (batch && batch.scenario) ? batch.scenario : null;
+  const place = scenario ? scenario.place : (sv ? "på arbetsplatsen" : "at work");
+
+  const s1 = scenario ? scenario.setting : (sv ? "Du märker att informationen inte går ihop" : "You notice the information does not align");
+  const s2 = scenario ? scenario.constraintB : (sv ? "Två personer säger olika och du har ont om tid." : "Two people disagree and you are short on time.");
+  const q = sv
+    ? `${s1} ${place}. ${s2} Vad gör du först för att undvika att ni gissar?`
+    : `${s1} ${place}. ${s2} What do you do first to avoid guessing?`;
+
+  const options = sv
+    ? [
+        "Stoppa och säkra fakta: samla underlag innan ni bestämmer",
+        "Gå direkt på den snabbaste lösningen så det blir klart",
+        "Låt alla göra som de tycker är rimligt",
+        "Vänta tills någon annan tar beslutet"
+      ]
+    : [
+        "Stop and secure facts: gather evidence before deciding",
+        "Jump to the fastest solution to get it done",
+        "Let everyone do what they think is reasonable",
+        "Wait for someone else to decide"
+      ];
+
+  const rationale = sv
+    ? "Förklaring: Första steget är att säkra fakta och spårbarhet innan ni väljer åtgärd. Annars riskerar ni att lösa fel problem."
+    : "Explanation: The first step is to secure facts and traceability before choosing an action. Otherwise you risk solving the wrong problem.";
+
+  // bygg “choice-question” som resten av pipeline förväntar sig
+  const choices = options.map((t, idx) => ({ id: `c${idx + 1}`, text: t }));
+  return {
+    kind: "question",
+    text: stripDomainWordsFromQuestion(q, language),
+    choices,
+    correctChoiceId: "c1",
+    rationale,
+    difficulty: undefined,
+    tags: ["fallback", "dedupe_fail", `area_${normKey(courseLabel && courseLabel.area).slice(0, 32)}`]
   };
 }
 
