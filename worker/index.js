@@ -28,39 +28,6 @@
 // - Returnerar även `items[]` (envelope-friendly) utan att bryta befintligt UI.
 // - Lägger X-Request-Id + X-HR-Request-Id i svar (SDK kan plocka upp).
 // - CORS headers tillåter även X-HR-SDK / X-HR-Client (case-variant).
-//
-// PATCH v1.5.5 (HYG + VARIATION):
-// - P0: Slutar injicera courseLabel.area (t.ex. "ISO 9001") i question/options/explanation/feedback.
-// - P0: Tar bort förbjudna domänord i Q-fält: "steg/steget/modul/kapitel/kurs/utbildning".
-// - P1: Mer scen-variation + workplace-infer från context (utan ny datamodell).
-// - P2: true/false får korrekt correctIndex (baserat på correctChoiceId).
-//
-// UI kräver vid MCQ:
-// - type: "question"
-// - question: string
-// - options: string[]
-// - correctIndex: number (eller correctIndices: number[])
-//
-// POLICY (LÅST):
-// - Stateless (ingen lagring)
-// - Fail-closed
-// - Endast JSON
-// - Max payload 64KB
-// - Logga aldrig payload (endast requestId + felkod)
-// - CORS strikt: aldrig wildcard
-// - ENV:
-//   - ALLOWED_ORIGIN (MUST)
-//   - REQUIRE_AUTH ("true"/"false")
-//   - WORKER_TOKEN (secret, om REQUIRE_AUTH=true)
-//   - AI_ENABLED ("true"/"false")  // just nu påverkar text (mock), inte extern AI-call
-//
-// Endpoints (versionerade):
-// - GET  /v1/health
-// - GET  /v1/version
-// - POST /v1/ai/generate
-// - POST /v1/ai/training   (alias)
-// - POST /v1/ai/document   (alias)
-// - OPTIONS *              (CORS preflight)
 // ============================================================
 
 // ============================================================
@@ -1029,7 +996,7 @@ function prefixKey(text, maxWords) {
   return parts.slice(0, Math.max(4, Math.min(6, maxWords || 5))).join(" ");
 }
 
-function joinSentences(sv, s1, s2, s3, count) {
+function joinSentences(_sv, s1, s2, s3, count) {
   const a = safeStr(s1).trim();
   const b = safeStr(s2).trim();
   const c = safeStr(s3).trim();
@@ -1382,7 +1349,10 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   const minOpt = qq && qq.mcq ? qq.mcq.minOptions : 4;
   const maxOpt = qq && qq.mcq ? qq.mcq.maxOptions : 6;
 
-  const choiceCount = isTf ? 2 : (isMcq ? clampInt(5, minOpt, maxOpt) : 4);
+  // PATCH (P1, safe): gör antal alternativ varierande (4–6) i stället för konstant 5
+  const span = Math.max(1, (maxOpt - minOpt + 1));
+  const pick = minOpt + (n % span);
+  const choiceCount = isTf ? 2 : (isMcq ? clampInt(pick, minOpt, maxOpt) : 4);
 
   const dimsDefault = [
     "definition_or_concept",
@@ -1451,9 +1421,7 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     ];
     const askStyle = (sv ? askStylesSv : askStylesEn)[seed2 % 5];
 
-    const s1 = sv
-      ? `${scenario.setting} ${scenario.place}.`
-      : `${scenario.setting} ${scenario.place}.`;
+    const s1 = `${scenario.setting} ${scenario.place}.`;
 
     // 2:a meningen: fråga + dim
     const askSv = {
@@ -1472,13 +1440,13 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     };
 
     const dimSv = {
-      definition_or_concept: sv ? "Tänk på varför ni behöver ett gemensamt sätt att göra saker." : "",
-      routine_start: sv ? "Tänk på hur ni sätter ramar: mål, avgränsning, ansvar." : "",
-      traceability_and_evidence: sv ? `Tänk på underlag: ${scenario.artifact}.` : "",
-      risk_consequence: sv ? "Tänk på konsekvensen om ni gissar eller hoppar över kontroll." : "",
-      roles_and_responsibility: sv ? "Tänk på vem som har mandat att starta och samordna." : "",
-      deviation_and_action: sv ? "Tänk på hur ni stoppar, avgränsar och säkrar fakta." : "",
-      scenario_application: sv ? `Du är ${role}.` : ""
+      definition_or_concept: "Tänk på varför ni behöver ett gemensamt sätt att göra saker.",
+      routine_start: "Tänk på hur ni sätter ramar: mål, avgränsning, ansvar.",
+      traceability_and_evidence: `Tänk på underlag: ${scenario.artifact}.`,
+      risk_consequence: "Tänk på konsekvensen om ni gissar eller hoppar över kontroll.",
+      roles_and_responsibility: "Tänk på vem som har mandat att starta och samordna.",
+      deviation_and_action: "Tänk på hur ni stoppar, avgränsar och säkrar fakta.",
+      scenario_application: `Du är ${role}.`
     };
 
     const dimEn = {
@@ -1509,8 +1477,8 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     // säkerställ min-längd genom att lägga till en extra konkret rad om den blev kort
     if (safeStr(out).length < lenProf.minChars) {
       const add = sv
-        ? `Du behöver kunna förklara varför ni valde just detta, och vad nästa uppföljning blir.`
-        : `You need to be able to explain why you chose this and what the next follow-up will be.`;
+        ? "Du behöver kunna förklara varför ni valde just detta, och vad nästa uppföljning blir."
+        : "You need to be able to explain why you chose this and what the next follow-up will be.";
       return joinSentences(sv, out, add, "", 2);
     }
     return out;
