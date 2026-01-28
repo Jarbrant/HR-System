@@ -15,27 +15,30 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras (render visar, callbacks hanterar write)
 
-PATCH v1.1.5 (PP-SC-010-08D) (AUTOPATCH):
-- P0: Visa “Förklaring” alltid om den finns (även när facit saknas) och undvik “—” som känns “klart”.
-- P0: Visa contextHint (om finns) precis under frågetexten för att göra frågan tydligare (minskar tvetydighet).
-- P1: Modal-edit: krav för question höjs till minst 3 svarsalternativ (fail-closed, håll modalen öppen).
-- P1: View: om fråga saknar förklaring -> visa neutral uppmaning (“Lägg till en kort förklaring…”) istället för “—”.
+PATCH v1.1.6 (PP-SC-010-08E) (AUTOPATCH):
+- P0: View(question): om frågetext saknas -> visa neutral “(saknar frågetext)” istället för “—”.
+- P1: Edit(question): fail-closed om checkbox ikryssad men text saknas (håller modalen öppen).
+- P1: Save(question): sätt alltid options[] + correctIndex + correctIndices (och uppdatera legacy-fält om de finns).
+- P2: Debug: valfri render-logg bakom window.__HR_DEBUG_TRAININGS_RENDER (ingen påverkan annars).
 
 Ändringslogg (≤8):
-- v1.1.5: view(question): rendera contextHint under frågan (om finns)
-- v1.1.5: view(question): förklaring visas alltid om text finns; annars neutral uppmaning
-- v1.1.5: edit(question): kräver minst 3 svarsalternativ innan spara (fail-closed)
-- v1.1.5: små XSS-safe helpers för explanation/contextHint
+- v1.1.6: view(question): neutral fallback för saknad frågetext
+- v1.1.6: edit(question): stoppa spara om ikryssat alternativ saknar text
+- v1.1.6: save(question): normalisera facit (correctIndex + correctIndices) + options[]
+- v1.1.6: debug: render-logg bakom flagga
 
 Testnoteringar:
-- View: fråga med contextHint ska visa en “muted” rad under frågan.
-- View: fråga utan förklaring ska visa “Lägg till en kort förklaring…” (inte “—”).
-- Edit: <3 svarsalternativ => alert + modalen hålls öppen.
-- Edit: facit saknas => alert + modalen hålls öppen (som tidigare).
+- View: fråga utan question/text -> “(saknar frågetext)”.
+- Edit: kryssa i tom rad -> alert + modal hålls öppen.
+- Save: efter spara ska item ha options[] och både correctIndex + correctIndices.
 
 Risk/edge cases:
-- Befintliga frågor med exakt 2 alternativ (som inte är Sant/Falskt) kan inte sparas om de öppnas i edit och man försöker spara.
+- Om någon förväntar sig enbart correctIndex eller enbart correctIndices kan dubbel-write avslöja buggar i konsumenter (men ökar kompatibilitet i UI/worker-flöden).
 ============================================================ */
+
+/* =========================================
+   BLOCK 01/08 – Bootstrap + helpers + element cache
+   ========================================= */
 (function () {
   "use strict";
 
@@ -43,12 +46,19 @@ Risk/edge cases:
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.1.5-PP-SC-010-08D";
+  render.__VERSION = "v1.1.6-PP-SC-010-08E";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
   function safeArr(a) { return Array.isArray(a) ? a : []; }
   function isObj(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
+
+  // Debug (fail-soft): sätt window.__HR_DEBUG_TRAININGS_RENDER = true i console vid behov.
+  function dbg(msg, obj) {
+    try {
+      if (window.__HR_DEBUG_TRAININGS_RENDER) console.log("[Trainings][Render]", msg, obj || "");
+    } catch (_) { }
+  }
 
   // We expect 01-dom to provide dom helpers; fallback to minimal.
   const dom = NS.dom || {
@@ -79,9 +89,9 @@ Risk/edge cases:
     if (kind === "ok" || kind === "warn" || kind === "bad") pillEl.classList.add(kind);
   }
 
-  // ------------------------------
-  // Top pills
-  // ------------------------------
+  /* =========================================
+     BLOCK 02/08 – Top pills
+     ========================================= */
   render.setContextPill = function (text) {
     dom.setText(EL.contextText, normStr(text) || "—");
   };
@@ -95,9 +105,9 @@ Risk/edge cases:
     dom.setText(EL.whoText, normStr(text) || "—");
   };
 
-  // ------------------------------
-  // Hints
-  // ------------------------------
+  /* =========================================
+     BLOCK 03/08 – Hints
+     ========================================= */
   render.setLeftHint = function (text) {
     dom.setText(EL.leftHint, normStr(text) || "");
   };
@@ -106,9 +116,9 @@ Risk/edge cases:
     dom.setText(EL.aiHint, normStr(text) || "");
   };
 
-  // ------------------------------
-  // Training list
-  // ------------------------------
+  /* =========================================
+     BLOCK 04/08 – Training list (vänster) + delegation
+     ========================================= */
   function clearChildren(el) {
     if (!el) return;
     while (el.firstChild) el.removeChild(el.firstChild);
@@ -135,7 +145,7 @@ Risk/edge cases:
     return "Steg " + s; // sista fallback
   }
 
-  // --- P0: Event-delegation state ---
+  // --- Event-delegation state ---
   render.__LIST_BOUND = false;
   render.__listOnPick = null;
 
@@ -194,7 +204,7 @@ Risk/edge cases:
   function makeCardRow(t, selected, id) {
     const wrap = document.createElement("div");
 
-    // P1: data + button-semantik
+    // data + button-semantik
     const tid = normStr(id || (t && t.id));
     if (tid) wrap.setAttribute("data-training-id", tid);
     wrap.setAttribute("role", "button");
@@ -302,9 +312,9 @@ Risk/edge cases:
     }
   };
 
-  // ------------------------------
-  // Blocks list (right side)
-  // ------------------------------
+  /* =========================================
+     BLOCK 05/08 – Blocks list (höger)
+     ========================================= */
   function typeLabel(it) {
     const s = normStr(it && it.type).toLowerCase();
     if (s === "question" || s === "quiz") return "Fråga";
@@ -468,9 +478,9 @@ Risk/edge cases:
     });
   };
 
-  // ------------------------------
-  // Modal (core)
-  // ------------------------------
+  /* =========================================
+     BLOCK 06/08 – Modal core (overlay + save/cancel)
+     ========================================= */
   let _modalEl = null;
   let _modalRoot = null;
   let _prevBodyOverflow = null;
@@ -522,7 +532,7 @@ Risk/edge cases:
     unlockBodyScroll();
   }
 
-  // P0 (2B stöd): Exponera fail-soft stängning så 06-page kan stänga modal vid byte
+  // Exponera fail-soft stängning så 06-page kan stänga modal vid byte
   render.closeItemModal = function () { try { closeModal(); } catch (_) { } };
   render.hideItemModal = function () { try { closeModal(); } catch (_) { } };
 
@@ -611,7 +621,7 @@ Risk/edge cases:
     save.className = "btn primary";
     save.textContent = "Spara";
     save.addEventListener("click", function () {
-      // P2: om onSave() returnerar false -> håll modalen öppen
+      // Om onSave() returnerar false -> håll modalen öppen (fail-closed)
       let shouldClose = true;
       try {
         if (typeof onSave === "function") {
@@ -656,9 +666,9 @@ Risk/edge cases:
     try { x.focus && x.focus(); } catch (_) { }
   };
 
-  // ------------------------------
-  // Modal: Item editor
-  // ------------------------------
+  /* =========================================
+     BLOCK 07/08 – Modal: Item view/edit (question-aware)
+     ========================================= */
   function extractOptions(it) {
     if (!it) return [];
     const cand = it.options || it.choices || it.answers || it.alternatives;
@@ -749,6 +759,7 @@ Risk/edge cases:
     const onDelete = typeof (opts && opts.onDelete) === "function" ? opts.onDelete : null;
 
     if (!item || (typeof item !== "object" && typeof item !== "string")) {
+      dbg("openItemModal: unknown item shape", item);
       const box = document.createElement("div");
       box.className = "muted2";
       box.textContent = "Kan inte visa detta item (okänd shape).";
@@ -821,10 +832,13 @@ Risk/edge cases:
         const q = document.createElement("div");
         q.style.marginTop = "8px";
         q.style.fontWeight = "700";
-        q.textContent = primaryText(item) || "—";
+
+        // P0: neutral fallback om frågetext saknas (undvik “—” som känns “klart”)
+        const qTxt = primaryText(item);
+        q.textContent = qTxt ? qTxt : "(saknar frågetext)";
         content.appendChild(q);
 
-        // P0: visa contextHint om finns (gör frågan tydligare)
+        // Visa contextHint om finns (gör frågan tydligare)
         const hintTxt = extractContextHint(item);
         if (hintTxt) {
           const ch = document.createElement("div");
@@ -882,26 +896,21 @@ Risk/edge cases:
         const explTxt = extractExplanation(item);
 
         // Visa “Rätt!” bara när facit faktiskt finns (annars blir det falsk trygghet)
+        content.appendChild(makeSectionTitle("Förklaring:"));
         if (hasCorrect) {
-          content.appendChild(makeSectionTitle("Förklaring:"));
-
           const okLine = document.createElement("div");
           okLine.style.fontWeight = "900";
           okLine.textContent = "Rätt!";
           content.appendChild(okLine);
-        } else {
-          content.appendChild(makeSectionTitle("Förklaring:"));
         }
 
         const expl = document.createElement("div");
         expl.className = "muted2";
         expl.style.textAlign = "left";
-        // P0/P1: undvik “—” (känns “klart”). Visa neutral uppmaning om tomt.
         expl.textContent = explTxt ? explTxt : "Lägg till en kort förklaring så att eleven förstår varför svaret är rätt.";
         content.appendChild(expl);
 
         if (!hasCorrect && explTxt) {
-          // Om förklaring finns men facit saknas: var tydlig med att facit behövs för “Rätt!”-känslan
           const n = document.createElement("div");
           n.className = "muted2";
           n.style.textAlign = "left";
@@ -1069,6 +1078,18 @@ Risk/edge cases:
         const optOut = [];
         const correctIdxs = [];
 
+        // P1: fail-closed om checkbox ikryssad men text saknas (annars tappas facit tyst)
+        for (let i = 0; i < refs.optRows.length; i++) {
+          const row = refs.optRows[i];
+          const t = normStr(row.inp.value || "");
+          const checked = !!row.cb.checked;
+
+          if (checked && !t) {
+            try { window.alert("Du har markerat ett korrekt svar utan text. Fyll i texten eller avmarkera."); } catch (_) { }
+            return false; // håll modalen öppen
+          }
+        }
+
         for (let i = 0; i < refs.optRows.length; i++) {
           const t = normStr(refs.optRows[i].inp.value || "");
           if (!t) continue;
@@ -1076,7 +1097,7 @@ Risk/edge cases:
           if (refs.optRows[i].cb.checked) correctIdxs.push(optOut.length - 1);
         }
 
-        // P1: fail-closed i modal-edit (håll öppen) — kräver minst 3 alternativ nu
+        // fail-closed — kräver minst 3 alternativ
         if (optOut.length < 3) {
           try { window.alert("Frågan måste ha minst 3 svarsalternativ innan du sparar."); } catch (_) { }
           return false;
@@ -1087,28 +1108,33 @@ Risk/edge cases:
         }
 
         if (isObj(updated)) {
+          // normalisera options
           if (Array.isArray(updated.options)) updated.options = optOut;
           else if (Array.isArray(updated.choices)) updated.choices = optOut;
           else if (Array.isArray(updated.answers)) updated.answers = optOut;
           else updated.options = optOut;
 
+          // normalisera förklaring
           const expl = refs.taE ? normStr(refs.taE.value || "") : "";
           if (typeof updated.explanation === "string") updated.explanation = expl;
           else if (typeof updated.feedback === "string") updated.feedback = expl;
           else if (typeof updated.rationale === "string") updated.rationale = expl;
           else updated.explanation = expl;
 
-          if (typeof updated.correctIndex === "number" || updated.correctIndex === null) {
-            updated.correctIndex = correctIdxs.length ? correctIdxs[0] : -1;
-          } else if (Array.isArray(updated.correctIndices)) {
-            updated.correctIndices = correctIdxs;
-          } else if (typeof updated.answerIndex === "number") {
-            updated.answerIndex = correctIdxs.length ? correctIdxs[0] : -1;
-          } else if (Array.isArray(updated.answerIndices)) {
-            updated.answerIndices = correctIdxs;
-          } else {
-            updated.correctIndices = correctIdxs;
-          }
+          // P1: sätt både single + multi för kompatibilitet
+          const first = correctIdxs[0];
+
+          // primära fält
+          updated.correctIndex = first;
+          updated.correctIndices = correctIdxs;
+
+          // legacy/alias (uppdatera bara om de finns, annars lämna)
+          if ("answerIndex" in updated) updated.answerIndex = first;
+          if ("answerIndices" in updated) updated.answerIndices = correctIdxs;
+          if ("correctIdx" in updated) updated.correctIdx = first;
+          if ("correctIdxs" in updated) updated.correctIdxs = correctIdxs;
+
+          dbg("modal-save(question): normalized", { options: optOut.length, correctIdxs: correctIdxs.slice(0) });
         }
       }
 
@@ -1117,9 +1143,9 @@ Risk/edge cases:
     });
   };
 
-  // ------------------------------
-  // Debug view
-  // ------------------------------
+  /* =========================================
+     BLOCK 08/08 – Debug view
+     ========================================= */
   render.renderDebug = function (obj) {
     try {
       if (!EL.debugPre) return;
