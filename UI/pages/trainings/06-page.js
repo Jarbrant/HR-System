@@ -13,11 +13,11 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.3.1-PP-SC-010-07I (AUTOPATCH paket 1–3):
-- P0 FIX: Block-editor (openBlockEditor) får writer-guard + re-check i save-callback (read-only kan inte edit:a).
-- P0 FIX: Provfrågor: även auto kräver facit/struktur (MCQ/TF/short/numeric) → annars import stoppad (fail-closed).
-- P0 FIX: questionType normaliseras för worker: auto_* → auto (minskar kontraktsrisk).
-- P1: isWriterAllowed refreshar alltid who även vid locked → korrekt who-pill/rollvisning.
+PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
+- P0 FIX: AI-import: normalisering får inte välja r.data om r.data saknar blocks/items (worker returnerar top-level blocks/items).
+- P0 FIX: Stöd för worker blocks[] där block saknar items men har kind/question/options → mappas till UI-block + item.
+- P0 FIX: Auto-sätt item.type om saknas (question=>question, annars info) så render/filters blir stabila.
+- P1: Robustare normalisering: om raw.data saknar blocks/items men raw har dem, använd raw (fail-closed bibehålls).
 
 ============================================================ */
 (function () {
@@ -30,7 +30,7 @@ PATCH v1.3.1-PP-SC-010-07I (AUTOPATCH paket 1–3):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.3.1-PP-SC-010-07I";
+  page.__VERSION = "v1.3.2-PP-SC-010-07J";
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -314,6 +314,21 @@ PATCH v1.3.1-PP-SC-010-07I (AUTOPATCH paket 1–3):
     if (out.indexOf("[object Object]") !== -1) out = out.replace(/\[object Object\]/g, "(kontext dolt)");
     return stripContextBoilerplate(out);
   }
+
+  function ensureItemType(it) {
+    // P0: gör rendering stabil om worker/AI saknar type
+    if (!it || typeof it !== "object") return it;
+    const t = normStr(it.type).toLowerCase();
+    if (t) return it;
+    // om question-fält finns -> question
+    if (typeof it.question === "string" && normStr(it.question)) { it.type = "question"; return it; }
+    // om options+correct finns -> question
+    if (Array.isArray(it.options) && it.options.length >= 2) { it.type = "question"; return it; }
+    // annars info
+    it.type = "info";
+    return it;
+  }
+
   function sanitizeAiItemInPlace(item) {
     if (!item || typeof item !== "object") return item;
     const keys = ["text", "instruction", "prompt", "question", "explanation", "feedback", "rationale", "reason", "title", "heading"];
@@ -324,6 +339,8 @@ PATCH v1.3.1-PP-SC-010-07I (AUTOPATCH paket 1–3):
     if (Array.isArray(item.options)) {
       item.options = item.options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
     }
+    // P0: auto-sätt type om saknas
+    ensureItemType(item);
     return item;
   }
 
@@ -1373,26 +1390,87 @@ PATCH v1.3.1-PP-SC-010-07I (AUTOPATCH paket 1–3):
     if (dom && dom.aiHint && dom.setText) dom.setText(dom.aiHint, String(text || ""));
   }
 
+  function mapWorkerBlockToUiBlock(wb) {
+    // P0: worker kan skicka blocks[] där block saknar items men har kind/question/options...
+    if (!wb || typeof wb !== "object") return null;
+
+    const title = normStr(wb.title || wb.heading || wb.name || "");
+    const items = [];
+
+    // a) redan i UI-shape
+    if (Array.isArray(wb.items)) {
+      for (const it of wb.items) {
+        if (typeof it === "string") items.push(scrubObjectObjectToken(it));
+        else if (it && typeof it === "object") items.push(sanitizeAiItemInPlace(deepClone(it)));
+      }
+      return items.length ? { title, items } : null;
+    }
+
+    // b) worker "question block"
+    const kind = normStr(wb.kind || wb.type || "").toLowerCase();
+    const hasQuestionField = typeof wb.question === "string" && normStr(wb.question);
+    const hasOptions = Array.isArray(wb.options) && wb.options.length >= 2;
+    const hasCorrectIndex = Number.isFinite(Number(wb.correctIndex));
+    const hasCorrectIndices = Array.isArray(wb.correctIndices) && wb.correctIndices.length > 0;
+
+    if (kind === "question" || hasQuestionField || hasOptions) {
+      const qItem = {
+        type: "question",
+        question: normStr(wb.question || wb.q || wb.text || ""),
+        questionType: normStr(wb.questionType || ""),
+        difficulty: normStr(wb.difficulty || ""),
+        options: Array.isArray(wb.options) ? wb.options.slice() : undefined,
+        correctIndex: (hasCorrectIndex ? Number(wb.correctIndex) : undefined),
+        correctIndices: (hasCorrectIndices ? wb.correctIndices.slice() : undefined),
+        explanation: normStr(wb.explanation || wb.rationale || wb.feedback || "")
+      };
+      items.push(sanitizeAiItemInPlace(qItem));
+      return { title: title || normStr(wb.blockId || "") || "Provfråga", items };
+    }
+
+    // c) fallback: text-ish block
+    const txt = normStr(wb.text || wb.instruction || wb.prompt || wb.content || "");
+    if (txt) {
+      items.push({ type: "info", text: scrubObjectObjectToken(txt) });
+      return { title, items };
+    }
+
+    return null;
+  }
+
   function normalizeAiBlocksFromAny(raw) {
     // Tillåt flera shapes men fail-closed om det inte går att mappa till blocks/items.
-    // Shape A: { blocks:[{title, items:[...]}] }
-    // Shape B: { data:{ blocks:[...] } }
-    // Shape C: { items:[...] } (wrap till 1 block)
-    // Shape D: [...] (treat as blocks om items/title finns, annars items->1 block)
-    const pick = (raw && raw.data) ? raw.data : raw;
+    // Viktigt: worker kan ha raw.data (training) men blocks/items ligger top-level.
+
+    if (!raw) return { ok: false, reason: "AI-svar saknar data." };
+
+    // P0: välj raw.data bara om den verkligen innehåller blocks/items, annars använd raw
+    const hasBlocksOrItems = function (x) {
+      return !!(x && (Array.isArray(x.blocks) || Array.isArray(x.trainingBlocks) || Array.isArray(x.items)));
+    };
+
+    const pick = (raw && raw.data && hasBlocksOrItems(raw.data)) ? raw.data : raw;
     if (!pick) return { ok: false, reason: "AI-svar saknar data." };
 
     const blocksCand = pick.blocks || pick.trainingBlocks || null;
     if (Array.isArray(blocksCand)) {
-      const out = blocksCand.map(b => ({
-        title: normStr(b && (b.title || b.heading || b.name)) || "",
-        items: Array.isArray(b && b.items) ? b.items.slice() : []
-      })).filter(b => b.items && b.items.length);
+      const out = [];
+      for (const b of blocksCand) {
+        // om redan {title,items} -> använd, annars mappa worker-block
+        const mapped = mapWorkerBlockToUiBlock(b);
+        if (mapped && Array.isArray(mapped.items) && mapped.items.length) out.push(mapped);
+      }
       return out.length ? { ok: true, blocks: out } : { ok: false, reason: "AI gav inga block/items." };
     }
 
     if (Array.isArray(pick.items)) {
-      return { ok: true, blocks: [{ title: "", items: pick.items.slice() }] };
+      // wrap till 1 block
+      const items = [];
+      for (const it of pick.items) {
+        if (typeof it === "string") items.push(scrubObjectObjectToken(it));
+        else if (it && typeof it === "object") items.push(sanitizeAiItemInPlace(deepClone(it)));
+      }
+      return items.length ? { ok: true, blocks: [{ title: "", items }] } : { ok: false, reason: "AI gav inga items." };
     }
 
     if (Array.isArray(pick)) {
@@ -1555,7 +1633,8 @@ PATCH v1.3.1-PP-SC-010-07I (AUTOPATCH paket 1–3):
     }
 
     // Normalisera → blocks/items
-    const norm = normalizeAiBlocksFromAny(r.data != null ? r.data : r);
+    // P0 FIX: skicka in HELA r (inte r.data) eftersom worker lägger blocks/items top-level även när r.data finns.
+    const norm = normalizeAiBlocksFromAny(r);
     page._LAST_AI_NORM = deepClone(norm);
 
     if (!norm.ok) {
