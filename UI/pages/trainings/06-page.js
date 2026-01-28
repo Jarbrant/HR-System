@@ -216,7 +216,7 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
   };
   page._state = state;
 
-  /* =========================
+    /* =========================
      BLOCK 5/18 — Utils
   ========================== */
   function normStr(v) {
@@ -297,6 +297,25 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
     return (s === "mcq_single" || s === "mcq_multi" || s.indexOf("mcq") === 0);
   }
 
+  // P0: saknades i senaste sanning → kan krascha Generate om den inte finns
+  function normalizeQuestionTypeForWorker(qtUi) {
+    const s = normStr(qtUi).toLowerCase();
+    if (!s) return "auto";
+
+    // UI-varianter som ska räknas som auto
+    if (s === "auto" || s.startsWith("auto")) return "auto";
+
+    // Stabil mapping
+    if (s === "mcq_single" || s === "mcq-single" || s === "single" || s === "mcq") return "mcq_single";
+    if (s === "mcq_multi" || s === "mcq-multi" || s === "multi") return "mcq_multi";
+    if (s === "true_false" || s === "true-false" || s === "tf" || s === "sant_falskt" || s === "sant/falskt") return "true_false";
+    if (s === "short_answer" || s === "short-answer" || s === "short" || s === "kortsvar") return "short_answer";
+    if (s === "numeric" || s === "number" || s === "tal") return "numeric";
+
+    // Okänt -> auto (fail-safe)
+    return "auto";
+  }
+
   // UI-sanerare för "[object Object]" + kontext-malltext (fail-closed)
   function stripContextBoilerplate(s) {
     if (typeof s !== "string") return s;
@@ -318,8 +337,14 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
   function ensureItemType(it) {
     // P0: gör rendering stabil om worker/AI saknar type
     if (!it || typeof it !== "object") return it;
-    const t = normStr(it.type).toLowerCase();
-    if (t) return it;
+
+    const t0 = normStr(it.type).toLowerCase();
+
+    // P0: worker kan skicka "text" → normalisera så contract/save inte stoppar
+    if (t0 === "text" || t0 === "paragraph" || t0 === "copy") { it.type = "info"; return it; }
+
+    if (t0) return it;
+
     // om question-fält finns -> question
     if (typeof it.question === "string" && normStr(it.question)) { it.type = "question"; return it; }
     // om options+correct finns -> question
@@ -339,7 +364,7 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
     if (Array.isArray(item.options)) {
       item.options = item.options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
     }
-    // P0: auto-sätt type om saknas
+    // P0: auto-sätt type om saknas + normalisera "text"
     ensureItemType(item);
     return item;
   }
