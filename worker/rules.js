@@ -1,5 +1,5 @@
 // ============================================================
-// PRC-MASTER-BYGGORDER — MASTER-AO-WORKER-STACK-01 (PROD v1.0)
+// PRC-MASTER-BYGGORDER — MASTER-AO-WORKER-STACK-01 (PROD v1.1 AUTOPATCH)
 // FIL: worker/rules.js
 // Syfte: Guards + response helpers + requestId + low-level utils
 //
@@ -40,56 +40,77 @@ export function isPlainObject(v) {
 // ------------------------------
 // JSON responses (standardformat)
 // ------------------------------
-export function okJSON(status, payload, extraHeaders) {
+// Backwards compatible: okJSON(status, payload, extraHeaders)
+// + ny optional: okJSON(status, payload, extraHeaders, requestId)
+export function okJSON(status, payload, extraHeaders, requestId) {
+  const rid = safeStr(requestId || "").trim();
+
   return new Response(JSON.stringify(payload), {
     status,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
+      ...(rid ? { "X-Request-Id": rid, "X-HR-Request-Id": rid } : {}),
       ...(extraHeaders || {})
     }
   });
 }
 
+// Backwards compatible signature:
+// errorJSON(status, requestId, code, message, extraHeaders, logIt)
 export function errorJSON(status, requestId, code, message, extraHeaders, logIt) {
   // Logga ALDRIG payload
-  if (logIt) console.error("ERR", requestId, code);
-  return okJSON(status, {
-    ok: false,
-    requestId: safeStr(requestId),
-    error: { code: safeStr(code), message: safeStr(message) }
-  }, extraHeaders);
+  if (logIt) console.error("ERR", safeStr(requestId), safeStr(code));
+
+  const rid = safeStr(requestId);
+  const c = safeStr(code);
+  const m = safeStr(message);
+
+  // Inkludera errorCode på toppnivå (kompat med index.js)
+  return okJSON(
+    status,
+    {
+      ok: false,
+      requestId: rid,
+      errorCode: c,
+      error: { code: c, message: m }
+    },
+    extraHeaders,
+    rid
+  );
 }
 
 // ------------------------------
 // CORS (strict, no wildcard)
 // ------------------------------
 export function buildCorsHeaders(origin, allowedOrigin) {
-  const o = safeStr(origin);
+  const o = safeStr(origin).trim();
   const allowed = safeStr(allowedOrigin).trim();
 
-  // Health kan svara utan Origin. För andra: index/guards tar 403.
-  const allowOrigin = (allowed && o && o === allowed) ? allowed : (allowed && !o ? "" : "");
+  // Strict: endast exakt match får en Allow-Origin. Annars tom sträng.
+  const allowOrigin = (allowed && o && o === allowed) ? allowed : "";
+
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    // Preflight måste matcha exakt header-namn som klienten använder
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
     "Vary": "Origin"
   };
 }
 
 export function ensureEnvOr500({ requestId, allowedOrigin }) {
-  if (!safeStr(allowedOrigin).trim()) {
-    console.error("ERR", requestId, "ENV_MISSING");
+  const ao = safeStr(allowedOrigin).trim();
+  if (!ao) {
+    console.error("ERR", safeStr(requestId), "ENV_MISSING");
     return {
       ok: false,
-      response: okJSON(
+      response: errorJSON(
         500,
-        {
-          ok: false,
-          requestId,
-          error: { code: "ENV_MISSING", message: "ALLOWED_ORIGIN saknas i env" }
-        },
-        { "Content-Type": "application/json; charset=utf-8" }
+        requestId,
+        "ENV_MISSING",
+        "ALLOWED_ORIGIN saknas i env",
+        { "Content-Type": "application/json; charset=utf-8" },
+        false
       )
     };
   }
@@ -100,7 +121,8 @@ export function guardCorsPreflightOr403({ request, requestId, allowedOrigin }) {
   const origin = request.headers.get("Origin") || "";
   const corsHeaders = buildCorsHeaders(origin, allowedOrigin);
 
-  if (origin !== safeStr(allowedOrigin).trim()) {
+  // Preflight måste ha origin som exakt matchar
+  if (safeStr(origin).trim() !== safeStr(allowedOrigin).trim()) {
     return {
       ok: false,
       corsHeaders,
@@ -124,7 +146,7 @@ export function guardCorsForHealthOr403({ request, requestId, allowedOrigin }) {
   const corsHeaders = buildCorsHeaders(origin, allowedOrigin);
 
   // Health: tillåt utan Origin (curl), men om Origin finns måste matcha
-  if (origin && origin !== safeStr(allowedOrigin).trim()) {
+  if (origin && safeStr(origin).trim() !== safeStr(allowedOrigin).trim()) {
     return {
       ok: false,
       corsHeaders,
@@ -147,7 +169,7 @@ export function guardCorsForAIOr403({ request, requestId, allowedOrigin }) {
   const corsHeaders = buildCorsHeaders(origin, allowedOrigin);
 
   // AI: origin måste matcha exakt
-  if (origin !== safeStr(allowedOrigin).trim()) {
+  if (safeStr(origin).trim() !== safeStr(allowedOrigin).trim()) {
     return {
       ok: false,
       corsHeaders,
@@ -180,7 +202,7 @@ export function guardAuthOr401({ request, requestId, requireAuth, workerToken, c
 
   const tokenEnv = safeStr(workerToken).trim();
   if (!tokenEnv) {
-    console.error("ERR", requestId, "ENV_MISSING");
+    console.error("ERR", safeStr(requestId), "ENV_MISSING");
     return {
       ok: false,
       response: errorJSON(
@@ -309,4 +331,3 @@ export function parseJsonOrErr({ bytes, requestId, corsHeaders }) {
     };
   }
 }
-
