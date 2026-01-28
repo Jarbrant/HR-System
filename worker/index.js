@@ -52,6 +52,10 @@
 // - OPTIONS *              (CORS preflight)
 // ============================================================
 
+// ============================================================
+// BLOCK 01 — Imports (ai-rules bundle)
+// ============================================================
+
 import INDEX from "../ai-rules/index.json";
 import GLOBAL from "../ai-rules/v1/global.json";
 import MODULES from "../ai-rules/v1/modules.json";
@@ -68,12 +72,17 @@ import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json"
 // LÄGG DEN HÄR: ai-rules/v1/rulesets/training_prompt.json
 import TRAINING_PROMPT from "../ai-rules/v1/rulesets/training_prompt.json";
 
+// ============================================================
+// BLOCK 02 — Constants
+// ============================================================
+
 export const MAX_BODY_BYTES = 64 * 1024;
 const VERSION = "1.5.7";
 
-// ------------------------------
-// Fetch
-// ------------------------------
+// ============================================================
+// BLOCK 03 — Fetch handler (routing + guards)
+// ============================================================
+
 export default {
   async fetch(request, env) {
     let requestId = makeRequestId();
@@ -300,7 +309,10 @@ export default {
       return errorJSON(400, requestId, "VALIDATION_ERROR", courseCheck.message, corsHeaders, true);
     }
 
-    // ---------- BUILD ----------
+    // ============================================================
+    // BLOCK 04 — Build output (training-blocks + UI-items envelope)
+    // ============================================================
+
     let training;
     try {
       training = buildTrainingBlocks({
@@ -327,7 +339,7 @@ export default {
     // V1-items: default = blocks (för training-blocks consumers)
     let items = topBlocks;
 
-    // Om UI ber om MCQ/TF: returnera items[] som question.json-kompatibla frågor
+    // Om UI ber om provfrågor (inkl AUTO): returnera items[] som question.json-kompatibla frågor
     // MEN: Lämna blocks/training.blocks som training-blocks så legacy/UI inte bryts.
     if (isUiQuestionRequest(questionType)) {
       const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, language);
@@ -356,7 +368,7 @@ export default {
 };
 
 // ============================================================
-// HELPERS
+// BLOCK 05 — HTTP helpers (CORS + JSON)
 // ============================================================
 
 function buildCorsHeaders(origin, allowedOrigin) {
@@ -398,6 +410,10 @@ function extractBearerToken(authHeader) {
   if (!h.toLowerCase().startsWith("bearer ")) return "";
   return h.slice(7).trim();
 }
+
+// ============================================================
+// BLOCK 06 — Core utils (safe parsing, normalize, hashing)
+// ============================================================
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -497,6 +513,7 @@ function normalizeMode(modeRaw) {
 }
 
 function normalizeFormat(format, mode, questionType) {
+  // P0: UI-frågeflödet (inkl AUTO) ska låsa format till "question"
   if (isUiQuestionRequest(questionType)) return "question";
 
   const f = safeStr(format).toLowerCase().trim();
@@ -532,9 +549,10 @@ function pickDifficultyLabel(difficultyHint, seedN) {
   return "normal";
 }
 
-// ------------------------------------------------------------
-// V1 ruleset payload (ai-rules/v1)
-// ------------------------------------------------------------
+// ============================================================
+// BLOCK 07 — V1 ruleset payload (ai-rules/v1)
+// ============================================================
+
 function parseV1RulesetPayload(body) {
   // Minimal detection: contentType + output.formatRef
   const contentType = safeStr(body && body.contentType).trim();
@@ -598,9 +616,10 @@ function parseV1RulesetPayload(body) {
   };
 }
 
-// ------------------------------------------------------------
-// Course Subject (module/area/chapter/step)
-// ------------------------------------------------------------
+// ============================================================
+// BLOCK 08 — Course Subject (module/area/chapter/step)
+// ============================================================
+
 function normalizeCourseSubject(subjectObj) {
   if (!isPlainObject(subjectObj)) return null;
 
@@ -691,8 +710,9 @@ function resolveCourseLabelFallback(course, mode, contextText) {
 }
 
 // ============================================================
-// RULES BUNDLE
+// BLOCK 09 — Rules bundle + quality config
 // ============================================================
+
 function getRulesBundle(subjectId) {
   const s = normalizeSubjectId(subjectId);
   const subj =
@@ -828,8 +848,9 @@ function pickOne(list, seed) {
 }
 
 // ============================================================
-// STEP PROFILE (1–7) → styr frågedimensioner
+// BLOCK 10 — STEP PROFILE (1–7) → styr frågedimensioner
 // ============================================================
+
 function getStepProfile(step) {
   const s = normalizeStepValue(step);
   // Tydligare separation mellan steg:
@@ -847,8 +868,9 @@ function getStepProfile(step) {
 }
 
 // ============================================================
-// Workplace inference (P1) — utan ny datamodell
+// BLOCK 11 — Workplace inference (P1) — utan ny datamodell
 // ============================================================
+
 function inferWorkplaceFromContext(contextText, language) {
   const t = safeStr(contextText).toLowerCase();
 
@@ -861,8 +883,9 @@ function inferWorkplaceFromContext(contextText, language) {
 }
 
 // ============================================================
-// OUTPUT BUILDER — training-blocks + question-format (choices)
+// BLOCK 12 — OUTPUT BUILDER (training-blocks + question-format)
 // ============================================================
+
 function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnabled, format, subjectId, difficultyHint, course, questionType }) {
   const fmt = normalizeFormat(format, mode, questionType);
   const subjId = normalizeSubjectId(subjectId);
@@ -963,9 +986,10 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
   };
 }
 
-// ------------------------------
-// Block generators
-// ------------------------------
+// ============================================================
+// BLOCK 13 — Block generators (info/task/document/question)
+// ============================================================
+
 function genInfoBlock({ i, language, context, courseLabel, difficulty, subjId, qq }) {
   const blockId = `b_info_${i + 1}_${subjId}`.slice(0, 32);
 
@@ -1169,9 +1193,10 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
   };
 }
 
-// ------------------------------
-// QUESTION (choice-format, ruleset-quality)
-// ------------------------------
+// ============================================================
+// BLOCK 14 — QUESTION (choice-format, ruleset-quality)
+// ============================================================
+
 function makeQuestion({ n, i, count, language, context, courseLabel, difficulty, subjId, questionType, bundle, qq, batch }) {
   const qt0 = normalizeQuestionType(questionType);
   const qt = (qt0 === "auto") ? "mcq_single" : qt0;
@@ -1485,6 +1510,10 @@ function shuffledIndices(n, seed) {
   return arr;
 }
 
+// ============================================================
+// BLOCK 15 — Choice pools + rationales
+// ============================================================
+
 function getChoicePools(language) {
   if (language === "sv") {
     return {
@@ -1722,7 +1751,7 @@ function buildRationale({ language, dim, place, bestAnswerText }) {
 }
 
 // ============================================================
-// UI-frågeformat (options + correctIndex)
+// BLOCK 16 — UI-frågeformat (options + correctIndex)
 // ============================================================
 
 function normalizeQuestionType(v) {
@@ -1751,13 +1780,16 @@ function normalizeQuestionType(v) {
   return s0;
 }
 
+// P0 PATCH: "auto" är också ett UI-frågeläge och ska ge stabilt items[]-output.
 function isUiQuestionRequest(questionType) {
   const qt = normalizeQuestionType(questionType);
-  return qt === "mcq_single" || qt === "mcq_multi" || qt === "true_false";
+  return qt === "auto" || qt === "mcq_single" || qt === "mcq_multi" || qt === "true_false";
 }
 
 function mapTrainingBlocksToUiQuestions(trainingBlocks, questionType, language) {
-  const qt = normalizeQuestionType(questionType);
+  const qt0 = normalizeQuestionType(questionType);
+  const qt = (qt0 === "auto") ? "mcq_single" : qt0; // P0 PATCH: auto -> mcq_single (stabil UI-contract)
+
   const blocks = Array.isArray(trainingBlocks) ? trainingBlocks : [];
   const out = [];
 
