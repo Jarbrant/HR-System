@@ -15,34 +15,30 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras (render visar, callbacks hanterar write)
 
-PATCH v1.1.7 (PP-SC-010-08F) (AUTOPATCH):
-- P0: Blocks-preview: om item saknar primärtext men har alt-fält -> visa fallback per typ:
-      question => “(saknar frågetext)”, övrigt => “(tomt)”.
-- P0: primaryText(): utökat fältstöd (body/description/title/stem/content.text m.fl.) + fail-soft logg bakom flagga.
-- P0: Modal(view/question): använder samma förbättrade text-extraktion + behåller neutral fallback.
-- P1: Save(question): säkerställ updated.type="question" (om saknas) + behåll normalisering av options/facit.
-- P2: Debug: mer tydliga render-logs bakom window.__HR_DEBUG_TRAININGS_RENDER.
+PATCH v1.1.8 (PP-SC-010-08G) (AUTOPATCH):
+- P0: Support nested question-shape:
+      item.question = { kind:'question', text:'...', choices:[{id,text}], correctChoiceId:'c1', rationale:'...' }
+      => preview + modal + label fungerar även om item.type='info'.
+- P1: Modal edit/save: om nested question finns -> uppdatera nested (text/choices/correctChoiceId/rationale)
+      + behåll normalisering till options/correctIndex/correctIndices för kompatibilitet.
+- P2: Debug: mer info bakom window.__HR_DEBUG_TRAININGS_RENDER.
 
 Ändringslogg (≤8):
-- v1.1.7: blocks-preview: typ-specifik fallback istället för “—”
-- v1.1.7: primaryText: fler fält + content.text + stem/title/description/body
-- v1.1.7: modal view: align med primaryText och neutral fallback
-- v1.1.7: save(question): säkra type="question" om question-mode
+- v1.1.8: typeLabel/itemKind: detektera nested question-objekt
+- v1.1.8: primaryText: läs question.text när question är objekt
+- v1.1.8: extractOptions/extractCorrect/extractExplanation: stöd för question.choices/correctChoiceId/rationale
+- v1.1.8: modal-save: uppdatera nested question + normalisera facit/options
 
 Testnoteringar:
-- Preview: item utan text/question men type=question -> “(saknar frågetext)”.
-- Preview: item utan text och ej question -> “(tomt)”.
-- Debug: sätt window.__HR_DEBUG_TRAININGS_RENDER=true och generera -> se vilka fält som hittades/missades.
-- Save(question): efter spara ska item ha options[] och både correctIndex + correctIndices.
+- Preview: item.type='info' + item.question.text -> text syns i blockkort.
+- Modal: öppna item -> visar fråga, alternativ, facit och rationale.
+- Edit: spara -> options[] + correctIndex + correctIndices uppdateras + nested question uppdateras om den fanns.
 
 Risk/edge cases:
-- Om någon förväntar sig enbart correctIndex eller enbart correctIndices kan dubbel-write avslöja buggar i konsumenter
-  (men ökar kompatibilitet i UI/worker-flöden).
+- Dubbel-representation (nested + platt) kan avslöja buggar i konsumenter som bara läser ena varianten,
+  men ökar kompatibilitet för UI/worker-flöden.
 ============================================================ */
 
-/* =========================================
-   BLOCK 01/08 – Bootstrap + helpers + element cache
-   ========================================= */
 (function () {
   "use strict";
 
@@ -50,7 +46,7 @@ Risk/edge cases:
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.1.7-PP-SC-010-08F";
+  render.__VERSION = "v1.1.8-PP-SC-010-08G";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
@@ -319,30 +315,49 @@ Risk/edge cases:
   /* =========================================
      BLOCK 05/08 – Blocks list (höger)
      ========================================= */
+
+  function hasNestedQuestion(it) {
+    // item.question kan vara string (legacy) eller objekt (ny worker-shape)
+    return !!(it && isObj(it.question) && (
+      normStr(it.question.kind).toLowerCase() === "question" ||
+      typeof it.question.text === "string" ||
+      Array.isArray(it.question.choices)
+    ));
+  }
+
+  function itemKind(it) {
+    const t = normStr(it && it.type).toLowerCase();
+    if (t === "question" || t === "quiz") return "question";
+    // fail-soft: nested question obj
+    if (hasNestedQuestion(it)) return "question";
+    // fail-soft: om question-fält finns som string
+    if (it && typeof it === "object" && typeof it.question === "string" && normStr(it.question)) return "question";
+    return "other";
+  }
+
   function typeLabel(it) {
     const s = normStr(it && it.type).toLowerCase();
     if (s === "question" || s === "quiz") return "Fråga";
+    // fail-soft: nested question obj (även om type='info')
+    if (itemKind(it) === "question") return "Fråga";
     if (s === "task") return "Uppgift";
     if (s === "document" || s === "doc") return "Dokument";
     if (s === "both") return "Mix";
     return "Info";
   }
 
-  function itemKind(it) {
-    const t = normStr(it && it.type).toLowerCase();
-    if (t === "question" || t === "quiz") return "question";
-    // fail-soft: om question-fält finns -> behandla som question
-    if (it && typeof it === "object" && typeof it.question === "string" && normStr(it.question)) return "question";
-    return "other";
-  }
-
-  // P0: mer robust text-extraktion (för att undvika “tomma” previews när worker använder annat fält)
+  // Robust text-extraktion (inkl nested question.text)
   function primaryText(it) {
     try {
       if (!it) return "";
       if (typeof it === "string") return normStr(it);
-
       if (!isObj(it)) return "";
+
+      // Nested question object (din debug-shape)
+      if (hasNestedQuestion(it)) {
+        const qt = normStr(it.question && it.question.text);
+        if (qt) return qt;
+      }
 
       // Direkt-strängfält (vanliga)
       const direct =
@@ -361,7 +376,7 @@ Risk/edge cases:
       const d = normStr(direct);
       if (d) return d;
 
-      // content: {text:"..."} / {body:"..."} (vanligt i vissa generators)
+      // content: {text:"..."} / {body:"..."}
       if (isObj(it.content)) {
         const c =
           (typeof it.content.text === "string" && it.content.text) ||
@@ -380,9 +395,9 @@ Risk/edge cases:
       const a = normStr(alt);
       if (a) return a;
 
-      // debug: visa vilka fält som fanns (utan att logga stora payloads)
       dbg("primaryText: empty (field scan)", {
         type: normStr(it.type),
+        hasNestedQuestion: hasNestedQuestion(it),
         keys: Object.keys(it).slice(0, 24)
       });
 
@@ -731,19 +746,41 @@ Risk/edge cases:
   /* =========================================
      BLOCK 07/08 – Modal: Item view/edit (question-aware)
      ========================================= */
+
   function extractOptions(it) {
     if (!it) return [];
+
+    // Nested question object: question.choices = [{id,text}]
+    if (hasNestedQuestion(it)) {
+      const ch = safeArr(it.question && it.question.choices);
+      return ch.map(function (o) {
+        if (typeof o === "string") return { id: "", text: normStr(o) };
+        if (isObj(o)) return { id: normStr(o.id || o.value || ""), text: normStr(o.text || o.label || "") };
+        return { id: "", text: normStr(String(o)) };
+      }).filter(x => x.text);
+    }
+
     const cand = it.options || it.choices || it.answers || it.alternatives;
     const arr = safeArr(cand);
     return arr.map(function (o) {
-      if (typeof o === "string") return { text: normStr(o) };
-      if (isObj(o)) return { text: normStr(o.text || o.label || o.value || "") };
-      return { text: normStr(String(o)) };
+      if (typeof o === "string") return { id: "", text: normStr(o) };
+      if (isObj(o)) return { id: normStr(o.id || o.value || ""), text: normStr(o.text || o.label || o.value || "") };
+      return { id: "", text: normStr(String(o)) };
     }).filter(x => x.text);
   }
 
   function extractCorrect(it, optList) {
     const set = new Set();
+
+    // Nested correctChoiceId
+    if (hasNestedQuestion(it)) {
+      const ccid = normStr(it.question && it.question.correctChoiceId);
+      if (ccid) {
+        for (let i = 0; i < optList.length; i++) {
+          if (normStr(optList[i].id) === ccid) set.add(String(i));
+        }
+      }
+    }
 
     const idx = it && (it.correctIndex ?? it.answerIndex ?? it.correctIdx);
     const idxs = it && (it.correctIndices ?? it.answerIndices ?? it.correctIdxs);
@@ -768,11 +805,14 @@ Risk/edge cases:
 
   function extractExplanation(it) {
     if (!it || typeof it !== "object") return "";
+    // Nested rationale
+    if (hasNestedQuestion(it)) return normStr(it.question && (it.question.rationale || it.question.explanation || it.question.feedback || ""));
     return normStr(it.explanation || it.feedback || it.rationale || it.explain || "");
   }
 
   function extractContextHint(it) {
     if (!it || typeof it !== "object") return "";
+    if (hasNestedQuestion(it)) return normStr(it.question && (it.question.contextHint || it.question.hint || it.question.context || ""));
     return normStr(it.contextHint || it.context || it.hint || "");
   }
 
@@ -887,12 +927,10 @@ Risk/edge cases:
         q.style.marginTop = "8px";
         q.style.fontWeight = "700";
 
-        // P0: neutral fallback om frågetext saknas
         const qTxt = primaryText(item);
         q.textContent = qTxt ? qTxt : "(saknar frågetext)";
         content.appendChild(q);
 
-        // Visa contextHint om finns (gör frågan tydligare)
         const hintTxt = extractContextHint(item);
         if (hintTxt) {
           const ch = document.createElement("div");
@@ -1032,8 +1070,7 @@ Risk/edge cases:
         wrapOpts.style.flexDirection = "column";
         wrapOpts.style.gap = "8px";
 
-        // fail-soft: minst 3 rader att börja med (ny baseline)
-        while (optsList.length < 3) optsList.push({ text: "" });
+        while (optsList.length < 3) optsList.push({ id: "", text: "" });
 
         for (let i = 0; i < optsList.length; i++) {
           const row = document.createElement("div");
@@ -1054,7 +1091,7 @@ Risk/edge cases:
           row.appendChild(inp);
           wrapOpts.appendChild(row);
 
-          optRows.push({ cb, inp });
+          optRows.push({ cb, inp, _id: normStr(optsList[i].id) });
         }
 
         content.appendChild(wrapOpts);
@@ -1120,7 +1157,12 @@ Risk/edge cases:
 
       const qText = normStr(refs.taQ.value || "");
       if (isObj(updated)) {
-        if (typeof updated.question === "string") updated.question = qText;
+        // Skriv tillbaka på bästa plats
+        if (hasNestedQuestion(updated)) {
+          updated.question = updated.question || {};
+          updated.question.kind = normStr(updated.question.kind) || "question";
+          updated.question.text = qText;
+        } else if (typeof updated.question === "string") updated.question = qText;
         else if (typeof updated.text === "string") updated.text = qText;
         else if (typeof updated.instruction === "string") updated.instruction = qText;
         else if (typeof updated.prompt === "string") updated.prompt = qText;
@@ -1130,8 +1172,9 @@ Risk/edge cases:
       if (refs.kind === "question") {
         const optOut = [];
         const correctIdxs = [];
+        const nestedChoices = [];
 
-        // P1: fail-closed om checkbox ikryssad men text saknas
+        // fail-closed: checkbox ikryssad men tom text
         for (let i = 0; i < refs.optRows.length; i++) {
           const row = refs.optRows[i];
           const t = normStr(row.inp.value || "");
@@ -1139,18 +1182,21 @@ Risk/edge cases:
 
           if (checked && !t) {
             try { window.alert("Du har markerat ett korrekt svar utan text. Fyll i texten eller avmarkera."); } catch (_) { }
-            return false; // håll modalen öppen
+            return false;
           }
         }
 
         for (let i = 0; i < refs.optRows.length; i++) {
           const t = normStr(refs.optRows[i].inp.value || "");
           if (!t) continue;
+
           optOut.push(t);
+          const choiceId = normStr(refs.optRows[i]._id) || ("c" + (nestedChoices.length + 1));
+          nestedChoices.push({ id: choiceId, text: t });
+
           if (refs.optRows[i].cb.checked) correctIdxs.push(optOut.length - 1);
         }
 
-        // fail-closed — kräver minst 3 alternativ
         if (optOut.length < 3) {
           try { window.alert("Frågan måste ha minst 3 svarsalternativ innan du sparar."); } catch (_) { }
           return false;
@@ -1161,39 +1207,51 @@ Risk/edge cases:
         }
 
         if (isObj(updated)) {
-          // P1: säkra type
-          if (!normStr(updated.type)) updated.type = "question";
+          // säkra typ (även om den var 'info')
+          updated.type = "question";
 
-          // normalisera options
-          if (Array.isArray(updated.options)) updated.options = optOut;
-          else if (Array.isArray(updated.choices)) updated.choices = optOut;
-          else if (Array.isArray(updated.answers)) updated.answers = optOut;
-          else updated.options = optOut;
-
-          // normalisera förklaring
-          const expl = refs.taE ? normStr(refs.taE.value || "") : "";
-          if (typeof updated.explanation === "string") updated.explanation = expl;
-          else if (typeof updated.feedback === "string") updated.feedback = expl;
-          else if (typeof updated.rationale === "string") updated.rationale = expl;
-          else updated.explanation = expl;
-
-          // sätt både single + multi för kompatibilitet
+          // normalisera platt
+          updated.options = optOut;
           const first = correctIdxs[0];
           updated.correctIndex = first;
           updated.correctIndices = correctIdxs;
 
-          // legacy/alias (uppdatera bara om de finns, annars lämna)
+          // legacy/alias om de finns
           if ("answerIndex" in updated) updated.answerIndex = first;
           if ("answerIndices" in updated) updated.answerIndices = correctIdxs;
           if ("correctIdx" in updated) updated.correctIdx = first;
           if ("correctIdxs" in updated) updated.correctIdxs = correctIdxs;
 
-          dbg("modal-save(question): normalized", { options: optOut.length, correctIdxs: correctIdxs.slice(0) });
+          // förklaring
+          const expl = refs.taE ? normStr(refs.taE.value || "") : "";
+          updated.explanation = expl;
+
+          // uppdatera nested om det fanns (din worker-shape)
+          if (hasNestedQuestion(updated)) {
+            updated.question = updated.question || {};
+            updated.question.kind = normStr(updated.question.kind) || "question";
+            updated.question.text = qText;
+            updated.question.choices = nestedChoices;
+
+            // korrekt = correctChoiceId (ta första korrekta)
+            const correctFirstIdx = first;
+            const correctChoice = nestedChoices[correctFirstIdx];
+            updated.question.correctChoiceId = normStr(correctChoice && correctChoice.id) || "c1";
+
+            // rationale
+            updated.question.rationale = expl;
+          }
+
+          dbg("modal-save(question): normalized", {
+            options: optOut.length,
+            correctIdxs: correctIdxs.slice(0),
+            nested: hasNestedQuestion(updated)
+          });
         }
       }
 
       try { onSave(updated); } catch (_) { }
-      return true; // close
+      return true;
     });
   };
 
