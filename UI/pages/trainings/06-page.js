@@ -13,12 +13,12 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.3.0-PP-SC-010-07I (AUTOPATCH):
-- P0 FIX: dom.setText hanterar även <input>/<textarea> korrekt (value istället för textContent) → titleDisplay/inputs fungerar.
-- P0 FIX: Implementerar saknad generateAi + robust normalisering/import (fail-closed) så “frågor försvinner” inte pga halvfil.
-- P1: Fallback-DOM kompletterad med saknade id:n (leftHint/aiHint/list/blocksList) för robust bootstrap om 01-dom är ofullständig.
-- P1: AI-controls: visar/döljer questionControls baserat på aiContent.
-- Inga nya keys, ingen UX-redesign, endast logikjustering inom AO-scope.
+PATCH v1.3.1-PP-SC-010-07I (AUTOPATCH paket 1–3):
+- P0 FIX: Block-editor (openBlockEditor) får writer-guard + re-check i save-callback (read-only kan inte edit:a).
+- P0 FIX: Provfrågor: även auto kräver facit/struktur (MCQ/TF/short/numeric) → annars import stoppad (fail-closed).
+- P0 FIX: questionType normaliseras för worker: auto_* → auto (minskar kontraktsrisk).
+- P1: isWriterAllowed refreshar alltid who även vid locked → korrekt who-pill/rollvisning.
+
 ============================================================ */
 (function () {
   "use strict";
@@ -30,7 +30,7 @@ PATCH v1.3.0-PP-SC-010-07I (AUTOPATCH):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.3.0-PP-SC-010-07I";
+  page.__VERSION = "v1.3.1-PP-SC-010-07I";
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -373,9 +373,11 @@ PATCH v1.3.0-PP-SC-010-07I (AUTOPATCH):
   }
 
   function isWriterAllowed() {
-    if (state.locked) return false;
+    // P1: refresha who även vid locked, så UI visar korrekt roll/empNo
     const who = getWhoFresh();
     state.who = who;
+
+    if (state.locked) return false;
     const role = upper(who.role || "SYSTEM_ADMIN");
     if (role !== "ADMIN") return false;
     if (who.canWrite === false) return false;
@@ -1188,6 +1190,8 @@ PATCH v1.3.0-PP-SC-010-07I (AUTOPATCH):
      BLOCK 15/18 — Blocks (baseline editor)
   ========================== */
   function openBlockEditor(idx) {
+    // P0: fail-closed: read-only får inte edit:a
+    if (!isWriterAllowed()) return;
     if (!state.draft || !DEPS.render || typeof DEPS.render.openModal !== "function") return;
 
     const blocks = currentBlocks();
@@ -1208,6 +1212,9 @@ PATCH v1.3.0-PP-SC-010-07I (AUTOPATCH):
     wrap.appendChild(ta);
 
     DEPS.render.openModal("Block " + (idx + 1), wrap, function () {
+      // P0: re-check writer även vid modal-save (roll kan ändras under tiden)
+      if (!isWriterAllowed()) return;
+
       const txt = normStr(ta.value);
       if (!state.draft.blocks) state.draft.blocks = blocks;
       const bb = state.draft.blocks[idx];
@@ -1337,6 +1344,15 @@ PATCH v1.3.0-PP-SC-010-07I (AUTOPATCH):
     return { module: module || "", area: area || "", chapter: chapter || "", step: step || "1" };
   }
 
+  // P0: worker-kontrakt: auto_* → auto
+  function normalizeQuestionTypeForWorker(qt) {
+    const s = normStr(qt).toLowerCase();
+    if (!s) return "auto";
+    if (s === "auto") return "auto";
+    if (s.indexOf("auto") === 0) return "auto";
+    return s;
+  }
+
   function readAiControls() {
     // aiContent i HTML: blocks | questions
     const content = normStr(dom && dom.aiContent && dom.aiContent.value) || "blocks";
@@ -1345,10 +1361,11 @@ PATCH v1.3.0-PP-SC-010-07I (AUTOPATCH):
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
     const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
 
-    const questionType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value) || "auto";
+    const questionTypeUi = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value) || "auto";
+    const questionType = normalizeQuestionTypeForWorker(questionTypeUi);
     const feedbackEnabled = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked === true));
 
-    return { content, mode, count, questionType, feedbackEnabled };
+    return { content, mode, count, questionType, feedbackEnabled, _uiQuestionType: questionTypeUi };
   }
 
   function setAiHint(text) {
@@ -1395,21 +1412,28 @@ PATCH v1.3.0-PP-SC-010-07I (AUTOPATCH):
     return { ok: false, reason: "AI-svar har okänt format (kan inte importera)." };
   }
 
-  function validateQuestionItem(it, hardType) {
-    // hardType = användaren har valt explicit (mcq_single/true_false/short_answer/numeric)
+  function validateQuestionItem(it, hardTypeOrAuto) {
+    // hardTypeOrAuto = explicit typ (mcq_single/true_false/short_answer/numeric) eller "auto"
     if (!it || typeof it !== "object") return { ok: false, reason: "Fråga är inte ett objekt." };
 
-    const type = normStr(it.type || "");
-    // Tillåt om modellen glömmer type men har question
     const question = normStr(it.question || it.q || it.text || "");
     if (!question) return { ok: false, reason: "Fråga saknar text." };
 
-    if (!hardType || isAutoPreferredType(hardType)) {
-      // Auto = mildare, men vi kräver fortfarande fråga
-      return { ok: true };
-    }
+    const ht = normStr(hardTypeOrAuto).toLowerCase() || "auto";
 
-    const ht = normStr(hardType).toLowerCase();
+    // P0: även auto måste ha någon form av facit/struktur (annars blir det “fråga utan svar”)
+    if (ht === "auto") {
+      const opts = Array.isArray(it.options) ? it.options : null;
+      const hasSingle = opts && opts.length >= 2 && Number.isFinite(Number(it.correctIndex));
+      const hasMulti = opts && opts.length >= 2 && Array.isArray(it.correctIndices) && it.correctIndices.length > 0;
+      const hasTF = (typeof it.correct === "boolean");
+      const hasShort = normStr((typeof it.answer === "string" && it.answer) || (typeof it.expected === "string" && it.expected) || "");
+      const hasNum = (typeof it.answer === "number" && Number.isFinite(it.answer));
+      const hasRange = isObj(it.range) && Number.isFinite(Number(it.range.min)) && Number.isFinite(Number(it.range.max));
+
+      if (hasSingle || hasMulti || hasTF || hasShort || hasNum || hasRange) return { ok: true };
+      return { ok: false, reason: "Auto: saknar facit/struktur (options+correct, correct:boolean, answer/expected eller numeric)." };
+    }
 
     if (ht === "true_false") {
       // Accept: options + correctIndex, eller correct:boolean
@@ -1542,8 +1566,8 @@ PATCH v1.3.0-PP-SC-010-07I (AUTOPATCH):
     }
 
     // Sanitera + validera (fail-closed)
-    const hardSelected = isHardQuestionTypeSelected(controls.questionType);
-    const hardType = hardSelected ? normStr(controls.questionType).toLowerCase() : "";
+    const hardSelected = isHardQuestionTypeSelected(controls._uiQuestionType);
+    const hardType = hardSelected ? normStr(controls._uiQuestionType).toLowerCase() : "auto";
 
     const incomingBlocks = [];
     for (const b of safeArr(norm.blocks)) {
