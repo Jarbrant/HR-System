@@ -1755,7 +1755,8 @@ function buildRationale({ language, dim, place, bestAnswerText }) {
 // ============================================================
 
 function normalizeQuestionType(v) {
-  const s0 = safeStr(v).toLowerCase().trim();
+  const raw = safeStr(v).trim();
+  const s0 = raw.toLowerCase();
   if (!s0) return "";
 
   const s = s0
@@ -1765,19 +1766,24 @@ function normalizeQuestionType(v) {
     .replace(/ä/g, "a")
     .replace(/ö/g, "o");
 
+  // P0: ALLA auto-varianter ska räknas som "auto"
+  // Ex: "auto", "auto_mcq", "auto-mcq", "auto mcq single", "auto_tf", "auto_anything"
+  if (s === "auto" || s.startsWith("auto_") || s.startsWith("auto-") || s.startsWith("auto")) {
+    return "auto";
+  }
+
   // Canonical (ai-rules/v1)
-  if (s === "auto") return "auto";
-  if (s === "mcq_single" || s === "single" || s === "mcq") return "mcq_single";
-  if (s === "mcq_multi" || s === "multi") return "mcq_multi";
-  if (s === "truefalse" || s === "true_false" || s === "sant_falskt" || s === "tf") return "true_false";
-  if (s === "short_answer" || s === "short" || s === "kort") return "short_answer";
+  if (s === "mcq_single" || s === "single" || s === "mcq" || s === "mcq1" || s === "mcq_one") return "mcq_single";
+  if (s === "mcq_multi" || s === "multi" || s === "mcqm" || s === "mcq_many") return "mcq_multi";
+  if (s === "truefalse" || s === "true_false" || s === "sant_falskt" || s === "santfalskt" || s === "tf") return "true_false";
+  if (s === "short_answer" || s === "short" || s === "kortsvar" || s === "kort") return "short_answer";
   if (s === "numeric" || s === "number" || s === "tal") return "numeric";
 
   if (s.includes("mcq") && s.includes("multi")) return "mcq_multi";
-  if (s.includes("mcq") && (s.includes("single") || s.includes("ett") || s.includes("one"))) return "mcq_single";
+  if (s.includes("mcq") && (s.includes("single") || s.includes("ett") || s.includes("one") || s.includes("1"))) return "mcq_single";
   if (s.includes("true") || s.includes("false") || s.includes("sant") || s.includes("falskt")) return "true_false";
 
-  return s0;
+  return raw;
 }
 
 // P0 PATCH: "auto" är också ett UI-frågeläge och ska ge stabilt items[]-output.
