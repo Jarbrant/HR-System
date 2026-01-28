@@ -15,11 +15,11 @@ POLICY (LÅST):
 - XSS-safe: render via textContent/value i render (denna fil gör ingen DOM)
 - ADMIN-only write hanteras i 06-page (inte här)
 
-PATCH v1.1.0 (PP-SC-010-04B) – AUTOPATCH:
-- P0: Robust AI-validering: stöd för payload.items[] OCH payload.blocks[] (+ data.blocks) (fail-closed).
-- P0: Strikt question-validering vid publicering: kräver facit; om options används krävs korrekt index/indices i range.
-- P1: Stoppa AI-resultat som innehåller question-like items utan facit, eller index-facit utan options.
-- P1: Normaliserar och extraherar options/choices/answers konsekvent (inkl. [{label|text}]).
+PATCH v1.1.1 (PP-SC-010-04C) – AUTOPATCH:
+- P0: FIX: payload.data fick inte “vinna” över root → AI-svar med root.items/root.blocks gav “okänt format”.
+      Nu: provar root först, sedan payload.data (fail-closed kvar).
+- P1: Robust typ-detektion: stöd för kind (blockId/kind) utöver type (för worker-blocks).
+- P1: extractAiItems: stöd för blocks[] som är “flat” (saknar .items) → behandlas som items.
 
 BLOCKS:
 1) Namespace + version
@@ -43,7 +43,7 @@ BLOCKS:
   if (NS.contract) return;
 
   const contract = (NS.contract = {});
-  contract.__VERSION = "v1.1.0-PP-SC-010-04B";
+  contract.__VERSION = "v1.1.1-PP-SC-010-04C";
 
   /* =========================
      BLOCK 2/10 — Bas-utils (no deps)
@@ -75,6 +75,12 @@ BLOCKS:
   /* =========================
      BLOCK 4/10 — Item helpers (robust, fail-closed)
   ========================== */
+  function getTypeField(it) {
+    // GUARD: worker kan skicka kind istället för type
+    if (!isPlainObject(it)) return "";
+    return it.type ?? it.kind ?? it.blockType ?? it.itemType ?? "";
+  }
+
   function normType(v) {
     const s = normStr(v).toLowerCase();
     if (!s) return "info";
@@ -103,10 +109,10 @@ BLOCKS:
     if (typeof it === "string") return false;
     if (!isPlainObject(it)) return false;
 
-    const t = normType(it.type);
+    const t = normType(getTypeField(it));
     if (t === "question") return true;
 
-    // AI kan sakna type men ha question-fält
+    // AI kan sakna type/kind men ha question-fält
     if (isNonEmptyStr(it.question)) return true;
 
     return false;
@@ -325,7 +331,8 @@ BLOCKS:
     if (!isPlainObject(it)) return { type: "info", text: normStr(it) };
 
     const out = it; // in-place ok (06-page deepClone hanterar)
-    out.type = normType(out.type);
+    // GUARD: worker kan skicka kind istället för type
+    out.type = normType(out.type || out.kind);
 
     // normalisera vanliga textfält
     if (typeof out.text === "string") out.text = normStr(out.text);
@@ -342,37 +349,56 @@ BLOCKS:
      BLOCK 9/10 — validateAiResult (fail-closed)
   ========================== */
   function extractAiItemsFromPayload(payload) {
-    const p = payload && payload.data ? payload.data : payload;
+    const root = payload || {};
 
-    // 1) items[] direkt
-    if (p && Array.isArray(p.items)) return p.items;
+    function tryExtractFrom(obj) {
+      if (!obj) return null;
 
-    // 2) blocks[] (standard i training-blocks)
-    const blocks = p && Array.isArray(p.blocks) ? p.blocks
-      : (p && Array.isArray(p.trainingBlocks) ? p.trainingBlocks : null);
+      // 1) items[] direkt
+      if (Array.isArray(obj.items)) return obj.items;
 
-    if (blocks && blocks.length) {
-      const items = [];
-      for (const b of blocks) {
-        if (!b || !Array.isArray(b.items)) continue;
-        for (const it of b.items) items.push(it);
-      }
-      return items;
-    }
+      // 2) blocks[] / trainingBlocks[]
+      const blocks = Array.isArray(obj.blocks) ? obj.blocks
+        : (Array.isArray(obj.trainingBlocks) ? obj.trainingBlocks : null);
 
-    // 3) raw array (antingen blocks eller items)
-    if (Array.isArray(p)) {
-      const looksLikeBlocks = p.some(x => x && typeof x === "object" && Array.isArray(x.items));
-      if (looksLikeBlocks) {
-        const items = [];
-        for (const b of p) {
-          if (!b || !Array.isArray(b.items)) continue;
-          for (const it of b.items) items.push(it);
+      if (blocks && blocks.length) {
+        // a) blocks med .items (nested)
+        const looksNested = blocks.some(x => x && typeof x === "object" && Array.isArray(x.items));
+        if (looksNested) {
+          const items = [];
+          for (const b of blocks) {
+            if (!b || !Array.isArray(b.items)) continue;
+            for (const it of b.items) items.push(it);
+          }
+          return items;
         }
-        return items;
+        // b) blocks som är “flat” (saknar .items) -> behandla som items
+        return blocks;
       }
-      return p; // treat as items
+
+      // 3) raw array (antingen blocks eller items)
+      if (Array.isArray(obj)) {
+        const looksLikeBlocks = obj.some(x => x && typeof x === "object" && Array.isArray(x.items));
+        if (looksLikeBlocks) {
+          const items = [];
+          for (const b of obj) {
+            if (!b || !Array.isArray(b.items)) continue;
+            for (const it of b.items) items.push(it);
+          }
+          return items;
+        }
+        return obj; // treat as items
+      }
+
+      return null;
     }
+
+    // P0 FIX: prova root först (items/blocks ligger ofta här), sedan payload.data
+    const fromRoot = tryExtractFrom(root);
+    if (fromRoot) return fromRoot;
+
+    const fromData = tryExtractFrom(root.data);
+    if (fromData) return fromData;
 
     return null;
   }
@@ -428,7 +454,7 @@ BLOCKS:
 
     if (!isPlainObject(it)) return { ok: false, reasons: ["Ogiltigt item-format."] };
 
-    const t = normType(it.type);
+    const t = normType(getTypeField(it));
 
     const p = primaryText(it);
     if (!p) reasons.push("Saknar text/instruction/prompt/question.");
