@@ -13,11 +13,10 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
-- P0 FIX: AI-import: normalisering får inte välja r.data om r.data saknar blocks/items (worker returnerar top-level blocks/items).
+PATCH v1.3.3-PP-SC-010-07K (AUTOPATCH P0/P1):
+- P0 FIX: Normalisering väljer inte blint raw.data. Väljer den shape som faktiskt har blocks/items (raw vs raw.data).
 - P0 FIX: Stöd för worker blocks[] där block saknar items men har kind/question/options → mappas till UI-block + item.
-- P0 FIX: Auto-sätt item.type om saknas (question=>question, annars info) så render/filters blir stabila.
-- P1: Robustare normalisering: om raw.data saknar blocks/items men raw har dem, använd raw (fail-closed bibehålls).
+- P1 FIX: generateAi normaliserar alltid från hela svaret (r) så vi kan hitta top-level blocks/items om data saknar dem.
 
 ============================================================ */
 (function () {
@@ -30,7 +29,7 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.3.2-PP-SC-010-07J";
+  page.__VERSION = "v1.3.3-PP-SC-010-07K";
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -216,7 +215,7 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
   };
   page._state = state;
 
-     /* =========================
+  /* =========================
      BLOCK 5/18 — Utils
   ========================== */
   function normStr(v) {
@@ -1288,395 +1287,460 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
   }
 
   /* =========================
-   BLOCK 16/18 — AI hooks (health + generate)
-========================== */
+     BLOCK 16/18 — AI hooks (health + generate)
+  ========================== */
 
-// ---------- AI: Health ----------
-async function testAi() {
-  try {
-    if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
-      return;
+  // ---------- AI: Health ----------
+  async function testAi() {
+    try {
+      if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
+        return;
+      }
+
+      const initR = await ensureSdkReady();
+      if (!initR || initR.ok !== true) {
+        const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
+        if (code === "BASE_URL_MISSING") DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
+        else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "warn");
+        return;
+      }
+
+      const r = await window.HRWorkerSDK.health();
+      if (r && r.ok) DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI OK", "ok");
+      else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "warn");
+    } catch (_) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
     }
+  }
+
+  // ---------- Snapshot (NO goals to AI) ----------
+  function snapshotEditorStateForAi() {
+    const module = normStr(dom && dom.mod && dom.mod.value);
+    const area = normStr(dom && dom.area && dom.area.value);
+    const courseTitle = normStr(dom && dom.courseTitle && dom.courseTitle.value) || "Introduktion";
+    const courseStep = parseCourseStep(dom && dom.courseStep && dom.courseStep.value);
+    const goalsLevel = normStr(dom && dom.goalsLevel && dom.goalsLevel.value) || "normal";
+
+    // LÅST: skickar aldrig goals till AI
+    return { module, area, courseTitle, courseStep, goalsLevel, goals: "" };
+  }
+
+  function buildAiContextNoGoals() {
+    const s = snapshotEditorStateForAi();
+    const level = normalizeLevel(s.goalsLevel);
+    const subjectTitle = normStr(s.area) || normStr(s.module) || "";
+
+    if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
+      const ctx = DEPS.core.buildAiContext(s) || {};
+      try {
+        ctx.goals = "";
+        ctx.level = level;
+        if (!ctx.subject || typeof ctx.subject !== "object") ctx.subject = {};
+        if (!ctx.subject.title && subjectTitle) ctx.subject.title = subjectTitle;
+      } catch (_) { }
+      return ctx;
+    }
+
+    return {
+      subject: { module: s.module, area: s.area, title: subjectTitle },
+      course: {
+        chapter: s.courseTitle,
+        step: s.courseStep,
+        title: (DEPS.core && DEPS.core.composeTitle)
+          ? DEPS.core.composeTitle(s.courseTitle, s.courseStep, s.area || "—")
+          : (s.courseTitle + " • Steg " + s.courseStep + " • " + (s.area || "—"))
+      },
+      level: level,
+      goals: ""
+    };
+  }
+
+  // ---------- Controls ----------
+  function readAiControls() {
+    // aiContent kan vara "blocks"|"questions" – men UI kan även ha etiketter som "Provfrågor + facit".
+    const raw = normStr(dom && dom.aiContent && dom.aiContent.value) || "blocks";
+    const rawLower = raw.toLowerCase();
+
+    // Robust normalisering av content
+    let content = "blocks";
+    if (rawLower === "questions" || rawLower.includes("provfrå") || rawLower.includes("fråga") || rawLower.includes("quiz")) content = "questions";
+    else if (rawLower === "blocks" || rawLower.includes("block") || rawLower.includes("utbildning")) content = "blocks";
+
+    // mode-normalisering (worker kräver training|document)
+    const mode = (content === "questions") ? "training" : normalizeMode(raw);
+
+    const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
+    const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
+
+    const questionTypeUi = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value) || "auto";
+    const questionType = normalizeQuestionTypeForWorker(questionTypeUi);
+
+    const feedbackEnabled = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked === true));
+
+    return { content, mode, count, questionType, feedbackEnabled, _uiQuestionType: questionTypeUi };
+  }
+
+  // ---------- UI hint ----------
+  function setAiHint(text) {
+    if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
+    if (dom && dom.aiHint && dom.setText) dom.setText(dom.aiHint, String(text || ""));
+  }
+
+  // ---------- Normalize AI response into blocks/items ----------
+  function normalizeAiBlocksFromAny(raw) {
+    // Stöd fler shapes + “blocks(meta) + items(data)” (vanligt worker-format)
+    // Shape A: { blocks:[{title, items:[...]}] }
+    // Shape B: { data:{ blocks:[...] } }  (MEN: data kan vara meta-only)
+    // Shape C: { items:[...] } (wrap till 1 block)
+    // Shape D: blocks(meta) + items(separat) => para indexvis eller wrap
+    // Shape E: blocks[] där block saknar items men har kind/question/options → block=>item
+
+    function hasBlocksOrItems(obj) {
+      if (!obj) return false;
+      if (Array.isArray(obj)) return true;
+      if (Array.isArray(obj.blocks)) return true;
+      if (Array.isArray(obj.trainingBlocks)) return true;
+      if (Array.isArray(obj.items)) return true;
+      if (Array.isArray(obj.questions)) return true;
+      return false;
+    }
+
+    function pickBestSource(r) {
+      if (!r) return null;
+      const d = (r && r.data) ? r.data : null;
+
+      // välj den som faktiskt har blocks/items (inte bara att data finns)
+      if (hasBlocksOrItems(d)) return d;
+      if (hasBlocksOrItems(r)) return r;
+
+      // om data finns men saknar content: returnera data ändå (för bättre feltext)
+      return d || r;
+    }
+
+    const pick = pickBestSource(raw);
+    if (!pick) return { ok: false, reason: "AI-svar saknar data." };
+
+    const blocksCand = pick.blocks || pick.trainingBlocks || null;
+    const itemsCand = Array.isArray(pick.items) ? pick.items
+      : Array.isArray(pick.questions) ? pick.questions
+        : null;
+
+    if (Array.isArray(blocksCand)) {
+      // 1) inline-items?
+      const hasInlineItems = blocksCand.some(b => b && Array.isArray(b.items) && b.items.length);
+
+      // 2) blocks är bara metadata men items finns separat
+      if (!hasInlineItems && itemsCand && itemsCand.length) {
+        const out = [];
+
+        // Om samma längd: para 1 item per block
+        if (blocksCand.length === itemsCand.length) {
+          for (let i = 0; i < blocksCand.length; i++) {
+            const b = blocksCand[i];
+            out.push({
+              title: normStr(b && (b.title || b.heading || b.name)) || "",
+              items: [itemsCand[i]]
+            });
+          }
+          return { ok: true, blocks: out };
+        }
+
+        // Annars: wrap alla items till ett block (ta titel från första blocket om finns)
+        const firstTitle = normStr(blocksCand[0] && (blocksCand[0].title || blocksCand[0].heading || blocksCand[0].name)) || "";
+        return { ok: true, blocks: [{ title: firstTitle, items: itemsCand.slice() }] };
+      }
+
+      // 3) blocks[] saknar items men har question-ish fält → mappa till item
+      const out2 = [];
+      for (const b of blocksCand) {
+        const title = normStr(b && (b.title || b.heading || b.name)) || "";
+        const inline = (b && Array.isArray(b.items)) ? b.items.slice() : [];
+
+        if (inline.length) {
+          out2.push({ title, items: inline });
+          continue;
+        }
+
+        // “question in block” fallback
+        if (b && typeof b === "object") {
+          const q = normStr(b.question || b.q || b.text || "");
+          const opts = Array.isArray(b.options) ? b.options.slice() : null;
+          const hasAnyAnswerShape =
+            (opts && opts.length >= 2) ||
+            (typeof b.correct === "boolean") ||
+            (b.correctIndex != null) ||
+            (Array.isArray(b.correctIndices) && b.correctIndices.length) ||
+            (b.answer != null) ||
+            (b.expected != null) ||
+            (b.range != null);
+
+          if (q && hasAnyAnswerShape) {
+            const item = {};
+            // kopiera relevanta fält (minimalt, safe)
+            item.question = q;
+            if (opts) item.options = opts;
+            if (b.correctIndex != null) item.correctIndex = b.correctIndex;
+            if (Array.isArray(b.correctIndices)) item.correctIndices = b.correctIndices.slice();
+            if (typeof b.correct === "boolean") item.correct = b.correct;
+            if (typeof b.answer === "string" || typeof b.answer === "number") item.answer = b.answer;
+            if (typeof b.expected === "string") item.expected = b.expected;
+            if (isObj(b.range)) item.range = deepClone(b.range);
+            if (typeof b.explanation === "string") item.explanation = b.explanation;
+            if (typeof b.feedback === "string") item.feedback = b.feedback;
+
+            // type/kind
+            item.type = "question";
+            out2.push({ title, items: [item] });
+            continue;
+          }
+        }
+      }
+
+      return out2.length ? { ok: true, blocks: out2 } : { ok: false, reason: "AI gav inga block/items." };
+    }
+
+    if (itemsCand) return { ok: true, blocks: [{ title: "", items: itemsCand.slice() }] };
+
+    if (Array.isArray(pick)) {
+      const looksLikeBlocks = pick.some(x => x && typeof x === "object" && Array.isArray(x.items));
+      if (looksLikeBlocks) {
+        const out3 = pick.map(b => ({
+          title: normStr(b && (b.title || b.heading || b.name)) || "",
+          items: Array.isArray(b && b.items) ? b.items.slice() : []
+        })).filter(b => b.items && b.items.length);
+        return out3.length ? { ok: true, blocks: out3 } : { ok: false, reason: "AI gav tomma block." };
+      }
+      return { ok: true, blocks: [{ title: "", items: pick.slice() }] };
+    }
+
+    return { ok: false, reason: "AI-svar har okänt format (kan inte importera)." };
+  }
+
+  // ---------- Validate question item ----------
+  function validateQuestionItem(it, hardTypeOrAuto) {
+    if (!it || typeof it !== "object") return { ok: false, reason: "Fråga är inte ett objekt." };
+
+    const question = normStr(it.question || it.q || it.text || "");
+    if (!question) return { ok: false, reason: "Fråga saknar text." };
+
+    const ht = normStr(hardTypeOrAuto).toLowerCase() || "auto";
+
+    // Auto måste ha facit/struktur
+    if (ht === "auto") {
+      const opts = Array.isArray(it.options) ? it.options : null;
+      const hasSingle = opts && opts.length >= 2 && Number.isFinite(Number(it.correctIndex));
+      const hasMulti = opts && opts.length >= 2 && Array.isArray(it.correctIndices) && it.correctIndices.length > 0;
+      const hasTF = (typeof it.correct === "boolean");
+      const hasShort = normStr((typeof it.answer === "string" && it.answer) || (typeof it.expected === "string" && it.expected) || "");
+      const hasNum = (typeof it.answer === "number" && Number.isFinite(it.answer));
+      const hasRange = isObj(it.range) && Number.isFinite(Number(it.range.min)) && Number.isFinite(Number(it.range.max));
+
+      if (hasSingle || hasMulti || hasTF || hasShort || hasNum || hasRange) return { ok: true };
+      return { ok: false, reason: "Auto: saknar facit/struktur (options+correct, correct:boolean, answer/expected eller numeric)." };
+    }
+
+    if (ht === "true_false") {
+      if (Array.isArray(it.options) && it.options.length >= 2) {
+        const ci = Number(it.correctIndex);
+        if (!Number.isFinite(ci) || ci < 0 || ci >= it.options.length) return { ok: false, reason: "Sant/Falskt: fel correctIndex." };
+        return { ok: true };
+      }
+      if (typeof it.correct === "boolean") return { ok: true };
+      return { ok: false, reason: "Sant/Falskt: saknar options+correctIndex eller correct:boolean." };
+    }
+
+    if (ht === "short_answer") {
+      const ans = (typeof it.answer === "string" && it.answer) || (typeof it.expected === "string" && it.expected) || "";
+      if (!normStr(ans)) return { ok: false, reason: "Kortsvar: saknar answer/expected." };
+      return { ok: true };
+    }
+
+    if (ht === "numeric") {
+      const hasNum = (typeof it.answer === "number" && Number.isFinite(it.answer));
+      const hasRange = isObj(it.range) && Number.isFinite(Number(it.range.min)) && Number.isFinite(Number(it.range.max));
+      if (!hasNum && !hasRange) return { ok: false, reason: "Numeric: saknar answer:number eller range{min,max}." };
+      return { ok: true };
+    }
+
+    if (isMcqType(ht)) {
+      const opts = Array.isArray(it.options) ? it.options : [];
+      if (opts.length < 2) return { ok: false, reason: "MCQ: saknar options." };
+      if (ht === "mcq_multi") {
+        const cis = Array.isArray(it.correctIndices) ? it.correctIndices : null;
+        if (!cis || !cis.length) return { ok: false, reason: "MCQ multi: saknar correctIndices." };
+        for (const x of cis) {
+          const n = Number(x);
+          if (!Number.isFinite(n) || n < 0 || n >= opts.length) return { ok: false, reason: "MCQ multi: ogiltig correctIndices." };
+        }
+        return { ok: true };
+      }
+      const ci = Number(it.correctIndex);
+      if (!Number.isFinite(ci) || ci < 0 || ci >= opts.length) return { ok: false, reason: "MCQ: fel correctIndex." };
+      return { ok: true };
+    }
+
+    return { ok: false, reason: "Okänd frågetyp (explicit vald): " + ht };
+  }
+
+  // ---------- AI Generate ----------
+  async function generateAi() {
+    if (!isWriterAllowed()) return;
+    if (!state.draft) return;
+
+    // Synka först (så AI får rätt modul/område/kapitel/steg)
+    syncDraftFromInputs();
+    syncDraftTitleFromFields();
+
+    setAiHint("");
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI…", "warn");
 
     const initR = await ensureSdkReady();
     if (!initR || initR.ok !== true) {
       const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
       if (code === "BASE_URL_MISSING") DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
-      else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "warn");
+      else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
+      setAiHint("AI init fail-closed: " + code);
       return;
     }
 
-    const r = await window.HRWorkerSDK.health();
-    if (r && r.ok) DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI OK", "ok");
-    else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "warn");
-  } catch (_) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
-  }
-}
+    const controls = readAiControls();
+    const ctxObj = buildAiContextNoGoals();
 
-// ---------- Snapshot (NO goals to AI) ----------
-function snapshotEditorStateForAi() {
-  const module = normStr(dom && dom.mod && dom.mod.value);
-  const area = normStr(dom && dom.area && dom.area.value);
-  const courseTitle = normStr(dom && dom.courseTitle && dom.courseTitle.value) || "Introduktion";
-  const courseStep = parseCourseStep(dom && dom.courseStep && dom.courseStep.value);
-  const goalsLevel = normStr(dom && dom.goalsLevel && dom.goalsLevel.value) || "normal";
+    // P0: Skicka INTE extra metadata som modellen kan “eka” tillbaka (contextText/subject).
+    const req = {
+      mode: controls.mode,               // training|document
+      count: controls.count,             // 1..12
+      context: ctxObj,                   // NO goals
+      language: "sv",
+      questionType: controls.questionType || "auto",
+      feedbackEnabled: !!controls.feedbackEnabled
+    };
 
-  // LÅST: skickar aldrig goals till AI
-  return { module, area, courseTitle, courseStep, goalsLevel, goals: "" };
-}
+    page._LAST_AI_REQUEST = deepClone(req);
+    page._LAST_AI_RAW = null;
+    page._LAST_AI_NORM = null;
+    page._LAST_AI_PICK = null;
 
-function buildAiContextNoGoals() {
-  const s = snapshotEditorStateForAi();
-  const level = normalizeLevel(s.goalsLevel);
-  const subjectTitle = normStr(s.area) || normStr(s.module) || "";
-
-  if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
-    const ctx = DEPS.core.buildAiContext(s) || {};
+    let r;
     try {
-      ctx.goals = "";
-      ctx.level = level;
-      if (!ctx.subject || typeof ctx.subject !== "object") ctx.subject = {};
-      if (!ctx.subject.title && subjectTitle) ctx.subject.title = subjectTitle;
-    } catch (_) { }
-    return ctx;
-  }
-
-  return {
-    subject: { module: s.module, area: s.area, title: subjectTitle },
-    course: {
-      chapter: s.courseTitle,
-      step: s.courseStep,
-      title: (DEPS.core && DEPS.core.composeTitle)
-        ? DEPS.core.composeTitle(s.courseTitle, s.courseStep, s.area || "—")
-        : (s.courseTitle + " • Steg " + s.courseStep + " • " + (s.area || "—"))
-    },
-    level: level,
-    goals: ""
-  };
-}
-
-// ---------- Controls ----------
-function readAiControls() {
-  // aiContent kan vara "blocks"|"questions" – men UI kan även ha etiketter som "Provfrågor + facit".
-  const raw = normStr(dom && dom.aiContent && dom.aiContent.value) || "blocks";
-  const rawLower = raw.toLowerCase();
-
-  // Robust normalisering av content
-  let content = "blocks";
-  if (rawLower === "questions" || rawLower.includes("provfrå") || rawLower.includes("fråga") || rawLower.includes("quiz")) content = "questions";
-  else if (rawLower === "blocks" || rawLower.includes("block") || rawLower.includes("utbildning")) content = "blocks";
-
-  // mode-normalisering (worker kräver training|document)
-  const mode = (content === "questions") ? "training" : normalizeMode(raw);
-
-  const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
-  const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
-
-  const questionTypeUi = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value) || "auto";
-  const questionType = normalizeQuestionTypeForWorker(questionTypeUi);
-
-  const feedbackEnabled = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked === true));
-
-  return { content, mode, count, questionType, feedbackEnabled, _uiQuestionType: questionTypeUi };
-}
-
-// ---------- UI hint ----------
-function setAiHint(text) {
-  if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
-  if (dom && dom.aiHint && dom.setText) dom.setText(dom.aiHint, String(text || ""));
-}
-
-// ---------- Normalize AI response into blocks/items ----------
-function normalizeAiBlocksFromAny(raw) {
-  // Stöd fler shapes + “blocks(meta) + items(data)” (vanligt worker-format)
-  // Shape A: { blocks:[{title, items:[...]}] }
-  // Shape B: { data:{ blocks:[...] } }
-  // Shape C: { items:[...] } (wrap till 1 block)
-  // Shape D: blocks(meta) + items(separat) => para indexvis eller wrap
-
-  const pick = (raw && raw.data) ? raw.data : raw;
-  if (!pick) return { ok: false, reason: "AI-svar saknar data." };
-
-  const blocksCand = pick.blocks || pick.trainingBlocks || null;
-  const itemsCand = Array.isArray(pick.items) ? pick.items : null;
-
-  if (Array.isArray(blocksCand)) {
-    const hasInlineItems = blocksCand.some(b => b && Array.isArray(b.items) && b.items.length);
-
-    // FALL: blocks är bara metadata men items finns separat
-    if (!hasInlineItems && itemsCand && itemsCand.length) {
-      const out = [];
-
-      // Om samma längd: para 1 item per block
-      if (blocksCand.length === itemsCand.length) {
-        for (let i = 0; i < blocksCand.length; i++) {
-          const b = blocksCand[i];
-          out.push({
-            title: normStr(b && (b.title || b.heading || b.name)) || "",
-            items: [itemsCand[i]]
-          });
-        }
-        return { ok: true, blocks: out };
+      if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-funktion saknas", "bad");
+        setAiHint("HRWorkerSDK.aiGenerate saknas.");
+        return;
       }
-
-      // Annars: wrap alla items till ett block (ta titel från första blocket om finns)
-      const firstTitle = normStr(blocksCand[0] && (blocksCand[0].title || blocksCand[0].heading || blocksCand[0].name)) || "";
-      return { ok: true, blocks: [{ title: firstTitle, items: itemsCand.slice() }] };
-    }
-
-    // Normal inline-items
-    const out2 = blocksCand.map(b => ({
-      title: normStr(b && (b.title || b.heading || b.name)) || "",
-      items: Array.isArray(b && b.items) ? b.items.slice() : []
-    })).filter(b => b.items && b.items.length);
-
-    return out2.length ? { ok: true, blocks: out2 } : { ok: false, reason: "AI gav inga block/items." };
-  }
-
-  if (itemsCand) return { ok: true, blocks: [{ title: "", items: itemsCand.slice() }] };
-
-  if (Array.isArray(pick)) {
-    const looksLikeBlocks = pick.some(x => x && typeof x === "object" && Array.isArray(x.items));
-    if (looksLikeBlocks) {
-      const out3 = pick.map(b => ({
-        title: normStr(b && (b.title || b.heading || b.name)) || "",
-        items: Array.isArray(b && b.items) ? b.items.slice() : []
-      })).filter(b => b.items && b.items.length);
-      return out3.length ? { ok: true, blocks: out3 } : { ok: false, reason: "AI gav tomma block." };
-    }
-    return { ok: true, blocks: [{ title: "", items: pick.slice() }] };
-  }
-
-  return { ok: false, reason: "AI-svar har okänt format (kan inte importera)." };
-}
-
-// ---------- Validate question item ----------
-function validateQuestionItem(it, hardTypeOrAuto) {
-  if (!it || typeof it !== "object") return { ok: false, reason: "Fråga är inte ett objekt." };
-
-  const question = normStr(it.question || it.q || it.text || "");
-  if (!question) return { ok: false, reason: "Fråga saknar text." };
-
-  const ht = normStr(hardTypeOrAuto).toLowerCase() || "auto";
-
-  // Auto måste ha facit/struktur
-  if (ht === "auto") {
-    const opts = Array.isArray(it.options) ? it.options : null;
-    const hasSingle = opts && opts.length >= 2 && Number.isFinite(Number(it.correctIndex));
-    const hasMulti = opts && opts.length >= 2 && Array.isArray(it.correctIndices) && it.correctIndices.length > 0;
-    const hasTF = (typeof it.correct === "boolean");
-    const hasShort = normStr((typeof it.answer === "string" && it.answer) || (typeof it.expected === "string" && it.expected) || "");
-    const hasNum = (typeof it.answer === "number" && Number.isFinite(it.answer));
-    const hasRange = isObj(it.range) && Number.isFinite(Number(it.range.min)) && Number.isFinite(Number(it.range.max));
-
-    if (hasSingle || hasMulti || hasTF || hasShort || hasNum || hasRange) return { ok: true };
-    return { ok: false, reason: "Auto: saknar facit/struktur (options+correct, correct:boolean, answer/expected eller numeric)." };
-  }
-
-  if (ht === "true_false") {
-    if (Array.isArray(it.options) && it.options.length >= 2) {
-      const ci = Number(it.correctIndex);
-      if (!Number.isFinite(ci) || ci < 0 || ci >= it.options.length) return { ok: false, reason: "Sant/Falskt: fel correctIndex." };
-      return { ok: true };
-    }
-    if (typeof it.correct === "boolean") return { ok: true };
-    return { ok: false, reason: "Sant/Falskt: saknar options+correctIndex eller correct:boolean." };
-  }
-
-  if (ht === "short_answer") {
-    const ans = (typeof it.answer === "string" && it.answer) || (typeof it.expected === "string" && it.expected) || "";
-    if (!normStr(ans)) return { ok: false, reason: "Kortsvar: saknar answer/expected." };
-    return { ok: true };
-  }
-
-  if (ht === "numeric") {
-    const hasNum = (typeof it.answer === "number" && Number.isFinite(it.answer));
-    const hasRange = isObj(it.range) && Number.isFinite(Number(it.range.min)) && Number.isFinite(Number(it.range.max));
-    if (!hasNum && !hasRange) return { ok: false, reason: "Numeric: saknar answer:number eller range{min,max}." };
-    return { ok: true };
-  }
-
-  if (isMcqType(ht)) {
-    const opts = Array.isArray(it.options) ? it.options : [];
-    if (opts.length < 2) return { ok: false, reason: "MCQ: saknar options." };
-    if (ht === "mcq_multi") {
-      const cis = Array.isArray(it.correctIndices) ? it.correctIndices : null;
-      if (!cis || !cis.length) return { ok: false, reason: "MCQ multi: saknar correctIndices." };
-      for (const x of cis) {
-        const n = Number(x);
-        if (!Number.isFinite(n) || n < 0 || n >= opts.length) return { ok: false, reason: "MCQ multi: ogiltig correctIndices." };
-      }
-      return { ok: true };
-    }
-    const ci = Number(it.correctIndex);
-    if (!Number.isFinite(ci) || ci < 0 || ci >= opts.length) return { ok: false, reason: "MCQ: fel correctIndex." };
-    return { ok: true };
-  }
-
-  return { ok: false, reason: "Okänd frågetyp (explicit vald): " + ht };
-}
-
-// ---------- AI Generate ----------
-async function generateAi() {
-  if (!isWriterAllowed()) return;
-  if (!state.draft) return;
-
-  // Synka först (så AI får rätt modul/område/kapitel/steg)
-  syncDraftFromInputs();
-  syncDraftTitleFromFields();
-
-  setAiHint("");
-  DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI…", "warn");
-
-  const initR = await ensureSdkReady();
-  if (!initR || initR.ok !== true) {
-    const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
-    if (code === "BASE_URL_MISSING") DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
-    else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
-    setAiHint("AI init fail-closed: " + code);
-    return;
-  }
-
-  const controls = readAiControls();
-  const ctxObj = buildAiContextNoGoals();
-
-  // P0: Skicka INTE extra metadata som modellen kan “eka” tillbaka (contextText/subject).
-  const req = {
-    mode: controls.mode,               // training|document
-    count: controls.count,             // 1..12
-    context: ctxObj,                   // NO goals
-    language: "sv",
-    questionType: controls.questionType || "auto",
-    feedbackEnabled: !!controls.feedbackEnabled
-  };
-
-  page._LAST_AI_REQUEST = deepClone(req);
-  page._LAST_AI_RAW = null;
-  page._LAST_AI_NORM = null;
-  page._LAST_AI_PICK = null;
-
-  let r;
-  try {
-    if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-funktion saknas", "bad");
-      setAiHint("HRWorkerSDK.aiGenerate saknas.");
+      r = await window.HRWorkerSDK.aiGenerate(req);
+    } catch (e) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI exception", "bad");
+      setAiHint("AI exception (fail-closed).");
+      page._LAST_AI_RAW = { exception: String(e && e.message ? e.message : e) };
+      updateDebug();
       return;
     }
-    r = await window.HRWorkerSDK.aiGenerate(req);
-  } catch (e) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI exception", "bad");
-    setAiHint("AI exception (fail-closed).");
-    page._LAST_AI_RAW = { exception: String(e && e.message ? e.message : e) };
-    updateDebug();
-    return;
-  }
 
-  page._LAST_AI_RAW = deepClone(r);
+    page._LAST_AI_RAW = deepClone(r);
 
-  if (!r || r.ok !== true) {
-    const msg = (r && r.error && (r.error.message || r.error.code)) ? String(r.error.message || r.error.code) : "AI svarade inte ok.";
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
-    setAiHint(msg);
-    updateDebug();
-    return;
-  }
-
-  // Normalisera → blocks/items
-  const norm = normalizeAiBlocksFromAny(r.data != null ? r.data : r);
-  page._LAST_AI_NORM = deepClone(norm);
-
-  if (!norm.ok) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-format fel", "bad");
-    setAiHint(norm.reason || "AI gav ogiltigt format.");
-    updateDebug();
-    return;
-  }
-
-  // Sanitera + validera (fail-closed)
-  const hardSelected = isHardQuestionTypeSelected(controls._uiQuestionType);
-  const hardType = hardSelected ? normStr(controls._uiQuestionType).toLowerCase() : "auto";
-
-  const incomingBlocks = [];
-  for (const b of safeArr(norm.blocks)) {
-    const items = safeArr(b && b.items).map(x => {
-      // 1) Strängar -> alltid objekt (så store/contract inte failar)
-      if (typeof x === "string") {
-        const t = scrubObjectObjectToken(x);
-        return { type: "info", text: t };
-      }
-
-      // 2) Objekt -> sanera + säkerställ type
-      if (x && typeof x === "object") {
-        const obj = sanitizeAiItemInPlace(deepClone(x)) || {};
-        if (!obj.type || typeof obj.type !== "string") {
-          // Heuristik: om den ser ut som en fråga, märk som question annars info
-          const hasQ = !!normStr(obj.question || obj.q || obj.text || "");
-          const hasOpts = Array.isArray(obj.options) && obj.options.length >= 2;
-          obj.type = (hasQ && (hasOpts || obj.correct != null || obj.answer != null || obj.expected != null)) ? "question" : "info";
-        }
-        // Om contract har normalizeItem: kör den (safe + stabil schema)
-        if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
-          return DEPS.contract.normalizeItem(obj);
-        }
-        return obj;
-      }
-
-      return null;
-    }).filter(x => x != null);
-
-    if (!items.length) continue;
-
-    // Om användaren har valt provfrågor: kräver question-format
-    if (controls.content === "questions") {
-      for (const it of items) {
-        // Strängar kan inte ge facit -> men vi mappade strängar till info -> stoppa i questions-läge
-        if (it && it.type === "info") {
-          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-          setAiHint("Du valde provfrågor men AI gav text/info utan facit. Import stoppad (fail-closed).");
-          updateDebug();
-          return;
-        }
-        const vq = validateQuestionItem(it, hardType);
-        if (!vq.ok) {
-          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-          setAiHint("Import stoppad (fail-closed): " + (vq.reason || "ogiltig fråga."));
-          updateDebug();
-          return;
-        }
-      }
+    if (!r || r.ok !== true) {
+      const msg = (r && r.error && (r.error.message || r.error.code)) ? String(r.error.message || r.error.code) : "AI svarade inte ok.";
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
+      setAiHint(msg);
+      updateDebug();
+      return;
     }
 
-    incomingBlocks.push({
-      title: normStr(b && b.title) || "",
-      items: items
-    });
+    // Normalisera → blocks/items (P1: normalisera alltid från HELA svaret, så vi kan hitta top-level blocks/items)
+    const norm = normalizeAiBlocksFromAny(r);
+    page._LAST_AI_NORM = deepClone(norm);
+
+    if (!norm.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-format fel", "bad");
+      setAiHint(norm.reason || "AI gav ogiltigt format.");
+      updateDebug();
+      return;
+    }
+
+    // Sanitera + validera (fail-closed)
+    const hardSelected = isHardQuestionTypeSelected(controls._uiQuestionType);
+    const hardType = hardSelected ? normStr(controls._uiQuestionType).toLowerCase() : "auto";
+
+    const incomingBlocks = [];
+    for (const b of safeArr(norm.blocks)) {
+      const items = safeArr(b && b.items).map(x => {
+        // 1) Strängar -> alltid objekt (så store/contract inte failar)
+        if (typeof x === "string") {
+          const t = scrubObjectObjectToken(x);
+          return { type: "info", text: t };
+        }
+
+        // 2) Objekt -> sanera + säkerställ type
+        if (x && typeof x === "object") {
+          const obj = sanitizeAiItemInPlace(deepClone(x)) || {};
+          if (!obj.type || typeof obj.type !== "string") {
+            // Heuristik: om den ser ut som en fråga, märk som question annars info
+            const hasQ = !!normStr(obj.question || obj.q || obj.text || "");
+            const hasOpts = Array.isArray(obj.options) && obj.options.length >= 2;
+            obj.type = (hasQ && (hasOpts || obj.correct != null || obj.answer != null || obj.expected != null)) ? "question" : "info";
+          }
+          // Om contract har normalizeItem: kör den (safe + stabil schema)
+          if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
+            return DEPS.contract.normalizeItem(obj);
+          }
+          return obj;
+        }
+
+        return null;
+      }).filter(x => x != null);
+
+      if (!items.length) continue;
+
+      // Om användaren har valt provfrågor: kräver question-format
+      if (controls.content === "questions") {
+        for (const it of items) {
+          // Strängar kan inte ge facit -> men vi mappade strängar till info -> stoppa i questions-läge
+          if (it && it.type === "info") {
+            DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+            setAiHint("Du valde provfrågor men AI gav text/info utan facit. Import stoppad (fail-closed).");
+            updateDebug();
+            return;
+          }
+          const vq = validateQuestionItem(it, hardType);
+          if (!vq.ok) {
+            DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+            setAiHint("Import stoppad (fail-closed): " + (vq.reason || "ogiltig fråga."));
+            updateDebug();
+            return;
+          }
+        }
+      }
+
+      incomingBlocks.push({
+        title: normStr(b && b.title) || "",
+        items: items
+      });
+    }
+
+    if (!incomingBlocks.length) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Tomt AI-svar", "bad");
+      setAiHint("AI gav inga block/items att importera.");
+      updateDebug();
+      return;
+    }
+
+    page._LAST_AI_PICK = {
+      importedBlocks: incomingBlocks.length,
+      importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0)
+    };
+
+    // Importera till draft (append)
+    if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
+    for (const nb of incomingBlocks) state.draft.blocks.push(nb);
+
+    setDirty(true);
+    syncDraftTitleFromFields();
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI import OK", "ok");
+    setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items).`);
+    updateUiAll();
   }
-
-  if (!incomingBlocks.length) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Tomt AI-svar", "bad");
-    setAiHint("AI gav inga block/items att importera.");
-    updateDebug();
-    return;
-  }
-
-  page._LAST_AI_PICK = {
-    importedBlocks: incomingBlocks.length,
-    importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0)
-  };
-
-  // Importera till draft (append)
-  if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
-  for (const nb of incomingBlocks) state.draft.blocks.push(nb);
-
-  setDirty(true);
-  syncDraftTitleFromFields();
-  DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI import OK", "ok");
-  setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items).`);
-  updateUiAll();
-}
-
 
   /* =========================
      BLOCK 17/18 — Bootstrap + events
