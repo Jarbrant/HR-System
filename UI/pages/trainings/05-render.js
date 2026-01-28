@@ -15,25 +15,29 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras (render visar, callbacks hanterar write)
 
-PATCH v1.1.6 (PP-SC-010-08E) (AUTOPATCH):
-- P0: View(question): om frågetext saknas -> visa neutral “(saknar frågetext)” istället för “—”.
-- P1: Edit(question): fail-closed om checkbox ikryssad men text saknas (håller modalen öppen).
-- P1: Save(question): sätt alltid options[] + correctIndex + correctIndices (och uppdatera legacy-fält om de finns).
-- P2: Debug: valfri render-logg bakom window.__HR_DEBUG_TRAININGS_RENDER (ingen påverkan annars).
+PATCH v1.1.7 (PP-SC-010-08F) (AUTOPATCH):
+- P0: Blocks-preview: om item saknar primärtext men har alt-fält -> visa fallback per typ:
+      question => “(saknar frågetext)”, övrigt => “(tomt)”.
+- P0: primaryText(): utökat fältstöd (body/description/title/stem/content.text m.fl.) + fail-soft logg bakom flagga.
+- P0: Modal(view/question): använder samma förbättrade text-extraktion + behåller neutral fallback.
+- P1: Save(question): säkerställ updated.type="question" (om saknas) + behåll normalisering av options/facit.
+- P2: Debug: mer tydliga render-logs bakom window.__HR_DEBUG_TRAININGS_RENDER.
 
 Ändringslogg (≤8):
-- v1.1.6: view(question): neutral fallback för saknad frågetext
-- v1.1.6: edit(question): stoppa spara om ikryssat alternativ saknar text
-- v1.1.6: save(question): normalisera facit (correctIndex + correctIndices) + options[]
-- v1.1.6: debug: render-logg bakom flagga
+- v1.1.7: blocks-preview: typ-specifik fallback istället för “—”
+- v1.1.7: primaryText: fler fält + content.text + stem/title/description/body
+- v1.1.7: modal view: align med primaryText och neutral fallback
+- v1.1.7: save(question): säkra type="question" om question-mode
 
 Testnoteringar:
-- View: fråga utan question/text -> “(saknar frågetext)”.
-- Edit: kryssa i tom rad -> alert + modal hålls öppen.
-- Save: efter spara ska item ha options[] och både correctIndex + correctIndices.
+- Preview: item utan text/question men type=question -> “(saknar frågetext)”.
+- Preview: item utan text och ej question -> “(tomt)”.
+- Debug: sätt window.__HR_DEBUG_TRAININGS_RENDER=true och generera -> se vilka fält som hittades/missades.
+- Save(question): efter spara ska item ha options[] och både correctIndex + correctIndices.
 
 Risk/edge cases:
-- Om någon förväntar sig enbart correctIndex eller enbart correctIndices kan dubbel-write avslöja buggar i konsumenter (men ökar kompatibilitet i UI/worker-flöden).
+- Om någon förväntar sig enbart correctIndex eller enbart correctIndices kan dubbel-write avslöja buggar i konsumenter
+  (men ökar kompatibilitet i UI/worker-flöden).
 ============================================================ */
 
 /* =========================================
@@ -46,7 +50,7 @@ Risk/edge cases:
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.1.6-PP-SC-010-08E";
+  render.__VERSION = "v1.1.7-PP-SC-010-08F";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
@@ -324,16 +328,72 @@ Risk/edge cases:
     return "Info";
   }
 
+  function itemKind(it) {
+    const t = normStr(it && it.type).toLowerCase();
+    if (t === "question" || t === "quiz") return "question";
+    // fail-soft: om question-fält finns -> behandla som question
+    if (it && typeof it === "object" && typeof it.question === "string" && normStr(it.question)) return "question";
+    return "other";
+  }
+
+  // P0: mer robust text-extraktion (för att undvika “tomma” previews när worker använder annat fält)
   function primaryText(it) {
-    if (!it) return "";
-    if (typeof it === "string") return normStr(it);
-    const cand =
-      (typeof it.text === "string" && it.text) ||
-      (typeof it.instruction === "string" && it.instruction) ||
-      (typeof it.prompt === "string" && it.prompt) ||
-      (typeof it.question === "string" && it.question) ||
-      "";
-    return normStr(cand);
+    try {
+      if (!it) return "";
+      if (typeof it === "string") return normStr(it);
+
+      if (!isObj(it)) return "";
+
+      // Direkt-strängfält (vanliga)
+      const direct =
+        (typeof it.text === "string" && it.text) ||
+        (typeof it.instruction === "string" && it.instruction) ||
+        (typeof it.prompt === "string" && it.prompt) ||
+        (typeof it.question === "string" && it.question) ||
+        (typeof it.body === "string" && it.body) ||
+        (typeof it.description === "string" && it.description) ||
+        (typeof it.title === "string" && it.title) ||
+        (typeof it.stem === "string" && it.stem) ||
+        (typeof it.scenario === "string" && it.scenario) ||
+        (typeof it.statement === "string" && it.statement) ||
+        "";
+
+      const d = normStr(direct);
+      if (d) return d;
+
+      // content: {text:"..."} / {body:"..."} (vanligt i vissa generators)
+      if (isObj(it.content)) {
+        const c =
+          (typeof it.content.text === "string" && it.content.text) ||
+          (typeof it.content.body === "string" && it.content.body) ||
+          (typeof it.content.description === "string" && it.content.description) ||
+          "";
+        const cc = normStr(c);
+        if (cc) return cc;
+      }
+
+      // fallback: ibland “q” eller “promptText”
+      const alt =
+        (typeof it.q === "string" && it.q) ||
+        (typeof it.promptText === "string" && it.promptText) ||
+        "";
+      const a = normStr(alt);
+      if (a) return a;
+
+      // debug: visa vilka fält som fanns (utan att logga stora payloads)
+      dbg("primaryText: empty (field scan)", {
+        type: normStr(it.type),
+        keys: Object.keys(it).slice(0, 24)
+      });
+
+      return "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function previewFallback(it) {
+    return itemKind(it) === "question" ? "(saknar frågetext)" : "(tomt)";
   }
 
   render.renderBlocksList = function (opts) {
@@ -466,7 +526,9 @@ Risk/edge cases:
         const btxt = document.createElement("div");
         btxt.style.fontWeight = "600";
         btxt.style.textAlign = "left";
-        btxt.textContent = primaryText(it) || "—";
+
+        const txt = primaryText(it);
+        btxt.textContent = txt ? txt : previewFallback(it);
 
         row.appendChild(a);
         row.appendChild(btxt);
@@ -704,14 +766,6 @@ Risk/edge cases:
     return set;
   }
 
-  function itemKind(it) {
-    const t = normStr(it && it.type).toLowerCase();
-    if (t === "question" || t === "quiz") return "question";
-    // fail-soft: om question-fält finns -> behandla som question
-    if (it && typeof it === "object" && typeof it.question === "string" && normStr(it.question)) return "question";
-    return "other";
-  }
-
   function extractExplanation(it) {
     if (!it || typeof it !== "object") return "";
     return normStr(it.explanation || it.feedback || it.rationale || it.explain || "");
@@ -778,14 +832,14 @@ Risk/edge cases:
     actionRow.style.gap = "10px";
     actionRow.style.flexWrap = "wrap";
 
-    const btnEdit = makeBtn("redigera", "Redigera item");
+    const btnEdit = makeBtn("Redigera", "Redigera item");
     btnEdit.style.border = "2px solid #d11";
     btnEdit.style.color = "#d11";
     btnEdit.style.background = "transparent";
     btnEdit.style.padding = "10px 18px";
     btnEdit.style.borderRadius = "10px";
 
-    const btnDel = makeBtn("ta bort", "Ta bort item");
+    const btnDel = makeBtn("Ta bort", "Ta bort item");
     btnDel.style.border = "2px solid #d11";
     btnDel.style.color = "#d11";
     btnDel.style.background = "transparent";
@@ -833,7 +887,7 @@ Risk/edge cases:
         q.style.marginTop = "8px";
         q.style.fontWeight = "700";
 
-        // P0: neutral fallback om frågetext saknas (undvik “—” som känns “klart”)
+        // P0: neutral fallback om frågetext saknas
         const qTxt = primaryText(item);
         q.textContent = qTxt ? qTxt : "(saknar frågetext)";
         content.appendChild(q);
@@ -895,7 +949,6 @@ Risk/edge cases:
 
         const explTxt = extractExplanation(item);
 
-        // Visa “Rätt!” bara när facit faktiskt finns (annars blir det falsk trygghet)
         content.appendChild(makeSectionTitle("Förklaring:"));
         if (hasCorrect) {
           const okLine = document.createElement("div");
@@ -1078,7 +1131,7 @@ Risk/edge cases:
         const optOut = [];
         const correctIdxs = [];
 
-        // P1: fail-closed om checkbox ikryssad men text saknas (annars tappas facit tyst)
+        // P1: fail-closed om checkbox ikryssad men text saknas
         for (let i = 0; i < refs.optRows.length; i++) {
           const row = refs.optRows[i];
           const t = normStr(row.inp.value || "");
@@ -1108,6 +1161,9 @@ Risk/edge cases:
         }
 
         if (isObj(updated)) {
+          // P1: säkra type
+          if (!normStr(updated.type)) updated.type = "question";
+
           // normalisera options
           if (Array.isArray(updated.options)) updated.options = optOut;
           else if (Array.isArray(updated.choices)) updated.choices = optOut;
@@ -1121,10 +1177,8 @@ Risk/edge cases:
           else if (typeof updated.rationale === "string") updated.rationale = expl;
           else updated.explanation = expl;
 
-          // P1: sätt både single + multi för kompatibilitet
+          // sätt både single + multi för kompatibilitet
           const first = correctIdxs[0];
-
-          // primära fält
           updated.correctIndex = first;
           updated.correctIndices = correctIdxs;
 
