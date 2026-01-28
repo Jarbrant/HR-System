@@ -216,7 +216,7 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
   };
   page._state = state;
 
-    /* =========================
+     /* =========================
      BLOCK 5/18 — Utils
   ========================== */
   function normStr(v) {
@@ -298,21 +298,22 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
   }
 
   // P0: saknades i senaste sanning → kan krascha Generate om den inte finns
+  // Normaliserar UI-val (inkl "auto_*") till worker-kontrakt.
   function normalizeQuestionTypeForWorker(qtUi) {
     const s = normStr(qtUi).toLowerCase();
     if (!s) return "auto";
 
-    // UI-varianter som ska räknas som auto
-    if (s === "auto" || s.startsWith("auto")) return "auto";
+    // acceptera alla auto-varianter som "auto"
+    if (s === "auto" || s.indexOf("auto") === 0) return "auto";
 
-    // Stabil mapping
-    if (s === "mcq_single" || s === "mcq-single" || s === "single" || s === "mcq") return "mcq_single";
-    if (s === "mcq_multi" || s === "mcq-multi" || s === "multi") return "mcq_multi";
-    if (s === "true_false" || s === "true-false" || s === "tf" || s === "sant_falskt" || s === "sant/falskt") return "true_false";
-    if (s === "short_answer" || s === "short-answer" || s === "short" || s === "kortsvar") return "short_answer";
+    // worker-stödda explicita typer (justera vid behov om worker har annan enum)
+    if (s === "mcq_single") return "mcq_single";
+    if (s === "mcq_multi") return "mcq_multi";
+    if (s === "true_false" || s === "tf" || s === "sant_falskt" || s === "sant/falskt") return "true_false";
+    if (s === "short_answer" || s === "short" || s === "kortsvar") return "short_answer";
     if (s === "numeric" || s === "number" || s === "tal") return "numeric";
 
-    // Okänt -> auto (fail-safe)
+    // fallback: om UI skickar något okänt → auto (fail-safe)
     return "auto";
   }
 
@@ -337,18 +338,15 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
   function ensureItemType(it) {
     // P0: gör rendering stabil om worker/AI saknar type
     if (!it || typeof it !== "object") return it;
-
-    const t0 = normStr(it.type).toLowerCase();
-
-    // P0: worker kan skicka "text" → normalisera så contract/save inte stoppar
-    if (t0 === "text" || t0 === "paragraph" || t0 === "copy") { it.type = "info"; return it; }
-
-    if (t0) return it;
+    const t = normStr(it.type).toLowerCase();
+    if (t) return it;
 
     // om question-fält finns -> question
     if (typeof it.question === "string" && normStr(it.question)) { it.type = "question"; return it; }
+
     // om options+correct finns -> question
     if (Array.isArray(it.options) && it.options.length >= 2) { it.type = "question"; return it; }
+
     // annars info
     it.type = "info";
     return it;
@@ -364,7 +362,7 @@ PATCH v1.3.2-PP-SC-010-07J (AUTOPATCH P0):
     if (Array.isArray(item.options)) {
       item.options = item.options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
     }
-    // P0: auto-sätt type om saknas + normalisera "text"
+    // P0: auto-sätt type om saknas
     ensureItemType(item);
     return item;
   }
