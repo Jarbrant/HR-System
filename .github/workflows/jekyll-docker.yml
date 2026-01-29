@@ -2,19 +2,66 @@ name: Jekyll site CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jekyll-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build the site in the jekyll/builder container
-      run: |
-        docker run \
-        -v ${{ github.workspace }}:/srv/jekyll -v ${{ github.workspace }}/_site:/srv/jekyll/_site \
-        jekyll/builder:latest /bin/bash -c "chmod -R 777 /srv/jekyll && jekyll build --future"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Cache för bundler (snabbare + stabilare)
+      - name: Cache bundler
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/bundle
+            .bundle
+          key: ${{ runner.os }}-gems-${{ hashFiles('**/Gemfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-gems-
+
+      - name: Build the site in the jekyll/builder container
+        env:
+          JEKYLL_ENV: production
+        run: |
+          set -euo pipefail
+          echo "Workspace: $GITHUB_WORKSPACE"
+          ls -la
+
+          # Bygg alltid med samma miljö (undvik "latest" som kan ändras)
+          # Välj en stabil tag. Om du vill byta: använd en existerande tag som matchar din Jekyll-version.
+          IMAGE="jekyll/builder:4.3.3"
+
+          # Se till att outputmapp finns
+          mkdir -p "$GITHUB_WORKSPACE/_site"
+
+          docker run --rm \
+            -e JEKYLL_ENV="$JEKYLL_ENV" \
+            -v "$GITHUB_WORKSPACE":/srv/jekyll \
+            -v "$GITHUB_WORKSPACE/_site":/srv/jekyll/_site \
+            "$IMAGE" /bin/bash -lc \
+            "chmod -R 777 /srv/jekyll && \
+             if [ -f Gemfile ]; then \
+               bundle config set path 'vendor/bundle' && \
+               bundle install --jobs 4 --retry 3; \
+             fi && \
+             jekyll build --future --trace"
+
+      - name: Upload site artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: site
+          path: _site
