@@ -1,14 +1,16 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.3 JSON-MODE+REASON+DBG)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.3 VARIATION+ARC + V1-CONTRACT)
 // FIL: worker/index.js
 //
-// PATCH v1.6.3 (FIX: AI fastnar i fallback):
-// - P0: Tvinga strukturerad JSON från Workers AI via response_format:{type:"json_object"}.
-// - P0: Renare prompt (mindre “extra text” → färre BAD_JSON).
-// - P0: Propagera AI-reason (BAD_JSON / NO_QUESTIONS / SCHEMA_FAIL) istället för alltid SCHEMA_FAIL.
-// - P0: X-HR-AI-DBG: minimal diagnos (typ/len/json/q) utan payload.
-// - P0: FAIL-SOFT bibehålls: trasiga frågor skippas, fylls upp deterministiskt.
-// - P0: Output-contract bibehållet: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
+// PATCH v1.6.3 (CONTEXT-UNWRAP + HARD-CONTRACT + BETTER-MCQ):
+// - P0: Unwrap/parsa context.text även när det är "dubbelt JSON" (sträng som innehåller JSON).
+// - P0: Extrahera subject/course/level + focus → injiceras i prompt som hårda rubriker.
+// - P0: Striktare prompt: 2–3 meningar, scenario → beslut, unika frågor, inga fluffrader.
+// - P0: Seed-shuffle av options + korrekt correctIndex (undvik att facit alltid blir 0).
+// - P0: Robustare JSON extraction behålls + fail-soft (skippa trasiga frågor, toppa upp deterministic).
+// - P0: Debug headers bibehålls: X-HR-AI + X-HR-AI-REASON (+ X-HR-AI-DBG om du redan sätter den i svar).
+//
+// Output-contract: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
 // ============================================================
 
 // ============================================================
@@ -111,7 +113,7 @@ export const MAX_BODY_BYTES = 64 * 1024;
 const VERSION = "1.6.3";
 
 // ============================================================
-// BLOCK 02B — Local utils (self-contained)
+// BLOCK 02B — Local utils (self-contained)  [P0: undvik import-crash]
 // ============================================================
 
 function normalizeLanguage(v) {
@@ -282,11 +284,115 @@ function normalizeToAiQt(questionTypeRaw) {
   return qt;
 }
 
-function aiMaxTokensForCount(count) {
-  const c = Math.max(1, Math.min(12, Number(count) || 1));
-  // Grov budget: stem+4 options+explanation * c
-  const est = 260 * c + 300;
-  return Math.max(800, Math.min(4096, est));
+// ============================================================
+// BLOCK 02C — Context unwrap (P0)
+// ============================================================
+
+function parseContextBundle(contextTextRaw) {
+  // Förväntat i ditt fall: en sträng som ser ut som "\"{\\\"subject\\\":...}\""
+  // Vi hanterar:
+  // 1) JSON-objekt i text
+  // 2) JSON-sträng som innehåller JSON-objekt
+  const raw = safeStr(contextTextRaw).trim();
+  if (!raw) return null;
+
+  let v = safeJsonParseLoose(raw);
+  if (typeof v === "string") {
+    // andra lagret
+    const v2 = safeJsonParseLoose(v);
+    if (isPlainObject(v2)) v = v2;
+  }
+  if (!isPlainObject(v)) return null;
+
+  const subject = isPlainObject(v.subject) ? v.subject : null;
+  const course = isPlainObject(v.course) ? v.course : null;
+
+  const module = safeStr(subject && subject.module).trim();
+  const area = safeStr(subject && subject.area).trim();
+  const subjectId = safeStr(subject && (subject.subjectId || subject.id)).trim();
+
+  const chapter = safeStr(course && course.chapter).trim();
+  const step = safeStr(course && course.step).trim();
+  const title = safeStr(course && course.title).trim();
+  const chapterFocus = safeStr(course && course.chapterFocus).trim();
+  const stepFocus = safeStr(course && course.stepFocus).trim();
+
+  const level = safeStr(v.level || "").trim();
+  const goals = safeStr(v.goals || "").trim();
+
+  return {
+    module,
+    area,
+    subjectId,
+    chapter,
+    step,
+    title,
+    chapterFocus,
+    stepFocus,
+    level,
+    goals,
+    raw: raw.slice(0, 2000),
+  };
+}
+
+function fmtContextForPrompt(bundle, language) {
+  const sv = language === "sv";
+  if (!bundle) return sv ? "KURSINFO: (saknas)" : "COURSE INFO: (missing)";
+
+  const lines = [];
+  lines.push(sv ? "KURSINFO (hårda fakta):" : "COURSE INFO (hard facts):");
+  if (bundle.module) lines.push(`${sv ? "Modul" : "Module"}: ${bundle.module}`);
+  if (bundle.area) lines.push(`${sv ? "Område" : "Area"}: ${bundle.area}`);
+  if (bundle.subjectId) lines.push(`subjectId: ${bundle.subjectId}`);
+  if (bundle.chapter) lines.push(`${sv ? "Kapitel" : "Chapter"}: ${bundle.chapter}`);
+  if (bundle.step) lines.push(`${sv ? "Steg" : "Step"}: ${bundle.step}`);
+  if (bundle.level) lines.push(`${sv ? "Nivå" : "Level"}: ${bundle.level}`);
+  if (bundle.title) lines.push(`${sv ? "Titel" : "Title"}: ${bundle.title}`);
+  if (bundle.chapterFocus) lines.push(`${sv ? "Kapitel-fokus" : "Chapter focus"}: ${bundle.chapterFocus}`);
+  if (bundle.stepFocus) lines.push(`${sv ? "Steg-fokus" : "Step focus"}: ${bundle.stepFocus}`);
+  if (bundle.goals) lines.push(`${sv ? "Mål (för människa)" : "Goals (for humans)"}: ${bundle.goals}`);
+
+  return lines.join("\n");
+}
+
+// ============================================================
+// BLOCK 02D — Seeded shuffle for MCQ options (P0)
+// ============================================================
+
+function seededRand(seed) {
+  // enkel LCG
+  let x = (seed >>> 0) || 1;
+  return function () {
+    x = (Math.imul(1664525, x) + 1013904223) >>> 0;
+    return x / 4294967296;
+  };
+}
+
+function shuffleWithCorrectIndex(options, correctIndex, seed) {
+  const arr = Array.isArray(options) ? options.slice() : [];
+  const n = arr.length;
+  if (n < 2) return { options: arr, correctIndex: Math.max(0, Number(correctIndex) || 0) };
+
+  const ci = Math.max(0, Math.min(n - 1, Number(correctIndex) || 0));
+  const rand = seededRand(seed);
+
+  // Fisher-Yates, men spåra var facit hamnar
+  let currentCorrect = ci;
+  for (let i = n - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    if (i === j) continue;
+
+    // swap
+    const tmp = arr[i];
+    arr[i] = arr[j];
+    arr[j] = tmp;
+
+    // uppdatera correctIndex om vi swappade en position som påverkar facit
+    if (currentCorrect === i) currentCorrect = j;
+    else if (currentCorrect === j) currentCorrect = i;
+  }
+
+  return { options: arr, correctIndex: currentCorrect };
 }
 
 // ============================================================
@@ -330,7 +436,7 @@ function validateCourseSubject(course) {
 }
 
 // ============================================================
-// BLOCK 03 — Fetch handler
+// BLOCK 03 — Fetch handler (routing + guards)
 // ============================================================
 
 export default {
@@ -548,7 +654,6 @@ export default {
     let training;
     let aiSource = "fallback";
     let aiReason = "OK";
-    let aiDbg = "";
 
     try {
       const res = await buildTrainingBlocks(
@@ -570,7 +675,6 @@ export default {
       training = res && res.training ? res.training : res;
       aiSource = safeStr(res && res.source).trim() || "fallback";
       aiReason = safeStr(res && res.reason).trim() || "OK";
-      aiDbg = safeStr(res && res.dbg).trim();
     } catch (e) {
       const msg = safeStr(e && (e.message || e.stack || String(e))).slice(0, 200);
       console.error("ERR", requestId, "WORKER_BUILD_FAILED");
@@ -596,7 +700,6 @@ export default {
       ...(corsHeaders || {}),
       "X-HR-AI": aiSource === "cf" ? "cf" : "fallback",
       "X-HR-AI-REASON": safeStr(aiReason || "OK"),
-      ...(aiDbg ? { "X-HR-AI-DBG": aiDbg } : {}),
     };
 
     return okJSON(
@@ -626,7 +729,7 @@ function buildCorsHeaders(origin, allowedOrigin) {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
-    Vary: "Origin",
+    "Vary": "Origin",
   };
 }
 
@@ -671,24 +774,20 @@ function extractBearerToken(authHeader) {
 // ============================================================
 
 async function buildTrainingBlocks(input, env) {
-  // Returnerar {training, source:"cf"|"fallback", reason:"...", dbg:"..."}
+  // Returnerar {training, source:"cf"|"fallback", reason:"..."}
   const hasBinding = !!(env && env.AI && typeof env.AI.run === "function");
   if (!hasBinding) {
-    return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "NO_BINDING", dbg: "bind=0" };
+    return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "NO_BINDING" };
   }
 
   try {
     const ai = await buildTrainingBlocksWithAI(input, env);
-
     if (ai && ai.ok && Array.isArray(ai.blocks) && ai.blocks.length) {
-      return { training: ai, source: "cf", reason: "OK", dbg: safeStr(ai && ai.dbg) };
+      return { training: ai, source: "cf", reason: "OK" };
     }
-
-    const reason = safeStr(ai && ai.reason).trim() || "SCHEMA_FAIL";
-    const dbg = safeStr(ai && ai.dbg).trim();
-    return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason, dbg };
+    return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "SCHEMA_FAIL" };
   } catch (_) {
-    return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "RUN_FAIL", dbg: "run=fail" };
+    return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "RUN_FAIL" };
   }
 }
 
@@ -697,101 +796,105 @@ async function buildTrainingBlocksWithAI(input, env) {
   const mode = safeStr(input && input.mode).trim() || "training";
   const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
   const language = normalizeLanguage(input && input.language);
-  const contextText = safeStr(input && (input.context || input.contextText)).trim();
+  const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
   const subjectId = safeStr(input && input.subjectId).trim() || "generic";
 
   // P0: "auto" -> mcq_single i AI-ledet
   const qt = normalizeToAiQt(input && input.questionType);
 
-  const place = inferWorkplaceFromContext(contextText, language);
+  // P0: unwrap kursinfo från context.text (även om den är dubbelt JSON)
+  const bundle = parseContextBundle(contextTextRaw);
+  const courseInfo = fmtContextForPrompt(bundle, language);
+
+  const place = inferWorkplaceFromContext(contextTextRaw, language);
   const arc = buildStoryArc(count);
-  const pack = pickScenarioPack(contextText, place, language, hash32(`${requestId}|${subjectId}|${language}|${contextText.slice(0, 120)}`));
+  const pack = pickScenarioPack(
+    contextTextRaw,
+    place,
+    language,
+    hash32(`${requestId}|${subjectId}|${language}|${(bundle && (bundle.module + "|" + bundle.area + "|" + bundle.chapter)) || ""}|${contextTextRaw.slice(0, 120)}`)
+  );
 
   const sv = language === "sv";
-  const isTF = qt === "true_false";
 
+  // P0: hårdare krav på “riktiga” frågor och MCQ-kvalitet
   const schemaHint = sv
-    ? `Returnera ENDAST JSON (ingen markdown, ingen text före/efter).
-JSON-format:
-{"questions":[{"stem":"...","options":[...], "correctIndex":0, "explanation":"..."}]}
-Regler:
-- Exakt ${count} frågor.
-- options: ${isTF ? "2" : "4"} st.
-- correctIndex inom range.
-- Alla frågor unika. Inga platshållare.`
-    : `Return ONLY JSON (no markdown, no text before/after).
-JSON:
-{"questions":[{"stem":"...","options":[...], "correctIndex":0, "explanation":"..."}]}
-Rules:
+    ? `Returnera ENDAST giltig JSON. Inget markdown. Inga extra rader. JSON måste börja med "{" och sluta med "}".
+Schema:
+{
+  "questions": [
+    { "stem": "string", "options": ["A","B","C","D"], "correctIndex": 0, "explanation": "string" }
+  ]
+}
+Regler (mycket viktiga):
+- Exakt ${count} frågor (inte fler/inte färre).
+- Varje "stem" är 2–3 meningar (scenario + beslut), inte en kort rad.
+- Ställ en tydlig fråga i sista meningen. Undvik ja/nej-frågor.
+- options: 4 st (true_false: 2 st). Alla alternativ ska vara plausibla och tydligt olika.
+- correctIndex inom range och får inte alltid vara 0.
+- explanation: 1–2 meningar som motiverar varför rätt svar är rätt + varför minst ett fel är fel.
+- Varje fråga måste kännas kopplad till modul/område/kapitel/steget (använd orden i kursinfo).
+- Inga platshållare ("som ovan", "...", "osv"). Inga meta-texter.`
+    : `Return ONLY valid JSON. No markdown, no extra lines. JSON must start with "{" and end with "}".
+Schema:
+{
+  "questions": [
+    { "stem": "string", "options": ["A","B","C","D"], "correctIndex": 0, "explanation": "string" }
+  ]
+}
+Rules (very important):
 - Exactly ${count} questions.
-- options: ${isTF ? "2" : "4"}.
-- correctIndex in range.
-- All questions unique. No placeholders.`;
+- Each stem is 2–3 sentences (scenario + decision), not a short line.
+- The last sentence is a clear question.
+- options: 4 (true_false: 2). All options must be plausible and clearly distinct.
+- correctIndex in range and not always 0.
+- explanation: 1–2 sentences explaining why correct is correct.
+- Must tie to course info (use module/area/chapter/step focus terms).
+- No placeholders. No meta text.`;
 
   const systemPrompt = sv
-    ? `Du skapar provfrågor för HR/QA. Svara strikt i JSON enligt formatet.`
-    : `You create assessment questions for HR/QA. Respond strictly in JSON per the format.`;
+    ? `Du skapar provfrågor för utbildning (HR/QA) och måste följa JSON-schemat exakt.`
+    : `You create assessment questions for training (HR/QA) and must follow the JSON schema exactly.`;
 
   const userPrompt =
-    (sv ? `KONTEXT:\n${contextText || "(ingen)"}\n\n` : `CONTEXT:\n${contextText || "(none)"}\n\n`) +
-    (sv
-      ? `SCENARIOPACK:\n- place: ${pack.place}\n- setting: ${pack.setting}\n- artifact: ${pack.artifact}\n- constraintB: ${pack.constraintB}\n- twist: ${pack.twist}\n\n`
-      : `SCENARIO PACK:\n- place: ${pack.place}\n- setting: ${pack.setting}\n- artifact: ${pack.artifact}\n- constraintB: ${pack.constraintB}\n- twist: ${pack.twist}\n\n`) +
+    `${courseInfo}\n\n` +
+    (sv ? `SCENARIOPACK:\n` : `SCENARIO PACK:\n`) +
+    `- place: ${pack.place}\n- setting: ${pack.setting}\n- artifact: ${pack.artifact}\n- constraintB: ${pack.constraintB}\n- twist: ${pack.twist}\n\n` +
     (sv ? `ARC (i ordning):\n${arc.join(", ")}\n\n` : `ARC (in order):\n${arc.join(", ")}\n\n`) +
     `questionType: ${qt}\n\n` +
+    (sv
+      ? `KONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n\n`
+      : `CONTEXT (raw):\n${contextTextRaw || "(none)"}\n\n`) +
     schemaHint;
 
   const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
 
-  const runParams = {
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-    // P0: Tvinga strukturerad JSON om modellen stödjer det
-    response_format: { type: "json_object" },
-    temperature: 0.2,
-    max_tokens: aiMaxTokensForCount(count),
-  };
-
   let answer;
   try {
-    answer = await env.AI.run(model, runParams);
+    answer = await env.AI.run(model, {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
   } catch (_) {
     // fallback modell
-    answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", runParams);
+    answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
   }
 
-  // CF kan ge object med response: {...} (objekt) eller string
-  const raw = isPlainObject(answer)
-    ? answer.response || answer.result || answer.output || answer.text || answer
-    : answer;
+  // CF kan ge object med response: "..." (string), eller ibland direkt text/objekt.
+  const raw = isPlainObject(answer) ? answer.response || answer.result || answer.output || answer.text || answer : answer;
 
-  const rawType = typeof raw;
-  const rawLen = rawType === "string" ? raw.length : isPlainObject(raw) ? JSON.stringify(raw).length : 0;
+  const parsed = safeJsonFromUnknown(raw);
+  if (!parsed || !isPlainObject(parsed)) return null;
 
-  let parsed = safeJsonFromUnknown(raw);
-
-  // Om modellen ändå returnerar wrapper: {response:{questions:[...]}}
-  if (parsed && isPlainObject(parsed) && isPlainObject(parsed.response)) {
-    parsed = parsed.response;
-  }
-
-  if (!parsed || !isPlainObject(parsed)) {
-    return { ok: false, reason: "BAD_JSON", dbg: `t=${rawType};len=${rawLen};json=0;q=0` };
-  }
-
-  const qArr = Array.isArray(parsed.questions)
-    ? parsed.questions
-    : Array.isArray(parsed.items)
-      ? parsed.items
-      : Array.isArray(parsed.q)
-        ? parsed.q
-        : [];
-
-  if (!qArr.length) {
-    return { ok: false, reason: "NO_QUESTIONS", dbg: `t=${rawType};len=${rawLen};json=1;q=0` };
-  }
+  const qArr = Array.isArray(parsed.questions) ? parsed.questions : [];
+  if (!qArr.length) return null;
 
   const blocks = [];
   const seenStem = new Set();
@@ -803,6 +906,7 @@ Rules:
     const stem = safeStr(q && (q.stem || q.question || q.text)).trim();
     if (!stem) continue;
 
+    // anti-duplicates (normalize whitespace)
     const key = stem.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenStem.has(key)) continue;
     seenStem.add(key);
@@ -812,22 +916,29 @@ Rules:
       .map((x) => (isPlainObject(x) ? safeStr(x.text) : safeStr(x)))
       .map((s) => safeStr(s).trim())
       .filter(Boolean);
-
     options = uniqStrings(options);
 
     if (qt === "true_false") {
+      // enforce 2
       if (options.length < 2) {
         options = sv ? ["Sant", "Falskt"] : ["True", "False"];
       } else {
         options = options.slice(0, 2);
       }
     } else {
+      // accept >=2, pad to 4
       if (options.length < 2) continue;
       options = padOptions(language, options, 4);
     }
 
     const ciRaw = Number(q && q.correctIndex);
-    const correctIndex = Number.isFinite(ciRaw) && ciRaw >= 0 && ciRaw < options.length ? Math.floor(ciRaw) : 0;
+    let correctIndex = Number.isFinite(ciRaw) && ciRaw >= 0 && ciRaw < options.length ? Math.floor(ciRaw) : 0;
+
+    // P0: seed-shuffle options så facit inte fastnar
+    const seed = hash32(`${requestId}|${subjectId}|${key}|${i}`);
+    const shuffled = shuffleWithCorrectIndex(options, correctIndex, seed);
+    options = shuffled.options;
+    correctIndex = shuffled.correctIndex;
 
     const explanation = safeStr(q && (q.explanation || q.rationale || q.feedback)).trim();
 
@@ -845,9 +956,7 @@ Rules:
     }
   }
 
-  if (!blocks.length) {
-    return { ok: false, reason: "SCHEMA_FAIL", dbg: `t=${rawType};len=${rawLen};json=1;q=${qArr.length}` };
-  }
+  if (!blocks.length) return null;
 
   // re-id 1..count stabilt
   const normalizedBlocks = blocks.slice(0, count).map((b, idx) => ({ ...b, id: `q_${idx + 1}` }));
@@ -856,10 +965,9 @@ Rules:
     ok: true,
     v: "training-blocks@v1",
     mode,
-    subjectId,
+    subjectId: (bundle && bundle.subjectId) || subjectId,
     language,
     blocks: normalizedBlocks,
-    dbg: `t=${rawType};len=${rawLen};json=1;q=${qArr.length}`,
   };
 }
 
@@ -929,7 +1037,8 @@ function inferWorkplaceFromContext(contextText, language) {
 
   if (t.includes("kök") || t.includes("restaurang") || t.includes("servering")) return sv ? "i köket" : "in the kitchen";
   if (t.includes("leverans") || t.includes("mottagning") || t.includes("varumottag")) return sv ? "vid varumottagningen" : "at receiving";
-  if (t.includes("internkontroll") || t.includes("revision") || t.includes("audit")) return sv ? "i en internkontroll" : "in an internal check";
+  if (t.includes("internkontroll") || t.includes("revision") || t.includes("audit") || t.includes("iso 9001") || t.includes("kvalitet"))
+    return sv ? "i en kvalitetsgenomgång" : "in a quality review";
   if (t.includes("morgonmöte") || t.includes("brief") || t.includes("standup")) return sv ? "på ett kort avstämningsmöte" : "in a short briefing";
 
   return sv ? "på arbetsplatsen" : "at work";
@@ -956,7 +1065,7 @@ function pickScenarioPack(contextText, place, language, seed) {
   const t = safeStr(contextText).toLowerCase();
   const isKitchen = t.includes("kök") || t.includes("restaurang") || t.includes("servering");
   const isReceiving = t.includes("leverans") || t.includes("mottagning") || t.includes("varumottag");
-  const isAudit = t.includes("revision") || t.includes("internkontroll") || t.includes("audit");
+  const isAudit = t.includes("revision") || t.includes("internkontroll") || t.includes("audit") || t.includes("iso 9001") || t.includes("kvalitet");
   const isBrief = t.includes("morgonmöte") || t.includes("brief") || t.includes("standup") || t.includes("avstämning");
   const isCustomer = t.includes("kund") || t.includes("klagomål") || t.includes("reklamation");
 
@@ -973,32 +1082,32 @@ function pickScenarioPack(contextText, place, language, seed) {
 
   const defs = {
     receiving: {
-      setting: sv ? "En leverans har precis kommit in" : "A delivery has just arrived",
-      artifact: sv ? "en kvittens eller en notering i loggen" : "a receipt or a log note",
+      setting: sv ? "En leverans har precis kommit in och underlaget är oklart" : "A delivery has just arrived and the evidence is unclear",
+      artifact: sv ? "en sign-off, kvittens eller loggnotering" : "a sign-off, receipt, or log note",
       constraintB: sv ? "Märkningen är ofullständig och två personer säger olika." : "The labeling is incomplete and two people give different answers.",
       twist: sv ? "Efter 2 minuter kommer ny info som motsäger första beskedet." : "After 2 minutes, new info contradicts the first message.",
     },
     kitchen: {
       setting: sv ? "Ni är mitt i produktionen och tempot är högt" : "You’re mid-production and the pace is high",
-      artifact: sv ? "en checklista eller en sign-off" : "a checklist or sign-off",
+      artifact: sv ? "en checklista, temperatur-logg eller signering" : "a checklist, temperature log, or sign-off",
       constraintB: sv ? "En kollega säger “vi gör som vanligt” men underlaget saknas." : "A colleague says “we do it as usual” but there’s no evidence.",
       twist: sv ? "En detalj dyker upp som gör att “som vanligt” inte längre gäller." : "A detail appears that makes “as usual” no longer valid.",
     },
     audit: {
-      setting: sv ? "Ni gör en snabb internkontroll" : "You’re doing a quick internal check",
-      artifact: sv ? "ett underlag som kan visas i efterhand" : "evidence you can show later",
+      setting: sv ? "Ni gör en snabb kvalitetsgenomgång (ISO 9001) och behöver tydliga bevis" : "You’re doing a quick quality review (ISO 9001) and need clear evidence",
+      artifact: sv ? "ett dokumenterat beslut eller en verifierbar notering" : "a documented decision or a verifiable note",
       constraintB: sv ? "Det finns en avvikelse, men ni vet inte ännu om den är liten eller stor." : "There’s a deviation, but you don’t yet know its scope.",
       twist: sv ? "En ny observation gör att ni måste omvärdera vad som är “viktigast först”." : "A new observation forces you to reconsider what matters first.",
     },
     brief: {
-      setting: sv ? "På ett kort avstämningsmöte ska ni få samsyn" : "In a short briefing you need alignment",
-      artifact: sv ? "en enkel beslutspunkt (vem-gör-vad)" : "a simple decision note (who-does-what)",
+      setting: sv ? "På ett kort avstämningsmöte ska ni få samsyn och spårbarhet" : "In a short briefing you need alignment and traceability",
+      artifact: sv ? "en tydlig vem-gör-vad-notering" : "a clear who-does-what note",
       constraintB: sv ? "En person saknas men påverkas av beslutet." : "One person is absent but will be impacted by the decision.",
       twist: sv ? "Efter mötet framkommer att en viktig detalj aldrig blev sagd." : "After the meeting, a key detail turns out to have been missing.",
     },
     customer: {
-      setting: sv ? "En kund har hört av sig med ett klagomål" : "A customer has contacted you with a complaint",
-      artifact: sv ? "en notering som gör att ni kan följa upp" : "a note that enables follow-up",
+      setting: sv ? "En kund har hört av sig med ett klagomål och ni måste följa spår" : "A customer has contacted you with a complaint and you must trace the chain",
+      artifact: sv ? "en notering som kopplar händelse till fakta" : "a note linking the event to facts",
       constraintB: sv ? "Det finns flera möjliga orsaker, och ni riskerar att gissa." : "There are multiple causes and you risk guessing.",
       twist: sv ? "En kollega hittar en tidigare notering som ändrar bedömningen." : "A colleague finds a previous note that changes the assessment.",
     },
