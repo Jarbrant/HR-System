@@ -1,330 +1,176 @@
 // ============================================================
-// PRC-MASTER-BYGGORDER — MASTER-AO-WORKER-STACK-01 (PROD v1.1)
-// FIL: worker/rules.js
-// Syfte: Guards + response helpers + requestId + low-level utils
-//
-// POLICY (LÅST):
-// - Stateless
-// - Fail-closed
-// - Endast JSON
-// - Max payload 64KB
-// - Logga aldrig payload (endast requestId + felkod)
-// - CORS strikt: aldrig wildcard
+// AO-WORKER-TRAINING-BLOCKS-01 | worker/rules.js
+// Syfte: Rules bundle + quality config + text/dup helpers (flytt från worker/index.js BLOCK 09)
+// POLICY: No behavior change. Inga sid-effekter.
 // ============================================================
 
-export const MAX_BODY_BYTES = 64 * 1024;
+import INDEX from "../ai-rules/index.json";
+import GLOBAL from "../ai-rules/v1/global.json";
+import MODULES from "../ai-rules/v1/modules.json";
 
-// ------------------------------
-// RequestId
-// ------------------------------
-export function makeRequestId() {
-  try {
-    return "req_" + crypto.randomUUID();
-  } catch {
-    return "req_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 10);
-  }
-}
+import SWEDISH from "../ai-rules/v1/subjects/swedish.json";
+import MATH from "../ai-rules/v1/subjects/math.json";
+import GENERIC from "../ai-rules/v1/subjects/generic.json";
 
-// ------------------------------
-// Safe primitives
-// ------------------------------
-export function safeStr(v) {
+import QUESTION_FORMAT from "../ai-rules/v1/formats/question.json";
+import TASK_FORMAT from "../ai-rules/v1/formats/task.json";
+import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json";
+
+// ruleset för kvalitet
+import TRAINING_PROMPT from "../ai-rules/v1/rulesets/training_prompt.json";
+
+// ----------------- tiny utils (lokalt) -----------------
+function safeStr(v) {
   return (v === null || v === undefined) ? "" : String(v);
 }
-
-export function isPlainObject(v) {
-  return v !== null && typeof v === "object" && !Array.isArray(v);
+function safeArr(a) {
+  return Array.isArray(a) ? a : [];
 }
 
-// ------------------------------
-// JSON responses (standardformat)
-// - alltid JSON
-// - inkluderar requestId-headers (SDK kan läsa)
-// ------------------------------
-export function okJSON(status, payload, extraHeaders, requestId) {
-  return new Response(JSON.stringify(payload), {
-    status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "X-Request-Id": safeStr(requestId || ""),
-      "X-HR-Request-Id": safeStr(requestId || ""),
-      ...(extraHeaders || {})
-    }
-  });
-}
+// ============================================================
+// Rules bundle + quality
+// ============================================================
 
-export function errorJSON(status, requestId, code, message, extraHeaders, logIt) {
-  // Logga ALDRIG payload
-  if (logIt) console.error("ERR", safeStr(requestId), safeStr(code));
-  return okJSON(
-    status,
-    {
-      ok: false,
-      requestId: safeStr(requestId),
-      errorCode: safeStr(code),
-      error: { code: safeStr(code), message: safeStr(message) }
+export function getRulesBundle(subjectIdNormalized) {
+  const s = safeStr(subjectIdNormalized).toLowerCase().trim();
+  const subj =
+    (s === "math") ? (MATH || {}) :
+      (s === "swedish") ? (SWEDISH || {}) :
+        (s === "generic") ? (GENERIC || {}) :
+          (GENERIC || {});
+
+  return {
+    index: INDEX || {},
+    global: GLOBAL || {},
+    modules: MODULES || {},
+    subject: subj,
+    rulesets: {
+      training_prompt: TRAINING_PROMPT || {}
     },
-    extraHeaders,
-    requestId
-  );
-}
-
-// ------------------------------
-// CORS (strict, no wildcard)
-// - om origin matchar allowedOrigin => returnera Allow-Origin
-// - annars => returnera CORS-headers utan Allow-Origin (strikt)
-// ------------------------------
-export function buildCorsHeaders(origin, allowedOrigin) {
-  const o = safeStr(origin).trim();
-  const allowed = safeStr(allowedOrigin).trim();
-
-  const base = {
-    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-    // Tillåt både varianter (preflight kräver match)
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
-    "Vary": "Origin"
+    formats: {
+      question: QUESTION_FORMAT || {},
+      task: TASK_FORMAT || {},
+      "training-blocks": TRAINING_BLOCKS_FORMAT || {}
+    }
   };
-
-  if (allowed && o && o === allowed) {
-    return { ...base, "Access-Control-Allow-Origin": allowed };
-  }
-
-  // strict: ingen wildcard, och vi sätter inte tom Allow-Origin
-  return base;
 }
 
-export function ensureEnvOr500({ requestId, allowedOrigin }) {
-  const allowed = safeStr(allowedOrigin).trim();
-  if (!allowed) {
-    console.error("ERR", safeStr(requestId), "ENV_MISSING");
-    return {
-      ok: false,
-      response: okJSON(
-        500,
-        {
-          ok: false,
-          requestId: safeStr(requestId),
-          errorCode: "ENV_MISSING",
-          error: { code: "ENV_MISSING", message: "ALLOWED_ORIGIN saknas i env" }
-        },
-        { "Content-Type": "application/json; charset=utf-8" },
-        requestId
-      )
-    };
-  }
-  return { ok: true };
+export function getQuestionQuality(bundle) {
+  const qp = bundle && bundle.rulesets && bundle.rulesets.training_prompt;
+  const q = (qp && qp.questionQuality) ? qp.questionQuality : null;
+
+  const forbiddenPhrases = safeArr(q && q.general && q.general.forbiddenPhrases).filter(Boolean);
+  const forbidContextPlaceholderText = !!(q && q.general && q.general.forbidContextPlaceholderText);
+  const requireExplanation = !!(q && q.general && q.general.requireExplanation);
+  const explanationMinChars = Number(q && q.general && q.general.explanationMinChars) || 40;
+
+  const nearDupThreshold = Number(q && q.general && q.general.batchUniqueness && q.general.batchUniqueness.forbidNearDuplicateThreshold);
+  const forbidNearDuplicateThreshold = Number.isFinite(nearDupThreshold) ? nearDupThreshold : 0.85;
+
+  const rotateDims = safeArr(q && q.general && q.general.variationPlan && q.general.variationPlan.rotateDimensions).filter(Boolean);
+  const minDistinctDims = Number(q && q.general && q.general.variationPlan && q.general.variationPlan.minimumDistinctDimensionsInBatch) || 3;
+
+  const minOptions = Number(q && q.mcq && q.mcq.minOptions) || 4;
+  const maxOptions = Number(q && q.mcq && q.mcq.maxOptions) || 6;
+
+  return {
+    forbidContextPlaceholderText,
+    forbiddenPhrases,
+    requireExplanation,
+    explanationMinChars,
+    forbidNearDuplicateThreshold,
+    variation: { rotateDims, minDistinctDims },
+    mcq: { minOptions, maxOptions }
+  };
 }
 
-// OPTIONS preflight: kräver origin exakt match
-export function guardCorsPreflightOr403({ request, requestId, allowedOrigin }) {
-  const origin = request.headers.get("Origin") || "";
-  const corsHeaders = buildCorsHeaders(origin, allowedOrigin);
+// ============================================================
+// Text guards + sanitizers
+// ============================================================
 
-  if (safeStr(origin).trim() !== safeStr(allowedOrigin).trim()) {
-    return {
-      ok: false,
-      corsHeaders,
-      response: errorJSON(
-        403,
-        requestId,
-        "CORS_FORBIDDEN",
-        "Origin är inte tillåten",
-        corsHeaders,
-        true
-      )
-    };
+export function containsForbiddenPhrase(text, forbiddenPhrases) {
+  const t = safeStr(text).toLowerCase();
+  for (const p of safeArr(forbiddenPhrases)) {
+    const ph = safeStr(p).toLowerCase().trim();
+    if (ph && t.includes(ph)) return true;
   }
-
-  return { ok: true, corsHeaders, response: new Response(null, { status: 204, headers: corsHeaders }) };
+  return false;
 }
 
-// Health/version: tillåt utan Origin, men om Origin finns måste matcha
-export function guardCorsForHealthOr403({ request, requestId, allowedOrigin }) {
-  const origin = request.headers.get("Origin") || "";
-  const corsHeaders = buildCorsHeaders(origin, allowedOrigin);
-
-  if (origin && safeStr(origin).trim() !== safeStr(allowedOrigin).trim()) {
-    return {
-      ok: false,
-      corsHeaders,
-      response: errorJSON(
-        403,
-        requestId,
-        "CORS_FORBIDDEN",
-        "Origin är inte tillåten",
-        corsHeaders,
-        true
-      )
-    };
-  }
-
-  return { ok: true, corsHeaders };
+export function stripAnyBracketedContext(s) {
+  const txt = safeStr(s);
+  return txt
+    .replace(/\(\s*kontext[^)]*\)/gi, "")
+    .replace(/\(\s*använd[^)]*\)/gi, "")
+    .replace(/\[\s*object\s+object\s*\]/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
-// AI-endpoints: origin måste matcha exakt
-export function guardCorsForAIOr403({ request, requestId, allowedOrigin }) {
-  const origin = request.headers.get("Origin") || "";
-  const corsHeaders = buildCorsHeaders(origin, allowedOrigin);
+export function stripDomainWordsFromQuestion(s, language) {
+  const txt = safeStr(s);
+  if (!txt) return txt;
 
-  if (safeStr(origin).trim() !== safeStr(allowedOrigin).trim()) {
-    return {
-      ok: false,
-      corsHeaders,
-      response: errorJSON(
-        403,
-        requestId,
-        "CORS_FORBIDDEN",
-        "Origin är inte tillåten",
-        corsHeaders,
-        true
-      )
-    };
+  const reSv = /\b(steg|steget|modul|modulen|kapitel|kapitlet|kurs|kursen|utbildning|utbildningen)\b/gi;
+  const reEn = /\b(step|module|chapter|course|training)\b/gi;
+
+  const out = txt.replace(reSv, "").replace(reEn, "").replace(/\s{2,}/g, " ").trim();
+  if (!out) {
+    return (language === "sv") ? "Vilket val är bäst i situationen?" : "Which choice is best in this situation?";
   }
-
-  return { ok: true, corsHeaders };
+  return out;
 }
 
-// ------------------------------
-// Auth (Bearer)
-// ------------------------------
-export function extractBearerToken(authHeaderRaw) {
-  const h = safeStr(authHeaderRaw).trim();
-  if (!h) return "";
-  if (!h.toLowerCase().startsWith("bearer ")) return "";
-  return h.slice(7).trim();
+export function sanitizeContextForDisplay(contextText, qq) {
+  const c = safeStr(contextText).trim();
+  if (!c) return "—";
+  if (qq && qq.forbidContextPlaceholderText) {
+    if (containsForbiddenPhrase(c, qq.forbiddenPhrases)) return "—";
+    if (/\(kontext\s+dolt\)/i.test(c)) return "—";
+    if (/\[object\s+object\]/i.test(c)) return "—";
+  }
+  return c;
 }
 
-export function guardAuthOr401({ request, requestId, requireAuth, workerToken, corsHeaders }) {
-  if (!requireAuth) return { ok: true };
+// ============================================================
+// Similarity / uniqueness helpers
+// ============================================================
 
-  const tokenEnv = safeStr(workerToken).trim();
-  if (!tokenEnv) {
-    console.error("ERR", safeStr(requestId), "ENV_MISSING");
-    return {
-      ok: false,
-      response: errorJSON(
-        500,
-        requestId,
-        "ENV_MISSING",
-        "WORKER_TOKEN saknas i env",
-        corsHeaders,
-        false
-      )
-    };
-  }
-
-  const token = extractBearerToken(request.headers.get("Authorization") || "");
-  if (!token || token !== tokenEnv) {
-    return {
-      ok: false,
-      response: errorJSON(
-        401,
-        requestId,
-        "UNAUTHORIZED",
-        "Ogiltig eller saknad token",
-        corsHeaders,
-        true
-      )
-    };
-  }
-
-  return { ok: true };
+export function tokenizeForSimilarity(s) {
+  const t = safeStr(s)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  if (!t) return [];
+  const parts = t.split(/\s+/g).filter(Boolean);
+  const stop = new Set([
+    "i","en","ett","att","och","du","när","vad","vilket","vilken","är","ska","för","på","om","som","det","de","den","ni",
+    "innan","efter","bäst","mest","rätt","fel","gör","göra","behöver","måste","kan","vill","där","här","nu"
+  ]);
+  return parts.filter(w => w.length >= 3 && !stop.has(w));
 }
 
-// ------------------------------
-// JSON-only + Payload size
-// ------------------------------
-export function guardJsonContentTypeOr400({ request, requestId, corsHeaders }) {
-  const ct = (request.headers.get("Content-Type") || "").toLowerCase();
-  if (!ct.includes("application/json")) {
-    return {
-      ok: false,
-      response: errorJSON(
-        400,
-        requestId,
-        "BAD_JSON",
-        "Endast application/json tillåtet",
-        corsHeaders,
-        true
-      )
-    };
-  }
-  return { ok: true };
+export function jaccardSimilarity(a, b) {
+  const A = new Set(tokenizeForSimilarity(a));
+  const B = new Set(tokenizeForSimilarity(b));
+  if (A.size === 0 && B.size === 0) return 1;
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  const uni = A.size + B.size - inter;
+  return uni ? (inter / uni) : 0;
 }
 
-export function guardContentLengthOr413({ request, requestId, corsHeaders }) {
-  const lenHeader = request.headers.get("Content-Length");
-  if (!lenHeader) return { ok: true };
-
-  const len = Number(lenHeader);
-  if (Number.isFinite(len) && len > MAX_BODY_BYTES) {
-    return {
-      ok: false,
-      response: errorJSON(
-        413,
-        requestId,
-        "PAYLOAD_TOO_LARGE",
-        "Payload för stor",
-        corsHeaders,
-        true
-      )
-    };
-  }
-
-  return { ok: true };
+export function normKey(s) {
+  return safeStr(s)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
-export async function readBodyBytesOrErr({ request, requestId, corsHeaders }) {
-  let rawBytes;
-  try {
-    rawBytes = await request.clone().arrayBuffer();
-  } catch {
-    return {
-      ok: false,
-      response: errorJSON(
-        400,
-        requestId,
-        "BAD_JSON",
-        "Kunde inte läsa request body",
-        corsHeaders,
-        true
-      )
-    };
-  }
-
-  if (rawBytes.byteLength > MAX_BODY_BYTES) {
-    return {
-      ok: false,
-      response: errorJSON(
-        413,
-        requestId,
-        "PAYLOAD_TOO_LARGE",
-        "Payload för stor",
-        corsHeaders,
-        true
-      )
-    };
-  }
-
-  return { ok: true, bytes: rawBytes };
-}
-
-export function parseJsonOrErr({ bytes, requestId, corsHeaders }) {
-  try {
-    const txt = new TextDecoder("utf-8").decode(bytes);
-    const obj = JSON.parse(txt);
-    return { ok: true, json: obj };
-  } catch {
-    return {
-      ok: false,
-      response: errorJSON(
-        400,
-        requestId,
-        "BAD_JSON",
-        "Kunde inte tolka JSON",
-        corsHeaders,
-        true
-      )
-    };
-  }
+export function pickOne(list, seed) {
+  const arr = safeArr(list).filter(Boolean);
+  if (arr.length === 0) return "";
+  return arr[seed % arr.length] || arr[0] || "";
 }
