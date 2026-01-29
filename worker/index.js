@@ -422,14 +422,9 @@ function extractBearerToken(authHeader) {
 }
 
 // ============================================================
-// BLOCK 06 — Core utils (migrated)
+// BLOCK 06 — Core utils (remaining local only)
 // ============================================================
-// Flyttat till worker/utils.js:
-// isPlainObject, safeStr, safeArr, normalizeLanguage, normalizeStepValue,
-// normalizeContextText, makeRequestId, normalizeCount, hash32, normalizeMode,
-// normalizeSubjectId, pickDifficultyLabel
-//
-// Kvar här pga beroende till isUiQuestionRequest() som finns senare i filen:
+
 function normalizeFormat(format, mode, questionType) {
   // P0: UI-frågeflödet (inkl AUTO) ska låsa format till "question"
   if (isUiQuestionRequest(questionType)) return "question";
@@ -442,6 +437,30 @@ function normalizeFormat(format, mode, questionType) {
   return (mode === "document") ? "document" : "training-blocks";
 }
 
+function normalizeSubjectId(subjectId) {
+  const s = safeStr(subjectId).toLowerCase().trim();
+  if (s === "swedish" || s === "svenska") return "swedish";
+  if (s === "math" || s === "matte") return "math";
+  if (s) return s;
+  return "generic";
+}
+
+function pickDifficultyLabel(difficultyHint, seedN) {
+  const s = safeStr(difficultyHint).toLowerCase().trim();
+  if (s === "intro" || s === "normal" || s === "advanced") return s;
+
+  if (!s || s === "auto") {
+    const lvl = 1 + (seedN % 5);
+    return (lvl <= 2) ? "intro" : (lvl <= 4) ? "normal" : "advanced";
+  }
+
+  const n = Number(difficultyHint);
+  if (Number.isInteger(n) && n >= 1 && n <= 5) {
+    return (n <= 2) ? "intro" : (n <= 4) ? "normal" : "advanced";
+  }
+
+  return "normal";
+}
 
 // ============================================================
 // BLOCK 07 — V1 ruleset payload (ai-rules/v1)
