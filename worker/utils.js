@@ -16,75 +16,79 @@ export function safeArr(a) {
   return Array.isArray(a) ? a : [];
 }
 
-// ---------- Normalizers ----------
+// ------------------------------------------------------------
+// Normalizers (pure)
+// ------------------------------------------------------------
 
-export function normalizeLanguage(langRaw) {
-  const s = safeStr(langRaw).toLowerCase().trim();
-  if (s === "sv" || s === "se" || s === "svenska" || s.startsWith("sv-")) return "sv";
-  if (s === "en" || s === "eng" || s === "english" || s.startsWith("en-")) return "en";
-  return "sv"; // stabil default
+export function normalizeLanguage(languageRaw) {
+  const s = safeStr(languageRaw).toLowerCase().trim();
+  if (s === "sv" || s === "svenska" || s === "swedish") return "sv";
+  if (s === "en" || s === "english" || s === "eng") return "en";
+  return "sv"; // fail-safe default
 }
 
 export function normalizeStepValue(stepRaw) {
+  // accepterar: 1..7, "Steg 1", "kurs 1" etc -> returnerar "1".."7" eller ""
   const s = safeStr(stepRaw).trim();
-  const n = Number(s);
-  if (Number.isFinite(n)) {
-    const clamped = Math.max(1, Math.min(7, Math.round(n)));
-    return String(clamped);
-  }
-  // om någon skickar "step 3" etc
-  const m = s.match(/(\d+)/);
-  if (m) {
-    const nn = Number(m[1]);
-    const clamped = Math.max(1, Math.min(7, Math.round(nn)));
-    return String(clamped);
-  }
-  return ""; // ok om saknas
+  if (!s) return "";
+  const m = s.match(/([1-7])/);
+  return m ? String(m[1]) : "";
 }
 
-export function normalizeContextText(raw) {
-  // Grundsanering: trim + kollapsa whitespace. (Ingen domänlogik här.)
-  const t = safeStr(raw).replace(/\s+/g, " ").trim();
-  return t;
+export function normalizeContextText(contextRaw) {
+  // UI kan råka skicka objekt; vi vill alltid ha text
+  if (typeof contextRaw === "string") return contextRaw.trim();
+  if (contextRaw === null || contextRaw === undefined) return "";
+  // om objekt/array -> försök vara defensiv men stabil
+  try {
+    if (typeof contextRaw === "object") {
+      // vanligt: { text:"..." } eller { context:"..." }
+      const t =
+        safeStr(contextRaw.text).trim() ||
+        safeStr(contextRaw.context).trim() ||
+        safeStr(contextRaw.prompt).trim();
+      if (t) return t;
+      // annars: JSON-stringify (begränsat) men undvik [object Object]
+      const j = JSON.stringify(contextRaw);
+      return (j && j !== "{}") ? j.slice(0, 4000) : "";
+    }
+  } catch (_) {}
+  return safeStr(contextRaw).trim();
 }
 
 export function normalizeCount(countRaw) {
-  // Returnerar number 1..12 eller null om ogiltigt
-  if (countRaw === null || countRaw === undefined) return null;
   const n = Number(countRaw);
   if (!Number.isFinite(n)) return null;
-  const k = Math.round(n);
-  if (k < 1 || k > 12) return null;
-  return k;
+  const i = Math.floor(n);
+  if (i < 1 || i > 12) return null;
+  return i;
 }
 
 export function normalizeMode(modeRaw) {
   const s = safeStr(modeRaw).toLowerCase().trim();
-  if (s === "training" || s === "trainings" || s === "training-blocks" || s === "blocks") return "training";
+  if (s === "training" || s === "trainings") return "training";
   if (s === "document" || s === "doc" || s === "docs") return "document";
-  return "training"; // stabil default
+  return "training";
 }
 
-// ---------- IDs / hashing ----------
+// ------------------------------------------------------------
+// IDs + hashing (pure)
+// ------------------------------------------------------------
 
 export function makeRequestId() {
-  // Kort stabilt id (Worker-miljö har crypto)
-  try {
-    const a = new Uint32Array(4);
-    crypto.getRandomValues(a);
-    return [...a].map(x => x.toString(16).padStart(8, "0")).join("");
-  } catch {
-    // fallback om crypto av någon anledning saknas i build
-    return String(Date.now()) + "-" + Math.random().toString(16).slice(2);
-  }
+  // deterministisk nog för loggning, ingen crypto-beroende
+  // (Workers har crypto.randomUUID men vi håller detta enkelt och kompatibelt)
+  const t = Date.now().toString(16);
+  const r = Math.floor(Math.random() * 1e16).toString(16);
+  return (t + r).slice(0, 32);
 }
 
-export function hash32(input) {
-  // FNV-1a 32-bit (snabb, stabil, inga externa beroenden)
-  const str = safeStr(input);
+export function hash32(str) {
+  // FNV-1a 32-bit
+  const s = safeStr(str);
   let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
     h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
   }
   return h >>> 0;
