@@ -1,14 +1,20 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.0 VARIATION+ARC + V1-CONTRACT)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.1 VARIATION+ARC + V1-CONTRACT)
 // FIL: worker/index.js
 //
-// PATCH v1.6.0 (CF-AI + NO-CRASH + CORS-NORMALIZE + SELF-CONTAINED):
-// - P0: Cloudflare AI (env.AI.run) används om binding finns, annars deterministic fallback.
-// - P0: NO-CRASH: buildTrainingBlocks får inte kasta (AI-parse fail => fallback).
-// - P0: CORS: normaliserar origin (tål trailing slash), strict för AI endpoints.
-// - P0: Self-contained: importerar ENDAST isPlainObject/safeStr/safeArr från ./utils.js.
-// - P0: Output-contract bibehållet: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
-// - P0: FIX: robust JSON extraction + fix "Vary" header + X-HR-AI header
+// PATCH v1.6.1 (CF-AI PARSE-FIX):
+// - P0: Fix: CF-AI kan returnera objekt i answer.result (inte text). Vi unwrap:ar korrekt,
+//       så vi inte hamnar i fallback pga "[object Object]".
+// - P0: Bibehåller: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
+// - P0: Behåller X-HR-AI header (cf/fallback)
+//
+// POLICY (LÅST):
+// - Stateless
+// - Fail-closed
+// - Endast JSON
+// - Max payload 64KB
+// - Logga aldrig payload
+// - Logga endast requestId + errorCode
 // ============================================================
 
 // ============================================================
@@ -108,7 +114,7 @@ function mapTrainingBlocksToUiQuestions(blocks /*, questionTypeRaw*/) {
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.6.0";
+const VERSION = "1.6.1";
 
 // ============================================================
 // BLOCK 02B — Local utils (self-contained)  [P0: undvik import-crash]
@@ -609,7 +615,7 @@ function buildCorsHeaders(origin, allowedOrigin) {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
-    "Vary": "Origin", // FIX: måste vara sträng-nyckel
+    Vary: "Origin",
   };
 }
 
@@ -755,15 +761,43 @@ Rules:
     }
   }
 
-  // CF kan ge: {response:"..."} eller ibland direkt JSON/objekt
-  let parsed = null;
+  // ============================================================
+  // P0 FIX: Unwrap CF-AI answer shapes (object OR text)
+  // - answer.response kan vara string (vanligt)
+  // - answer.result kan vara OBJECT (vanligt) => får INTE gå via safeStr()
+  // ============================================================
 
-  if (isPlainObject(answer) && isPlainObject(answer.response)) {
-    parsed = answer.response; // redan objekt
-  } else {
-    const rawText = safeStr(answer && (answer.response || answer.result || answer.output || answer.text || "")).trim();
-    parsed = safeJsonFromUnknown(rawText);
+  function unwrapCandidate(a) {
+    if (!a) return null;
+
+    // Om redan har questions direkt
+    if (isPlainObject(a) && Array.isArray(a.questions)) return a;
+
+    // Vanliga wrappers
+    const r = isPlainObject(a) ? a.response : null;
+    const res = isPlainObject(a) ? a.result : null;
+    const out = isPlainObject(a) ? a.output : null;
+    const txt = isPlainObject(a) ? a.text : null;
+
+    // Prioritera text om den finns
+    if (typeof r === "string" && r.trim()) return r;
+    if (typeof res === "string" && res.trim()) return res;
+    if (typeof out === "string" && out.trim()) return out;
+    if (typeof txt === "string" && txt.trim()) return txt;
+
+    // Om result/response är objekt, returnera objektet (inte stränga det!)
+    if (isPlainObject(r)) return r;
+    if (isPlainObject(res)) return res;
+    if (isPlainObject(out)) return out;
+
+    // Sista utväg: om a är ett objekt, returnera det (safeJsonFromUnknown hanterar plain object)
+    if (typeof a === "object") return a;
+
+    return a;
   }
+
+  const candidate = unwrapCandidate(answer);
+  const parsed = safeJsonFromUnknown(candidate);
 
   if (!parsed || !isPlainObject(parsed)) return null;
 
