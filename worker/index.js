@@ -6,6 +6,7 @@
 // - P0: AI används när binding finns: "auto" -> mcq_single för AI.
 // - P0: FAIL-SOFT: AI-parse ska inte kasta och ska inte return null pga enstaka trasig fråga.
 // - P0: Robust JSON extraction (codefence + första {..}).
+// - P0: Unwrap av {data:{questions}} / {response:{questions}} + stöd för fler nycklar (answers/choices, correctAnswerIndex, question/text).
 // - P0: Options pad/unique + dedupe på stems.
 // - P0: X-HR-AI + X-HR-AI-REASON headers för snabb felsökning (ingen payload loggas).
 // - P0: Output-contract bibehållet: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
@@ -235,7 +236,23 @@ function safeJsonParseLoose(text) {
 }
 
 function safeJsonFromUnknown(x) {
-  if (isPlainObject(x)) return x;
+  // Tolerant: klarar {response:"...json..."}, {result:"..."} etc.
+  if (isPlainObject(x)) {
+    // om redan har questions => ok
+    if (Array.isArray(x.questions)) return x;
+
+    const inner = x.response ?? x.result ?? x.output ?? x.text ?? x.data ?? null;
+
+    if (isPlainObject(inner) && Array.isArray(inner.questions)) return inner;
+
+    const innerStr = safeStr(inner).trim();
+    if (innerStr) {
+      const p = safeJsonParseLoose(innerStr);
+      if (p) return p;
+    }
+    return x;
+  }
+
   const t = safeStr(x).trim();
   if (!t) return null;
   return safeJsonParseLoose(t);
@@ -258,12 +275,7 @@ function uniqStrings(arr) {
 function padOptions(language, options, target) {
   const sv = language === "sv";
   const basePads = sv
-    ? [
-        "Inget av ovanstående.",
-        "Be om mer information innan du bestämmer.",
-        "Dokumentera först och återkom.",
-        "Kontrollera mot rutin/checklista.",
-      ]
+    ? ["Inget av ovanstående.", "Be om mer information innan du bestämmer.", "Dokumentera först och återkom.", "Kontrollera mot rutin/checklista."]
     : ["None of the above.", "Ask for more information before deciding.", "Document first and revisit.", "Verify against the checklist/routine."];
 
   const out = uniqStrings(Array.isArray(options) ? options : []);
@@ -684,6 +696,7 @@ async function buildTrainingBlocks(input, env) {
 }
 
 async function buildTrainingBlocksWithAI(input, env) {
+  // FAIL-SOFT: den här funktionen ska helst aldrig kasta.
   const requestId = safeStr(input && input.requestId).trim();
   const mode = safeStr(input && input.mode).trim() || "training";
   const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
@@ -701,35 +714,40 @@ async function buildTrainingBlocksWithAI(input, env) {
   const sv = language === "sv";
 
   const schemaHint = sv
-    ? `Returnera ENDAST giltig JSON. Inget markdown. Inga extra rader. JSON måste börja med "{" och sluta med "}".
-Schema:
-{
-  "questions": [
-    { "stem": "string", "options": ["A","B","C","D"], "correctIndex": 0, "explanation": "string" }
-  ]
-}
+    ? `Returnera ENDAST giltig JSON. Inget markdown. Inga extra rader.
+Du får svara i någon av toppformerna:
+A) {"questions":[...]}
+B) {"data":{"questions":[...]}}
+C) {"response":{"questions":[...]}}
+Varje fråga får använda nycklar:
+- stem ELLER question ELLER text
+- options ELLER answers ELLER choices (array av strängar eller objekt {text:"..."})
+- correctIndex ELLER correctAnswerIndex
+- explanation ELLER rationale
 Regler:
-- Exakt ${count} frågor (inte fler/inte färre).
-- options: 4 st (true_false: 2 st).
-- correctIndex inom range.
-- Varje fråga unik (ingen omskrivning av samma).
-- Inga platshållare ("som ovan", "...").`
-    : `Return ONLY valid JSON. No markdown, no extra lines. JSON must start with "{" and end with "}".
-Schema:
-{
-  "questions": [
-    { "stem": "string", "options": ["A","B","C","D"], "correctIndex": 0, "explanation": "string" }
-  ]
-}
+- Exakt ${count} frågor.
+- MCQ: 4 alternativ (true_false: 2).
+- index måste vara giltig.
+- Unika frågor. Inga platshållare.`
+    : `Return ONLY valid JSON. No markdown. No extra lines.
+Allowed top-level:
+A) {"questions":[...]}
+B) {"data":{"questions":[...]}}
+C) {"response":{"questions":[...]}}
+Allowed question keys:
+- stem OR question OR text
+- options OR answers OR choices (array of strings or {text:"..."})
+- correctIndex OR correctAnswerIndex
+- explanation OR rationale
 Rules:
 - Exactly ${count} questions.
-- options: 4 (true_false: 2).
-- correctIndex in range.
-- Each question unique. No placeholders.`;
+- MCQ: 4 options (true_false: 2).
+- index must be valid.
+- Unique questions. No placeholders.`;
 
   const systemPrompt = sv
-    ? `Du skapar provfrågor för HR/QA. Svara strikt enligt schema som JSON.`
-    : `You create assessment questions for HR/QA. Respond strictly as JSON per schema.`;
+    ? `Du skapar provfrågor för HR/QA. Svara strikt som JSON.`
+    : `You create assessment questions for HR/QA. Respond strictly as JSON.`;
 
   const userPrompt =
     (sv ? `KONTEXT:\n${contextText || "(ingen)"}\n\n` : `CONTEXT:\n${contextText || "(none)"}\n\n`) +
@@ -760,68 +778,101 @@ Rules:
     });
   }
 
-  // CF kan ge object med response: "..." (string), eller ibland direkt text/objekt.
+  // CF kan ge object med response/result/output/text etc, eller ibland direkt objekt.
   const raw = isPlainObject(answer)
     ? answer.response || answer.result || answer.output || answer.text || answer
     : answer;
 
-  const parsed = safeJsonFromUnknown(raw);
-  if (!parsed || !isPlainObject(parsed)) return null;
+  const parsed0 = safeJsonFromUnknown(raw);
+  if (!parsed0) return null;
 
-  const qArr = Array.isArray(parsed.questions) ? parsed.questions : [];
+  // unwrap toppnivåer
+  const parsed =
+    (isPlainObject(parsed0) && isPlainObject(parsed0.data) && parsed0.data) ||
+    (isPlainObject(parsed0) && isPlainObject(parsed0.response) && parsed0.response) ||
+    parsed0;
+
+  if (!isPlainObject(parsed)) return null;
+
+  const qArr =
+    (Array.isArray(parsed.questions) && parsed.questions) ||
+    (isPlainObject(parsed.data) && Array.isArray(parsed.data.questions) && parsed.data.questions) ||
+    (isPlainObject(parsed.response) && Array.isArray(parsed.response.questions) && parsed.response.questions) ||
+    [];
+
   if (!qArr.length) return null;
 
   const blocks = [];
   const seenStem = new Set();
 
-  // FAIL-SOFT: skippa trasiga, fyll upp senare
+  const getStem = (q) => safeStr(q && (q.stem || q.question || q.text || q.prompt)).trim();
+
+  const getOptions = (q) => {
+    const rawOpts =
+      (Array.isArray(q && q.options) && q.options) ||
+      (Array.isArray(q && q.answers) && q.answers) ||
+      (Array.isArray(q && q.choices) && q.choices) ||
+      (Array.isArray(q && q.alternatives) && q.alternatives) ||
+      [];
+
+    const asText = rawOpts
+      .map((x) => {
+        if (isPlainObject(x)) return safeStr(x.text || x.label || x.value || "");
+        return safeStr(x);
+      })
+      .map((s) => safeStr(s).trim())
+      .filter(Boolean);
+
+    return uniqStrings(asText);
+  };
+
+  const getCorrectIndex = (q, nOptions) => {
+    const ciRaw = q && (q.correctIndex ?? q.correctAnswerIndex ?? q.answerIndex ?? q.correct ?? null);
+    const n = Number(ciRaw);
+    if (Number.isFinite(n) && n >= 0 && n < nOptions) return Math.floor(n);
+    return 0;
+  };
+
+  const getExplanation = (q) => safeStr(q && (q.explanation || q.rationale || q.feedback || q.reason || "")).trim();
+
+  // FAIL-SOFT: skippa trasiga frågor, bygg det vi kan
   for (let i = 0; i < qArr.length && blocks.length < count; i++) {
     const q = qArr[i];
-
-    const stem = safeStr(q && (q.stem || q.question || q.text)).trim();
+    const stem = getStem(q);
     if (!stem) continue;
 
     const key = stem.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenStem.has(key)) continue;
     seenStem.add(key);
 
-    const optsRaw = Array.isArray(q && q.options) ? q.options : Array.isArray(q && q.choices) ? q.choices : [];
-    let options = optsRaw.map((x) => (isPlainObject(x) ? safeStr(x.text) : safeStr(x))).map((s) => safeStr(s).trim()).filter(Boolean);
-    options = uniqStrings(options);
+    let options = getOptions(q);
 
     if (qt === "true_false") {
-      // enforce 2
-      if (options.length < 2) {
-        options = sv ? ["Sant", "Falskt"] : ["True", "False"];
-      } else {
-        options = options.slice(0, 2);
-      }
+      if (options.length < 2) options = sv ? ["Sant", "Falskt"] : ["True", "False"];
+      options = options.slice(0, 2);
     } else {
-      // accept >=2, pad to 4
+      // acceptera >=2 och pad till 4 (stabil UI)
       if (options.length < 2) continue;
       options = padOptions(language, options, 4);
     }
 
-    const ciRaw = Number(q && q.correctIndex);
-    const correctIndex = Number.isFinite(ciRaw) && ciRaw >= 0 && ciRaw < options.length ? Math.floor(ciRaw) : 0;
-
-    const explanation = safeStr(q && (q.explanation || q.rationale || q.feedback)).trim();
+    const correctIndex = getCorrectIndex(q, options.length);
+    const explanation = getExplanation(q);
 
     blocks.push(makeQuestionBlockFromUi({ i: blocks.length, stem, options, correctIndex, explanation }));
   }
 
-  // toppa upp med deterministic om AI gav färre
+  // Om AI gav 0 giltiga -> null (så buildTrainingBlocks sätter SCHEMA_FAIL)
+  if (!blocks.length) return null;
+
+  // Top-up om AI gav färre än count
   if (blocks.length < count) {
     const det = buildTrainingBlocksDeterministic({ ...input, count: count - blocks.length, questionType: qt });
     const detBlocks = Array.isArray(det && det.blocks) ? det.blocks : [];
     for (let j = 0; j < detBlocks.length && blocks.length < count; j++) {
-      const b = detBlocks[j];
-      const newId = `q_${blocks.length + 1}`;
-      blocks.push({ ...b, id: newId });
+      blocks.push({ ...detBlocks[j], id: `q_${blocks.length + 1}` });
     }
   }
-
-  if (!blocks.length) return null;
 
   // re-id 1..count stabilt
   const normalizedBlocks = blocks.slice(0, count).map((b, idx) => ({ ...b, id: `q_${idx + 1}` }));
