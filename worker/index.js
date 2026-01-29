@@ -36,8 +36,21 @@
 // ============================================================
 
 // ============================================================
-// BLOCK 01 — Imports (split: rules + course)
+// BLOCK 01 — Imports (split: rules + course + utils)
 // ============================================================
+
+import {
+  isPlainObject,
+  safeStr,
+  safeArr,
+  normalizeLanguage,
+  normalizeStepValue,
+  normalizeContextText,
+  makeRequestId,
+  normalizeCount,
+  hash32,
+  normalizeMode
+} from "./utils.js";
 
 import {
   getRulesBundle,
