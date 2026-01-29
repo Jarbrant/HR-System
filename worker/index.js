@@ -8,6 +8,7 @@
 // - P0: CORS: normaliserar origin (tål trailing slash), strict för AI endpoints.
 // - P0: Self-contained: importerar ENDAST isPlainObject/safeStr/safeArr från ./utils.js.
 // - P0: Output-contract bibehållet: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
+// - P0: FIX: robust JSON extraction + fix "Vary" header + X-HR-AI header
 // ============================================================
 
 // ============================================================
@@ -171,16 +172,108 @@ function normalizeOrigin(s) {
   return safeStr(s).trim().replace(/\/+$/g, "");
 }
 
-function safeJsonParseMaybe(text) {
+// ---------- Robust JSON extraction (first {...} object) ----------
+function extractFirstJsonObjectString(text) {
+  const s = safeStr(text);
+  const start = s.indexOf("{");
+  if (start < 0) return "";
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+
+    if (inStr) {
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (ch === "\\") {
+        esc = true;
+        continue;
+      }
+      if (ch === '"') {
+        inStr = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inStr = true;
+      continue;
+    }
+    if (ch === "{") depth++;
+    if (ch === "}") depth--;
+
+    if (depth === 0) {
+      return s.slice(start, i + 1);
+    }
+  }
+  return "";
+}
+
+function safeJsonParseLoose(text) {
   const t = safeStr(text).trim();
   if (!t) return null;
-  // trimma bort ev. kodstaket utan att försöka vara smart
+
+  // försök direkt
+  try {
+    return JSON.parse(t);
+  } catch (_) {}
+
+  // trimma bort kodstaket
   const cleaned = t.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
   try {
     return JSON.parse(cleaned);
+  } catch (_) {}
+
+  // plocka första {..}
+  const objStr = extractFirstJsonObjectString(cleaned);
+  if (!objStr) return null;
+  try {
+    return JSON.parse(objStr);
   } catch (_) {
     return null;
   }
+}
+
+function padOptions(language, options, target) {
+  const sv = language === "sv";
+  const basePads = sv
+    ? [
+        "Inget av ovanstående.",
+        "Be om mer information innan du bestämmer.",
+        "Dokumentera först och återkom.",
+        "Kontrollera mot rutin/checklista.",
+      ]
+    : [
+        "None of the above.",
+        "Ask for more information before deciding.",
+        "Document first and revisit.",
+        "Verify against the checklist/routine.",
+      ];
+
+  const out = Array.isArray(options) ? options.slice(0) : [];
+  const seen = new Set(out.map((x) => safeStr(x).trim()).filter(Boolean));
+
+  for (const p of basePads) {
+    if (out.length >= target) break;
+    const s = safeStr(p).trim();
+    if (!seen.has(s)) {
+      seen.add(s);
+      out.push(s);
+    }
+  }
+
+  // sista utväg: fyll med generiska varianter
+  let k = 1;
+  while (out.length < target && k < 10) {
+    const s = sv ? `Alternativ ${out.length + 1}.` : `Option ${out.length + 1}.`;
+    if (!seen.has(s)) out.push(s);
+    k++;
+  }
+  return out;
 }
 
 /**
@@ -263,9 +356,21 @@ export default {
       if (origin && origin !== allowedOrigin) {
         return errorJSON(403, requestId, "CORS_FORBIDDEN", "Origin är inte tillåten", corsHeaders, true);
       }
+      const hasAIBinding = !!(env && env.AI && typeof env.AI.run === "function");
+      const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
       return okJSON(
         200,
-        { ok: true, requestId, data: { service: "hr-worker", version: VERSION, v: "v1", rulesets: { ok: true, base: "ai-rules" } } },
+        {
+          ok: true,
+          requestId,
+          data: {
+            service: "hr-worker",
+            version: VERSION,
+            v: "v1",
+            rulesets: { ok: true, base: "ai-rules" },
+            ai: { enabled: aiEnabled, binding: hasAIBinding, model },
+          },
+        },
         corsHeaders,
         requestId
       );
@@ -428,8 +533,10 @@ export default {
     }
 
     let training;
+    let aiSource = "fallback";
+
     try {
-      training = await buildTrainingBlocks(
+      const res = await buildTrainingBlocks(
         {
           requestId,
           mode,
@@ -444,6 +551,13 @@ export default {
         },
         env
       );
+
+      if (res && isPlainObject(res) && isPlainObject(res.training)) {
+        training = res.training;
+        aiSource = safeStr(res.source || "fallback") || "fallback";
+      } else {
+        training = res;
+      }
     } catch (e) {
       const msg = safeStr(e && (e.message || e.stack || String(e))).slice(0, 200);
       console.error("ERR", requestId, "WORKER_BUILD_FAILED");
@@ -465,6 +579,9 @@ export default {
       items = mapped.items;
     }
 
+    // header som visar om AI användes
+    const hdr = { ...(corsHeaders || {}), "X-HR-AI": aiSource === "cf" ? "cf" : "fallback" };
+
     return okJSON(
       200,
       {
@@ -476,7 +593,7 @@ export default {
         blocks: topBlocks,
         mode: training.mode || mode,
       },
-      corsHeaders,
+      hdr,
       requestId
     );
   },
@@ -491,9 +608,8 @@ function buildCorsHeaders(origin, allowedOrigin) {
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-    "Access-Control-Allow-Headers":
-      "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
-    Vary: "Origin",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
+    "Vary": "Origin", // FIX: måste vara sträng-nyckel
   };
 }
 
@@ -540,15 +656,18 @@ function extractBearerToken(authHeader) {
 
 async function buildTrainingBlocks(input, env) {
   // Denna funktion ska INTE kasta.
+  // Returnerar {training, source:"cf"|"fallback"} för att kunna sätta X-HR-AI header.
   try {
     if (env && env.AI && typeof env.AI.run === "function") {
       const ai = await buildTrainingBlocksWithAI(input, env);
-      if (ai && ai.ok && Array.isArray(ai.blocks) && ai.blocks.length) return ai;
+      if (ai && ai.ok && Array.isArray(ai.blocks) && ai.blocks.length) {
+        return { training: ai, source: "cf" };
+      }
     }
   } catch (_) {
     // swallow => fallback
   }
-  return buildTrainingBlocksDeterministic(input);
+  return { training: buildTrainingBlocksDeterministic(input), source: "fallback" };
 }
 
 async function buildTrainingBlocksWithAI(input, env) {
@@ -562,33 +681,45 @@ async function buildTrainingBlocksWithAI(input, env) {
 
   const place = inferWorkplaceFromContext(contextText, language);
   const arc = buildStoryArc(count);
-  const pack = pickScenarioPack(contextText, place, language, hash32(`${requestId}|${subjectId}|${language}|${contextText.slice(0, 120)}`));
+  const pack = pickScenarioPack(
+    contextText,
+    place,
+    language,
+    hash32(`${requestId}|${subjectId}|${language}|${contextText.slice(0, 120)}`)
+  );
 
   const sv = language === "sv";
   const qt = questionType || "mcq_single";
 
   const schemaHint = sv
-    ? `Returnera ENDAST giltig JSON. Inget markdown. Schema:
+    ? `Returnera ENDAST giltig JSON. Inget markdown. Inga förklaringar utanför JSON.
+Schema:
 {
   "questions": [
     { "stem": "string", "options": ["A","B","C","D"], "correctIndex": 0, "explanation": "string" }
   ]
 }
-Regler: exakt ${count} frågor. options-längd: 4 (om true_false: 2). correctIndex inom range.
-Språk: svenska. Varje fråga ska kännas unik och ha liten "röd tråd" enligt arc.`
-    : `Return ONLY valid JSON. No markdown. Schema:
+Regler:
+- Exakt ${count} frågor (inte fler/inte färre).
+- options: 4 st (true_false: 2 st).
+- correctIndex måste vara giltig (0..options.length-1).
+- Varje fråga måste vara unik och använda scenario/arc. Inga platshållare, inga "som ovan".`
+    : `Return ONLY valid JSON. No markdown. No explanations outside JSON.
+Schema:
 {
   "questions": [
     { "stem": "string", "options": ["A","B","C","D"], "correctIndex": 0, "explanation": "string" }
   ]
 }
-Rules: exactly ${count} questions. options length: 4 (if true_false: 2). correctIndex in range.
-Language: English. Each question should be unique and follow a small story arc.`;
-
+Rules:
+- Exactly ${count} questions (no more/no less).
+- options: 4 (true_false: 2).
+- correctIndex must be valid.
+- Each question must be unique and use scenario/arc. No placeholders.`;
 
   const systemPrompt = sv
-    ? `Du skapar provfrågor för HR/QA. Du får en situation (pack) + arc-dimensioner. Svara strikt som JSON enligt schema. Inga platshållare, inga "som ovan".`
-    : `You create assessment questions for HR/QA. You get a scenario pack + arc dimensions. Respond strictly as JSON per schema. No placeholders.`;
+    ? `Du skapar provfrågor för HR/QA. Svara strikt som JSON enligt schema.`
+    : `You create assessment questions for HR/QA. Respond strictly as JSON per schema.`;
 
   const userPrompt =
     (sv
@@ -598,13 +729,11 @@ Language: English. Each question should be unique and follow a small story arc.`
       ? `SCENARIOPACK:\n- place: ${pack.place}\n- setting: ${pack.setting}\n- artifact: ${pack.artifact}\n- constraintB: ${pack.constraintB}\n- twist: ${pack.twist}\n\n`
       : `SCENARIO PACK:\n- place: ${pack.place}\n- setting: ${pack.setting}\n- artifact: ${pack.artifact}\n- constraintB: ${pack.constraintB}\n- twist: ${pack.twist}\n\n`) +
     (sv ? `ARC (i ordning):\n${arc.join(", ")}\n\n` : `ARC (in order):\n${arc.join(", ")}\n\n`) +
-    (sv ? `questionType: ${qt}\n` : `questionType: ${qt}\n`) +
+    `questionType: ${qt}\n\n` +
     schemaHint;
 
-  // Modell: välj 3.1 om tillgänglig, annars fallback.
   const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
 
-  // NOTE: vi loggar aldrig payload eller prompt.
   let answer;
   try {
     answer = await env.AI.run(model, {
@@ -614,7 +743,6 @@ Language: English. Each question should be unique and follow a small story arc.`
       ],
     });
   } catch (_) {
-    // fallback modell
     try {
       answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
         messages: [
@@ -622,39 +750,63 @@ Language: English. Each question should be unique and follow a small story arc.`
           { role: "user", content: userPrompt },
         ],
       });
-    } catch (e2) {
-      // ingen throw här
+    } catch (_) {
       return null;
     }
   }
 
-  // Cloudflare returnerar ofta {response:"..."} för textmodeller
-  const text = safeStr(answer && (answer.response || answer.result || answer.output || "")).trim();
-  const parsed = safeJsonParseMaybe(text);
+  // CF kan ge: {response:"..."} eller ibland direkt JSON/objekt
+  let parsed = null;
+
+  if (isPlainObject(answer) && isPlainObject(answer.response)) {
+    parsed = answer.response; // redan objekt
+  } else {
+    const rawText = safeStr(answer && (answer.response || answer.result || answer.output || answer.text || "")).trim();
+    parsed = safeJsonFromUnknown(rawText);
+  }
+
   if (!parsed || !isPlainObject(parsed)) return null;
 
   const qArr = Array.isArray(parsed.questions) ? parsed.questions : [];
   if (!qArr.length) return null;
 
   const blocks = [];
-  for (let i = 0; i < Math.min(count, qArr.length); i++) {
+  const target = count;
+
+  for (let i = 0; i < Math.min(target, qArr.length); i++) {
     const q = qArr[i];
     const stem = safeStr(q && q.stem).trim();
     const optsRaw = Array.isArray(q && q.options) ? q.options : [];
-    const options = optsRaw.map((x) => safeStr(x).trim()).filter(Boolean);
+    let options = optsRaw.map((x) => safeStr(x).trim()).filter(Boolean);
     const ci = Number(q && q.correctIndex);
 
     if (!stem) return null;
+
     if (qt === "true_false") {
       if (options.length < 2) return null;
+      options = options.slice(0, 2);
     } else {
-      if (options.length < 4) return null;
+      // fail-soft: acceptera >=3 men pad till 4 för stabil MCQ
+      if (options.length < 3) return null;
+      options = padOptions(language, options, 4).slice(0, 4);
     }
 
     const correctIndex = Number.isFinite(ci) && ci >= 0 && ci < options.length ? Math.floor(ci) : 0;
     const explanation = safeStr(q && (q.explanation || q.rationale)).trim();
 
     blocks.push(makeQuestionBlockFromUi({ i, stem, options, correctIndex, explanation }));
+  }
+
+  // toppa upp om AI gav färre än count (blanda in deterministic för resten)
+  if (blocks.length < target) {
+    const det = buildTrainingBlocksDeterministic({ ...input, count: target - blocks.length });
+    const detBlocks = Array.isArray(det && det.blocks) ? det.blocks : [];
+    for (let j = 0; j < detBlocks.length && blocks.length < target; j++) {
+      const b = detBlocks[j];
+      // re-id för att inte krocka
+      const newId = `q_${blocks.length + 1}`;
+      blocks.push({ ...b, id: newId });
+    }
   }
 
   if (!blocks.length) return null;
@@ -667,6 +819,13 @@ Language: English. Each question should be unique and follow a small story arc.`
     language,
     blocks,
   };
+}
+
+function safeJsonFromUnknown(textOrObject) {
+  if (isPlainObject(textOrObject)) return textOrObject;
+  const t = safeStr(textOrObject).trim();
+  if (!t) return null;
+  return safeJsonParseLoose(t);
 }
 
 function makeQuestionBlockFromUi({ i, stem, options, correctIndex, explanation }) {
