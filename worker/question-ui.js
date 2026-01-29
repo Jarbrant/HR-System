@@ -11,6 +11,11 @@
 // Policy (LÅST):
 // - Stateless, deterministisk, inga sid-effekter
 // - XSS-safe: endast textdata (ingen HTML)
+//
+// PATCH (AUTOPATCH v1.5.9b-qUI-01):
+// - P0: Fixar facit-index när tomma svarsalternativ finns (synkad id->index map).
+// - P0: Fail-closed med tydligare felorsak (vilken fråga i batchen som bråkar).
+// - P1: Rensning skiljer på fråga vs förklaring (ingen “fråga” som fallback i explanation).
 // ============================================================
 
 import { safeStr, isPlainObject } from "./utils.js";
@@ -18,18 +23,33 @@ import { safeStr, isPlainObject } from "./utils.js";
 // ------------------------------------------------------------
 // P0: Domänord får inte läcka i Q-fältet (extra skydd även här)
 // ------------------------------------------------------------
-export function stripDomainWordsFromQuestion(s, language) {
+
+function stripDomainWordsCore(s, language) {
   const txt = safeStr(s);
-  if (!txt) return txt;
+  if (!txt) return "";
 
   const reSv = /\b(steg|steget|modul|modulen|kapitel|kapitlet|kurs|kursen|utbildning|utbildningen)\b/gi;
   const reEn = /\b(step|module|chapter|course|training)\b/gi;
 
-  const out = txt.replace(reSv, "").replace(reEn, "").replace(/\s{2,}/g, " ").trim();
+  return txt
+    .replace(reSv, "")
+    .replace(reEn, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+// Exporterad (bakåtkompatibel): används för själva frågetexten (med fallback)
+export function stripDomainWordsFromQuestion(s, language) {
+  const out = stripDomainWordsCore(s, language);
   if (!out) {
     return (language === "sv") ? "Vilket val är bäst i situationen?" : "Which choice is best in this situation?";
   }
   return out;
+}
+
+// Intern: förklaringar/övrig text (ingen fallback-mening)
+function stripDomainWordsFromText(s, language) {
+  return stripDomainWordsCore(s, language);
 }
 
 // ============================================================
@@ -64,7 +84,8 @@ export function normalizeQuestionType(v) {
   if (s.includes("mcq") && (s.includes("single") || s.includes("ett") || s.includes("one") || s.includes("1"))) return "mcq_single";
   if (s.includes("true") || s.includes("false") || s.includes("sant") || s.includes("falskt")) return "true_false";
 
-  return raw;
+  // Okänd -> tomt (så vi kan falla tillbaka stabilt)
+  return "";
 }
 
 // P0: "auto" räknas som UI-frågeläge och ska ge items[]-output.
@@ -79,27 +100,51 @@ export function isUiQuestionRequest(questionType) {
 
 export function mapTrainingBlocksToUiQuestions(trainingBlocks, questionType, language) {
   const qt0 = normalizeQuestionType(questionType);
-  const qt = (qt0 === "auto") ? "mcq_single" : qt0; // stabil default
+  let qt = qt0;
 
-  const blocks = Array.isArray(trainingBlocks) ? trainingBlocks : [];
-  const out = [];
+  // Stabil default
+  if (!qt || qt === "auto") qt = "mcq_single";
 
-  for (const b of blocks) {
-    if (!b || b.kind !== "question") continue;
-    const q = extractQuestionFromBlock(b);
-    if (!q.ok) continue;
-
-    const mapped = mapChoiceQuestionToUi(q.question, qt, language);
-    if (mapped.ok) out.push(mapped.item);
+  // Endast stödda typer i UI-output
+  if (!(qt === "mcq_single" || qt === "mcq_multi" || qt === "true_false")) {
+    qt = "mcq_single";
   }
 
-  // Fail-closed: mappningen ska vara 1:1
-  const expected = blocks.filter(x => x && x.kind === "question").length;
-  if (out.length === 0 || out.length !== expected) {
+  const blocks = Array.isArray(trainingBlocks) ? trainingBlocks : [];
+  const questionBlocks = blocks.filter(x => x && x.kind === "question");
+  const out = [];
+
+  // Fail-closed 1:1 med bättre felorsak:
+  for (let idx = 0; idx < questionBlocks.length; idx++) {
+    const b = questionBlocks[idx];
+
+    const q = extractQuestionFromBlock(b);
+    if (!q.ok) {
+      return {
+        ok: false,
+        errorCode: "Q_SCHEMA_INVALID",
+        message: `Kunde inte läsa fråga ${idx + 1} i batchen`
+      };
+    }
+
+    const mapped = mapChoiceQuestionToUi(q.question, qt, language);
+    if (!mapped.ok) {
+      const reason = safeStr(mapped && mapped.reason).trim();
+      return {
+        ok: false,
+        errorCode: safeStr(mapped && mapped.errorCode) || "Q_SCHEMA_INVALID",
+        message: `Kunde inte skapa giltig provfråga ${idx + 1} i batchen${reason ? `: ${reason}` : ""}`
+      };
+    }
+
+    out.push(mapped.item);
+  }
+
+  if (out.length === 0) {
     return {
       ok: false,
       errorCode: "Q_SCHEMA_INVALID",
-      message: "Kunde inte skapa giltiga provfrågor (items) för hela batchen"
+      message: "Kunde inte skapa giltiga provfrågor (items) för batchen"
     };
   }
 
@@ -116,31 +161,62 @@ export function extractQuestionFromBlock(block) {
   return { ok: false };
 }
 
+// ============================================================
+// Mapping av en fråga till UI-format (options + correctIndex/Indices)
+// ============================================================
+
+function buildOptionsAndIndexMap(choices) {
+  const opts = [];
+  const idToIndex = Object.create(null);
+
+  for (const c of choices) {
+    const id = safeStr(c && c.id).trim();
+    const t0 = safeStr(c && c.text).trim();
+
+    // Tomt alternativ -> vi tar inte med det, men då kan facit bli omöjligt => fail-closed senare
+    if (!id || !t0) continue;
+
+    const idx = opts.length;
+    opts.push(t0);
+    idToIndex[id] = idx;
+  }
+
+  return { options: opts, idToIndex };
+}
+
 export function mapChoiceQuestionToUi(q, questionType, language) {
   const question = stripDomainWordsFromQuestion(safeStr(q && q.text).trim(), language);
 
   const choices = Array.isArray(q && q.choices) ? q.choices : [];
-  if (!question || choices.length < 2) return { ok: false };
-
-  const options = [];
-  for (const c of choices) {
-    const t0 = safeStr(c && c.text).trim();
-    if (t0) options.push(t0);
+  if (!question || choices.length < 2) {
+    return { ok: false, errorCode: "Q_SCHEMA_INVALID", reason: "saknar fråga eller svarsalternativ" };
   }
-  if (options.length < 2) return { ok: false };
+
+  const { options, idToIndex } = buildOptionsAndIndexMap(choices);
+  if (options.length < 2) {
+    return { ok: false, errorCode: "Q_SCHEMA_INVALID", reason: "för få giltiga svarsalternativ" };
+  }
 
   let explanation = safeStr(q && (q.rationale || q.explanation || q.feedback || "")).trim();
-  explanation = stripDomainWordsFromQuestion(explanation, language);
+  explanation = stripDomainWordsFromText(explanation, language); // ingen fallback-mening här
 
   const difficulty = safeStr(q && q.difficulty).trim() || undefined;
   const tags = Array.isArray(q && q.tags) ? q.tags.slice(0, 8) : undefined;
 
+  // ---------- TRUE/FALSE ----------
   if (questionType === "true_false") {
     const a = (language === "sv") ? "Sant" : "True";
     const b = (language === "sv") ? "Falskt" : "False";
+
     const correctId = safeStr(q && q.correctChoiceId).trim();
-    const idx = indexOfChoiceId(choices, correctId);
-    const correctIndex = (idx >= 0 && idx <= 1) ? idx : 0;
+
+    // Om facit pekar på en choice-id: mappa via text (så vi inte blandar två listor)
+    let correctIndex = 0;
+    if (correctId && Object.prototype.hasOwnProperty.call(idToIndex, correctId)) {
+      const t = safeStr(choices.find(x => safeStr(x && x.id).trim() === correctId)?.text).trim().toLowerCase();
+      if (t === "falskt" || t === "false") correctIndex = 1;
+      else correctIndex = 0;
+    }
 
     return {
       ok: true,
@@ -157,10 +233,15 @@ export function mapChoiceQuestionToUi(q, questionType, language) {
     };
   }
 
+  // ---------- MCQ SINGLE ----------
   if (questionType === "mcq_single") {
     const correctId = safeStr(q && q.correctChoiceId).trim();
-    const idx = indexOfChoiceId(choices, correctId);
-    if (idx < 0 || idx >= options.length) return { ok: false };
+    if (!correctId) {
+      return { ok: false, errorCode: "Q_SCHEMA_INVALID", reason: "saknar facit" };
+    }
+    if (!Object.prototype.hasOwnProperty.call(idToIndex, correctId)) {
+      return { ok: false, errorCode: "Q_SCHEMA_INVALID", reason: "facit matchar inget giltigt svarsalternativ" };
+    }
 
     return {
       ok: true,
@@ -170,25 +251,35 @@ export function mapChoiceQuestionToUi(q, questionType, language) {
         ...(difficulty ? { difficulty } : {}),
         question,
         options,
-        correctIndex: idx,
+        correctIndex: idToIndex[correctId],
         ...(explanation ? { explanation } : {}),
         ...(tags ? { tags } : {})
       }
     };
   }
 
+  // ---------- MCQ MULTI ----------
   if (questionType === "mcq_multi") {
-    const ids = Array.isArray(q && q.correctChoiceIds) ? q.correctChoiceIds : [];
+    const idsRaw = Array.isArray(q && q.correctChoiceIds) ? q.correctChoiceIds : [];
     const indices = [];
-    for (const id of ids) {
-      const idx = indexOfChoiceId(choices, safeStr(id).trim());
-      if (idx >= 0 && idx < options.length && !indices.includes(idx)) indices.push(idx);
+
+    for (const id of idsRaw) {
+      const k = safeStr(id).trim();
+      if (!k) continue;
+      if (Object.prototype.hasOwnProperty.call(idToIndex, k)) {
+        const ix = idToIndex[k];
+        if (!indices.includes(ix)) indices.push(ix);
+      }
     }
+
+    // Fallback till single-facit om multi saknas/inte går att mappa
     if (indices.length === 0) {
       const correctId = safeStr(q && q.correctChoiceId).trim();
-      const idx = indexOfChoiceId(choices, correctId);
-      if (idx < 0 || idx >= options.length) return { ok: false };
-      indices.push(idx);
+      if (!correctId) return { ok: false, errorCode: "Q_SCHEMA_INVALID", reason: "saknar facit" };
+      if (!Object.prototype.hasOwnProperty.call(idToIndex, correctId)) {
+        return { ok: false, errorCode: "Q_SCHEMA_INVALID", reason: "facit matchar inget giltigt svarsalternativ" };
+      }
+      indices.push(idToIndex[correctId]);
     }
 
     return {
@@ -206,9 +297,10 @@ export function mapChoiceQuestionToUi(q, questionType, language) {
     };
   }
 
-  return { ok: false };
+  return { ok: false, errorCode: "Q_SCHEMA_INVALID", reason: "okänd frågetyp" };
 }
 
+// Behåll exporten (kan användas externt)
 export function indexOfChoiceId(choices, id) {
   if (!id) return -1;
   for (let i = 0; i < choices.length; i++) {
