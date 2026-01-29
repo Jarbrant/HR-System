@@ -1,46 +1,19 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.9b VARIATION+ARC + V1-CONTRACT)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.9c VARIATION+ARC + V1-CONTRACT)
 // FIL: worker/index.js
 //
 // Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ/TF begärs.
 //      FIX: Undvik “samma frågor”, förbjud placeholder-fraser, kräver förklaring,
 //           och gör batchen unik (dedupe) + bättre variation.
 //
-// PATCH v1.5.9b (SPLIT-UI-MAP + REMOVE-DUP-COURSE):
-// - P0: Bryter ut UI-frågeformat (options + correctIndex) till worker/question-ui.js.
-// - P0: Tar bort dubbla course-funktioner (import + lokal deklaration) som annars kraschar.
+// PATCH v1.5.9c (HOTFIX):
+// - P0: Tar bort statisk import "./question-ui.js" (module-not-found => Error 1101).
+// - P0: Lägger tillbaka normalizeQuestionType/isUiQuestionRequest/mapTrainingBlocksToUiQuestions inline (fail-closed).
 // - P0: Oförändrat output-contract.
-//
-// PATCH v1.5.9 (SCENARIO-PACK + STORY-ARC + LENGTH+PREFIX-GUARD):
-// - P0: Scenario-pack väljs per batch (samma “värld” genom hela blocket när count>=6).
-// - P0: Story-arc (röd tråd) över 6–12 frågor: start → bevis → risk → avvikelse → ansvar → twist.
-// - P0: Längdstyrning: 70% 2 meningar, 20% 3 meningar (”konstverk”), 10% korta.
-// - P0: Prefix-guard: stoppar frågor som börjar med samma 4–6 ord i samma batch.
-// - P1: Variation i frågetyp inom MCQ (utan att ändra UI-contract): saknad info, minst risk, undvik, dokumentera.
-//
-// PATCH v1.5.8 (QTYPE-SOURCEGUARD + STABLE-DEFAULT):
-// - P0: Tar bort `body.question` från questionType-inferens (krockar med frågetext och kan slå av UI-items).
-// - P0: Stabil default: om UI kör questions-format/contentType=questions men questionType saknas → sätt "auto".
-//
-// PATCH v1.5.7 (STEP-NORM + COURSE-SEED + TRACEABILITY-DIM + STEM-VARIANTS):
-// - P0: Normaliserar step till ren siffra (1–7) i v1 + legacy + infer från contextText.
-// - P0: Seed inkluderar kurs/ids/step så kursval & nivå ger tydligt olika output.
-// - P1: Ny dimension: traceability_and_evidence (spårbarhet/bevis) + nya stammar.
-// - P1: Flera stammar per dimension så frågorna inte låser i “bästa startåtgärden…”.
-//
-// PATCH v1.5.6 (V1-CONTRACT + CORS + REQUESTID):
-// - Stödjer ai-rules/v1 ruleset-payload (contentType/context/output/formatRef + requestId från UI).
-// - Returnerar även `items[]` (envelope-friendly) utan att bryta befintligt UI.
-// - Lägger X-Request-Id + X-HR-Request-Id i svar (SDK kan plocka upp).
-// - CORS headers tillåter även X-HR-SDK / X-HR-Client (case-variant).
-//
-// PATCH v1.5.9a (FALLBACK-QUESTION + CORRECT-ERRORS):
-// - P0: Om batch-unikhet misslyckas: skapa fallback-fråga istället för att kasta och döda hela svaret.
-// - P0: Korrekt feltext vid interna build-fel (inte “AI svarade inte”).
 // ============================================================
 
 // ============================================================
-// BLOCK 01 — Imports (split: rules + course + utils)
+// BLOCK 01 — Imports (rules + course + utils)
 // ============================================================
 
 import {
@@ -76,20 +49,12 @@ import {
   resolveCourseLabelFallback
 } from "./course.js";
 
-// FAS 7 (SPLIT): UI-frågeformat flyttat hit
-import {
-  normalizeQuestionType,
-  isUiQuestionRequest,
-  mapTrainingBlocksToUiQuestions
-} from "./question-ui.js";
-
-
 // ============================================================
 // BLOCK 02 — Constants
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5.9b";
+const VERSION = "1.5.9c";
 
 // ============================================================
 // BLOCK 03 — Fetch handler (routing + guards)
@@ -474,6 +439,99 @@ function pickDifficultyLabel(difficultyHint, seedN) {
 }
 
 // ============================================================
+// BLOCK 06B — UI question helpers (INLINE, fail-closed)
+// ============================================================
+
+function normalizeQuestionType(v) {
+  const s = safeStr(v).toLowerCase().trim();
+  if (!s) return "";
+  if (s === "auto") return "auto";
+  if (s === "mcq" || s === "single" || s === "mcq_single" || s === "mcq-single") return "mcq_single";
+  if (s === "multi" || s === "mcq_multi" || s === "mcq-multi") return "mcq_multi";
+  if (s === "tf" || s === "truefalse" || s === "true_false" || s === "true-false") return "true_false";
+  // tolerant legacy (UI kan skicka "questions" etc)
+  if (s.includes("mcq") && s.includes("multi")) return "mcq_multi";
+  if (s.includes("mcq")) return "mcq_single";
+  if (s.includes("true") || s.includes("false")) return "true_false";
+  return s; // ok att bära vidare (isUiQuestionRequest styr)
+}
+
+function isUiQuestionRequest(questionType) {
+  const qt = normalizeQuestionType(questionType);
+  return qt === "auto" || qt === "mcq_single" || qt === "mcq_multi" || qt === "true_false";
+}
+
+/**
+ * mapTrainingBlocksToUiQuestions(blocks, questionType, language)
+ * Output: items[] där varje item är:
+ *  - { type:'question', question:'...', options:['..'], correctIndex:0.., explanation:'...' }
+ *  - vid multi: kan även sätta correctIndices:[..] (UI kan välja att ignorera)
+ */
+function mapTrainingBlocksToUiQuestions(blocks, questionType, language) {
+  const qt0 = normalizeQuestionType(questionType);
+  const qt = qt0 === "auto" ? "mcq_single" : qt0;
+
+  const out = [];
+  const arr = Array.isArray(blocks) ? blocks : [];
+
+  for (const b of arr) {
+    if (!b || b.kind !== "question") continue;
+
+    const items = Array.isArray(b.items) ? b.items : [];
+    const qi = items.find(x => x && x.type === "questionInline" && x.question);
+    const q = qi && qi.question ? qi.question : null;
+
+    const stem = safeStr(q && (q.text || q.question || "")).trim();
+    const choices = Array.isArray(q && q.choices) ? q.choices : [];
+    const correctChoiceId = safeStr(q && q.correctChoiceId).trim();
+    const correctChoiceIds = Array.isArray(q && q.correctChoiceIds) ? q.correctChoiceIds.map(x => safeStr(x).trim()).filter(Boolean) : null;
+    const rationale = safeStr(q && (q.rationale || q.explanation || q.feedback || "")).trim();
+
+    if (!stem || choices.length < 2) {
+      return { ok: false, errorCode: "UI_MAP_INVALID", message: "Kunde inte mappa question: saknar text/choices" };
+    }
+
+    const options = choices.map(c => safeStr(c && c.text).trim()).filter(Boolean);
+    if (options.length < 2) {
+      return { ok: false, errorCode: "UI_MAP_INVALID", message: "Kunde inte mappa question: tomma svarsalternativ" };
+    }
+
+    let correctIndex = -1;
+    if (correctChoiceId) {
+      correctIndex = choices.findIndex(c => safeStr(c && c.id).trim() === correctChoiceId);
+    }
+    if (correctIndex < 0 && correctChoiceIds && correctChoiceIds.length) {
+      // välj första som default, men även correctIndices
+      correctIndex = choices.findIndex(c => safeStr(c && c.id).trim() === correctChoiceIds[0]);
+    }
+    if (correctIndex < 0) correctIndex = 0; // fail-closed-ish: fortfarande giltig UI-fråga
+
+    const item = {
+      type: "question",
+      question: stem,
+      options,
+      correctIndex,
+      explanation: rationale
+    };
+
+    if (qt === "mcq_multi" && correctChoiceIds && correctChoiceIds.length) {
+      const idxs = correctChoiceIds
+        .map(id => choices.findIndex(c => safeStr(c && c.id).trim() === id))
+        .filter(i => i >= 0);
+      if (idxs.length) item.correctIndices = idxs;
+    }
+
+    out.push(item);
+  }
+
+  if (out.length === 0) {
+    return { ok: false, errorCode: "UI_MAP_EMPTY", message: "Inga question-block hittades att mappa" };
+  }
+
+  return { ok: true, items: out };
+}
+
+// ============================================================
 // BLOCK 07 — V1 ruleset payload (ai-rules/v1)
 // ============================================================
 // Flyttat till worker/course.js: parseV1RulesetPayload
@@ -497,12 +555,6 @@ function pickDifficultyLabel(difficultyHint, seedN) {
 
 function getStepProfile(step) {
   const s = normalizeStepValue(step);
-  // Tydligare separation mellan steg:
-  // 1: begrepp + enkel start
-  // 2: ansvar/roller + spårbarhet
-  // 3: tillämpning + avvikelse
-  // 4: risk/konsekvens + spårbarhet
-  // 5: avvikelse + åtgärd/uppföljning
   if (s === "1") return ["definition_or_concept", "routine_start", "scenario_application"];
   if (s === "2") return ["roles_and_responsibility", "traceability_and_evidence", "routine_start"];
   if (s === "3") return ["scenario_application", "deviation_and_action", "routine_start"];
@@ -531,8 +583,6 @@ function inferWorkplaceFromContext(contextText, language) {
 // ============================================================
 
 function buildStoryArc(count) {
-  // En röd tråd som känns som “mini-berättelse” när man gör 6–12 frågor i samma block.
-  // 0: etablering, 1: saknad info, 2: bevis/logg, 3: risk, 4: avvikelse, 5: ansvar, 6: uppföljning, 7: twist
   const base = [
     "scenario_application",
     "routine_start",
@@ -543,7 +593,6 @@ function buildStoryArc(count) {
     "traceability_and_evidence",
     "scenario_application"
   ];
-  // Om count > 8: fortsätt med praktisk variation utan att tappa tråden
   const tail = [
     "risk_consequence",
     "deviation_and_action",
@@ -635,9 +684,6 @@ function pickScenarioPack(contextText, place, language, seed) {
 }
 
 function pickLengthProfile(seed) {
-  // 70%: 2 meningar (med konkret constraint)
-  // 20%: 3 meningar (”konstverk”)
-  // 10%: 1 mening (kort kontroll)
   const x = seed % 10;
   if (x <= 6) return { minChars: 140, sentences: 2 };
   if (x <= 8) return { minChars: 260, sentences: 3 };
@@ -672,7 +718,6 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
 
   const courseLabel = resolveCourseLabelFallback(course, mode, context);
 
-  // P0: seed ska tydligt variera mellan kurs/område/kapitel/steg (och id om det finns)
   const courseSeedKey = [
     safeStr(courseLabel.module),
     safeStr(courseLabel.area),
@@ -707,7 +752,6 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
 
   const blocks = [];
 
-  // Batch-state (unikhet inom batchen)
   const place0 = inferWorkplaceFromContext(context, language);
   const useArc = (fmt === "question" && isUiQuestionRequest(questionType) && count >= 6);
 
@@ -718,7 +762,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     seenStems: [],
     seenDims: new Set(),
     seenBestAnswers: [],
-    seenPrefixes: [], // v1.5.9
+    seenPrefixes: [],
     scenario,
     arcSeq,
     useArc
@@ -769,7 +813,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.5.9b"
+      source: "mock-v1.5.9c"
     }
   };
 }
@@ -872,7 +916,6 @@ function genDocumentBlock({ i, language, context, courseLabel, difficulty, subjI
 function genQuestionBlock({ i, n, count, language, context, courseLabel, difficulty, subjId, bundle, questionType, qq, batch }) {
   const blockId = `b_q_${i + 1}_${subjId}`.slice(0, 32);
 
-  // Titel får bära område (UI runtom), men själva question/options/explanation/feedback ska vara “verklighetsspråk”
   const title =
     language === "sv"
       ? `Kontrollfråga: ${courseLabel.area}`
@@ -900,17 +943,14 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
     const stem0 = safeStr(cand && (cand.text || cand.question || "")).trim();
     if (!stem0) continue;
 
-    // P0: domänord får inte finnas i Q-fältet
     const stem = stripDomainWordsFromQuestion(stem0, language);
     if (!stem) continue;
 
-    // P0: stoppa även om området råkar läcka in i Q-fältet (extra guard)
     if (courseLabel && courseLabel.area) {
       const a = normKey(courseLabel.area);
       if (a && normKey(stem).includes(a)) continue;
     }
 
-    // forbidden placeholders: applicera på stem + rationale + choices
     if (qq && qq.forbidContextPlaceholderText) {
       const rat = safeStr(cand && (cand.rationale || cand.explanation || cand.feedback || "")).trim();
       if (containsForbiddenPhrase(stem, qq.forbiddenPhrases)) continue;
@@ -925,7 +965,6 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
         if (!t) continue;
         if (containsForbiddenPhrase(t, qq.forbiddenPhrases)) { badChoice = true; break; }
         if (/\(kontext\s+dolt\)/i.test(t) || /\[object\s+object\]/i.test(t)) { badChoice = true; break; }
-        // P0 guard: ingen area-läcka i options
         if (courseLabel && courseLabel.area) {
           const a = normKey(courseLabel.area);
           if (a && normKey(t).includes(a)) { badChoice = true; break; }
@@ -934,14 +973,12 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
       if (badChoice) continue;
     }
 
-    // v1.5.9: prefix-guard (första ord) för att stoppa “samma fråga i ny kostym”
     const pk = prefixKey(stem, 5);
     if (pk) {
       const prevP = safeArr(batch && batch.seenPrefixes);
       if (prevP.some(x => x === pk)) continue;
     }
 
-    // near-dup across batch
     let nearDup = false;
     for (const prev of (batch && Array.isArray(batch.seenStems) ? batch.seenStems : [])) {
       const sim = jaccardSimilarity(prev, stem);
@@ -965,14 +1002,12 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
     if (batch && Array.isArray(batch.seenStems)) batch.seenStems.push(stem);
     if (pk && batch && Array.isArray(batch.seenPrefixes)) batch.seenPrefixes.push(pk);
 
-    // Skriv tillbaka sanerad Q-text (P0)
     cand.text = stem;
 
     q = cand;
     break;
   }
 
-  // PATCH v1.5.9a: ingen throw här. Skapa fallback-fråga så UI inte tappar allt.
   if (!q) {
     const fb = makeFallbackQuestion({
       i,
@@ -981,7 +1016,6 @@ function genQuestionBlock({ i, n, count, language, context, courseLabel, difficu
       batch
     });
     q = fb;
-    // logga kort (ingen payload)
     console.error("ERR", "fallback_question", `i=${i + 1}`);
   }
 
@@ -1013,7 +1047,6 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   const minOpt = qq && qq.mcq ? qq.mcq.minOptions : 4;
   const maxOpt = qq && qq.mcq ? qq.mcq.maxOptions : 6;
 
-  // PATCH (P1, safe): gör antal alternativ varierande (4–6) i stället för konstant 5
   const span = Math.max(1, (maxOpt - minOpt + 1));
   const pick = minOpt + (n % span);
   const choiceCount = isTf ? 2 : (isMcq ? clampInt(pick, minOpt, maxOpt) : 4);
@@ -1035,7 +1068,6 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
   const stepDims = getStepProfile(courseLabel.step);
   const rotate = (stepDims && stepDims.length) ? stepDims.concat(rotateBase.filter(d => !stepDims.includes(d))) : rotateBase;
 
-  // v1.5.9: story-arc override när batch.useArc är aktiv
   let dim = "scenario_application";
   if (batch && batch.useArc && Array.isArray(batch.arcSeq) && batch.arcSeq.length) {
     dim = batch.arcSeq[i % batch.arcSeq.length] || "scenario_application";
@@ -1055,34 +1087,22 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     }
   }
 
-  // P1: workplace-infer från context (utan ny datamodell)
   const place = inferWorkplaceFromContext(context, language);
 
   const rolesSv = ["du som medarbetare", "du som ansvarig", "du som tar emot", "du som kontrollerar", "du som rapporterar"];
   const rolesEn = ["you as the employee", "you as responsible", "you as receiver", "you as checker", "you as reporter"];
   const role = (language === "sv" ? rolesSv : rolesEn)[(n + i) % 5];
 
-  // v1.5.9: scenario-pack (samma per batch)
   const scenario = (batch && batch.scenario) ? batch.scenario : pickScenarioPack(context, place, language, (n ^ i) >>> 0);
 
-  // v1.5.9: längdprofil per fråga
   const lenProf = pickLengthProfile(n ^ hash32(`${i}|${dim}|${scenario.id}`));
   const sv = (language === "sv");
 
   function stemForDimension() {
     const seed2 = (n ^ hash32(`${dim}|${difficulty}|${i}`) ^ hash32(place) ^ hash32(scenario.id)) >>> 0;
 
-    // Variation i “frågesätt” utan att byta UI-contract:
-    const askStylesSv = [
-      "first_action",
-      "missing_info",
-      "least_risky",
-      "must_document",
-      "avoid_first"
-    ];
-    const askStylesEn = [
-      "first_action","missing_info","least_risky","must_document","avoid_first"
-    ];
+    const askStylesSv = ["first_action", "missing_info", "least_risky", "must_document", "avoid_first"];
+    const askStylesEn = ["first_action", "missing_info", "least_risky", "must_document", "avoid_first"];
     const askStyle = (sv ? askStylesSv : askStylesEn)[seed2 % 5];
 
     const s1 = `${scenario.setting} ${scenario.place}.`;
@@ -1154,7 +1174,6 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
     }
   }
 
-  // P0: rensa domänord i Q-fält
   text = stripDomainWordsFromQuestion(text, language);
 
   const choices = [];
@@ -1345,10 +1364,7 @@ function shuffledIndices(n, seed) {
 }
 
 // ============================================================
-// BLOCK 15 — Choice pools + rationales
-// ============================================================
-// (OFÖRÄNDRAD, samma som din senaste sanning)
-// ... (resten av BLOCK 15 ligger kvar exakt som du hade den)
+// BLOCK 15 — Choice pools + rationales (OFÖRÄNDRAD)
 // ============================================================
 
 function getChoicePools(language) {
