@@ -156,7 +156,6 @@ export const MAX_BODY_BYTES = 64 * 1024;
 // OBS: Detta är bara för felsökning. När allt funkar kan du byta tillbaka.
 const VERSION = "1.5.9c-dbg2";
 
-
 // ============================================================
 // BLOCK 03 — Fetch handler (routing + guards)
 // ============================================================
