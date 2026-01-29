@@ -393,11 +393,27 @@ export default {
 
     // ============================================================
 // BLOCK 04 — Build output (training-blocks + UI-items envelope)
-// PATCH: DEBUG-EXPOSE v1 (tillfälligt) — gör 502 “pratig” så vi kan felsöka
+// PATCH: DEBUG v2 — alltid diagnostik även om throw är null/undefined
 // ============================================================
+
+const __diag = {
+  has_buildTrainingBlocks: typeof buildTrainingBlocks,
+  has_getRulesBundle: typeof getRulesBundle,
+  has_getQuestionQuality: typeof getQuestionQuality,
+  has_parseV1RulesetPayload: typeof parseV1RulesetPayload,
+  mode,
+  count,
+  language,
+  questionType: safeStr(questionType)
+};
 
 let training;
 try {
+  // Extra fail-closed: om funktionen saknas helt, få ett tydligt fel direkt
+  if (typeof buildTrainingBlocks !== "function") {
+    throw new Error("buildTrainingBlocks saknas eller är inte en funktion");
+  }
+
   training = buildTrainingBlocks({
     requestId,
     mode,
@@ -412,15 +428,29 @@ try {
     questionType
   });
 } catch (e) {
-  // Gör felet synligt i Response + logg (utan payload)
-  const msg = safeStr(e && (e.stack || e.message || String(e))).slice(0, 1200);
-  console.error("ERR", requestId, "WORKER_BUILD_FAILED", msg);
+  // Gör felet synligt även om e är null/undefined
+  let msg = safeStr(e && (e.stack || e.message || String(e))).trim();
+
+  // Om kastat värde är null/undefined (eller tomt), ge fallback
+  if (!msg) {
+    msg = "buildTrainingBlocks kastade ett tomt fel (null/undefined) eller utan message/stack";
+  }
+
+  const diagStr = (() => {
+    try { return JSON.stringify(__diag); } catch { return "[diag kunde ej serialiseras]"; }
+  })();
+
+  const fallbackStack = safeStr(new Error("WORKER_BUILD_FAILED@BLOCK04").stack || "").slice(0, 600);
+
+  const full = `${msg} | DIAG=${diagStr} | FALLBACK_STACK=${fallbackStack}`.slice(0, 1500);
+
+  console.error("ERR", requestId, "WORKER_BUILD_FAILED", full);
 
   return errorJSON(
     502,
     requestId,
     "WORKER_BUILD_FAILED",
-    msg || "Worker kunde inte bygga ett giltigt svar",
+    full,
     corsHeaders,
     true
   );
