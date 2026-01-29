@@ -148,10 +148,14 @@ function mapTrainingBlocksToUiQuestions(blocks, questionTypeRaw, language) {
 
 // ============================================================
 // BLOCK 02 — Constants
+// PATCH: DBG2 (deploy-bevis) — ändra VERSION så /v1/version visar rätt kod körs
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5.9c";
+
+// OBS: Detta är bara för felsökning. När allt funkar kan du byta tillbaka.
+const VERSION = "1.5.9c-dbg2";
+
 
 // ============================================================
 // BLOCK 03 — Fetch handler (routing + guards)
