@@ -1,11 +1,15 @@
-
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.9 VARIATION+ARC + V1-CONTRACT)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.9b VARIATION+ARC + V1-CONTRACT)
 // FIL: worker/index.js
 //
 // Mål: Lås worker-output till training-blocks + UI-frågeformat när MCQ/TF begärs.
 //      FIX: Undvik “samma frågor”, förbjud placeholder-fraser, kräver förklaring,
 //           och gör batchen unik (dedupe) + bättre variation.
+//
+// PATCH v1.5.9b (SPLIT-UI-MAP + REMOVE-DUP-COURSE):
+// - P0: Bryter ut UI-frågeformat (options + correctIndex) till worker/question-ui.js.
+// - P0: Tar bort dubbla course-funktioner (import + lokal deklaration) som annars kraschar.
+// - P0: Oförändrat output-contract.
 //
 // PATCH v1.5.9 (SCENARIO-PACK + STORY-ARC + LENGTH+PREFIX-GUARD):
 // - P0: Scenario-pack väljs per batch (samma “värld” genom hela blocket när count>=6).
@@ -72,13 +76,20 @@ import {
   resolveCourseLabelFallback
 } from "./course.js";
 
+// FAS 7 (SPLIT): UI-frågeformat flyttat hit
+import {
+  normalizeQuestionType,
+  isUiQuestionRequest,
+  mapTrainingBlocksToUiQuestions
+} from "./question-ui.js";
+
 
 // ============================================================
 // BLOCK 02 — Constants
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.5.9a";
+const VERSION = "1.5.9b";
 
 // ============================================================
 // BLOCK 03 — Fetch handler (routing + guards)
@@ -269,7 +280,7 @@ export default {
       ? body.subjectObj
       : (isPlainObject(body.subject) ? body.subject : null);
 
-    // NOTE: ofta saknas subjectObj → då infererar vi från context.text
+    // NOTE: ofta saknas subjectObj → då infererar vi från context.text (i course.js)
     let course = normalizeCourseSubject(subjectObj);
 
     // ---- V1 override (ai-rules/v1) ----
@@ -465,162 +476,12 @@ function pickDifficultyLabel(difficultyHint, seedN) {
 // ============================================================
 // BLOCK 07 — V1 ruleset payload (ai-rules/v1)
 // ============================================================
-
-function parseV1RulesetPayload(body) {
-  // Minimal detection: contentType + output.formatRef
-  const contentType = safeStr(body && body.contentType).trim();
-  const out = body && isPlainObject(body.output) ? body.output : null;
-  const formatRef = safeStr(out && out.formatRef).trim();
-
-  if (!contentType || !formatRef) return null;
-
-  const count = body.count ?? 4;
-  const language = body.language || "sv-SE";
-  const ctx = (body && isPlainObject(body.context)) ? body.context : {};
-
-  const stepNorm = normalizeStepValue(ctx.step || ctx.stepId || "");
-  const difficulty = safeStr(ctx.difficulty || "").trim();
-
-  const course = {
-    module: safeStr(ctx.moduleLabel || "").trim(),
-    area: safeStr(ctx.areaLabel || "").trim(),
-    chapter: safeStr(ctx.chapterLabel || "").trim(),
-    step: stepNorm || "1",
-    moduleId: safeStr(ctx.moduleId || "").trim(),
-    areaId: safeStr(ctx.areaId || "").trim(),
-    chapterId: safeStr(ctx.chapterId || "").trim(),
-    stepId: stepNorm || safeStr(ctx.step || ctx.stepId || "").trim()
-  };
-
-  // contentType -> mode/format
-  let mode = "training";
-  let format = "training-blocks";
-
-  if (contentType === "document") {
-    mode = "document";
-    format = "document";
-  } else if (contentType === "questions") {
-    mode = "training";
-    format = "question";
-  } else if (contentType === "training_blocks") {
-    mode = "training";
-    format = "training-blocks";
-  } else {
-    // okänt => fail-closed via validation senare
-    mode = "";
-    format = "";
-  }
-
-  // questionType (gäller questions)
-  const questionType = normalizeQuestionType(safeStr(out && out.questionType).trim() || "auto");
-
-  // contextText: bygg från labels (workplace-infer kan använda om labels råkar innehålla t.ex. "kök")
-  const contextText = normalizeContextText(ctx);
-
-  return {
-    mode,
-    format,
-    count,
-    language,
-    questionType,
-    difficulty,
-    course,
-    contextText
-  };
-}
+// Flyttat till worker/course.js: parseV1RulesetPayload
 
 // ============================================================
 // BLOCK 08 — Course Subject (module/area/chapter/step)
 // ============================================================
-
-function normalizeCourseSubject(subjectObj) {
-  if (!isPlainObject(subjectObj)) return null;
-
-  const module = safeStr(subjectObj.module || "").trim();
-  const area = safeStr(subjectObj.area || "").trim();
-  const chapter = safeStr(subjectObj.chapter || "").trim();
-
-  const moduleId = safeStr(subjectObj.moduleId || "").trim();
-  const areaId = safeStr(subjectObj.areaId || "").trim();
-  const chapterId = safeStr(subjectObj.chapterId || "").trim();
-  const stepIdRaw = safeStr(subjectObj.stepId || "").trim();
-
-  const stepRaw = safeStr(subjectObj.step || "").trim();
-  const stepNorm = normalizeStepValue(stepRaw) || normalizeStepValue(stepIdRaw) || "";
-
-  return {
-    module: module || "",
-    area: area || "",
-    chapter: chapter || "",
-    step: stepNorm,
-    moduleId,
-    areaId,
-    chapterId,
-    stepId: stepNorm || stepIdRaw
-  };
-}
-
-function validateCourseSubject(course) {
-  if (course === null) return { ok: true };
-  const step = normalizeStepValue(course.step);
-  if (step) {
-    const allow = new Set(["1", "2", "3", "4", "5", "6", "7"]);
-    if (!allow.has(step)) return { ok: false, message: "subject.step måste vara 1–7" };
-  }
-  return { ok: true };
-}
-
-function inferCourseFromContextText(contextText) {
-  // Förväntad sträng från UI:
-  // "Modul: Kvalitet • Område: ISO 9001 • Kapitel: Introduktion • Steg: 1"
-  const t = safeStr(contextText);
-
-  function pick(label) {
-    const re = new RegExp(`${label}\\s*:\\s*([^•\\n\\r]+)`, "i");
-    const m = t.match(re);
-    return m ? safeStr(m[1]).trim() : "";
-  }
-
-  const module = pick("Modul");
-  const area = pick("Område");
-  const chapter = pick("Kapitel");
-
-  let step = "";
-  const mStep = t.match(/Steg\s*:\s*([^•\n\r]+)/i);
-  if (mStep) step = normalizeStepValue(mStep[1]);
-
-  if (!module && !area && !chapter && !step) return null;
-
-  return {
-    module: module || "",
-    area: area || "",
-    chapter: chapter || "",
-    step: step || ""
-  };
-}
-
-function resolveCourseLabelFallback(course, mode, contextText) {
-  const inferred = (!course) ? inferCourseFromContextText(contextText) : null;
-
-  if (!course && !inferred) {
-    return {
-      module: "Generic",
-      area: (mode === "document") ? "Dokument" : "Utbildning",
-      chapter: "Introduktion",
-      step: "1"
-    };
-  }
-
-  const src = course || inferred || {};
-  const stepNorm = normalizeStepValue(src.step) || "1";
-
-  return {
-    module: safeStr(src.module).trim() || "Generic",
-    area: safeStr(src.area).trim() || ((mode === "document") ? "Dokument" : "Utbildning"),
-    chapter: safeStr(src.chapter).trim() || "Introduktion",
-    step: stepNorm
-  };
-}
+// Flyttat till worker/course.js: normalizeCourseSubject, validateCourseSubject, resolveCourseLabelFallback
 
 // ============================================================
 // BLOCK 09 — Rules bundle + quality config (migrated)
@@ -908,7 +769,7 @@ function buildTrainingBlocks({ requestId, mode, count, language, context, aiEnab
     meta: {
       createdAt: Date.now(),
       createdBy: "worker",
-      source: "mock-v1.5.9a"
+      source: "mock-v1.5.9b"
     }
   };
 }
@@ -1213,11 +1074,11 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
 
     // Variation i “frågesätt” utan att byta UI-contract:
     const askStylesSv = [
-      "first_action",       // vad gör du först
-      "missing_info",       // vilken info saknas
-      "least_risky",        // minst risk
-      "must_document",      // måste dokumenteras
-      "avoid_first"         // vilket ska undvikas
+      "first_action",
+      "missing_info",
+      "least_risky",
+      "must_document",
+      "avoid_first"
     ];
     const askStylesEn = [
       "first_action","missing_info","least_risky","must_document","avoid_first"
@@ -1226,7 +1087,6 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
 
     const s1 = `${scenario.setting} ${scenario.place}.`;
 
-    // 2:a meningen: fråga + dim
     const askSv = {
       first_action: "Vilket första agerande är mest korrekt?",
       missing_info: "Vilken information måste du säkra först innan du bestämmer dig?",
@@ -1262,10 +1122,8 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
       scenario_application: `You are ${role}.`
     };
 
-    // 3:e meningen (konkret constraint / twist) – bara om vi ska ha 3 meningar
     const c2 = (seed2 & 1) === 0 ? scenario.constraintA : scenario.constraintB;
 
-    // “twist” på slutet i arcens senare del (ger röd tråd)
     const useTwist = !!(batch && batch.useArc && i >= Math.min(6, Math.max(4, Math.floor(count / 2))) && (seed2 % 3 === 0));
 
     const q2 = sv
@@ -1274,10 +1132,8 @@ function makeQuestion({ n, i, count, language, context, courseLabel, difficulty,
 
     const q3 = useTwist ? scenario.twist : c2;
 
-    // bygg meningar enligt profil
     const out = joinSentences(sv, s1, q2, q3, lenProf.sentences);
 
-    // säkerställ min-längd genom att lägga till en extra konkret rad om den blev kort
     if (safeStr(out).length < lenProf.minChars) {
       const add = sv
         ? "Du behöver kunna förklara varför ni valde just detta, och vad nästa uppföljning blir."
@@ -1449,7 +1305,6 @@ function makeFallbackQuestion({ i, language, courseLabel, batch }) {
     ? "Förklaring: Första steget är att säkra fakta och spårbarhet innan ni väljer åtgärd. Annars riskerar ni att lösa fel problem."
     : "Explanation: The first step is to secure facts and traceability before choosing an action. Otherwise you risk solving the wrong problem.";
 
-  // bygg “choice-question” som resten av pipeline förväntar sig
   const choices = options.map((t, idx) => ({ id: `c${idx + 1}`, text: t }));
   return {
     kind: "question",
@@ -1491,6 +1346,9 @@ function shuffledIndices(n, seed) {
 
 // ============================================================
 // BLOCK 15 — Choice pools + rationales
+// ============================================================
+// (OFÖRÄNDRAD, samma som din senaste sanning)
+// ... (resten av BLOCK 15 ligger kvar exakt som du hade den)
 // ============================================================
 
 function getChoicePools(language) {
@@ -1727,188 +1585,6 @@ function buildRationale({ language, dim, place, bestAnswerText }) {
     return `Explanation: "${bestAnswerText}" is the answer here. Evaluate strictly and pick the option that best matches the situation ${place}.`;
   }
   return `Explanation: "${bestAnswerText}" is correct because it creates clarity ${place}: what applies now, who owns the next action, and how you will follow up.`;
-}
-
-// ============================================================
-// BLOCK 16 — UI-frågeformat (options + correctIndex)
-// ============================================================
-
-function normalizeQuestionType(v) {
-  const raw = safeStr(v).trim();
-  const s0 = raw.toLowerCase();
-  if (!s0) return "";
-
-  const s = s0
-    .replace(/\s+/g, "_")
-    .replace(/[()]/g, "")
-    .replace(/å/g, "a")
-    .replace(/ä/g, "a")
-    .replace(/ö/g, "o");
-
-  // P0: ALLA auto-varianter ska räknas som "auto"
-  // Ex: "auto", "auto_mcq", "auto-mcq", "auto mcq single", "auto_tf", "auto_anything"
-  if (s === "auto" || s.startsWith("auto_") || s.startsWith("auto-") || s.startsWith("auto")) {
-    return "auto";
-  }
-
-  // Canonical (ai-rules/v1)
-  if (s === "mcq_single" || s === "single" || s === "mcq" || s === "mcq1" || s === "mcq_one") return "mcq_single";
-  if (s === "mcq_multi" || s === "multi" || s === "mcqm" || s === "mcq_many") return "mcq_multi";
-  if (s === "truefalse" || s === "true_false" || s === "sant_falskt" || s === "santfalskt" || s === "tf") return "true_false";
-  if (s === "short_answer" || s === "short" || s === "kortsvar" || s === "kort") return "short_answer";
-  if (s === "numeric" || s === "number" || s === "tal") return "numeric";
-
-  if (s.includes("mcq") && s.includes("multi")) return "mcq_multi";
-  if (s.includes("mcq") && (s.includes("single") || s.includes("ett") || s.includes("one") || s.includes("1"))) return "mcq_single";
-  if (s.includes("true") || s.includes("false") || s.includes("sant") || s.includes("falskt")) return "true_false";
-
-  return raw;
-}
-
-// P0 PATCH: "auto" är också ett UI-frågeläge och ska ge stabilt items[]-output.
-function isUiQuestionRequest(questionType) {
-  const qt = normalizeQuestionType(questionType);
-  return qt === "auto" || qt === "mcq_single" || qt === "mcq_multi" || qt === "true_false";
-}
-
-function mapTrainingBlocksToUiQuestions(trainingBlocks, questionType, language) {
-  const qt0 = normalizeQuestionType(questionType);
-  const qt = (qt0 === "auto") ? "mcq_single" : qt0; // P0 PATCH: auto -> mcq_single (stabil UI-contract)
-
-  const blocks = Array.isArray(trainingBlocks) ? trainingBlocks : [];
-  const out = [];
-
-  for (const b of blocks) {
-    if (!b || b.kind !== "question") continue;
-    const q = extractQuestionFromBlock(b);
-    if (!q.ok) continue;
-
-    const mapped = mapChoiceQuestionToUi(q.question, qt, language);
-    if (mapped.ok) out.push(mapped.item);
-  }
-
-  // Fail-closed: om vi genererade 0, eller om vi tappade frågor (mappningen ska vara 1:1)
-  const expected = blocks.filter(x => x && x.kind === "question").length;
-  if (out.length === 0 || out.length !== expected) {
-    return {
-      ok: false,
-      errorCode: "Q_SCHEMA_INVALID",
-      message: "Kunde inte skapa giltiga provfrågor (items) för hela batchen"
-    };
-  }
-
-  return { ok: true, items: out };
-}
-
-function extractQuestionFromBlock(block) {
-  const items = Array.isArray(block.items) ? block.items : [];
-  for (const it of items) {
-    if (it && it.type === "questionInline" && isPlainObject(it.question)) {
-      return { ok: true, question: it.question };
-    }
-  }
-  return { ok: false };
-}
-
-function mapChoiceQuestionToUi(q, questionType, language) {
-  const question = stripDomainWordsFromQuestion(safeStr(q.text).trim(), language);
-
-  const choices = Array.isArray(q.choices) ? q.choices : [];
-  if (!question || choices.length < 2) return { ok: false };
-
-  const options = [];
-  for (const c of choices) {
-    const t0 = safeStr(c && c.text).trim();
-    if (t0) options.push(t0);
-  }
-  if (options.length < 2) return { ok: false };
-
-  let explanation = safeStr(q.rationale || q.explanation || q.feedback || "").trim();
-  explanation = stripDomainWordsFromQuestion(explanation, language);
-
-  const difficulty = safeStr(q.difficulty).trim() || undefined;
-  const tags = Array.isArray(q.tags) ? q.tags.slice(0, 8) : undefined;
-
-  if (questionType === "true_false") {
-    const a = (language === "sv") ? "Sant" : "True";
-    const b = (language === "sv") ? "Falskt" : "False";
-    const correctId = safeStr(q.correctChoiceId).trim();
-    const idx = indexOfChoiceId(choices, correctId);
-    const correctIndex = (idx >= 0 && idx <= 1) ? idx : 0;
-
-    return {
-      ok: true,
-      item: {
-        type: "question",
-        questionType: "true_false",
-        ...(difficulty ? { difficulty } : {}),
-        question,
-        options: [a, b],
-        correctIndex,
-        ...(explanation ? { explanation } : {}),
-        ...(tags ? { tags } : {})
-      }
-    };
-  }
-
-  if (questionType === "mcq_single") {
-    const correctId = safeStr(q.correctChoiceId).trim();
-    const idx = indexOfChoiceId(choices, correctId);
-    if (idx < 0 || idx >= options.length) return { ok: false };
-
-    return {
-      ok: true,
-      item: {
-        type: "question",
-        questionType: "mcq_single",
-        ...(difficulty ? { difficulty } : {}),
-        question,
-        options,
-        correctIndex: idx,
-        ...(explanation ? { explanation } : {}),
-        ...(tags ? { tags } : {})
-      }
-    };
-  }
-
-  if (questionType === "mcq_multi") {
-    const ids = Array.isArray(q.correctChoiceIds) ? q.correctChoiceIds : [];
-    const indices = [];
-    for (const id of ids) {
-      const idx = indexOfChoiceId(choices, safeStr(id).trim());
-      if (idx >= 0 && idx < options.length && !indices.includes(idx)) indices.push(idx);
-    }
-    if (indices.length === 0) {
-      const correctId = safeStr(q.correctChoiceId).trim();
-      const idx = indexOfChoiceId(choices, correctId);
-      if (idx < 0 || idx >= options.length) return { ok: false };
-      indices.push(idx);
-    }
-
-    return {
-      ok: true,
-      item: {
-        type: "question",
-        questionType: "mcq_multi",
-        ...(difficulty ? { difficulty } : {}),
-        question,
-        options,
-        correctIndices: indices,
-        ...(explanation ? { explanation } : {}),
-        ...(tags ? { tags } : {})
-      }
-    };
-  }
-
-  return { ok: false };
-}
-
-function indexOfChoiceId(choices, id) {
-  if (!id) return -1;
-  for (let i = 0; i < choices.length; i++) {
-    if (safeStr(choices[i] && choices[i].id).trim() === id) return i;
-  }
-  return -1;
 }
 
 // ===================== EOF =====================
