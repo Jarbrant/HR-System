@@ -1,7 +1,7 @@
 // ============================================================
 // AO-WORKER-TRAINING-BLOCKS-01 | worker/http.js
-// Syfte: HTTP helpers (CORS + JSON responses) — flytt från index.js (BLOCK 05)
-// POLICY: No behavior change. Fail-closed bibehålls.
+// Syfte: HTTP/CORS/JSON helpers — flytt från worker/index.js (BLOCK 05)
+// POLICY: No behavior change. Inga sid-effekter.
 // ============================================================
 
 function safeStr(v) {
@@ -47,4 +47,3 @@ export function extractBearerToken(authHeader) {
   if (!h.toLowerCase().startsWith("bearer ")) return "";
   return h.slice(7).trim();
 }
-
