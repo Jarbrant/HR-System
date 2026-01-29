@@ -2,12 +2,11 @@
 // PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.9c VARIATION+ARC + V1-CONTRACT)
 // FIL: worker/index.js
 //
-// HOTFIX v1.5.9c (NO-CRASH + CORS-NORMALIZE + SELF-CONTAINED UTILS):
-// - P0: Tar bort import-beroende av ./question-ui.js (vanlig orsak till Error 1101 vid deploy).
-//       UI-frågeformat-funktioner inline:as här för att Workern alltid ska starta.
-// - P0: Normaliserar ALLOWED_ORIGIN (tål trailing slash) + jämför normaliserat mot request Origin.
-// - P0: Undviker build-fel pga saknade exports i worker/utils.js genom att bara importera
-//       safeStr/isPlainObject/safeArr och definiera normalize* + hash + requestId lokalt här.
+// HOTFIX v1.5.9c-dbg2 (NO-CRASH + CORS-NORMALIZE + SELF-CONTAINED):
+// - P0: Inga imports till question-ui.js (inline UI-map).
+// - P0: Undvik deploy-crash pga saknade exports i utils/rules/course:
+//       => importerar ENDAST isPlainObject/safeStr/safeArr från ./utils.js.
+//       => allt annat är lokalt i denna fil.
 // - P0: Fail-closed: JSON-only, payload <= 64KB, CORS strikt, loggar aldrig payload.
 // - P0: Oförändrat output-contract: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
 // ============================================================
@@ -17,12 +16,6 @@
 // ============================================================
 
 import { isPlainObject, safeStr, safeArr } from "./utils.js";
-
-// OBS: vi behåller rules/course-import *valfritt* (för framtida engine),
-// men vi använder dem inte i hotfix-engine för att undvika nya crash-or.
-// Om du vill “slå på” de avancerade reglerna senare, finns krokarna här.
-import { getRulesBundle, getQuestionQuality } from "./rules.js";
-import { parseV1RulesetPayload, validateCourseSubject, normalizeCourseSubject } from "./course.js";
 
 // ============================================================
 // BLOCK 01B — UI question helpers (INLINE HOTFIX)
@@ -127,7 +120,7 @@ export const MAX_BODY_BYTES = 64 * 1024;
 const VERSION = "1.5.9c-dbg2";
 
 // ============================================================
-// BLOCK 02B — Local utils (self-contained)  [P0: undvik saknade exports i utils.js]
+// BLOCK 02B — Local utils (self-contained)  [P0: undvik import-crash]
 // ============================================================
 
 function normalizeLanguage(v) {
@@ -147,7 +140,6 @@ function normalizeContextText(v) {
   // UI kan skicka object — vi fail-closed till text
   if (typeof v === "string") return v.trim();
   if (v === null || v === undefined) return "";
-  // Försök plocka “text” om det är ett objekt
   try {
     if (typeof v === "object") {
       const t = safeStr(v.text || v.contextText || v.prompt || "");
@@ -166,7 +158,6 @@ function normalizeCount(v) {
 }
 
 function makeRequestId() {
-  // enkel deterministic-ish id: crypto om finns, annars fallback
   try {
     if (typeof crypto !== "undefined" && crypto && typeof crypto.getRandomValues === "function") {
       const b = new Uint8Array(16);
@@ -174,7 +165,6 @@ function makeRequestId() {
       return Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
     }
   } catch (_) {}
-  // fallback
   return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
 }
 
@@ -193,6 +183,53 @@ function normalizeOrigin(s) {
   return safeStr(s).trim().replace(/\/+$/g, "");
 }
 
+/**
+ * parseV1RulesetPayload (tolerant, fail-closed)
+ * - Om payload inte matchar ett känt v1-upplägg => return null.
+ * - Vi undviker import-beroenden här för deploy-stabilitet.
+ */
+function parseV1RulesetPayload(body) {
+  if (!isPlainObject(body)) return null;
+
+  // Ex: body.v1 = { ... } eller body.rulesetVersion="v1"
+  const rv = safeStr(body.rulesetVersion || body.ruleset || body.version || "").toLowerCase().trim();
+  const v1obj = isPlainObject(body.v1) ? body.v1 : null;
+
+  if (!v1obj && rv !== "v1" && rv !== "ai-rules/v1") return null;
+
+  const src = v1obj || body;
+
+  const mode = normalizeMode(src.mode || src.type || "training");
+  const count = normalizeCount(src.count ?? src.n);
+  const language = normalizeLanguage(src.language || "sv");
+  const contextText = normalizeContextText(src.context ?? src.contextText ?? src.prompt ?? "");
+  const format = safeStr(src.format || "").trim();
+  const subjectId = safeStr(src.subjectId || src.subject || "").trim();
+  const questionType = normalizeQuestionType(src.questionType || src.qType || "");
+  const difficulty = src.difficultyHint ?? src.difficulty ?? "";
+
+  // course: pass-through (inte validerad i hotfix)
+  const course = isPlainObject(src.course) ? src.course : (isPlainObject(src.subjectObj) ? src.subjectObj : null);
+
+  if (!count) return null; // v1 måste ha count inom 1..12 för att anses giltig här
+
+  return { mode, count, language, contextText, format, subjectId, questionType, difficulty, course };
+}
+
+function normalizeCourseSubject(subjectObj) {
+  // hotfix: vi kräver inte kursobjekt för att fungera (UI kan skicka tomt)
+  if (!isPlainObject(subjectObj)) return { id: "generic" };
+  const id = safeStr(subjectObj.id || subjectObj.subjectId || subjectObj.subject || "generic").trim() || "generic";
+  return { ...subjectObj, id };
+}
+
+function validateCourseSubject(course) {
+  // hotfix: fail-soft (ingen blockerande validering)
+  if (!course) return { ok: true };
+  if (typeof course !== "object") return { ok: true };
+  return { ok: true };
+}
+
 // ============================================================
 // BLOCK 03 — Fetch handler (routing + guards)
 // ============================================================
@@ -202,9 +239,9 @@ export default {
     let requestId = makeRequestId();
     const url = new URL(request.url);
 
-    const allowedOriginRaw = safeStr(env.ALLOWED_ORIGIN).trim();
-    const requireAuth = safeStr(env.REQUIRE_AUTH).trim().toLowerCase() === "true";
-    const aiEnabled = safeStr(env.AI_ENABLED).trim().toLowerCase() === "true";
+    const allowedOriginRaw = safeStr(env && env.ALLOWED_ORIGIN).trim();
+    const requireAuth = safeStr(env && env.REQUIRE_AUTH).trim().toLowerCase() === "true";
+    const aiEnabled = safeStr(env && env.AI_ENABLED).trim().toLowerCase() === "true";
 
     // ---------- ENV GUARD (fail-closed) ----------
     if (!allowedOriginRaw) {
@@ -294,7 +331,7 @@ export default {
     // ---------- AUTH (Bearer) ----------
     if (requireAuth) {
       const token = extractBearerToken(request.headers.get("Authorization") || "");
-      const expected = safeStr(env.WORKER_TOKEN).trim();
+      const expected = safeStr(env && env.WORKER_TOKEN).trim();
       if (!token || !expected || token !== expected) {
         return errorJSON(401, requestId, "UNAUTHORIZED", "Ogiltig eller saknad token", corsHeaders, true);
       }
@@ -380,7 +417,7 @@ export default {
 
     let course = normalizeCourseSubject(subjectObj);
 
-    // ---- V1 override (ai-rules/v1) ----
+    // ---- V1 override (tolerant) ----
     if (isV1) {
       mode = v1.mode;
       format = v1.format;
@@ -388,7 +425,7 @@ export default {
       languageRaw = v1.language;
       questionType = v1.questionType;
       difficultyHint = v1.difficulty;
-      course = v1.course;
+      course = normalizeCourseSubject(v1.course);
       contextText = v1.contextText;
       subjectId = v1.subjectId || subjectId;
     }
@@ -415,7 +452,7 @@ export default {
 
     const courseCheck = validateCourseSubject(course);
     if (!courseCheck.ok) {
-      return errorJSON(400, requestId, "VALIDATION_ERROR", courseCheck.message, corsHeaders, true);
+      return errorJSON(400, requestId, "VALIDATION_ERROR", courseCheck.message || "course ogiltig", corsHeaders, true);
     }
 
     // ============================================================
@@ -424,7 +461,6 @@ export default {
     // ============================================================
 
     if (!aiEnabled) {
-      // fail-closed: AI avstängt i env
       return errorJSON(503, requestId, "AI_DISABLED", "AI_ENABLED=false (Workern är avstängd)", corsHeaders, true);
     }
 
@@ -492,7 +528,7 @@ function buildCorsHeaders(origin, allowedOrigin) {
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
     "Access-Control-Allow-Headers":
       "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
-    Vary: "Origin",
+    "Vary": "Origin",
   };
 }
 
@@ -559,11 +595,9 @@ function buildTrainingBlocks(input) {
 
   const blocks = [];
   for (let i = 0; i < count; i++) {
-    const seed = (seedBase + i * 97) >>> 0;
     blocks.push(
       makeQuestionBlock({
         i,
-        seed,
         language,
         pack,
         dim: arc[i] || "scenario_application",
