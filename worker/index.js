@@ -1,13 +1,22 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.4 VARIATION+ARC+LEVEL + V1-CONTRACT)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.4 VARIATION+ARC + V1-CONTRACT)
 // FIL: worker/index.js
 //
-// PATCH v1.6.4 (COURSE+LEVEL SEEDING + DIFFICULTY SHAPING):
-// - P0: effectiveSubjectId = bundle.subjectId || input.subjectId || "generic" används i ALLA seeds.
-// - P0: normalizeLevel(intro/normal/advanced) påverkar arc + scenario-pack + prompt + deterministic.
-// - P1: Deterministic fallback får level-profiler + seeded shuffle så facit inte “fastnar”.
-// - P0: Behåller output-contract: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
-// - P0: Debug headers bibehålls: X-HR-AI + X-HR-AI-REASON
+// PATCH v1.6.4 (EXPLANATION-LESSON):
+// - P0: "Förklaring" blir mini-lektion (4–6 meningar) med struktur:
+//       Princip → Varför rätt → Varför minst ett fel är fel → Ta med dig.
+// - P0: Gäller både CF-AI och deterministic fallback.
+// - P0: Om AI skickar för kort/ingen förklaring → workern bygger en stabil mini-lektion.
+//
+// Tidigare patchar bibehålls (v1.6.3):
+// - P0: Context unwrap/parsa context.text även när det är "dubbelt JSON".
+// - P0: Extrahera subject/course/level + focus → injiceras i prompt som hårda rubriker.
+// - P0: Striktare prompt: 2–3 meningar, scenario → beslut, unika frågor, inga fluffrader.
+// - P0: Seed-shuffle av options + korrekt correctIndex (undvik att facit alltid blir 0).
+// - P0: Robustare JSON extraction behålls + fail-soft (skippa trasiga frågor, toppa upp deterministic).
+// - P0: Debug headers bibehålls: X-HR-AI + X-HR-AI-REASON (+ X-HR-AI-DBG om du redan sätter den i svar).
+//
+// Output-contract: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
 // ============================================================
 
 // ============================================================
@@ -171,24 +180,6 @@ function normalizeOrigin(s) {
   return safeStr(s).trim().replace(/\/+$/g, "");
 }
 
-function normalizeLevel(levelRaw, difficultyHintRaw) {
-  const a = safeStr(levelRaw).toLowerCase().trim();
-  const b = safeStr(difficultyHintRaw).toLowerCase().trim();
-  const s = a || b;
-
-  if (!s) return "normal";
-
-  // intro
-  if (s === "intro" || s === "introduktion" || s === "beginner" || s === "basic" || s === "nybörjare") return "intro";
-  if (s.includes("intro") || s.includes("introdu")) return "intro";
-
-  // advanced
-  if (s === "advanced" || s === "avancerad" || s === "svår" || s === "hard" || s === "expert") return "advanced";
-  if (s.includes("avancer") || s.includes("expert") || s.includes("advanced")) return "advanced";
-
-  return "normal";
-}
-
 // ---------- Robust JSON extraction (first {...} object) ----------
 function extractFirstJsonObjectString(text) {
   const s = safeStr(text);
@@ -304,11 +295,16 @@ function normalizeToAiQt(questionTypeRaw) {
 // ============================================================
 
 function parseContextBundle(contextTextRaw) {
+  // Förväntat i ditt fall: en sträng som ser ut som "\"{\\\"subject\\\":...}\""
+  // Vi hanterar:
+  // 1) JSON-objekt i text
+  // 2) JSON-sträng som innehåller JSON-objekt
   const raw = safeStr(contextTextRaw).trim();
   if (!raw) return null;
 
   let v = safeJsonParseLoose(raw);
   if (typeof v === "string") {
+    // andra lagret
     const v2 = safeJsonParseLoose(v);
     if (isPlainObject(v2)) v = v2;
   }
@@ -345,7 +341,7 @@ function parseContextBundle(contextTextRaw) {
   };
 }
 
-function fmtContextForPrompt(bundle, language, normLevel) {
+function fmtContextForPrompt(bundle, language) {
   const sv = language === "sv";
   if (!bundle) return sv ? "KURSINFO: (saknas)" : "COURSE INFO: (missing)";
 
@@ -356,7 +352,7 @@ function fmtContextForPrompt(bundle, language, normLevel) {
   if (bundle.subjectId) lines.push(`subjectId: ${bundle.subjectId}`);
   if (bundle.chapter) lines.push(`${sv ? "Kapitel" : "Chapter"}: ${bundle.chapter}`);
   if (bundle.step) lines.push(`${sv ? "Steg" : "Step"}: ${bundle.step}`);
-  lines.push(`${sv ? "Nivå" : "Level"}: ${normLevel}`);
+  if (bundle.level) lines.push(`${sv ? "Nivå" : "Level"}: ${bundle.level}`);
   if (bundle.title) lines.push(`${sv ? "Titel" : "Title"}: ${bundle.title}`);
   if (bundle.chapterFocus) lines.push(`${sv ? "Kapitel-fokus" : "Chapter focus"}: ${bundle.chapterFocus}`);
   if (bundle.stepFocus) lines.push(`${sv ? "Steg-fokus" : "Step focus"}: ${bundle.stepFocus}`);
@@ -366,10 +362,83 @@ function fmtContextForPrompt(bundle, language, normLevel) {
 }
 
 // ============================================================
+// BLOCK 02E — Explanation (mini-lesson)  [P0]
+// ============================================================
+
+function looksLikeMiniLesson(expl, language) {
+  const s = safeStr(expl).trim();
+  if (!s) return false;
+  const lower = s.toLowerCase();
+  const hasTagsSv = lower.includes("princip") || lower.includes("varför rätt") || lower.includes("ta med dig");
+  const hasTagsEn = lower.includes("principle") || lower.includes("why correct") || lower.includes("takeaway");
+  const hasTags = language === "sv" ? hasTagsSv : hasTagsEn;
+
+  // heuristik: minst ~240 tecken (ungefär 4 meningar) eller taggar
+  if (hasTags) return true;
+  return s.length >= 240;
+}
+
+function buildMiniLessonExplanation({ language, bundle, pack, dim, correctText, wrongText }) {
+  const sv = language === "sv";
+  const mod = safeStr(bundle && bundle.module).trim();
+  const area = safeStr(bundle && bundle.area).trim();
+  const chapter = safeStr(bundle && bundle.chapter).trim();
+  const step = safeStr(bundle && bundle.step).trim();
+  const level = safeStr(bundle && bundle.level).trim();
+
+  const ctxBits = [];
+  if (mod) ctxBits.push(mod);
+  if (area) ctxBits.push(area);
+  if (chapter) ctxBits.push(chapter);
+  if (step) ctxBits.push(`${sv ? "Steg" : "Step"} ${step}`);
+  if (level) ctxBits.push(`${sv ? "Nivå" : "Level"} ${level}`);
+  const ctx = ctxBits.length ? ctxBits.join(" • ") : (sv ? "Utbildning" : "Training");
+
+  const isIso = (safeStr(area).toLowerCase().includes("iso 9001") || safeStr(pack && pack.setting).toLowerCase().includes("iso 9001"));
+
+  if (sv) {
+    const p1 = `Princip: Spårbarhet betyder att ni kan visa vilka fakta som fanns och varför beslutet togs (${ctx}).`;
+    const p2 = `Varför rätt: Genom att ${safeStr(correctText).trim()} skapar ni underlag som håller vid granskning${isIso ? " (ISO 9001)" : ""} och gör beslutet möjligt att följa i efterhand.`;
+    const p3 = `Varför fel: Om ni ${safeStr(wrongText).trim()} riskerar ni att agera på antaganden som inte går att bevisa eller återupprepa.`;
+    const p4 = `Ta med dig: Saknas underlag – stoppa, säkra evidens, dokumentera beslutet och fortsätt först när spåret är tydligt.`;
+    return `${p1} ${p2} ${p3} ${p4}`.trim();
+  }
+
+  const p1 = `Principle: Traceability means you can show what facts you had and why the decision was made (${ctx}).`;
+  const p2 = `Why correct: By ${safeStr(correctText).trim()} you create evidence that stands up to review${isIso ? " (ISO 9001)" : ""} and makes the decision traceable afterwards.`;
+  const p3 = `Why a wrong option is wrong: If you ${safeStr(wrongText).trim()} you risk acting on assumptions that cannot be verified or repeated.`;
+  const p4 = `Takeaway: If evidence is missing—pause, secure proof, document the decision, and proceed only when the chain is clear.`;
+  return `${p1} ${p2} ${p3} ${p4}`.trim();
+}
+
+function ensureMiniLessonExplanation({ language, bundle, pack, dim, options, correctIndex, baseExplanation }) {
+  const expl = safeStr(baseExplanation).trim();
+  if (looksLikeMiniLesson(expl, language)) return expl;
+
+  const opts = Array.isArray(options) ? options : [];
+  const ci = Math.max(0, Math.min(opts.length - 1, Number(correctIndex) || 0));
+
+  const correctText = opts[ci] ? `“${opts[ci]}”` : (language === "sv" ? "välja rätt alternativ" : "choosing the correct option");
+
+  // välj en tydlig felkandidat att referera till
+  let wrongIdx = -1;
+  for (let i = 0; i < opts.length; i++) {
+    if (i !== ci && safeStr(opts[i]).trim()) {
+      wrongIdx = i;
+      break;
+    }
+  }
+  const wrongText = wrongIdx >= 0 ? `“${opts[wrongIdx]}”` : (language === "sv" ? "gå vidare utan underlag" : "proceed without evidence");
+
+  return buildMiniLessonExplanation({ language, bundle, pack, dim, correctText, wrongText });
+}
+
+// ============================================================
 // BLOCK 02D — Seeded shuffle for MCQ options (P0)
 // ============================================================
 
 function seededRand(seed) {
+  // enkel LCG
   let x = (seed >>> 0) || 1;
   return function () {
     x = (Math.imul(1664525, x) + 1013904223) >>> 0;
@@ -385,15 +454,18 @@ function shuffleWithCorrectIndex(options, correctIndex, seed) {
   const ci = Math.max(0, Math.min(n - 1, Number(correctIndex) || 0));
   const rand = seededRand(seed);
 
+  // Fisher-Yates, men spåra var facit hamnar
   let currentCorrect = ci;
   for (let i = n - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
     if (i === j) continue;
 
+    // swap
     const tmp = arr[i];
     arr[i] = arr[j];
     arr[j] = tmp;
 
+    // uppdatera correctIndex om vi swappade en position som påverkar facit
     if (currentCorrect === i) currentCorrect = j;
     else if (currentCorrect === j) currentCorrect = i;
   }
@@ -435,6 +507,7 @@ function normalizeCourseSubject(subjectObj) {
 }
 
 function validateCourseSubject(course) {
+  // hotfix: fail-soft
   if (!course) return { ok: true };
   if (typeof course !== "object") return { ok: true };
   return { ok: true };
@@ -779,6 +852,7 @@ function extractBearerToken(authHeader) {
 // ============================================================
 
 async function buildTrainingBlocks(input, env) {
+  // Returnerar {training, source:"cf"|"fallback", reason:"..."}
   const hasBinding = !!(env && env.AI && typeof env.AI.run === "function");
   if (!hasBinding) {
     return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "NO_BINDING" };
@@ -801,75 +875,27 @@ async function buildTrainingBlocksWithAI(input, env) {
   const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
   const language = normalizeLanguage(input && input.language);
   const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
-  const subjectIdIn = safeStr(input && input.subjectId).trim() || "generic";
-
-  // P0: unwrap kursinfo + normalisera level
-  const bundle = parseContextBundle(contextTextRaw);
-  const level = normalizeLevel(bundle && bundle.level, input && input.difficultyHint);
-  const effectiveSubjectId = safeStr((bundle && bundle.subjectId) || subjectIdIn || "generic").trim() || "generic";
+  const subjectId = safeStr(input && input.subjectId).trim() || "generic";
 
   // P0: "auto" -> mcq_single i AI-ledet
   const qt = normalizeToAiQt(input && input.questionType);
 
-  const courseInfo = fmtContextForPrompt(bundle, language, level);
+  // P0: unwrap kursinfo från context.text (även om den är dubbelt JSON)
+  const bundle = parseContextBundle(contextTextRaw);
+  const courseInfo = fmtContextForPrompt(bundle, language);
 
   const place = inferWorkplaceFromContext(contextTextRaw, language);
-
-  const arc = buildStoryArc(count, level);
-
-  const packSeed = hash32(
-    [
-      "pack",
-      VERSION,
-      effectiveSubjectId,
-      language,
-      qt,
-      level,
-      (bundle && (bundle.module || "")) || "",
-      (bundle && (bundle.area || "")) || "",
-      (bundle && (bundle.chapter || "")) || "",
-      (bundle && (bundle.step || "")) || "",
-      (bundle && (bundle.title || "")) || "",
-      contextTextRaw.slice(0, 120),
-    ].join("|")
+  const arc = buildStoryArc(count);
+  const pack = pickScenarioPack(
+    contextTextRaw,
+    place,
+    language,
+    hash32(`${requestId}|${subjectId}|${language}|${(bundle && (bundle.module + "|" + bundle.area + "|" + bundle.chapter)) || ""}|${contextTextRaw.slice(0, 120)}`)
   );
-
-  const pack = pickScenarioPack(contextTextRaw, place, language, packSeed);
 
   const sv = language === "sv";
 
-  const levelRulesSv =
-    level === "intro"
-      ? `NIVÅ-PROFIL: INTRO
-- Fokus: definitioner, syfte, grundregler, vanliga nybörjarmisstag.
-- Språk: enkelt och konkret.
-- Svårighet: tydligt rätt/fel men inga trams-alternativ.`
-      : level === "advanced"
-      ? `NIVÅ-PROFIL: AVANCERAD
-- Fokus: trade-offs, avvikelse, beviskrav, ansvar/roll, “minst dåliga” val.
-- Språk: precist, inga förenklingar.
-- Svårighet: alternativen ska vara plausibla; rätt svar är “bäst” utifrån spårbarhet/risk.`
-      : `NIVÅ-PROFIL: NORMAL
-- Fokus: scenario → första steg, spårbarhet, rutin, bevis.
-- Språk: tydligt men inte barnsligt.
-- Svårighet: plausibla distraktorer, rätt svar motiveras.`;
-
-  const levelRulesEn =
-    level === "intro"
-      ? `LEVEL PROFILE: INTRO
-- Focus: definitions, purpose, basic rules, common beginner mistakes.
-- Language: simple and concrete.
-- Difficulty: clear right/wrong without silly options.`
-      : level === "advanced"
-      ? `LEVEL PROFILE: ADVANCED
-- Focus: trade-offs, deviation handling, evidence, ownership/roles, “least-bad” decisions.
-- Language: precise, no oversimplification.
-- Difficulty: all options plausible; correct is best under traceability/risk.`
-      : `LEVEL PROFILE: NORMAL
-- Focus: scenario → first step, traceability, routine, evidence.
-- Language: clear but not simplistic.
-- Difficulty: plausible distractors; justify the best choice.`;
-
+  // P0: hårdare krav på “riktiga” frågor och MCQ-kvalitet + mini-lektion i explanation
   const schemaHint = sv
     ? `Returnera ENDAST giltig JSON. Inget markdown. Inga extra rader. JSON måste börja med "{" och sluta med "}".
 Schema:
@@ -881,11 +907,15 @@ Schema:
 Regler (mycket viktiga):
 - Exakt ${count} frågor (inte fler/inte färre).
 - Varje "stem" är 2–3 meningar (scenario + beslut), inte en kort rad.
-- Sista meningen är en tydlig fråga.
+- Ställ en tydlig fråga i sista meningen. Undvik ja/nej-frågor.
 - options: 4 st (true_false: 2 st). Alla alternativ ska vara plausibla och tydligt olika.
 - correctIndex inom range och får inte alltid vara 0.
-- explanation: 1–2 meningar: varför rätt är bäst + varför minst ett fel är sämre.
-- Varje fråga måste använda kursinfo-ord (modul/område/kapitel/steget) och följa nivån.
+- explanation: 4–6 meningar som en mini-lektion i exakt struktur:
+  1) "Princip:" (vad man lär sig),
+  2) "Varför rätt:" (koppla till scenario/kursinfo),
+  3) "Varför fel:" (nämn minst ett felalternativ och varför),
+  4) "Ta med dig:" (konkret tumregel).
+- Varje fråga måste kännas kopplad till modul/område/kapitel/steget (använd orden i kursinfo).
 - Inga platshållare ("som ovan", "...", "osv"). Inga meta-texter.`
     : `Return ONLY valid JSON. No markdown, no extra lines. JSON must start with "{" and end with "}".
 Schema:
@@ -897,11 +927,15 @@ Schema:
 Rules (very important):
 - Exactly ${count} questions.
 - Each stem is 2–3 sentences (scenario + decision), not a short line.
-- Last sentence is a clear question.
-- options: 4 (true_false: 2). All options plausible and distinct.
+- The last sentence is a clear question.
+- options: 4 (true_false: 2). All options must be plausible and clearly distinct.
 - correctIndex in range and not always 0.
-- explanation: 1–2 sentences: why correct is best + why at least one wrong is worse.
-- Must use course info terms and match the level.
+- explanation: 4–6 sentences as a mini-lesson with this structure:
+  1) "Principle:" (what you learn),
+  2) "Why correct:" (tie to scenario/course info),
+  3) "Why wrong:" (mention at least one wrong option and why),
+  4) "Takeaway:" (a concrete rule of thumb).
+- Must tie to course info (use module/area/chapter/step focus terms).
 - No placeholders. No meta text.`;
 
   const systemPrompt = sv
@@ -910,12 +944,13 @@ Rules (very important):
 
   const userPrompt =
     `${courseInfo}\n\n` +
-    (sv ? `${levelRulesSv}\n\n` : `${levelRulesEn}\n\n`) +
     (sv ? `SCENARIOPACK:\n` : `SCENARIO PACK:\n`) +
     `- place: ${pack.place}\n- setting: ${pack.setting}\n- artifact: ${pack.artifact}\n- constraintB: ${pack.constraintB}\n- twist: ${pack.twist}\n\n` +
     (sv ? `ARC (i ordning):\n${arc.join(", ")}\n\n` : `ARC (in order):\n${arc.join(", ")}\n\n`) +
     `questionType: ${qt}\n\n` +
-    (sv ? `KONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n\n` : `CONTEXT (raw):\n${contextTextRaw || "(none)"}\n\n`) +
+    (sv
+      ? `KONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n\n`
+      : `CONTEXT (raw):\n${contextTextRaw || "(none)"}\n\n`) +
     schemaHint;
 
   const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
@@ -929,6 +964,7 @@ Rules (very important):
       ],
     });
   } catch (_) {
+    // fallback modell
     answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
       messages: [
         { role: "system", content: systemPrompt },
@@ -937,6 +973,7 @@ Rules (very important):
     });
   }
 
+  // CF kan ge object med response: "..." (string), eller ibland direkt text/objekt.
   const raw = isPlainObject(answer) ? answer.response || answer.result || answer.output || answer.text || answer : answer;
 
   const parsed = safeJsonFromUnknown(raw);
@@ -948,12 +985,14 @@ Rules (very important):
   const blocks = [];
   const seenStem = new Set();
 
+  // FAIL-SOFT: skippa trasiga, fyll upp senare
   for (let i = 0; i < qArr.length && blocks.length < count; i++) {
     const q = qArr[i];
 
     const stem = safeStr(q && (q.stem || q.question || q.text)).trim();
     if (!stem) continue;
 
+    // anti-duplicates (normalize whitespace)
     const key = stem.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenStem.has(key)) continue;
     seenStem.add(key);
@@ -966,9 +1005,14 @@ Rules (very important):
     options = uniqStrings(options);
 
     if (qt === "true_false") {
-      if (options.length < 2) options = sv ? ["Sant", "Falskt"] : ["True", "False"];
-      else options = options.slice(0, 2);
+      // enforce 2
+      if (options.length < 2) {
+        options = sv ? ["Sant", "Falskt"] : ["True", "False"];
+      } else {
+        options = options.slice(0, 2);
+      }
     } else {
+      // accept >=2, pad to 4
       if (options.length < 2) continue;
       options = padOptions(language, options, 4);
     }
@@ -976,29 +1020,28 @@ Rules (very important):
     const ciRaw = Number(q && q.correctIndex);
     let correctIndex = Number.isFinite(ciRaw) && ciRaw >= 0 && ciRaw < options.length ? Math.floor(ciRaw) : 0;
 
-    const seed = hash32(
-      [
-        "shuffle",
-        VERSION,
-        requestId,
-        effectiveSubjectId,
-        level,
-        (bundle && bundle.chapter) || "",
-        (bundle && bundle.step) || "",
-        key,
-        String(i),
-      ].join("|")
-    );
-
+    // P0: seed-shuffle options så facit inte fastnar
+    const seed = hash32(`${requestId}|${subjectId}|${key}|${i}`);
     const shuffled = shuffleWithCorrectIndex(options, correctIndex, seed);
     options = shuffled.options;
     correctIndex = shuffled.correctIndex;
 
-    const explanation = safeStr(q && (q.explanation || q.rationale || q.feedback)).trim();
+    const dim = arc[blocks.length] || "scenario_application";
+    const baseExplanation = safeStr(q && (q.explanation || q.rationale || q.feedback)).trim();
+    const explanation = ensureMiniLessonExplanation({
+      language,
+      bundle,
+      pack,
+      dim,
+      options,
+      correctIndex,
+      baseExplanation,
+    });
 
     blocks.push(makeQuestionBlockFromUi({ i: blocks.length, stem, options, correctIndex, explanation }));
   }
 
+  // toppa upp med deterministic om AI gav färre
   if (blocks.length < count) {
     const det = buildTrainingBlocksDeterministic({ ...input, count: count - blocks.length, questionType: qt });
     const detBlocks = Array.isArray(det && det.blocks) ? det.blocks : [];
@@ -1011,13 +1054,14 @@ Rules (very important):
 
   if (!blocks.length) return null;
 
+  // re-id 1..count stabilt
   const normalizedBlocks = blocks.slice(0, count).map((b, idx) => ({ ...b, id: `q_${idx + 1}` }));
 
   return {
     ok: true,
     v: "training-blocks@v1",
     mode,
-    subjectId: effectiveSubjectId,
+    subjectId: (bundle && bundle.subjectId) || subjectId,
     language,
     blocks: normalizedBlocks,
   };
@@ -1056,36 +1100,20 @@ function buildTrainingBlocksDeterministic(input) {
   const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
   const language = normalizeLanguage(input && input.language);
   const contextText = safeStr(input && (input.context || input.contextText)).trim();
-  const subjectIdIn = safeStr(input && input.subjectId).trim() || "generic";
+  const subjectId = safeStr(input && input.subjectId).trim() || "generic";
   const questionType = normalizeQuestionType(input && input.questionType);
-
-  const bundle = parseContextBundle(contextText);
-  const level = normalizeLevel(bundle && bundle.level, input && input.difficultyHint);
-  const effectiveSubjectId = safeStr((bundle && bundle.subjectId) || subjectIdIn || "generic").trim() || "generic";
 
   const place = inferWorkplaceFromContext(contextText, language);
 
   const seedBase = hash32(
-    [
-      "det",
-      "AO-WORKER-TRAINING-BLOCKS-01",
-      VERSION,
-      requestId || "no-req",
-      effectiveSubjectId,
-      language,
-      questionType,
-      level,
-      (bundle && bundle.chapter) || "",
-      (bundle && bundle.step) || "",
-      (bundle && bundle.title) || "",
-      (bundle && bundle.chapterFocus) || "",
-      (bundle && bundle.stepFocus) || "",
-      contextText.slice(0, 160),
-    ].join("|")
+    ["AO-WORKER-TRAINING-BLOCKS-01", VERSION, requestId || "no-req", subjectId, language, questionType, contextText.slice(0, 160)].join("|")
   );
 
-  const arc = buildStoryArc(count, level);
+  const arc = buildStoryArc(count);
   const pack = pickScenarioPack(contextText, place, language, seedBase);
+
+  // För mini-lektion även i fallback: försök tolka bundle om den finns i contextText
+  const bundle = parseContextBundle(contextText);
 
   const blocks = [];
   for (let i = 0; i < count; i++) {
@@ -1095,13 +1123,12 @@ function buildTrainingBlocksDeterministic(input) {
         language,
         pack,
         dim: arc[i] || "scenario_application",
-        level,
-        seed: hash32([seedBase, "q", i].join("|")),
+        bundle,
       })
     );
   }
 
-  return { ok: true, v: "training-blocks@v1", mode, subjectId: effectiveSubjectId, language, blocks };
+  return { ok: true, v: "training-blocks@v1", mode, subjectId, language, blocks };
 }
 
 function inferWorkplaceFromContext(contextText, language) {
@@ -1117,18 +1144,8 @@ function inferWorkplaceFromContext(contextText, language) {
   return sv ? "på arbetsplatsen" : "at work";
 }
 
-function buildStoryArc(count, level) {
-  // P0: nivå styr dimensioner tydligare
-  const introBase = [
-    "definition_or_concept",
-    "routine_start",
-    "traceability_and_evidence",
-    "scenario_application",
-    "routine_start",
-    "traceability_and_evidence",
-  ];
-
-  const normalBase = [
+function buildStoryArc(count) {
+  const base = [
     "scenario_application",
     "routine_start",
     "traceability_and_evidence",
@@ -1138,21 +1155,7 @@ function buildStoryArc(count, level) {
     "traceability_and_evidence",
     "scenario_application",
   ];
-
-  const advancedBase = [
-    "traceability_and_evidence",
-    "risk_consequence",
-    "deviation_and_action",
-    "roles_and_responsibility",
-    "risk_consequence",
-    "traceability_and_evidence",
-    "deviation_and_action",
-  ];
-
-  const tail = ["risk_consequence", "deviation_and_action", "roles_and_responsibility", "routine_start", "traceability_and_evidence"];
-
-  const base = level === "intro" ? introBase : level === "advanced" ? advancedBase : normalBase;
-
+  const tail = ["risk_consequence", "deviation_and_action", "roles_and_responsibility", "routine_start"];
   const seq = [];
   for (let i = 0; i < count; i++) seq.push(i < base.length ? base[i] : tail[(i - base.length) % tail.length]);
   return seq;
@@ -1220,118 +1223,62 @@ function pickScenarioPack(contextText, place, language, seed) {
   return { id: packId, place, setting: d.setting, artifact: d.artifact, constraintB: d.constraintB, twist: d.twist };
 }
 
-function makeQuestionBlock({ i, language, pack, dim, level, seed }) {
+function makeQuestionBlock({ i, language, pack, dim, bundle }) {
   const sv = language === "sv";
 
-  const introTagSv = " (intro)";
-  const advTagSv = " (avancerad)";
-  const introTagEn = " (intro)";
-  const advTagEn = " (advanced)";
-
-  const tagSv = level === "intro" ? introTagSv : level === "advanced" ? advTagSv : "";
-  const tagEn = level === "intro" ? introTagEn : level === "advanced" ? advTagEn : "";
-
   const stemsSv = {
-    routine_start: `Ni står ${pack.place}. ${pack.setting}. Vilket är bästa första steget för att skapa kontroll utan att gissa${tagSv}?`,
-    scenario_application: `${pack.setting}. Ni behöver fatta ett val ${pack.place}. Vilket alternativ ger mest spårbarhet i stunden${tagSv}?`,
-    traceability_and_evidence: `Ni behöver kunna visa underlag i efterhand. Vilken handling ger tydligast spårbarhet ${pack.place}${tagSv}?`,
-    risk_consequence: `${pack.constraintB} Vilket val minskar risken för felbeslut mest ${pack.place}${tagSv}?`,
-    deviation_and_action: `${pack.twist} Vad är den mest korrekta åtgärden för att hantera en möjlig avvikelse${tagSv}?`,
-    roles_and_responsibility: `Två personer vill göra olika. Vilket ansvar/roll-val ger bäst ordning och tydlighet ${pack.place}${tagSv}?`,
-    definition_or_concept: `I en situation som denna: vad betyder “spårbarhet” i praktiken ${pack.place}${tagSv}?`,
+    routine_start: `Ni står ${pack.place}. ${pack.setting}. Vilket är bästa första steget för att skapa kontroll utan att gissa?`,
+    scenario_application: `${pack.setting}. Ni behöver fatta ett val ${pack.place}. Vilket alternativ ger mest spårbarhet i stunden?`,
+    traceability_and_evidence: `Ni behöver kunna visa underlag i efterhand. Vilken handling ger tydligast spårbarhet ${pack.place}?`,
+    risk_consequence: `${pack.constraintB} Vilket val minskar risken för felbeslut mest ${pack.place}?`,
+    deviation_and_action: `${pack.twist} Vad är den mest korrekta åtgärden för att hantera en möjlig avvikelse?`,
+    roles_and_responsibility: `Två personer vill göra olika. Vilket ansvar/roll-val ger bäst ordning och tydlighet ${pack.place}?`,
+    definition_or_concept: `I en situation som denna: vad betyder “spårbarhet” i praktiken ${pack.place}?`,
   };
 
   const stemsEn = {
-    routine_start: `You are ${pack.place}. ${pack.setting}. What is the best first step to regain control without guessing${tagEn}?`,
-    scenario_application: `${pack.setting}. You must decide ${pack.place}. Which option gives the strongest traceability right now${tagEn}?`,
-    traceability_and_evidence: `You need evidence you can show later. Which action creates the clearest traceability ${pack.place}${tagEn}?`,
-    risk_consequence: `${pack.constraintB} Which choice reduces the risk of a wrong decision the most ${pack.place}${tagEn}?`,
-    deviation_and_action: `${pack.twist} What is the most correct action to handle a potential deviation${tagEn}?`,
-    roles_and_responsibility: `Two people disagree. Which role/ownership choice creates the best order and clarity ${pack.place}${tagEn}?`,
-    definition_or_concept: `In this kind of situation: what does “traceability” mean in practice ${pack.place}${tagEn}?`,
+    routine_start: `You are ${pack.place}. ${pack.setting}. What is the best first step to regain control without guessing?`,
+    scenario_application: `${pack.setting}. You must decide ${pack.place}. Which option gives the strongest traceability right now?`,
+    traceability_and_evidence: `You need evidence you can show later. Which action creates the clearest traceability ${pack.place}?`,
+    risk_consequence: `${pack.constraintB} Which choice reduces the risk of a wrong decision the most ${pack.place}?`,
+    deviation_and_action: `${pack.twist} What is the most correct action to handle a potential deviation?`,
+    roles_and_responsibility: `Two people disagree. Which role/ownership choice creates the best order and clarity ${pack.place}?`,
+    definition_or_concept: `In this kind of situation: what does “traceability” mean in practice ${pack.place}?`,
   };
 
   const stem = sv ? stemsSv[dim] || stemsSv.scenario_application : stemsEn[dim] || stemsEn.scenario_application;
 
-  // nivå-styrda alternativ: intro tydligare, advanced mer plausibla trade-offs
-  const optionsSvIntro = [
+  const optionsSv = [
     `Stanna upp och be om ett konkret underlag (t.ex. ${pack.artifact}).`,
-    `Gå vidare “som vanligt” utan att kontrollera underlag.`,
-    `Välj det som känns rimligt utan att dokumentera.`,
-    `Skjut upp beslutet utan att säkra spårbarhet.`,
-  ];
-
-  const optionsSvNormal = [
-    `Säkra spårbarhet direkt: efterfråga/skriv ${pack.artifact} innan beslut.`,
     `Gå vidare “som vanligt” för att spara tid.`,
-    `Välj det som låter rimligt utan att kontrollera underlag.`,
+    `Välj det som känns rimligt utan att kontrollera underlag.`,
     `Skjut upp beslutet och gör inget just nu.`,
   ];
-
-  const optionsSvAdvanced = [
-    `Stoppa och skapa ett minimalt, verifierbart underlag (t.ex. ${pack.artifact}) innan beslut fattas.`,
-    `Fatta beslut nu men notera bara muntligt vem som “sa vad”.`,
-    `Fatta ett provisoriskt beslut och dokumentera först efteråt om tid finns.`,
-    `Skjut upp beslutet utan att säkra vad som är fakta vs antagande.`,
-  ];
-
-  const optionsEnIntro = [
+  const optionsEn = [
     `Pause and ask for concrete evidence (e.g., ${pack.artifact}).`,
-    `Proceed “as usual” without checking evidence.`,
-    `Pick what sounds reasonable without documenting.`,
-    `Delay the decision without securing traceability.`,
-  ];
-
-  const optionsEnNormal = [
-    `Secure traceability now: request/write ${pack.artifact} before deciding.`,
     `Proceed “as usual” to save time.`,
     `Pick what sounds reasonable without checking evidence.`,
     `Delay the decision and do nothing for now.`,
   ];
 
-  const optionsEnAdvanced = [
-    `Stop and create minimal, verifiable evidence (e.g., ${pack.artifact}) before deciding.`,
-    `Decide now but only keep a verbal note of who “said what”.`,
-    `Make a provisional decision and document later if time allows.`,
-    `Delay the decision without separating facts from assumptions.`,
-  ];
+  const options = sv ? optionsSv : optionsEn;
+  const correctIndex = 0;
 
-  let options;
-  if (sv) {
-    options = level === "intro" ? optionsSvIntro : level === "advanced" ? optionsSvAdvanced : optionsSvNormal;
-  } else {
-    options = level === "intro" ? optionsEnIntro : level === "advanced" ? optionsEnAdvanced : optionsEnNormal;
-  }
-
-  let correctIndex = 0;
-
-  const explanationSv =
-    level === "advanced"
-      ? `Rätt svar ger verifierbart underlag före beslut och separerar fakta från antaganden. Det minskar risk och gör beslutet spårbart även om alla alternativ kan låta rimliga.`
-      : level === "intro"
-      ? `Rätt svar prioriterar spårbarhet och minskar gissning. Utan underlag riskerar ni att fatta fel beslut och inte kunna visa varför.`
-      : `Rätt svar prioriterar spårbarhet och minimerar gissning. Det gör att ni kan förklara beslutet i efterhand och upptäcka avvikelse tidigt.`;
-
-  const explanationEn =
-    level === "advanced"
-      ? `The correct option creates verifiable evidence before deciding and separates facts from assumptions. That reduces risk and keeps the decision traceable even when options seem plausible.`
-      : level === "intro"
-      ? `The correct option prioritizes evidence and reduces guessing. Without evidence you risk a wrong decision and weak traceability.`
-      : `The correct option prioritizes evidence and minimizes guessing. That enables traceability and early detection of deviations.`;
-
-  const explanation = sv ? explanationSv : explanationEn;
-
-  // P1: seeded shuffle även i fallback (men correctChoiceId följer med)
-  const sh = shuffleWithCorrectIndex(options, correctIndex, seed || hash32(`fallback|${i}|${stem}`));
-  options = sh.options;
-  correctIndex = sh.correctIndex;
+  // P0: mini-lektion även i fallback
+  const explanation = ensureMiniLessonExplanation({
+    language,
+    bundle,
+    pack,
+    dim,
+    options,
+    correctIndex,
+    baseExplanation: "",
+  });
 
   const choices = options.map((text, idx) => ({
     id: `c${i + 1}_${idx + 1}`,
     text: safeStr(text),
   }));
-
-  const safeIdx = Math.max(0, Math.min(choices.length - 1, Number(correctIndex) || 0));
 
   return {
     kind: "question",
@@ -1342,7 +1289,7 @@ function makeQuestionBlock({ i, language, pack, dim, level, seed }) {
         question: {
           text: safeStr(stem),
           choices,
-          correctChoiceId: choices[safeIdx].id,
+          correctChoiceId: choices[correctIndex].id,
           rationale: safeStr(explanation),
         },
       },
