@@ -1,7 +1,6 @@
 // ============================================================
-// AO-WORKER-TRAINING-BLOCKS-01 | worker/utils.js
-// Syfte: Core utils (safe parsing, normalize, hashing, requestId) — flytt från index.js (BLOCK 06)
-// POLICY: No behavior change. UI-only. Fail-closed bibehålls.
+// AO-WORKER-TRAINING-BLOCKS-01 | FILE: worker/utils.js
+// Syfte: Rena utilities utan domänlogik (fail-closed helpers)
 // ============================================================
 
 export function isPlainObject(v) {
@@ -25,26 +24,18 @@ export function normalizeLanguage(v) {
 }
 
 export function normalizeStepValue(v) {
-  // Returnerar "1".."7" eller "".
   const s = safeStr(v).trim();
   if (!s) return "";
-  // plocka första tal (t.ex. "Steg 2" -> "2", "2." -> "2")
   const m = s.match(/([1-7])/);
   return m ? safeStr(m[1]) : "";
 }
 
 export function normalizeContextText(v) {
-  // UI kan skicka:
-  // - string
-  // - object { text: "..." }
-  // - object { contextText: "..." }
-  // - v1 object { moduleId, areaId, ... } (då bygger vi en kontrollerad text från labels)
   if (typeof v === "string") return v.trim();
   if (isPlainObject(v)) {
     const t = safeStr(v.text || v.contextText || v.value || "").trim();
     if (t) return t;
 
-    // v1 context object (labels)
     const ml = safeStr(v.moduleLabel || "").trim();
     const al = safeStr(v.areaLabel || "").trim();
     const cl = safeStr(v.chapterLabel || "").trim();
@@ -83,7 +74,7 @@ export function normalizeCount(v) {
 }
 
 export function hash32(str) {
-  let h = 2166136261 >>> 0; // FNV-1a base
+  let h = 2166136261 >>> 0;
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i);
     h = Math.imul(h, 16777619);
@@ -99,29 +90,3 @@ export function normalizeMode(modeRaw) {
   if (s.includes("doc")) return "document";
   return s;
 }
-
-export function normalizeSubjectId(subjectId) {
-  const s = safeStr(subjectId).toLowerCase().trim();
-  if (s === "swedish" || s === "svenska") return "swedish";
-  if (s === "math" || s === "matte") return "math";
-  if (s) return s;
-  return "generic";
-}
-
-export function pickDifficultyLabel(difficultyHint, seedN) {
-  const s = safeStr(difficultyHint).toLowerCase().trim();
-  if (s === "intro" || s === "normal" || s === "advanced") return s;
-
-  if (!s || s === "auto") {
-    const lvl = 1 + (seedN % 5); // 1..5
-    return (lvl <= 2) ? "intro" : (lvl <= 4) ? "normal" : "advanced";
-  }
-
-  const n = Number(difficultyHint);
-  if (Number.isInteger(n) && n >= 1 && n <= 5) {
-    return (n <= 2) ? "intro" : (n <= 4) ? "normal" : "advanced";
-  }
-
-  return "normal";
-}
-
