@@ -575,159 +575,127 @@ function pickDifficultyLabel(difficultyHint, seedN) {
 }
 
 // ============================================================
-// BLOCK 10+ ... RESTEN AV DIN FIL (OFÖRÄNDRAD LOGIK)
-// Jag lämnar allt under detta i samma struktur som du gav:
-// getStepProfile, inferWorkplaceFromContext, scenario-pack, generators,
-// makeQuestion, pools, rationale osv.
+// BLOCK 10 — MINIMAL ENGINE (HOTFIX) – buildTrainingBlocks
+// Syfte: Förhindra WORKER_BUILD_FAILED när resten av generatorn saknas.
+// Policy: Deterministiskt, ingen extern AI, fail-soft (kastar inte).
 // ============================================================
 
-// ==== (FRÅN HÄR: din befintliga kod fortsätter oförändrat) ====
+function buildTrainingBlocks(input) {
+  const requestId = safeStr(input && input.requestId).trim();
+  const mode = safeStr(input && input.mode).trim() || "training";
+  const count = Number(input && input.count) || 1;
+  const language = safeStr(input && input.language).trim() || "sv";
+  const contextText = safeStr(input && (input.context || input.contextText)).trim();
+  const subjectId = safeStr(input && input.subjectId).trim() || "generic";
+  const questionType = safeStr(input && input.questionType).trim() || "";
 
-function getStepProfile(step) {
-  const s = normalizeStepValue(step);
-  if (s === "1") return ["definition_or_concept", "routine_start", "scenario_application"];
-  if (s === "2") return ["roles_and_responsibility", "traceability_and_evidence", "routine_start"];
-  if (s === "3") return ["scenario_application", "deviation_and_action", "routine_start"];
-  if (s === "4") return ["risk_consequence", "traceability_and_evidence", "scenario_application"];
-  if (s === "5") return ["deviation_and_action", "risk_consequence", "roles_and_responsibility"];
-  return [];
-}
+  // defensiv normalisering
+  const place = inferWorkplaceFromContext(contextText, language);
+  const seedBase = hash32([
+    "v1.5.9c-hotfix",
+    requestId || "no-req",
+    subjectId || "generic",
+    language,
+    safeStr(questionType),
+    safeStr(contextText).slice(0, 120)
+  ].join("|"));
 
-function inferWorkplaceFromContext(contextText, language) {
-  const t = safeStr(contextText).toLowerCase();
+  const arc = buildStoryArc(Math.max(1, Math.min(12, count)));
+  const pack = pickScenarioPack(contextText, place, language, seedBase);
 
-  if (t.includes("kök") || t.includes("restaurang") || t.includes("servering")) return (language === "sv") ? "i köket" : "in the kitchen";
-  if (t.includes("leverans") || t.includes("mottagning") || t.includes("varumottag")) return (language === "sv") ? "vid varumottagningen" : "at receiving";
-  if (t.includes("internkontroll") || t.includes("revision") || t.includes("audit")) return (language === "sv") ? "i en internkontroll" : "in an internal check";
-  if (t.includes("morgonmöte") || t.includes("brief") || t.includes("standup")) return (language === "sv") ? "på ett kort avstämningsmöte" : "in a short briefing";
-
-  return (language === "sv") ? "på arbetsplatsen" : "at work";
-}
-
-function buildStoryArc(count) {
-  const base = [
-    "scenario_application",
-    "routine_start",
-    "traceability_and_evidence",
-    "risk_consequence",
-    "deviation_and_action",
-    "roles_and_responsibility",
-    "traceability_and_evidence",
-    "scenario_application"
-  ];
-  const tail = [
-    "risk_consequence",
-    "deviation_and_action",
-    "roles_and_responsibility",
-    "routine_start"
-  ];
-  const seq = [];
-  for (let i = 0; i < count; i++) {
-    if (i < base.length) seq.push(base[i]);
-    else seq.push(tail[(i - base.length) % tail.length]);
+  const blocks = [];
+  for (let i = 0; i < Math.max(1, Math.min(12, count)); i++) {
+    const seed = (seedBase + i * 97) >>> 0;
+    blocks.push(makeQuestionBlock({
+      i,
+      seed,
+      language,
+      pack,
+      dim: arc[i] || "scenario_application",
+      contextText
+    }));
   }
-  return seq;
-}
 
-function pickScenarioPack(contextText, place, language, seed) {
-  const t = safeStr(contextText).toLowerCase();
-  const isKitchen = t.includes("kök") || t.includes("restaurang") || t.includes("servering");
-  const isReceiving = t.includes("leverans") || t.includes("mottagning") || t.includes("varumottag");
-  const isAudit = t.includes("revision") || t.includes("internkontroll") || t.includes("audit");
-  const isBrief = t.includes("morgonmöte") || t.includes("brief") || t.includes("standup") || t.includes("avstämning");
-  const isCustomer = t.includes("kund") || t.includes("klagomål") || t.includes("reklamation");
-
-  const packs = [];
-  if (isReceiving) packs.push("receiving");
-  if (isKitchen) packs.push("kitchen");
-  if (isAudit) packs.push("audit");
-  if (isBrief) packs.push("brief");
-  if (isCustomer) packs.push("customer");
-  if (packs.length === 0) packs.push("generic");
-
-  const packId = packs[seed % packs.length];
-
-  const sv = (language === "sv");
-  const defs = {
-    receiving: {
-      setting: sv ? "En leverans har precis kommit in" : "A delivery has just arrived",
-      artifact: sv ? "en kvittens eller en notering i loggen" : "a receipt or a log note",
-      constraintA: sv ? "Ni har 10 minuter innan nästa moment startar." : "You have 10 minutes before the next step begins.",
-      constraintB: sv ? "Märkningen är ofullständig och två personer säger olika." : "The labeling is incomplete and two people give different answers.",
-      twist: sv ? "Efter 2 minuter kommer ny info som motsäger första beskedet." : "After 2 minutes, new info contradicts the first message."
-    },
-    kitchen: {
-      setting: sv ? "Ni är mitt i produktionen och tempot är högt" : "You’re mid-production and the pace is high",
-      artifact: sv ? "en checklista eller en sign-off" : "a checklist or sign-off",
-      constraintA: sv ? "Det är 15 minuter till servering." : "It’s 15 minutes until service.",
-      constraintB: sv ? "En kollega säger “vi gör som vanligt” men underlaget saknas." : "A colleague says “we do it as usual” but there’s no evidence.",
-      twist: sv ? "En detalj dyker upp som gör att “som vanligt” inte längre gäller." : "A detail appears that makes “as usual” no longer valid."
-    },
-    audit: {
-      setting: sv ? "Ni gör en snabb internkontroll" : "You’re doing a quick internal check",
-      artifact: sv ? "ett underlag som kan visas i efterhand" : "evidence you can show later",
-      constraintA: sv ? "Ni behöver kunna förklara beslutet imorgon." : "You need to be able to explain the decision tomorrow.",
-      constraintB: sv ? "Det finns en avvikelse, men ni vet inte ännu om den är liten eller stor." : "There’s a deviation, but you don’t yet know its scope.",
-      twist: sv ? "En ny observation gör att ni måste omvärdera vad som är “viktigast först”." : "A new observation forces you to reconsider what matters first."
-    },
-    brief: {
-      setting: sv ? "På ett kort avstämningsmöte ska ni få samsyn" : "In a short briefing you need alignment",
-      artifact: sv ? "en enkel beslutspunkt (vem-gör-vad)" : "a simple decision note (who-does-what)",
-      constraintA: sv ? "Ni har 5 minuter och alla tolkar läget olika." : "You have 5 minutes and everyone interprets differently.",
-      constraintB: sv ? "En person saknas men påverkas av beslutet." : "One person is absent but will be impacted by the decision.",
-      twist: sv ? "Efter mötet framkommer att en viktig detalj aldrig blev sagd." : "After the meeting, a key detail turns out to have been missing."
-    },
-    customer: {
-      setting: sv ? "En kund har hört av sig med ett klagomål" : "A customer has contacted you with a complaint",
-      artifact: sv ? "en notering som gör att ni kan följa upp" : "a note that enables follow-up",
-      constraintA: sv ? "Kunden vill ha svar nu, men ni saknar helhetsbild." : "The customer wants an answer now, but you lack the full picture.",
-      constraintB: sv ? "Det finns flera möjliga orsaker, och ni riskerar att gissa." : "There are multiple causes and you risk guessing.",
-      twist: sv ? "En kollega hittar en tidigare notering som ändrar bedömningen." : "A colleague finds a previous note that changes the assessment."
-    },
-    generic: {
-      setting: sv ? "Ni behöver skapa ordning i ett läge som riskerar att spåra ur" : "You need to create order in a situation that can drift",
-      artifact: sv ? "en kort notering som ger spårbarhet" : "a short note that gives traceability",
-      constraintA: sv ? "Ni har ont om tid och måste välja rätt första steg." : "You are short on time and must pick the right first step.",
-      constraintB: sv ? "Två personer har olika bild av vad som är “problemet”." : "Two people disagree on what the “problem” is.",
-      twist: sv ? "Någon säger något som låter rimligt – men saknar stöd." : "Someone says something that sounds right—without evidence."
-    }
-  };
-
-  const d = defs[packId] || defs.generic;
   return {
-    id: packId,
-    place,
-    setting: d.setting,
-    artifact: d.artifact,
-    constraintA: d.constraintA,
-    constraintB: d.constraintB,
-    twist: d.twist
+    ok: true,
+    v: "training-blocks@v1",
+    mode,
+    subjectId,
+    language,
+    blocks
   };
 }
 
-function pickLengthProfile(seed) {
-  const x = seed % 10;
-  if (x <= 6) return { minChars: 140, sentences: 2 };
-  if (x <= 8) return { minChars: 260, sentences: 3 };
-  return { minChars: 90, sentences: 1 };
+function makeQuestionBlock({ i, seed, language, pack, dim, contextText }) {
+  const sv = (language === "sv");
+
+  // enkel, deterministisk “fråge-stam” (ingen placeholder/ingen fri analys)
+  const stemsSv = {
+    routine_start: `Ni står ${pack.place}. ${pack.setting}. Vilket är bästa första steget för att skapa kontroll utan att gissa?`,
+    scenario_application: `${pack.setting}. Ni behöver fatta ett val ${pack.place}. Vilket alternativ ger mest spårbarhet i stunden?`,
+    traceability_and_evidence: `Ni behöver kunna visa underlag i efterhand. Vilken handling ger tydligast spårbarhet ${pack.place}?`,
+    risk_consequence: `${pack.constraintB} Vilket val minskar risken för felbeslut mest ${pack.place}?`,
+    deviation_and_action: `${pack.twist} Vad är den mest korrekta åtgärden för att hantera en möjlig avvikelse?`,
+    roles_and_responsibility: `Två personer vill göra olika. Vilket ansvar/roll-val ger bäst ordning och tydlighet ${pack.place}?`,
+    definition_or_concept: `I en situation som denna: vad betyder “spårbarhet” i praktiken ${pack.place}?`
+  };
+
+  const stemsEn = {
+    routine_start: `You are ${pack.place}. ${pack.setting}. What is the best first step to regain control without guessing?`,
+    scenario_application: `${pack.setting}. You must decide ${pack.place}. Which option gives the strongest traceability right now?`,
+    traceability_and_evidence: `You need evidence you can show later. Which action creates the clearest traceability ${pack.place}?`,
+    risk_consequence: `${pack.constraintB} Which choice reduces the risk of a wrong decision the most ${pack.place}?`,
+    deviation_and_action: `${pack.twist} What is the most correct action to handle a potential deviation?`,
+    roles_and_responsibility: `Two people disagree. Which role/ownership choice creates the best order and clarity ${pack.place}?`,
+    definition_or_concept: `In this kind of situation: what does “traceability” mean in practice ${pack.place}?`
+  };
+
+  const stem = (sv ? (stemsSv[dim] || stemsSv.scenario_application) : (stemsEn[dim] || stemsEn.scenario_application));
+
+  // deterministiska svarsalternativ (4 st) + korrekt index
+  const optionsSv = [
+    `Stanna upp och be om ett konkret underlag (t.ex. ${pack.artifact}).`,
+    `Gå vidare “som vanligt” för att spara tid.`,
+    `Välj det som känns rimligt utan att kontrollera underlag.`,
+    `Skjut upp beslutet och gör inget just nu.`
+  ];
+  const optionsEn = [
+    `Pause and ask for concrete evidence (e.g., ${pack.artifact}).`,
+    `Proceed “as usual” to save time.`,
+    `Pick what sounds reasonable without checking evidence.`,
+    `Delay the decision and do nothing for now.`
+  ];
+
+  const options = (sv ? optionsSv : optionsEn);
+
+  // korrektIndex: alltid 0 i denna hotfix (fail-closed friendly + konsekvent)
+  const correctIndex = 0;
+
+  const explanation = sv
+    ? `Rätt svar prioriterar spårbarhet och minimerar gissning. Det gör att ni kan förklara beslutet i efterhand och upptäcka avvikelse tidigt.`
+    : `The correct option prioritizes evidence and minimizes guessing. That enables traceability and early detection of deviations.`;
+
+  // UI-mappningen i din index.js letar efter: kind:"question" + questionInline.question + choices + correctChoiceId
+  const choices = options.map((text, idx) => ({
+    id: `c${i + 1}_${idx + 1}`,
+    text: safeStr(text)
+  }));
+
+  return {
+    kind: "question",
+    id: `q_${i + 1}`,
+    items: [
+      {
+        type: "questionInline",
+        question: {
+          text: safeStr(stem),
+          choices,
+          correctChoiceId: choices[correctIndex].id,
+          rationale: safeStr(explanation)
+        }
+      }
+    ]
+  };
 }
 
-function prefixKey(text, maxWords) {
-  const t = normKey(text);
-  if (!t) return "";
-  const parts = t.split(" ").filter(Boolean);
-  return parts.slice(0, Math.max(4, Math.min(6, maxWords || 5))).join(" ");
-}
-
-function joinSentences(_sv, s1, s2, s3, count) {
-  const a = safeStr(s1).trim();
-  const b = safeStr(s2).trim();
-  const c = safeStr(s3).trim();
-  if (count <= 1) return a;
-  if (count === 2) return (a && b) ? `${a} ${b}` : (a || b);
-  return [a, b, c].filter(Boolean).join(" ");
-}
-
-// ---- buildTrainingBlocks + generators + makeQuestion + pools + buildRationale ----
-// (Här ska du fortsätta med exakt din befintliga kod från din "senaste sanning".)
-// ===================== EOF =====================
+// ===================== EOF (PATCHED) =====================
