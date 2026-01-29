@@ -1,20 +1,14 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.1 VARIATION+ARC + V1-CONTRACT)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.2 VARIATION+ARC + V1-CONTRACT)
 // FIL: worker/index.js
 //
-// PATCH v1.6.1 (CF-AI PARSE-FIX):
-// - P0: Fix: CF-AI kan returnera objekt i answer.result (inte text). Vi unwrap:ar korrekt,
-//       så vi inte hamnar i fallback pga "[object Object]".
-// - P0: Bibehåller: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
-// - P0: Behåller X-HR-AI header (cf/fallback)
-//
-// POLICY (LÅST):
-// - Stateless
-// - Fail-closed
-// - Endast JSON
-// - Max payload 64KB
-// - Logga aldrig payload
-// - Logga endast requestId + errorCode
+// PATCH v1.6.2 (CF-AI FORCE-ON + FAIL-SOFT + DIAG-HEADERS):
+// - P0: AI används när binding finns: "auto" -> mcq_single för AI.
+// - P0: FAIL-SOFT: AI-parse ska inte kasta och ska inte return null pga enstaka trasig fråga.
+// - P0: Robust JSON extraction (codefence + första {..}).
+// - P0: Options pad/unique + dedupe på stems.
+// - P0: X-HR-AI + X-HR-AI-REASON headers för snabb felsökning (ingen payload loggas).
+// - P0: Output-contract bibehållet: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
 // ============================================================
 
 // ============================================================
@@ -114,7 +108,7 @@ function mapTrainingBlocksToUiQuestions(blocks /*, questionTypeRaw*/) {
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.6.1";
+const VERSION = "1.6.2";
 
 // ============================================================
 // BLOCK 02B — Local utils (self-contained)  [P0: undvik import-crash]
@@ -199,9 +193,7 @@ function extractFirstJsonObjectString(text) {
         esc = true;
         continue;
       }
-      if (ch === '"') {
-        inStr = false;
-      }
+      if (ch === '"') inStr = false;
       continue;
     }
 
@@ -212,9 +204,7 @@ function extractFirstJsonObjectString(text) {
     if (ch === "{") depth++;
     if (ch === "}") depth--;
 
-    if (depth === 0) {
-      return s.slice(start, i + 1);
-    }
+    if (depth === 0) return s.slice(start, i + 1);
   }
   return "";
 }
@@ -223,18 +213,18 @@ function safeJsonParseLoose(text) {
   const t = safeStr(text).trim();
   if (!t) return null;
 
-  // försök direkt
+  // direct
   try {
     return JSON.parse(t);
   } catch (_) {}
 
-  // trimma bort kodstaket
+  // trim code fences
   const cleaned = t.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
   try {
     return JSON.parse(cleaned);
   } catch (_) {}
 
-  // plocka första {..}
+  // first {..}
   const objStr = extractFirstJsonObjectString(cleaned);
   if (!objStr) return null;
   try {
@@ -242,6 +232,27 @@ function safeJsonParseLoose(text) {
   } catch (_) {
     return null;
   }
+}
+
+function safeJsonFromUnknown(x) {
+  if (isPlainObject(x)) return x;
+  const t = safeStr(x).trim();
+  if (!t) return null;
+  return safeJsonParseLoose(t);
+}
+
+function uniqStrings(arr) {
+  const out = [];
+  const seen = new Set();
+  for (const v of Array.isArray(arr) ? arr : []) {
+    const s = safeStr(v).trim();
+    if (!s) continue;
+    const k = s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(s);
+  }
+  return out;
 }
 
 function padOptions(language, options, target) {
@@ -253,39 +264,33 @@ function padOptions(language, options, target) {
         "Dokumentera först och återkom.",
         "Kontrollera mot rutin/checklista.",
       ]
-    : [
-        "None of the above.",
-        "Ask for more information before deciding.",
-        "Document first and revisit.",
-        "Verify against the checklist/routine.",
-      ];
+    : ["None of the above.", "Ask for more information before deciding.", "Document first and revisit.", "Verify against the checklist/routine."];
 
-  const out = Array.isArray(options) ? options.slice(0) : [];
-  const seen = new Set(out.map((x) => safeStr(x).trim()).filter(Boolean));
-
+  const out = uniqStrings(Array.isArray(options) ? options : []);
   for (const p of basePads) {
     if (out.length >= target) break;
-    const s = safeStr(p).trim();
-    if (!seen.has(s)) {
-      seen.add(s);
-      out.push(s);
-    }
+    out.push(p);
   }
 
-  // sista utväg: fyll med generiska varianter
   let k = 1;
-  while (out.length < target && k < 10) {
-    const s = sv ? `Alternativ ${out.length + 1}.` : `Option ${out.length + 1}.`;
-    if (!seen.has(s)) out.push(s);
+  while (out.length < target && k < 20) {
+    out.push(sv ? `Alternativ ${out.length + 1}.` : `Option ${out.length + 1}.`);
     k++;
   }
-  return out;
+  return out.slice(0, target);
 }
 
-/**
- * parseV1RulesetPayload (tolerant, fail-closed)
- * - Om payload inte matchar ett känt v1-upplägg => return null.
- */
+function normalizeToAiQt(questionTypeRaw) {
+  // P0: auto ger ofta “annat format” => tvinga mcq_single i AI-ledet
+  const qt = normalizeQuestionType(questionTypeRaw);
+  if (qt === "auto" || !qt) return "mcq_single";
+  return qt;
+}
+
+// ============================================================
+// parseV1RulesetPayload (tolerant, fail-closed)
+// ============================================================
+
 function parseV1RulesetPayload(body) {
   if (!isPlainObject(body)) return null;
 
@@ -316,7 +321,7 @@ function normalizeCourseSubject(subjectObj) {
 }
 
 function validateCourseSubject(course) {
-  // hotfix: fail-soft (ingen blockerande validering här)
+  // hotfix: fail-soft
   if (!course) return { ok: true };
   if (typeof course !== "object") return { ok: true };
   return { ok: true };
@@ -530,16 +535,17 @@ export default {
       return errorJSON(400, requestId, "VALIDATION_ERROR", courseCheck.message || "course ogiltig", corsHeaders, true);
     }
 
-    // ============================================================
-    // BLOCK 04 — Build output (training-blocks + UI-items envelope)
-    // ============================================================
-
     if (!aiEnabled) {
       return errorJSON(503, requestId, "AI_DISABLED", "AI_ENABLED=false (Workern är avstängd)", corsHeaders, true);
     }
 
+    // ============================================================
+    // BLOCK 04 — Build output (training-blocks + UI-items envelope)
+    // ============================================================
+
     let training;
     let aiSource = "fallback";
+    let aiReason = "OK";
 
     try {
       const res = await buildTrainingBlocks(
@@ -558,12 +564,9 @@ export default {
         env
       );
 
-      if (res && isPlainObject(res) && isPlainObject(res.training)) {
-        training = res.training;
-        aiSource = safeStr(res.source || "fallback") || "fallback";
-      } else {
-        training = res;
-      }
+      training = res && res.training ? res.training : res;
+      aiSource = safeStr(res && res.source).trim() || "fallback";
+      aiReason = safeStr(res && res.reason).trim() || "OK";
     } catch (e) {
       const msg = safeStr(e && (e.message || e.stack || String(e))).slice(0, 200);
       console.error("ERR", requestId, "WORKER_BUILD_FAILED");
@@ -585,8 +588,11 @@ export default {
       items = mapped.items;
     }
 
-    // header som visar om AI användes
-    const hdr = { ...(corsHeaders || {}), "X-HR-AI": aiSource === "cf" ? "cf" : "fallback" };
+    const hdr = {
+      ...(corsHeaders || {}),
+      "X-HR-AI": aiSource === "cf" ? "cf" : "fallback",
+      "X-HR-AI-REASON": safeStr(aiReason || "OK"),
+    };
 
     return okJSON(
       200,
@@ -615,12 +621,11 @@ function buildCorsHeaders(origin, allowedOrigin) {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
-    Vary: "Origin",
+    "Vary": "Origin",
   };
 }
 
 function okJSON(status, payload, corsHeaders, requestId) {
-  // JSON-only, no-crash stringify
   let body = "{}";
   try {
     body = JSON.stringify(payload);
@@ -661,19 +666,21 @@ function extractBearerToken(authHeader) {
 // ============================================================
 
 async function buildTrainingBlocks(input, env) {
-  // Denna funktion ska INTE kasta.
-  // Returnerar {training, source:"cf"|"fallback"} för att kunna sätta X-HR-AI header.
-  try {
-    if (env && env.AI && typeof env.AI.run === "function") {
-      const ai = await buildTrainingBlocksWithAI(input, env);
-      if (ai && ai.ok && Array.isArray(ai.blocks) && ai.blocks.length) {
-        return { training: ai, source: "cf" };
-      }
-    }
-  } catch (_) {
-    // swallow => fallback
+  // Returnerar {training, source:"cf"|"fallback", reason:"..."}
+  const hasBinding = !!(env && env.AI && typeof env.AI.run === "function");
+  if (!hasBinding) {
+    return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "NO_BINDING" };
   }
-  return { training: buildTrainingBlocksDeterministic(input), source: "fallback" };
+
+  try {
+    const ai = await buildTrainingBlocksWithAI(input, env);
+    if (ai && ai.ok && Array.isArray(ai.blocks) && ai.blocks.length) {
+      return { training: ai, source: "cf", reason: "OK" };
+    }
+    return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "SCHEMA_FAIL" };
+  } catch (_) {
+    return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "RUN_FAIL" };
+  }
 }
 
 async function buildTrainingBlocksWithAI(input, env) {
@@ -683,22 +690,18 @@ async function buildTrainingBlocksWithAI(input, env) {
   const language = normalizeLanguage(input && input.language);
   const contextText = safeStr(input && (input.context || input.contextText)).trim();
   const subjectId = safeStr(input && input.subjectId).trim() || "generic";
-  const questionType = normalizeQuestionType(input && input.questionType);
+
+  // P0: "auto" -> mcq_single i AI-ledet
+  const qt = normalizeToAiQt(input && input.questionType);
 
   const place = inferWorkplaceFromContext(contextText, language);
   const arc = buildStoryArc(count);
-  const pack = pickScenarioPack(
-    contextText,
-    place,
-    language,
-    hash32(`${requestId}|${subjectId}|${language}|${contextText.slice(0, 120)}`)
-  );
+  const pack = pickScenarioPack(contextText, place, language, hash32(`${requestId}|${subjectId}|${language}|${contextText.slice(0, 120)}`));
 
   const sv = language === "sv";
-  const qt = questionType || "mcq_single";
 
   const schemaHint = sv
-    ? `Returnera ENDAST giltig JSON. Inget markdown. Inga förklaringar utanför JSON.
+    ? `Returnera ENDAST giltig JSON. Inget markdown. Inga extra rader. JSON måste börja med "{" och sluta med "}".
 Schema:
 {
   "questions": [
@@ -708,9 +711,10 @@ Schema:
 Regler:
 - Exakt ${count} frågor (inte fler/inte färre).
 - options: 4 st (true_false: 2 st).
-- correctIndex måste vara giltig (0..options.length-1).
-- Varje fråga måste vara unik och använda scenario/arc. Inga platshållare, inga "som ovan".`
-    : `Return ONLY valid JSON. No markdown. No explanations outside JSON.
+- correctIndex inom range.
+- Varje fråga unik (ingen omskrivning av samma).
+- Inga platshållare ("som ovan", "...").`
+    : `Return ONLY valid JSON. No markdown, no extra lines. JSON must start with "{" and end with "}".
 Schema:
 {
   "questions": [
@@ -718,19 +722,17 @@ Schema:
   ]
 }
 Rules:
-- Exactly ${count} questions (no more/no less).
+- Exactly ${count} questions.
 - options: 4 (true_false: 2).
-- correctIndex must be valid.
-- Each question must be unique and use scenario/arc. No placeholders.`;
+- correctIndex in range.
+- Each question unique. No placeholders.`;
 
   const systemPrompt = sv
-    ? `Du skapar provfrågor för HR/QA. Svara strikt som JSON enligt schema.`
+    ? `Du skapar provfrågor för HR/QA. Svara strikt enligt schema som JSON.`
     : `You create assessment questions for HR/QA. Respond strictly as JSON per schema.`;
 
   const userPrompt =
-    (sv
-      ? `KONTEXT (max 4000 tecken):\n${contextText || "(ingen)"}\n\n`
-      : `CONTEXT (max 4000 chars):\n${contextText || "(none)"}\n\n`) +
+    (sv ? `KONTEXT:\n${contextText || "(ingen)"}\n\n` : `CONTEXT:\n${contextText || "(none)"}\n\n`) +
     (sv
       ? `SCENARIOPACK:\n- place: ${pack.place}\n- setting: ${pack.setting}\n- artifact: ${pack.artifact}\n- constraintB: ${pack.constraintB}\n- twist: ${pack.twist}\n\n`
       : `SCENARIO PACK:\n- place: ${pack.place}\n- setting: ${pack.setting}\n- artifact: ${pack.artifact}\n- constraintB: ${pack.constraintB}\n- twist: ${pack.twist}\n\n`) +
@@ -749,95 +751,71 @@ Rules:
       ],
     });
   } catch (_) {
-    try {
-      answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-      });
-    } catch (_) {
-      return null;
-    }
+    // fallback modell
+    answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
   }
 
-  // ============================================================
-  // P0 FIX: Unwrap CF-AI answer shapes (object OR text)
-  // - answer.response kan vara string (vanligt)
-  // - answer.result kan vara OBJECT (vanligt) => får INTE gå via safeStr()
-  // ============================================================
+  // CF kan ge object med response: "..." (string), eller ibland direkt text/objekt.
+  const raw = isPlainObject(answer)
+    ? answer.response || answer.result || answer.output || answer.text || answer
+    : answer;
 
-  function unwrapCandidate(a) {
-    if (!a) return null;
-
-    // Om redan har questions direkt
-    if (isPlainObject(a) && Array.isArray(a.questions)) return a;
-
-    // Vanliga wrappers
-    const r = isPlainObject(a) ? a.response : null;
-    const res = isPlainObject(a) ? a.result : null;
-    const out = isPlainObject(a) ? a.output : null;
-    const txt = isPlainObject(a) ? a.text : null;
-
-    // Prioritera text om den finns
-    if (typeof r === "string" && r.trim()) return r;
-    if (typeof res === "string" && res.trim()) return res;
-    if (typeof out === "string" && out.trim()) return out;
-    if (typeof txt === "string" && txt.trim()) return txt;
-
-    // Om result/response är objekt, returnera objektet (inte stränga det!)
-    if (isPlainObject(r)) return r;
-    if (isPlainObject(res)) return res;
-    if (isPlainObject(out)) return out;
-
-    // Sista utväg: om a är ett objekt, returnera det (safeJsonFromUnknown hanterar plain object)
-    if (typeof a === "object") return a;
-
-    return a;
-  }
-
-  const candidate = unwrapCandidate(answer);
-  const parsed = safeJsonFromUnknown(candidate);
-
+  const parsed = safeJsonFromUnknown(raw);
   if (!parsed || !isPlainObject(parsed)) return null;
 
   const qArr = Array.isArray(parsed.questions) ? parsed.questions : [];
   if (!qArr.length) return null;
 
   const blocks = [];
-  const target = count;
+  const seenStem = new Set();
 
-  for (let i = 0; i < Math.min(target, qArr.length); i++) {
+  // FAIL-SOFT: skippa trasiga, fyll upp senare
+  for (let i = 0; i < qArr.length && blocks.length < count; i++) {
     const q = qArr[i];
-    const stem = safeStr(q && q.stem).trim();
-    const optsRaw = Array.isArray(q && q.options) ? q.options : [];
-    let options = optsRaw.map((x) => safeStr(x).trim()).filter(Boolean);
-    const ci = Number(q && q.correctIndex);
 
-    if (!stem) return null;
+    const stem = safeStr(q && (q.stem || q.question || q.text)).trim();
+    if (!stem) continue;
+
+    const key = stem.toLowerCase().replace(/\s+/g, " ").trim();
+    if (seenStem.has(key)) continue;
+    seenStem.add(key);
+
+    const optsRaw = Array.isArray(q && q.options) ? q.options : Array.isArray(q && q.choices) ? q.choices : [];
+    let options = optsRaw.map((x) => (isPlainObject(x) ? safeStr(x.text) : safeStr(x))).map((s) => safeStr(s).trim()).filter(Boolean);
+    options = uniqStrings(options);
 
     if (qt === "true_false") {
-      if (options.length < 2) return null;
-      options = options.slice(0, 2);
+      // enforce 2
+      if (options.length < 2) {
+        options = sv ? ["Sant", "Falskt"] : ["True", "False"];
+      } else {
+        options = options.slice(0, 2);
+      }
     } else {
-      // fail-soft: acceptera >=3 men pad till 4 för stabil MCQ
-      if (options.length < 3) return null;
-      options = padOptions(language, options, 4).slice(0, 4);
+      // accept >=2, pad to 4
+      if (options.length < 2) continue;
+      options = padOptions(language, options, 4);
     }
 
-    const correctIndex = Number.isFinite(ci) && ci >= 0 && ci < options.length ? Math.floor(ci) : 0;
-    const explanation = safeStr(q && (q.explanation || q.rationale)).trim();
+    const ciRaw = Number(q && q.correctIndex);
+    const correctIndex = Number.isFinite(ciRaw) && ciRaw >= 0 && ciRaw < options.length ? Math.floor(ciRaw) : 0;
 
-    blocks.push(makeQuestionBlockFromUi({ i, stem, options, correctIndex, explanation }));
+    const explanation = safeStr(q && (q.explanation || q.rationale || q.feedback)).trim();
+
+    blocks.push(makeQuestionBlockFromUi({ i: blocks.length, stem, options, correctIndex, explanation }));
   }
 
-  // toppa upp om AI gav färre än count (blanda in deterministic för resten)
-  if (blocks.length < target) {
-    const det = buildTrainingBlocksDeterministic({ ...input, count: target - blocks.length });
+  // toppa upp med deterministic om AI gav färre
+  if (blocks.length < count) {
+    const det = buildTrainingBlocksDeterministic({ ...input, count: count - blocks.length, questionType: qt });
     const detBlocks = Array.isArray(det && det.blocks) ? det.blocks : [];
-    for (let j = 0; j < detBlocks.length && blocks.length < target; j++) {
+    for (let j = 0; j < detBlocks.length && blocks.length < count; j++) {
       const b = detBlocks[j];
-      // re-id för att inte krocka
       const newId = `q_${blocks.length + 1}`;
       blocks.push({ ...b, id: newId });
     }
@@ -845,21 +823,17 @@ Rules:
 
   if (!blocks.length) return null;
 
+  // re-id 1..count stabilt
+  const normalizedBlocks = blocks.slice(0, count).map((b, idx) => ({ ...b, id: `q_${idx + 1}` }));
+
   return {
     ok: true,
     v: "training-blocks@v1",
     mode,
     subjectId,
     language,
-    blocks,
+    blocks: normalizedBlocks,
   };
-}
-
-function safeJsonFromUnknown(textOrObject) {
-  if (isPlainObject(textOrObject)) return textOrObject;
-  const t = safeStr(textOrObject).trim();
-  if (!t) return null;
-  return safeJsonParseLoose(t);
 }
 
 function makeQuestionBlockFromUi({ i, stem, options, correctIndex, explanation }) {
