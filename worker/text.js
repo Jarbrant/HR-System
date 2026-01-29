@@ -1,10 +1,16 @@
 // ============================================================
 // AO-WORKER-TRAINING-BLOCKS-01 | worker/text.js
-// Syfte: Text/normalisering/similarity helpers — flytt från index.js (BLOCK 09 + BLOCK 11B)
+// Syfte: Text/normalisering/similarity helpers — fristående modul.
 // POLICY: No behavior change. Inga sid-effekter.
 // ============================================================
 
-import { safeStr, safeArr } from "./utils.js";
+function safeStr(v) {
+  return (v === null || v === undefined) ? "" : String(v);
+}
+
+function safeArr(a) {
+  return Array.isArray(a) ? a : [];
+}
 
 export function stripAnyBracketedContext(s) {
   const txt = safeStr(s);
@@ -70,4 +76,3 @@ export function joinSentences(_sv, s1, s2, s3, count) {
   if (count === 2) return (a && b) ? `${a} ${b}` : (a || b);
   return [a, b, c].filter(Boolean).join(" ");
 }
-
