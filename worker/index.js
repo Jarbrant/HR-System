@@ -392,57 +392,71 @@ export default {
     }
 
     // ============================================================
-    // BLOCK 04 — Build output (training-blocks + UI-items envelope)
-    // ============================================================
+// BLOCK 04 — Build output (training-blocks + UI-items envelope)
+// PATCH: DEBUG-EXPOSE v1 (tillfälligt) — gör 502 “pratig” så vi kan felsöka
+// ============================================================
 
-    let training;
-    try {
-      training = buildTrainingBlocks({
-        requestId,
-        mode,
-        count,
-        language,
-        context: contextText,
-        aiEnabled,
-        format,
-        subjectId,
-        difficultyHint,
-        course,
-        questionType
-      });
-    } catch (e) {
-      console.error("ERR", requestId, "WORKER_BUILD_FAILED");
-      return errorJSON(502, requestId, "WORKER_BUILD_FAILED", "Worker kunde inte bygga ett giltigt svar", corsHeaders, false);
-    }
+let training;
+try {
+  training = buildTrainingBlocks({
+    requestId,
+    mode,
+    count,
+    language,
+    context: contextText,
+    aiEnabled,
+    format,
+    subjectId,
+    difficultyHint,
+    course,
+    questionType
+  });
+} catch (e) {
+  // Gör felet synligt i Response + logg (utan payload)
+  const msg = safeStr(e && (e.stack || e.message || String(e))).slice(0, 1200);
+  console.error("ERR", requestId, "WORKER_BUILD_FAILED", msg);
 
-    const topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
+  return errorJSON(
+    502,
+    requestId,
+    "WORKER_BUILD_FAILED",
+    msg || "Worker kunde inte bygga ett giltigt svar",
+    corsHeaders,
+    true
+  );
+}
 
-    let items = topBlocks;
+// Fail-closed: om buildTrainingBlocks returnerar konstigt
+if (!training || typeof training !== "object") {
+  return errorJSON(502, requestId, "WORKER_BUILD_FAILED", "training är ogiltig (null/ej objekt)", corsHeaders, true);
+}
 
-    if (isUiQuestionRequest(questionType)) {
-      const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, language);
-      if (!mapped.ok) {
-        return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
-      }
-      items = mapped.items;
-    }
+const topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
 
-    return okJSON(
-      200,
-      {
-        ok: true,
-        requestId,
-        items,
-        data: { training },
-        training,
-        blocks: topBlocks,
-        mode: training.mode
-      },
-      corsHeaders,
-      requestId
-    );
+let items = topBlocks;
+
+if (isUiQuestionRequest(questionType)) {
+  const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, language);
+  if (!mapped.ok) {
+    return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
   }
-};
+  items = mapped.items;
+}
+
+return okJSON(
+  200,
+  {
+    ok: true,
+    requestId,
+    items,
+    data: { training },
+    training,
+    blocks: topBlocks,
+    mode: training.mode
+  },
+  corsHeaders,
+  requestId
+);
 
 // ============================================================
 // BLOCK 05 — HTTP helpers (CORS + JSON)
