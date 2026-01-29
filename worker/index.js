@@ -2,53 +2,30 @@
 // PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.5.9c VARIATION+ARC + V1-CONTRACT)
 // FIL: worker/index.js
 //
-// HOTFIX v1.5.9c (NO-CRASH + CORS-NORMALIZE):
+// HOTFIX v1.5.9c (NO-CRASH + CORS-NORMALIZE + SELF-CONTAINED UTILS):
 // - P0: Tar bort import-beroende av ./question-ui.js (vanlig orsak till Error 1101 vid deploy).
 //       UI-frågeformat-funktioner inline:as här för att Workern alltid ska starta.
 // - P0: Normaliserar ALLOWED_ORIGIN (tål trailing slash) + jämför normaliserat mot request Origin.
+// - P0: Undviker build-fel pga saknade exports i worker/utils.js genom att bara importera
+//       safeStr/isPlainObject/safeArr och definiera normalize* + hash + requestId lokalt här.
+// - P0: Fail-closed: JSON-only, payload <= 64KB, CORS strikt, loggar aldrig payload.
 // - P0: Oförändrat output-contract: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
 // ============================================================
 
 // ============================================================
-// BLOCK 01 — Imports (split: rules + course + utils)
+// BLOCK 01 — Imports (min-safe)
 // ============================================================
 
-import {
-  isPlainObject,
-  safeStr,
-  safeArr,
-  normalizeLanguage,
-  normalizeStepValue,
-  normalizeContextText,
-  makeRequestId,
-  normalizeCount,
-  hash32,
-  normalizeMode
-} from "./utils.js";
+import { isPlainObject, safeStr, safeArr } from "./utils.js";
 
-import {
-  getRulesBundle,
-  getQuestionQuality,
-  containsForbiddenPhrase,
-  stripAnyBracketedContext,
-  stripDomainWordsFromQuestion,
-  sanitizeContextForDisplay,
-  tokenizeForSimilarity,
-  jaccardSimilarity,
-  normKey,
-  pickOne
-} from "./rules.js";
-
-import {
-  parseV1RulesetPayload,
-  normalizeCourseSubject,
-  validateCourseSubject,
-  resolveCourseLabelFallback
-} from "./course.js";
+// OBS: vi behåller rules/course-import *valfritt* (för framtida engine),
+// men vi använder dem inte i hotfix-engine för att undvika nya crash-or.
+// Om du vill “slå på” de avancerade reglerna senare, finns krokarna här.
+import { getRulesBundle, getQuestionQuality } from "./rules.js";
+import { parseV1RulesetPayload, validateCourseSubject, normalizeCourseSubject } from "./course.js";
 
 // ============================================================
 // BLOCK 01B — UI question helpers (INLINE HOTFIX)
-// (Tidigare import: ./question-ui.js)  => borttagen för att undvika 1101 vid saknad fil.
 // ============================================================
 
 function normalizeQuestionType(qtRaw) {
@@ -74,16 +51,17 @@ function isUiQuestionRequest(questionTypeRaw) {
   return qt === "auto" || qt === "mcq_single" || qt === "mcq_multi" || qt === "true_false";
 }
 
-function mapTrainingBlocksToUiQuestions(blocks, questionTypeRaw, language) {
-  const qt = normalizeQuestionType(questionTypeRaw);
+function mapTrainingBlocksToUiQuestions(blocks, questionTypeRaw) {
+  // OBS: UI-formatet är samma för auto/single/multi/true_false i denna hotfix:
+  // type:"question", question:"..", options:[..], correctIndex (+ ev correctIndices), explanation
   const out = [];
-
   const arr = Array.isArray(blocks) ? blocks : [];
+
   for (const b of arr) {
     if (!b || b.kind !== "question") continue;
 
     const items = Array.isArray(b.items) ? b.items : [];
-    const qi = items.find(x => x && x.type === "questionInline" && x.question);
+    const qi = items.find((x) => x && x.type === "questionInline" && x.question);
     const q = qi && qi.question ? qi.question : null;
     if (!q) {
       return { ok: false, errorCode: "UI_MAP_FAILED", message: "Question-block saknar questionInline.question" };
@@ -91,54 +69,47 @@ function mapTrainingBlocksToUiQuestions(blocks, questionTypeRaw, language) {
 
     const stem = safeStr(q.text || q.question || "").trim();
     const choices = Array.isArray(q.choices) ? q.choices : [];
-    const options = choices.map(c => safeStr(c && c.text).trim()).filter(Boolean);
+    const options = choices.map((c) => safeStr(c && c.text).trim()).filter(Boolean);
 
-    // Fail-closed: UI kräver options + correctIndex
     if (!stem) return { ok: false, errorCode: "UI_MAP_FAILED", message: "En fråga saknar text" };
     if (options.length < 2) {
       return { ok: false, errorCode: "UI_MAP_FAILED", message: "AI-svaret saknade giltiga svarsalternativ" };
     }
 
-    // correct index
     let correctIndex = -1;
     let correctIndices = null;
 
     const correctChoiceId = safeStr(q.correctChoiceId).trim();
     if (correctChoiceId) {
-      const idx = choices.findIndex(c => safeStr(c && c.id).trim() === correctChoiceId);
+      const idx = choices.findIndex((c) => safeStr(c && c.id).trim() === correctChoiceId);
       correctIndex = idx;
     }
 
     const ids = Array.isArray(q.correctChoiceIds) ? q.correctChoiceIds : null;
     if (ids && ids.length) {
       const mapped = ids
-        .map(id => choices.findIndex(c => safeStr(c && c.id).trim() === safeStr(id).trim()))
-        .filter(n => Number.isInteger(n) && n >= 0);
+        .map((id) => choices.findIndex((c) => safeStr(c && c.id).trim() === safeStr(id).trim()))
+        .filter((n) => Number.isInteger(n) && n >= 0);
       if (mapped.length) correctIndices = mapped;
     }
 
     if (correctIndex < 0 && (!correctIndices || !correctIndices.length)) {
-      // defensiv fallback: om correct saknas => första option
+      // defensiv fallback
       correctIndex = 0;
     }
 
     const explanation = safeStr(q.rationale || q.explanation || q.feedback || "").trim();
 
-    const item = {
+    out.push({
       type: "question",
       question: stem,
       options,
       correctIndex,
       ...(correctIndices ? { correctIndices } : {}),
-      ...(explanation ? { explanation } : {})
-    };
-
-    // Om UI valt AUTO: vi mappar alltid till single (UI-formatet är samma),
-    // och korrekt-index fungerar.
-    out.push(item);
+      ...(explanation ? { explanation } : {}),
+    });
   }
 
-  // om UI ber om frågor men vi inte hittade någon -> fail-closed
   if (!out.length) {
     return { ok: false, errorCode: "UI_NO_QUESTIONS", message: "Inga question-block hittades att mappa till UI-frågor" };
   }
@@ -148,13 +119,79 @@ function mapTrainingBlocksToUiQuestions(blocks, questionTypeRaw, language) {
 
 // ============================================================
 // BLOCK 02 — Constants
-// PATCH: DBG2 (deploy-bevis) — ändra VERSION så /v1/version visar rätt kod körs
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
 
 // OBS: Detta är bara för felsökning. När allt funkar kan du byta tillbaka.
 const VERSION = "1.5.9c-dbg2";
+
+// ============================================================
+// BLOCK 02B — Local utils (self-contained)  [P0: undvik saknade exports i utils.js]
+// ============================================================
+
+function normalizeLanguage(v) {
+  const s = safeStr(v).toLowerCase().trim();
+  if (s === "sv" || s === "sv-se" || s === "svenska") return "sv";
+  if (s === "en" || s === "en-us" || s === "en-gb" || s === "english") return "en";
+  return "sv";
+}
+
+function normalizeMode(v) {
+  const s = safeStr(v).toLowerCase().trim();
+  if (s === "document" || s === "doc") return "document";
+  return "training";
+}
+
+function normalizeContextText(v) {
+  // UI kan skicka object — vi fail-closed till text
+  if (typeof v === "string") return v.trim();
+  if (v === null || v === undefined) return "";
+  // Försök plocka “text” om det är ett objekt
+  try {
+    if (typeof v === "object") {
+      const t = safeStr(v.text || v.contextText || v.prompt || "");
+      return t.trim();
+    }
+  } catch (_) {}
+  return safeStr(v).trim();
+}
+
+function normalizeCount(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.floor(n);
+  if (i < 1 || i > 12) return null;
+  return i;
+}
+
+function makeRequestId() {
+  // enkel deterministic-ish id: crypto om finns, annars fallback
+  try {
+    if (typeof crypto !== "undefined" && crypto && typeof crypto.getRandomValues === "function") {
+      const b = new Uint8Array(16);
+      crypto.getRandomValues(b);
+      return Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+    }
+  } catch (_) {}
+  // fallback
+  return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function hash32(str) {
+  // liten, stabil 32-bit hash (FNV-1a)
+  const s = safeStr(str);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+function normalizeOrigin(s) {
+  return safeStr(s).trim().replace(/\/+$/g, "");
+}
 
 // ============================================================
 // BLOCK 03 — Fetch handler (routing + guards)
@@ -180,10 +217,7 @@ export default {
       );
     }
 
-    // ---------- ORIGIN NORMALIZE (tål trailing slash i env) ----------
-    const normalizeOrigin = (s) => safeStr(s).trim().replace(/\/+$/, "");
     const allowedOrigin = normalizeOrigin(allowedOriginRaw);
-
     const origin = normalizeOrigin(request.headers.get("Origin") || "");
     const corsHeaders = buildCorsHeaders(origin, allowedOrigin);
 
@@ -211,8 +245,8 @@ export default {
             service: "hr-worker",
             version: VERSION,
             v: "v1",
-            rulesets: { ok: true, base: "ai-rules" }
-          }
+            rulesets: { ok: true, base: "ai-rules" },
+          },
         },
         corsHeaders,
         requestId
@@ -234,8 +268,8 @@ export default {
             version: VERSION,
             build: "wrangler",
             rulesBase: "ai-rules",
-            outputContract: "training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6"
-          }
+            outputContract: "training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6",
+          },
         },
         corsHeaders,
         requestId
@@ -247,11 +281,7 @@ export default {
       return errorJSON(405, requestId, "METHOD_NOT_ALLOWED", "Endast POST tillåtet för AI-endpoints", corsHeaders, true);
     }
 
-    const isAIPath =
-      path === "/v1/ai/generate" ||
-      path === "/v1/ai/training" ||
-      path === "/v1/ai/document";
-
+    const isAIPath = path === "/v1/ai/generate" || path === "/v1/ai/training" || path === "/v1/ai/document";
     if (!isAIPath) {
       return errorJSON(404, requestId, "NOT_FOUND", "Endpoint finns inte", corsHeaders, true);
     }
@@ -291,7 +321,6 @@ export default {
     } catch {
       return errorJSON(400, requestId, "BAD_JSON", "Kunde inte läsa request body", corsHeaders, true);
     }
-
     if (rawBytes.byteLength > MAX_BODY_BYTES) {
       return errorJSON(413, requestId, "PAYLOAD_TOO_LARGE", "Payload för stor", corsHeaders, true);
     }
@@ -329,24 +358,25 @@ export default {
     let subjectId = safeStr(body.subjectId || body.subject || "").trim();
     let difficultyHint = body.difficultyHint ?? body.difficulty;
 
-    // UI: frågetyp (tolerant mot olika fältnamn)
     let questionType = normalizeQuestionType(
       body.questionType ??
-      body.qType ??
-      body.questionMode ??
-      body.question_mode ??
-      body.questionKind ??
-      body.question_kind ??
-      body.quizMode ??
-      body.mcqMode ??
-      body.mcq_type ??
-      ""
+        body.qType ??
+        body.questionMode ??
+        body.question_mode ??
+        body.questionKind ??
+        body.question_kind ??
+        body.quizMode ??
+        body.mcqMode ??
+        body.mcq_type ??
+        ""
     );
 
     // subjectObj legacy
     const subjectObj = isPlainObject(body.subjectObj)
       ? body.subjectObj
-      : (isPlainObject(body.subject) ? body.subject : null);
+      : isPlainObject(body.subject)
+      ? body.subject
+      : null;
 
     let course = normalizeCourseSubject(subjectObj);
 
@@ -360,13 +390,7 @@ export default {
       difficultyHint = v1.difficulty;
       course = v1.course;
       contextText = v1.contextText;
-    }
-
-    // P0 HOTFIX: stabil default om UI tydligt kör questions men questionType saknas
-    const fmtHint = safeStr(format).toLowerCase();
-    const ctHint = safeStr(body && body.contentType).trim();
-    if (!safeStr(questionType).trim() && (fmtHint.includes("question") || ctHint === "questions")) {
-      questionType = "auto";
+      subjectId = v1.subjectId || subjectId;
     }
 
     const language = normalizeLanguage(languageRaw);
@@ -395,113 +419,80 @@ export default {
     }
 
     // ============================================================
-// BLOCK 04 — Build output (training-blocks + UI-items envelope)
-// PATCH: DEBUG v2 — alltid diagnostik även om throw är null/undefined
-// ============================================================
+    // BLOCK 04 — Build output (training-blocks + UI-items envelope)
+    // P0: No-crash engine: buildTrainingBlocks får inte kasta.
+    // ============================================================
 
-const __diag = {
-  has_buildTrainingBlocks: typeof buildTrainingBlocks,
-  has_getRulesBundle: typeof getRulesBundle,
-  has_getQuestionQuality: typeof getQuestionQuality,
-  has_parseV1RulesetPayload: typeof parseV1RulesetPayload,
-  mode,
-  count,
-  language,
-  questionType: safeStr(questionType)
-};
+    if (!aiEnabled) {
+      // fail-closed: AI avstängt i env
+      return errorJSON(503, requestId, "AI_DISABLED", "AI_ENABLED=false (Workern är avstängd)", corsHeaders, true);
+    }
 
-let training;
-try {
-  // Extra fail-closed: om funktionen saknas helt, få ett tydligt fel direkt
-  if (typeof buildTrainingBlocks !== "function") {
-    throw new Error("buildTrainingBlocks saknas eller är inte en funktion");
-  }
+    let training;
+    try {
+      training = buildTrainingBlocks({
+        requestId,
+        mode,
+        count,
+        language,
+        context: contextText,
+        format,
+        subjectId,
+        difficultyHint,
+        course,
+        questionType,
+      });
+    } catch (e) {
+      // Vi loggar aldrig payload. Bara requestId + code.
+      const msg = safeStr(e && (e.message || e.stack || String(e))).slice(0, 200);
+      console.error("ERR", requestId, "WORKER_BUILD_FAILED");
+      return errorJSON(502, requestId, "WORKER_BUILD_FAILED", msg || "Worker kunde inte bygga ett giltigt svar", corsHeaders, true);
+    }
 
-  training = buildTrainingBlocks({
-    requestId,
-    mode,
-    count,
-    language,
-    context: contextText,
-    aiEnabled,
-    format,
-    subjectId,
-    difficultyHint,
-    course,
-    questionType
-  });
-} catch (e) {
-  // Gör felet synligt även om e är null/undefined
-  let msg = safeStr(e && (e.stack || e.message || String(e))).trim();
+    if (!training || typeof training !== "object") {
+      return errorJSON(502, requestId, "WORKER_BUILD_FAILED", "training är ogiltig (null/ej objekt)", corsHeaders, true);
+    }
 
-  // Om kastat värde är null/undefined (eller tomt), ge fallback
-  if (!msg) {
-    msg = "buildTrainingBlocks kastade ett tomt fel (null/undefined) eller utan message/stack";
-  }
+    const topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
+    let items = topBlocks;
 
-  const diagStr = (() => {
-    try { return JSON.stringify(__diag); } catch { return "[diag kunde ej serialiseras]"; }
-  })();
+    if (isUiQuestionRequest(questionType)) {
+      const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType);
+      if (!mapped.ok) {
+        return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
+      }
+      items = mapped.items;
+    }
 
-  const fallbackStack = safeStr(new Error("WORKER_BUILD_FAILED@BLOCK04").stack || "").slice(0, 600);
-
-  const full = `${msg} | DIAG=${diagStr} | FALLBACK_STACK=${fallbackStack}`.slice(0, 1500);
-
-  console.error("ERR", requestId, "WORKER_BUILD_FAILED", full);
-
-  return errorJSON(
-    502,
-    requestId,
-    "WORKER_BUILD_FAILED",
-    full,
-    corsHeaders,
-    true
-  );
-}
-
-// Fail-closed: om buildTrainingBlocks returnerar konstigt
-if (!training || typeof training !== "object") {
-  return errorJSON(502, requestId, "WORKER_BUILD_FAILED", "training är ogiltig (null/ej objekt)", corsHeaders, true);
-}
-
-const topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
-
-let items = topBlocks;
-
-if (isUiQuestionRequest(questionType)) {
-  const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType, language);
-  if (!mapped.ok) {
-    return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
-  }
-  items = mapped.items;
-}
-
-return okJSON(
-  200,
-  {
-    ok: true,
-    requestId,
-    items,
-    data: { training },
-    training,
-    blocks: topBlocks,
-    mode: training.mode
+    return okJSON(
+      200,
+      {
+        ok: true,
+        requestId,
+        items, // UI använder detta
+        data: { training }, // legacy/diagnostik
+        training, // legacy
+        blocks: topBlocks, // legacy
+        mode: training.mode || mode,
+      },
+      corsHeaders,
+      requestId
+    );
   },
-  corsHeaders,
-  requestId
-);
+};
 
 // ============================================================
 // BLOCK 05 — HTTP helpers (CORS + JSON)
 // ============================================================
 
 function buildCorsHeaders(origin, allowedOrigin) {
-  const allowOrigin = (allowedOrigin && origin && origin === allowedOrigin) ? allowedOrigin : "";
+  const allowOrigin = allowedOrigin && origin && origin === allowedOrigin ? allowedOrigin : "";
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
-    "Vary": "Origin"
+    "Access-Control-Allow-Headers":
+      "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
+    Vary: "Origin",
   };
 }
 
@@ -512,13 +503,13 @@ function okJSON(status, payload, corsHeaders, requestId) {
       "Content-Type": "application/json; charset=utf-8",
       "X-Request-Id": safeStr(requestId || ""),
       "X-HR-Request-Id": safeStr(requestId || ""),
-      ...(corsHeaders || {})
-    }
+      ...(corsHeaders || {}),
+    },
   });
 }
 
 function errorJSON(status, requestId, code, message, corsHeaders, logIt) {
-  if (logIt) console.error("ERR", requestId, code);
+  if (logIt) console.error("ERR", requestId, safeStr(code));
   return okJSON(
     status,
     { ok: false, requestId, errorCode: safeStr(code), error: { code: safeStr(code), message: safeStr(message) } },
@@ -535,85 +526,49 @@ function extractBearerToken(authHeader) {
 }
 
 // ============================================================
-// BLOCK 06 — Core utils (remaining local only)
-// ============================================================
-
-function normalizeFormat(format, mode, questionType) {
-  if (isUiQuestionRequest(questionType)) return "question";
-
-  const f = safeStr(format).toLowerCase().trim();
-  if (f === "question" || f === "questions") return "question";
-  if (f === "task" || f === "tasks") return "task";
-  if (f === "document") return "document";
-  if (f === "training-blocks" || f === "training" || f === "blocks") return "training-blocks";
-  return (mode === "document") ? "document" : "training-blocks";
-}
-
-function normalizeSubjectId(subjectId) {
-  const s = safeStr(subjectId).toLowerCase().trim();
-  if (s === "swedish" || s === "svenska") return "swedish";
-  if (s === "math" || s === "matte") return "math";
-  if (s) return s;
-  return "generic";
-}
-
-function pickDifficultyLabel(difficultyHint, seedN) {
-  const s = safeStr(difficultyHint).toLowerCase().trim();
-  if (s === "intro" || s === "normal" || s === "advanced") return s;
-
-  if (!s || s === "auto") {
-    const lvl = 1 + (seedN % 5);
-    return (lvl <= 2) ? "intro" : (lvl <= 4) ? "normal" : "advanced";
-  }
-
-  const n = Number(difficultyHint);
-  if (Number.isInteger(n) && n >= 1 && n <= 5) {
-    return (n <= 2) ? "intro" : (n <= 4) ? "normal" : "advanced";
-  }
-
-  return "normal";
-}
-
-// ============================================================
-// BLOCK 10 — MINIMAL ENGINE (HOTFIX) – buildTrainingBlocks
-// Syfte: Förhindra WORKER_BUILD_FAILED när resten av generatorn saknas.
-// Policy: Deterministiskt, ingen extern AI, fail-soft (kastar inte).
+// BLOCK 10 — NO-CRASH ENGINE (HOTFIX) – buildTrainingBlocks
+// Syfte: Förhindra WORKER_BUILD_FAILED. Deterministiskt. Inget externt AI.
 // ============================================================
 
 function buildTrainingBlocks(input) {
+  // Denna funktion ska INTE kasta.
   const requestId = safeStr(input && input.requestId).trim();
   const mode = safeStr(input && input.mode).trim() || "training";
-  const count = Number(input && input.count) || 1;
-  const language = safeStr(input && input.language).trim() || "sv";
+  const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
+  const language = normalizeLanguage(input && input.language);
   const contextText = safeStr(input && (input.context || input.contextText)).trim();
   const subjectId = safeStr(input && input.subjectId).trim() || "generic";
   const questionType = safeStr(input && input.questionType).trim() || "";
 
-  // defensiv normalisering
   const place = inferWorkplaceFromContext(contextText, language);
-  const seedBase = hash32([
-    "v1.5.9c-hotfix",
-    requestId || "no-req",
-    subjectId || "generic",
-    language,
-    safeStr(questionType),
-    safeStr(contextText).slice(0, 120)
-  ].join("|"));
 
-  const arc = buildStoryArc(Math.max(1, Math.min(12, count)));
+  const seedBase = hash32(
+    [
+      "AO-WORKER-TRAINING-BLOCKS-01",
+      VERSION,
+      requestId || "no-req",
+      subjectId,
+      language,
+      questionType,
+      contextText.slice(0, 160),
+    ].join("|")
+  );
+
+  const arc = buildStoryArc(count);
   const pack = pickScenarioPack(contextText, place, language, seedBase);
 
   const blocks = [];
-  for (let i = 0; i < Math.max(1, Math.min(12, count)); i++) {
+  for (let i = 0; i < count; i++) {
     const seed = (seedBase + i * 97) >>> 0;
-    blocks.push(makeQuestionBlock({
-      i,
-      seed,
-      language,
-      pack,
-      dim: arc[i] || "scenario_application",
-      contextText
-    }));
+    blocks.push(
+      makeQuestionBlock({
+        i,
+        seed,
+        language,
+        pack,
+        dim: arc[i] || "scenario_application",
+      })
+    );
   }
 
   return {
@@ -622,14 +577,114 @@ function buildTrainingBlocks(input) {
     mode,
     subjectId,
     language,
-    blocks
+    blocks,
   };
 }
 
-function makeQuestionBlock({ i, seed, language, pack, dim, contextText }) {
-  const sv = (language === "sv");
+function inferWorkplaceFromContext(contextText, language) {
+  const t = safeStr(contextText).toLowerCase();
+  const sv = language === "sv";
 
-  // enkel, deterministisk “fråge-stam” (ingen placeholder/ingen fri analys)
+  if (t.includes("kök") || t.includes("restaurang") || t.includes("servering")) return sv ? "i köket" : "in the kitchen";
+  if (t.includes("leverans") || t.includes("mottagning") || t.includes("varumottag")) return sv ? "vid varumottagningen" : "at receiving";
+  if (t.includes("internkontroll") || t.includes("revision") || t.includes("audit")) return sv ? "i en internkontroll" : "in an internal check";
+  if (t.includes("morgonmöte") || t.includes("brief") || t.includes("standup")) return sv ? "på ett kort avstämningsmöte" : "in a short briefing";
+
+  return sv ? "på arbetsplatsen" : "at work";
+}
+
+function buildStoryArc(count) {
+  const base = [
+    "scenario_application",
+    "routine_start",
+    "traceability_and_evidence",
+    "risk_consequence",
+    "deviation_and_action",
+    "roles_and_responsibility",
+    "traceability_and_evidence",
+    "scenario_application",
+  ];
+  const tail = ["risk_consequence", "deviation_and_action", "roles_and_responsibility", "routine_start"];
+  const seq = [];
+  for (let i = 0; i < count; i++) {
+    if (i < base.length) seq.push(base[i]);
+    else seq.push(tail[(i - base.length) % tail.length]);
+  }
+  return seq;
+}
+
+function pickScenarioPack(contextText, place, language, seed) {
+  const t = safeStr(contextText).toLowerCase();
+  const isKitchen = t.includes("kök") || t.includes("restaurang") || t.includes("servering");
+  const isReceiving = t.includes("leverans") || t.includes("mottagning") || t.includes("varumottag");
+  const isAudit = t.includes("revision") || t.includes("internkontroll") || t.includes("audit");
+  const isBrief = t.includes("morgonmöte") || t.includes("brief") || t.includes("standup") || t.includes("avstämning");
+  const isCustomer = t.includes("kund") || t.includes("klagomål") || t.includes("reklamation");
+
+  const packs = [];
+  if (isReceiving) packs.push("receiving");
+  if (isKitchen) packs.push("kitchen");
+  if (isAudit) packs.push("audit");
+  if (isBrief) packs.push("brief");
+  if (isCustomer) packs.push("customer");
+  if (packs.length === 0) packs.push("generic");
+
+  const packId = packs[seed % packs.length];
+  const sv = language === "sv";
+
+  const defs = {
+    receiving: {
+      setting: sv ? "En leverans har precis kommit in" : "A delivery has just arrived",
+      artifact: sv ? "en kvittens eller en notering i loggen" : "a receipt or a log note",
+      constraintB: sv ? "Märkningen är ofullständig och två personer säger olika." : "The labeling is incomplete and two people give different answers.",
+      twist: sv ? "Efter 2 minuter kommer ny info som motsäger första beskedet." : "After 2 minutes, new info contradicts the first message.",
+    },
+    kitchen: {
+      setting: sv ? "Ni är mitt i produktionen och tempot är högt" : "You’re mid-production and the pace is high",
+      artifact: sv ? "en checklista eller en sign-off" : "a checklist or sign-off",
+      constraintB: sv ? "En kollega säger “vi gör som vanligt” men underlaget saknas." : "A colleague says “we do it as usual” but there’s no evidence.",
+      twist: sv ? "En detalj dyker upp som gör att “som vanligt” inte längre gäller." : "A detail appears that makes “as usual” no longer valid.",
+    },
+    audit: {
+      setting: sv ? "Ni gör en snabb internkontroll" : "You’re doing a quick internal check",
+      artifact: sv ? "ett underlag som kan visas i efterhand" : "evidence you can show later",
+      constraintB: sv ? "Det finns en avvikelse, men ni vet inte ännu om den är liten eller stor." : "There’s a deviation, but you don’t yet know its scope.",
+      twist: sv ? "En ny observation gör att ni måste omvärdera vad som är “viktigast först”." : "A new observation forces you to reconsider what matters first.",
+    },
+    brief: {
+      setting: sv ? "På ett kort avstämningsmöte ska ni få samsyn" : "In a short briefing you need alignment",
+      artifact: sv ? "en enkel beslutspunkt (vem-gör-vad)" : "a simple decision note (who-does-what)",
+      constraintB: sv ? "En person saknas men påverkas av beslutet." : "One person is absent but will be impacted by the decision.",
+      twist: sv ? "Efter mötet framkommer att en viktig detalj aldrig blev sagd." : "After the meeting, a key detail turns out to have been missing.",
+    },
+    customer: {
+      setting: sv ? "En kund har hört av sig med ett klagomål" : "A customer has contacted you with a complaint",
+      artifact: sv ? "en notering som gör att ni kan följa upp" : "a note that enables follow-up",
+      constraintB: sv ? "Det finns flera möjliga orsaker, och ni riskerar att gissa." : "There are multiple causes and you risk guessing.",
+      twist: sv ? "En kollega hittar en tidigare notering som ändrar bedömningen." : "A colleague finds a previous note that changes the assessment.",
+    },
+    generic: {
+      setting: sv ? "Ni behöver skapa ordning i ett läge som riskerar att spåra ur" : "You need to create order in a situation that can drift",
+      artifact: sv ? "en kort notering som ger spårbarhet" : "a short note that gives traceability",
+      constraintB: sv ? "Två personer har olika bild av vad som är “problemet”." : "Two people disagree on what the “problem” is.",
+      twist: sv ? "Någon säger något som låter rimligt – men saknar stöd." : "Someone says something that sounds right—without evidence.",
+    },
+  };
+
+  const d = defs[packId] || defs.generic;
+  return {
+    id: packId,
+    place,
+    setting: d.setting,
+    artifact: d.artifact,
+    constraintB: d.constraintB,
+    twist: d.twist,
+  };
+}
+
+function makeQuestionBlock({ i, language, pack, dim }) {
+  const sv = language === "sv";
+
   const stemsSv = {
     routine_start: `Ni står ${pack.place}. ${pack.setting}. Vilket är bästa första steget för att skapa kontroll utan att gissa?`,
     scenario_application: `${pack.setting}. Ni behöver fatta ett val ${pack.place}. Vilket alternativ ger mest spårbarhet i stunden?`,
@@ -637,7 +692,7 @@ function makeQuestionBlock({ i, seed, language, pack, dim, contextText }) {
     risk_consequence: `${pack.constraintB} Vilket val minskar risken för felbeslut mest ${pack.place}?`,
     deviation_and_action: `${pack.twist} Vad är den mest korrekta åtgärden för att hantera en möjlig avvikelse?`,
     roles_and_responsibility: `Två personer vill göra olika. Vilket ansvar/roll-val ger bäst ordning och tydlighet ${pack.place}?`,
-    definition_or_concept: `I en situation som denna: vad betyder “spårbarhet” i praktiken ${pack.place}?`
+    definition_or_concept: `I en situation som denna: vad betyder “spårbarhet” i praktiken ${pack.place}?`,
   };
 
   const stemsEn = {
@@ -647,38 +702,34 @@ function makeQuestionBlock({ i, seed, language, pack, dim, contextText }) {
     risk_consequence: `${pack.constraintB} Which choice reduces the risk of a wrong decision the most ${pack.place}?`,
     deviation_and_action: `${pack.twist} What is the most correct action to handle a potential deviation?`,
     roles_and_responsibility: `Two people disagree. Which role/ownership choice creates the best order and clarity ${pack.place}?`,
-    definition_or_concept: `In this kind of situation: what does “traceability” mean in practice ${pack.place}?`
+    definition_or_concept: `In this kind of situation: what does “traceability” mean in practice ${pack.place}?`,
   };
 
-  const stem = (sv ? (stemsSv[dim] || stemsSv.scenario_application) : (stemsEn[dim] || stemsEn.scenario_application));
+  const stem = sv ? stemsSv[dim] || stemsSv.scenario_application : stemsEn[dim] || stemsEn.scenario_application;
 
-  // deterministiska svarsalternativ (4 st) + korrekt index
   const optionsSv = [
     `Stanna upp och be om ett konkret underlag (t.ex. ${pack.artifact}).`,
     `Gå vidare “som vanligt” för att spara tid.`,
     `Välj det som känns rimligt utan att kontrollera underlag.`,
-    `Skjut upp beslutet och gör inget just nu.`
+    `Skjut upp beslutet och gör inget just nu.`,
   ];
   const optionsEn = [
     `Pause and ask for concrete evidence (e.g., ${pack.artifact}).`,
     `Proceed “as usual” to save time.`,
     `Pick what sounds reasonable without checking evidence.`,
-    `Delay the decision and do nothing for now.`
+    `Delay the decision and do nothing for now.`,
   ];
 
-  const options = (sv ? optionsSv : optionsEn);
-
-  // korrektIndex: alltid 0 i denna hotfix (fail-closed friendly + konsekvent)
+  const options = sv ? optionsSv : optionsEn;
   const correctIndex = 0;
 
   const explanation = sv
     ? `Rätt svar prioriterar spårbarhet och minimerar gissning. Det gör att ni kan förklara beslutet i efterhand och upptäcka avvikelse tidigt.`
     : `The correct option prioritizes evidence and minimizes guessing. That enables traceability and early detection of deviations.`;
 
-  // UI-mappningen i din index.js letar efter: kind:"question" + questionInline.question + choices + correctChoiceId
   const choices = options.map((text, idx) => ({
     id: `c${i + 1}_${idx + 1}`,
-    text: safeStr(text)
+    text: safeStr(text),
   }));
 
   return {
@@ -691,11 +742,11 @@ function makeQuestionBlock({ i, seed, language, pack, dim, contextText }) {
           text: safeStr(stem),
           choices,
           correctChoiceId: choices[correctIndex].id,
-          rationale: safeStr(explanation)
-        }
-      }
-    ]
+          rationale: safeStr(explanation),
+        },
+      },
+    ],
   };
 }
 
-// ===================== EOF (PATCHED) =====================
+// ===================== EOF =====================
