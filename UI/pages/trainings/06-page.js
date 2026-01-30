@@ -6,6 +6,12 @@ Syfte: Bootstrap + state + event wiring för trainings (ADMIN create/edit).
       + AI-generate via HRWorkerSDK (fail-closed) utan att skicka "Mål" till AI.
       + PP-SC-010-07: Klick på item i blocklistan öppnar modal (view/edit/delete/save).
 
+TILLÄGG — AO-VERKSAMHET-SELECT-01 (PROD v1.0):
+- Lägger till stöd för "Verksamhet" (businessArea) i training-objekt (ingen ny storage-key).
+- 15 standard + Annat… + sök på 3+ bokstäver (börjar med, case-insensitive).
+- "Annat" blir valbart nästa gång genom att sidan samlar unika businessArea från alla trainings
+  (ingen ny per-training options-struktur, ingen ny key).
+
 POLICY (LÅST):
 - UI-only • Fail-closed
 - Inga nya storage-keys (endast AO-057_TRAININGS_V1 skrivs via 03-store)
@@ -13,18 +19,12 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.3.3-PP-SC-010-07K (AUTOPATCH P0/P1):
-- P0 FIX: Normalisering väljer inte blint raw.data. Väljer den shape som faktiskt har blocks/items (raw vs raw.data).
-- P0 FIX: Stöd för worker blocks[] där block saknar items men har kind/question/options → mappas till UI-block + item.
-- P1 FIX: generateAi normaliserar alltid från hela svaret (r) så vi kan hitta top-level blocks/items om data saknar dem.
-
-PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
-- P0 FIX: Validering av “frågetyp” använder normaliserad controls.questionType (worker-enum),
-          inte UI-råtext (som kan vara label/”MCQ (mcq_single)” etc). Förhindrar felaktig fail-closed import.
-
-PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
-- P0 FIX: validateQuestionItem accepterar frågetext även från instruction/prompt (worker/AI varierar fält).
-- P0 FIX: Vid import normaliseras question-like items: om question saknas fylls den från text/instruction/prompt (schema-stabilitet).
+PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
+- P0 FIX: BUSINESS_DEFAULTS: "Build" → "Bygg" (AO).
+- P0 FIX: Tar bort per-training businessAreaOptions[] och bygger custom-val via unika businessArea från alla trainings.
+- P1 FIX: Nollar businessAreaQuery vid selectTraining() och createNewTraining().
+- P1 FIX: Fail-closed: om UI står på "Annat…" måste text vara icke-tom (min 2 tecken), annars stopp vid spara.
+- P1 ADD: inkluderar businessArea i AI-context (extra styrning) utan goals.
 ============================================================ */
 (function () {
   "use strict";
@@ -36,7 +36,7 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.3.5-PP-SC-010-07K";
+  page.__VERSION = "v1.3.8-PP-SC-010-07L";
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -102,6 +102,17 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
 
     D.goalsLevel = byId("goalsLevel");
     D.goals = byId("goals");
+
+    // AO-VERKSAMHET-SELECT-01 (optional hooks; no-op om de saknas)
+    // Rekommenderade id i trainings.html:
+    // - businessArea (SELECT eller INPUT)
+    // - businessAreaSearch (INPUT för sök 3+ bokstäver)
+    // - businessAreaOther (INPUT för Annat…)
+    // - businessAreaHint (span/div för hint)
+    D.businessArea = byId("businessArea");
+    D.businessAreaSearch = byId("businessAreaSearch");
+    D.businessAreaOther = byId("businessAreaOther");
+    D.businessAreaHint = byId("businessAreaHint");
 
     D.titleDisplay = byId("titleDisplay");
     D.subjectIdText = byId("subjectIdText");
@@ -171,6 +182,9 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     fStatus: "",
     onlyProblems: false,
 
+    // AO-VERKSAMHET-SELECT-01 (UI-only state)
+    businessAreaQuery: "",
+
     // Catalog (ai-rules/v1/modules.json)
     catalog: null,
     catalogStatus: "pending", // pending|ok|missing|error
@@ -235,6 +249,180 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
 
   function deepClone(obj) {
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
+  }
+
+  // =========================
+  // AO-VERKSAMHET-SELECT-01 — businessArea helpers (UI-only)
+  // =========================
+  const BUSINESS_OTHER_LABEL = "Annat…";
+  const BUSINESS_DEFAULTS = [
+    "Bygg",
+    "Butik/Handel",
+    "E-handel",
+    "Fastighet",
+    "Hotell",
+    "IT/Tech",
+    "Kontor/Administration",
+    "Lager/Logistik",
+    "Produktion/Industri",
+    "Restaurang/Café",
+    "Skola/Förskola",
+    "Städservice",
+    "Transport/Åkeri",
+    "Vård/Omsorg",
+    "Verkstad/Bilservice"
+  ];
+
+  function uniqueSorted(list) {
+    const set = new Set();
+    for (const x of safeArr(list)) {
+      const s = normStr(x);
+      if (s) set.add(s);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "sv"));
+  }
+
+  function isBusinessDefault(v) {
+    const s = lowerKey(v);
+    if (!s) return false;
+    for (const d of BUSINESS_DEFAULTS) if (lowerKey(d) === s) return true;
+    return false;
+  }
+
+  function collectBusinessAreasFromAllTrainings() {
+    // AO: "Annat…" ska dyka upp nästa gång utan ny key och utan ny per-training struktur.
+    // Lösning: samla unika businessArea från alla trainings (exkl. defaults + tomma + "Annat…").
+    const out = [];
+    for (const t of safeArr(state.trainings)) {
+      if (!t || typeof t !== "object") continue;
+      const v = normStr(t.businessArea);
+      if (!v) continue;
+      if (lowerKey(v) === lowerKey(BUSINESS_OTHER_LABEL)) continue;
+      if (isBusinessDefault(v)) continue;
+      out.push(v);
+    }
+    // även draft-värde (så UI känns stabilt innan save)
+    try {
+      const dv = normStr(state.draft && state.draft.businessArea);
+      if (dv && !isBusinessDefault(dv) && lowerKey(dv) !== lowerKey(BUSINESS_OTHER_LABEL)) out.push(dv);
+    } catch (_) { }
+    return uniqueSorted(out);
+  }
+
+  function composeBusinessOptionsForUi(/* draft */) {
+    const custom = collectBusinessAreasFromAllTrainings();
+    const all = uniqueSorted(BUSINESS_DEFAULTS.concat(custom));
+    return all;
+  }
+
+  function filterBusinessOptions(options, q) {
+    const query = normStr(q).toLowerCase();
+    if (query.length < 3) return options; // ingen filtrering 0–2
+    return options.filter(v => lowerKey(v).indexOf(query) === 0);
+  }
+
+  function setBusinessHint(msg) {
+    if (dom && dom.businessAreaHint && dom.setText) dom.setText(dom.businessAreaHint, msg || "");
+  }
+
+  function ensureBusinessAreaDatalist(inputEl) {
+    // återanvänder generic helper (nedan definierad senare) - men vi behöver den här tidigt:
+    // därför: minimal inline-variant om den inte finns än
+    if (!inputEl) return null;
+    const tag = String(inputEl.tagName || "").toUpperCase();
+    if (tag === "SELECT") return null;
+
+    const id = "businessAreaList";
+    let dl = byId(id);
+    if (!dl) {
+      dl = document.createElement("datalist");
+      dl.id = id;
+      inputEl.parentNode && inputEl.parentNode.appendChild(dl);
+    }
+    inputEl.setAttribute("list", id);
+    return dl;
+  }
+
+  function fillDatalistOptionsQuick(datalistEl, values) {
+    if (!datalistEl) return;
+    while (datalistEl.firstChild) datalistEl.removeChild(datalistEl.firstChild);
+    for (const v of values) {
+      const opt = document.createElement("option");
+      opt.value = v;
+      datalistEl.appendChild(opt);
+    }
+  }
+
+  function fillSelectOptionsQuick(selectEl, values, placeholder) {
+    if (!selectEl) return;
+    while (selectEl.firstChild) selectEl.removeChild(selectEl.firstChild);
+
+    if (placeholder) {
+      const o0 = document.createElement("option");
+      o0.value = "";
+      o0.textContent = placeholder;
+      selectEl.appendChild(o0);
+    }
+    for (const v of values) {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = v;
+      selectEl.appendChild(o);
+    }
+  }
+
+  function renderBusinessAreaPicker() {
+    // no-op om HTML inte har fälten än
+    if (!dom || !dom.businessArea) return;
+
+    const options = composeBusinessOptionsForUi(state.draft || {});
+    const q = normStr(state.businessAreaQuery);
+
+    let filtered = filterBusinessOptions(options, q);
+    // "Annat…" ska alltid finnas som val i UI
+    if (filtered && filtered.length) {
+      // ok
+    } else if (normStr(q).length >= 3) {
+      // 3+ men inga träffar: visa tomt urval + ändå "Annat…"
+      filtered = [];
+    }
+
+    const listWithOther = filtered.concat([BUSINESS_OTHER_LABEL]);
+
+    const tag = String(dom.businessArea.tagName || "").toUpperCase();
+    if (tag === "SELECT") {
+      fillSelectOptionsQuick(dom.businessArea, listWithOther, "Välj verksamhet…");
+    } else {
+      const dl = ensureBusinessAreaDatalist(dom.businessArea);
+      fillDatalistOptionsQuick(dl, listWithOther);
+    }
+
+    if (normStr(q).length > 0 && normStr(q).length < 3) {
+      setBusinessHint("Skriv minst 3 bokstäver för att söka.");
+    } else {
+      setBusinessHint("");
+    }
+
+    // Visa/dölj "Annat" input om det finns
+    if (dom.businessAreaOther && dom.show && dom.hide) {
+      const selected = normStr(dom.businessArea.value);
+      if (lowerKey(selected) === lowerKey(BUSINESS_OTHER_LABEL)) dom.show(dom.businessAreaOther);
+      else dom.hide(dom.businessAreaOther);
+    }
+  }
+
+  function readBusinessAreaFromInputs() {
+    if (!dom || !dom.businessArea) return "";
+    const sel = normStr(dom.businessArea.value);
+
+    // Om explicit "Annat…"
+    if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
+      const other = normStr(dom.businessAreaOther && dom.businessAreaOther.value);
+      return other; // kan vara tomt -> validering/guard stoppar save
+    }
+
+    // Om användaren skriver fritt i input: behandla som custom
+    return sel;
   }
 
   function findTrainingIndexById(id) {
@@ -341,14 +529,63 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     return stripContextBoilerplate(out);
   }
 
+  // P0: Flatten av worker-shape { question:{ text, choices[], correctChoiceId, rationale } } → UI-shape
+  function flattenChoiceQuestionShapeInPlace(it) {
+    if (!it || typeof it !== "object") return it;
+
+    const qObj = it.question;
+    if (!qObj || typeof qObj !== "object" || Array.isArray(qObj)) return it;
+
+    const qText = normStr(qObj.text || "");
+    const choices = Array.isArray(qObj.choices) ? qObj.choices : null;
+    if (!qText || !choices || choices.length < 2) return it;
+
+    // options från choices[].text
+    const options = choices.map(c => normStr(c && c.text)).filter(Boolean);
+    if (options.length < 2) return it;
+
+    const correctChoiceId = normStr(qObj.correctChoiceId || "");
+    let correctIndex = -1;
+    if (correctChoiceId) {
+      for (let i = 0; i < choices.length; i++) {
+        if (normStr(choices[i] && choices[i].id) === correctChoiceId) { correctIndex = i; break; }
+      }
+    }
+
+    // skriv om till UI-shape (endast normalisering före import)
+    it.type = "question";
+    it.question = scrubObjectObjectToken(qText);
+    it.options = options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
+
+    if (correctIndex >= 0 && correctIndex < it.options.length) it.correctIndex = correctIndex;
+
+    const rationale = (typeof qObj.rationale === "string") ? qObj.rationale : "";
+    if (rationale) it.explanation = scrubObjectObjectToken(rationale);
+
+    return it;
+  }
+
   function ensureItemType(it) {
     // P0: gör rendering stabil om worker/AI saknar type
     if (!it || typeof it !== "object") return it;
+
+    // P0: flatten om frågan ligger som object-shape (choices)
+    flattenChoiceQuestionShapeInPlace(it);
+
     const t = normStr(it.type).toLowerCase();
     if (t) return it;
 
     // om question-fält finns -> question
     if (typeof it.question === "string" && normStr(it.question)) { it.type = "question"; return it; }
+
+    // om question-objekt med text/choices -> question
+    if (it.question && typeof it.question === "object" && !Array.isArray(it.question)) {
+      const q = it.question;
+      if (typeof q.text === "string" && normStr(q.text) && Array.isArray(q.choices) && q.choices.length >= 2) {
+        it.type = "question";
+        return it;
+      }
+    }
 
     // P0: om prompt/instruction ser ut som fråga (och ev options) -> question
     if (typeof it.prompt === "string" && normStr(it.prompt) && (Array.isArray(it.options) && it.options.length >= 2)) { it.type = "question"; return it; }
@@ -364,11 +601,33 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
 
   function sanitizeAiItemInPlace(item) {
     if (!item || typeof item !== "object") return item;
+
+    // P0: om question ligger som objekt (choices-shape) -> flatten tidigt
+    flattenChoiceQuestionShapeInPlace(item);
+
     const keys = ["text", "instruction", "prompt", "question", "explanation", "feedback", "rationale", "reason", "title", "heading"];
     for (let i = 0; i < keys.length; i++) {
       const k = keys[i];
       if (typeof item[k] === "string") item[k] = scrubObjectObjectToken(item[k]);
     }
+
+    // P0: scrubba även ev. question-objekt om det finns kvar (fail-safe)
+    try {
+      const qObj = item.question;
+      if (qObj && typeof qObj === "object" && !Array.isArray(qObj)) {
+        if (typeof qObj.text === "string") qObj.text = scrubObjectObjectToken(qObj.text);
+        if (typeof qObj.rationale === "string") qObj.rationale = scrubObjectObjectToken(qObj.rationale);
+        if (Array.isArray(qObj.choices)) {
+          qObj.choices = qObj.choices.map(c => {
+            if (c && typeof c === "object") {
+              if (typeof c.text === "string") c.text = scrubObjectObjectToken(c.text);
+            }
+            return c;
+          });
+        }
+      }
+    } catch (_) { }
+
     if (Array.isArray(item.options)) {
       item.options = item.options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
     }
@@ -380,6 +639,14 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
   function getItemPrimaryTextForEditor(it) {
     try {
       if (!it || typeof it !== "object") return "";
+
+      // P0: om question är object med text
+      if (it.question && typeof it.question === "object" && !Array.isArray(it.question)) {
+        const qObj = it.question;
+        const t = (typeof qObj.text === "string" && qObj.text) ? qObj.text : "";
+        if (t) return scrubObjectObjectToken(String(t || ""));
+      }
+
       const cand = (typeof it.text === "string" && it.text) ? it.text
         : (typeof it.instruction === "string" && it.instruction) ? it.instruction
           : (typeof it.prompt === "string" && it.prompt) ? it.prompt
@@ -463,6 +730,9 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
 
     if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value) || "normal";
     if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
+
+    // AO-VERKSAMHET-SELECT-01
+    if (dom && dom.businessArea) state.draft.businessArea = readBusinessAreaFromInputs();
   }
 
   /* =========================
@@ -659,15 +929,6 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
   /* =========================
      BLOCK 11/18 — Datalist/select builders
   ========================== */
-  function uniqueSorted(list) {
-    const set = new Set();
-    for (const x of safeArr(list)) {
-      const s = normStr(x);
-      if (s) set.add(s);
-    }
-    return Array.from(set).sort((a, b) => a.localeCompare(b, "sv"));
-  }
-
   function collectModulesFromTrainings() {
     const out = [];
     for (const t of state.trainings) if (t && t.module) out.push(t.module);
@@ -852,7 +1113,12 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
       if (st && String(t.status || "draft") !== st) continue;
 
       if (q) {
-        const blob = (normStr(t.title) + " " + normStr(t.module) + " " + normStr(t.area)).toLowerCase();
+        const blob = (
+          normStr(t.title) + " " +
+          normStr(t.module) + " " +
+          normStr(t.area) + " " +
+          normStr(t.businessArea)
+        ).toLowerCase();
         if (!blob.includes(q)) continue;
       } else if (!state.showAll) {
         const tid = normStr(t.id);
@@ -1005,6 +1271,27 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     if (dom.goalsLevel) dom.goalsLevel.value = normStr(d.goalsLevel) || "normal";
     if (dom.goals) dom.goals.value = normStr(d.goals) || "";
 
+    // AO-VERKSAMHET-SELECT-01: fyll verksamhet
+    if (dom.businessArea) {
+      renderBusinessAreaPicker();
+      const v = normStr(d.businessArea);
+      if (v) {
+        if (isBusinessDefault(v)) {
+          dom.businessArea.value = v;
+          if (dom.businessAreaOther) dom.businessAreaOther.value = "";
+        } else {
+          // custom -> välj "Annat…" om möjligt och fyll other
+          dom.businessArea.value = BUSINESS_OTHER_LABEL;
+          if (dom.businessAreaOther) dom.businessAreaOther.value = v;
+          else dom.businessArea.value = v; // om vi inte har separat other-input
+        }
+      } else {
+        // tomt
+        // lämna som placeholder/blank
+      }
+      renderBusinessAreaPicker();
+    }
+
     syncDraftTitleFromFields();
 
     const blocks = currentBlocks();
@@ -1083,10 +1370,16 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
       return;
     }
 
+    // P1: nolla verksamhets-sök vid selection (undvik "tom lista" efter byt)
+    state.businessAreaQuery = "";
+    if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
+
     state.selectedId = normStr(id);
     state.draft = deepClone(state.trainings[idx]);
     setDirty(false);
     renderAreaDatalist();
+
+    renderBusinessAreaPicker();
     updateUiAll();
   }
 
@@ -1104,6 +1397,7 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
       status: "draft",
       module: "",
       area: "",
+      businessArea: "", // AO-VERKSAMHET-SELECT-01
       courseTitle: chapter,
       courseStep: step,
       goalsLevel: "normal",
@@ -1116,6 +1410,10 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
 
   function createNewTraining() {
     if (!isWriterAllowed()) return;
+
+    // P1: nolla verksamhets-sök vid new (undvik "tom lista" direkt)
+    state.businessAreaQuery = "";
+    if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
 
     const t = newTrainingTemplate();
     state.trainings.unshift(t);
@@ -1134,6 +1432,7 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     renderModuleDatalist();
     renderAreaDatalist();
     renderChapterAndStepPickers();
+    renderBusinessAreaPicker();
     updateUiAll();
   }
 
@@ -1186,6 +1485,7 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
 
     state.draft = deepClone(state.trainings[idx]);
     setDirty(false);
+    renderBusinessAreaPicker();
     updateUiAll();
   }
 
@@ -1196,6 +1496,28 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     syncDraftFromInputs();
     syncDraftTitleFromFields();
     state.draft.status = (status === "published") ? "published" : "draft";
+
+    // AO-VERKSAMHET-SELECT-01: Fail-closed guard för Annat…
+    try {
+      const sel = normStr(dom && dom.businessArea && dom.businessArea.value);
+      if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
+        const other = normStr(dom && dom.businessAreaOther && dom.businessAreaOther.value);
+        if (other.length < 2) {
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: Du valde Annat… men texten är tom eller för kort (minst 2 tecken).");
+          return;
+        }
+        state.draft.businessArea = other;
+      }
+
+      // fail-safe maxlängd (P1 skydd)
+      const ba = normStr(state.draft.businessArea);
+      if (ba && ba.length > 80) {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: För lång text (max 80 tecken).");
+        return;
+      }
+    } catch (_) { }
 
     const v = (status === "published" && DEPS.contract && DEPS.contract.validateForPublish)
       ? DEPS.contract.validateForPublish(state.draft)
@@ -1233,6 +1555,7 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
     renderModuleDatalist();
     renderAreaDatalist();
+    renderBusinessAreaPicker();
     updateUiAll();
   }
 
@@ -1275,6 +1598,7 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
           else if (typeof it0.instruction === "string") it0.instruction = txt;
           else if (typeof it0.prompt === "string") it0.prompt = txt;
           else if (typeof it0.question === "string") it0.question = txt;
+          else if (it0.question && typeof it0.question === "object" && !Array.isArray(it0.question) && typeof it0.question.text === "string") it0.question.text = txt;
         } else if (typeof it0 === "string") {
           bb.items[0] = txt;
         }
@@ -1332,9 +1656,10 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     const courseTitle = normStr(dom && dom.courseTitle && dom.courseTitle.value) || "Introduktion";
     const courseStep = parseCourseStep(dom && dom.courseStep && dom.courseStep.value);
     const goalsLevel = normStr(dom && dom.goalsLevel && dom.goalsLevel.value) || "normal";
+    const businessArea = normStr(readBusinessAreaFromInputs());
 
     // LÅST: skickar aldrig goals till AI
-    return { module, area, courseTitle, courseStep, goalsLevel, goals: "" };
+    return { module, area, businessArea, courseTitle, courseStep, goalsLevel, goals: "" };
   }
 
   function buildAiContextNoGoals() {
@@ -1349,12 +1674,15 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
         ctx.level = level;
         if (!ctx.subject || typeof ctx.subject !== "object") ctx.subject = {};
         if (!ctx.subject.title && subjectTitle) ctx.subject.title = subjectTitle;
+
+        // AO-VERKSAMHET-SELECT-01: extra styrning (ok att skicka)
+        if (s.businessArea) ctx.subject.businessArea = s.businessArea;
       } catch (_) { }
       return ctx;
     }
 
     return {
-      subject: { module: s.module, area: s.area, title: subjectTitle },
+      subject: { module: s.module, area: s.area, title: subjectTitle, businessArea: s.businessArea || "" },
       course: {
         chapter: s.courseTitle,
         step: s.courseStep,
@@ -1400,13 +1728,6 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
 
   // ---------- Normalize AI response into blocks/items ----------
   function normalizeAiBlocksFromAny(raw) {
-    // Stöd fler shapes + “blocks(meta) + items(data)” (vanligt worker-format)
-    // Shape A: { blocks:[{title, items:[...]}] }
-    // Shape B: { data:{ blocks:[...] } }  (MEN: data kan vara meta-only)
-    // Shape C: { items:[...] } (wrap till 1 block)
-    // Shape D: blocks(meta) + items(separat) => para indexvis eller wrap
-    // Shape E: blocks[] där block saknar items men har kind/question/options → block=>item
-
     function hasBlocksOrItems(obj) {
       if (!obj) return false;
       if (Array.isArray(obj)) return true;
@@ -1438,14 +1759,11 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
         : null;
 
     if (Array.isArray(blocksCand)) {
-      // 1) inline-items?
       const hasInlineItems = blocksCand.some(b => b && Array.isArray(b.items) && b.items.length);
 
-      // 2) blocks är bara metadata men items finns separat
       if (!hasInlineItems && itemsCand && itemsCand.length) {
         const out = [];
 
-        // Om samma längd: para 1 item per block
         if (blocksCand.length === itemsCand.length) {
           for (let i = 0; i < blocksCand.length; i++) {
             const b = blocksCand[i];
@@ -1457,12 +1775,10 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
           return { ok: true, blocks: out };
         }
 
-        // Annars: wrap alla items till ett block (ta titel från första blocket om finns)
         const firstTitle = normStr(blocksCand[0] && (blocksCand[0].title || blocksCand[0].heading || blocksCand[0].name)) || "";
         return { ok: true, blocks: [{ title: firstTitle, items: itemsCand.slice() }] };
       }
 
-      // 3) blocks[] saknar items men har question-ish fält → mappa till item
       const out2 = [];
       for (const b of blocksCand) {
         const title = normStr(b && (b.title || b.heading || b.name)) || "";
@@ -1473,7 +1789,6 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
           continue;
         }
 
-        // “question in block” fallback
         if (b && typeof b === "object") {
           const q = normStr(b.question || b.q || b.text || b.instruction || b.prompt || "");
           const opts = Array.isArray(b.options) ? b.options.slice() : null;
@@ -1488,7 +1803,6 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
 
           if (q && hasAnyAnswerShape) {
             const item = {};
-            // kopiera relevanta fält (minimalt, safe)
             item.question = q;
             if (opts) item.options = opts;
             if (b.correctIndex != null) item.correctIndex = b.correctIndex;
@@ -1500,7 +1814,6 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
             if (typeof b.explanation === "string") item.explanation = b.explanation;
             if (typeof b.feedback === "string") item.feedback = b.feedback;
 
-            // type/kind
             item.type = "question";
             out2.push({ title, items: [item] });
             continue;
@@ -1532,13 +1845,16 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
   function validateQuestionItem(it, hardTypeOrAuto) {
     if (!it || typeof it !== "object") return { ok: false, reason: "Fråga är inte ett objekt." };
 
-    // P0 FIX: fråga-text kan ligga i instruction/prompt (worker/AI varierar)
-    const question = normStr(it.question || it.q || it.text || it.instruction || it.prompt || "");
+    flattenChoiceQuestionShapeInPlace(it);
+
+    const question = normStr(
+      (typeof it.question === "string" ? it.question : "") ||
+      it.q || it.text || it.instruction || it.prompt || ""
+    );
     if (!question) return { ok: false, reason: "Fråga saknar text." };
 
     const ht = normStr(hardTypeOrAuto).toLowerCase() || "auto";
 
-    // Auto måste ha facit/struktur
     if (ht === "auto") {
       const opts = Array.isArray(it.options) ? it.options : null;
       const hasSingle = opts && opts.length >= 2 && Number.isFinite(Number(it.correctIndex));
@@ -1600,7 +1916,6 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
 
-    // Synka först (så AI får rätt modul/område/kapitel/steg)
     syncDraftFromInputs();
     syncDraftTitleFromFields();
 
@@ -1619,11 +1934,10 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     const controls = readAiControls();
     const ctxObj = buildAiContextNoGoals();
 
-    // P0: Skicka INTE extra metadata som modellen kan “eka” tillbaka (contextText/subject).
     const req = {
-      mode: controls.mode,               // training|document
-      count: controls.count,             // 1..12
-      context: ctxObj,                   // NO goals
+      mode: controls.mode,
+      count: controls.count,
+      context: ctxObj,
       language: "sv",
       questionType: controls.questionType || "auto",
       feedbackEnabled: !!controls.feedbackEnabled
@@ -1660,7 +1974,6 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
       return;
     }
 
-    // Normalisera → blocks/items (P1: normalisera alltid från HELA svaret, så vi kan hitta top-level blocks/items)
     const norm = normalizeAiBlocksFromAny(r);
     page._LAST_AI_NORM = deepClone(norm);
 
@@ -1671,8 +1984,6 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
       return;
     }
 
-    // Sanitera + validera (fail-closed)
-    // P0 FIX: använd normaliserad enum från controls.questionType (inte UI-label)
     const normalizedQt = normStr(controls.questionType).toLowerCase() || "auto";
     const hardType = (normalizedQt && normalizedQt !== "auto") ? normalizedQt : "auto";
     const hardSelected = (hardType !== "auto");
@@ -1680,23 +1991,23 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     const incomingBlocks = [];
     for (const b of safeArr(norm.blocks)) {
       const items = safeArr(b && b.items).map(x => {
-        // 1) Strängar -> alltid objekt (så store/contract inte failar)
         if (typeof x === "string") {
           const t = scrubObjectObjectToken(x);
           return { type: "info", text: t };
         }
 
-        // 2) Objekt -> sanera + säkerställ type
         if (x && typeof x === "object") {
           const obj = sanitizeAiItemInPlace(deepClone(x)) || {};
+
+          flattenChoiceQuestionShapeInPlace(obj);
+          ensureItemType(obj);
+
           if (!obj.type || typeof obj.type !== "string") {
-            // Heuristik: om den ser ut som en fråga, märk som question annars info
             const hasQ = !!normStr(obj.question || obj.q || obj.text || obj.instruction || obj.prompt || "");
             const hasOpts = Array.isArray(obj.options) && obj.options.length >= 2;
             obj.type = (hasQ && (hasOpts || obj.correct != null || obj.answer != null || obj.expected != null)) ? "question" : "info";
           }
 
-          // P0 FIX: schema-stabilitet för frågor: fyll question från text/instruction/prompt vid behov
           if (String(obj.type || "").toLowerCase() === "question") {
             if (!normStr(obj.question)) {
               const q2 = normStr(obj.q || obj.text || obj.instruction || obj.prompt || "");
@@ -1704,7 +2015,6 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
             }
           }
 
-          // Om contract har normalizeItem: kör den (safe + stabil schema)
           if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
             return DEPS.contract.normalizeItem(obj);
           }
@@ -1716,10 +2026,8 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
 
       if (!items.length) continue;
 
-      // Om användaren har valt provfrågor: kräver question-format
       if (controls.content === "questions") {
         for (const it of items) {
-          // Strängar kan inte ge facit -> men vi mappade strängar till info -> stoppa i questions-läge
           if (it && it.type === "info") {
             DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
             setAiHint("Du valde provfrågor men AI gav text/info utan facit. Import stoppad (fail-closed).");
@@ -1756,7 +2064,6 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
       hardSelected: hardSelected
     };
 
-    // Importera till draft (append)
     if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
     for (const nb of incomingBlocks) state.draft.blocks.push(nb);
 
@@ -1791,6 +2098,12 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
       if (dom.q) dom.q.value = "";
       if (dom.fStatus) dom.fStatus.value = "";
       if (dom.onlyProblems) dom.onlyProblems.checked = false;
+
+      // AO-VERKSAMHET-SELECT-01: rensa sökquery (UI-only)
+      state.businessAreaQuery = "";
+      if (dom.businessAreaSearch) dom.businessAreaSearch.value = "";
+      renderBusinessAreaPicker();
+
       state.showAll = false;
       refreshList();
       updateButtons();
@@ -1874,6 +2187,39 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
       }
     });
 
+    // AO-VERKSAMHET-SELECT-01: events (no-op om elementen saknas)
+    dom.on(dom.businessAreaSearch, "input", function () {
+      state.businessAreaQuery = normStr(dom.businessAreaSearch && dom.businessAreaSearch.value);
+      renderBusinessAreaPicker();
+      updateDebug();
+    });
+    dom.on(dom.businessArea, "change", function () {
+      if (state.draft) {
+        syncDraftFromInputs();
+        renderBusinessAreaPicker();
+        setDirty(true);
+        updateButtons();
+        updateDebug();
+      }
+    });
+    dom.on(dom.businessArea, "input", function () {
+      // om businessArea är input (datalist): behandla som editor-change
+      if (state.draft) {
+        syncDraftFromInputs();
+        setDirty(true);
+        updateButtons();
+        updateDebug();
+      }
+    });
+    dom.on(dom.businessAreaOther, "input", function () {
+      if (state.draft) {
+        syncDraftFromInputs();
+        setDirty(true);
+        updateButtons();
+        updateDebug();
+      }
+    });
+
     dom.on(dom.btnTestAI, "click", testAi);
     dom.on(dom.btnGenAI, "click", generateAi);
 
@@ -1908,6 +2254,7 @@ PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
     renderModuleDatalist();
     renderAreaDatalist();
     renderChapterAndStepPickers();
+    renderBusinessAreaPicker();
     state.showAll = false;
 
     wireEventsOnce();
