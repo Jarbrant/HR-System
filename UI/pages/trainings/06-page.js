@@ -11,6 +11,10 @@ Mål (Patchpaket 4):
    - Lagring: training.businessArea (inom befintlig AO-057_TRAININGS_V1 struktur; ingen ny key).
 4) P0: Flatten/normalisera AI question-shape till stabilt UI-format, fail-closed med tydlig orsak.
 
+TILLÄGG (FÖRSLAG, UI-only, NO STORAGE):
+- Kurs-spår (Course 1 vs Course 2) som påverkar endast AI-request + ankare.
+  - DOM-id: courseTrack (valfritt; om saknas => default course1)
+
 POLICY (LÅST):
 - UI-only • Fail-closed
 - Inga nya storage-keys (endast befintlig trainings-key via 03-store)
@@ -36,7 +40,7 @@ DoD:
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.4.3-AO-TRAININGS-VERKSAMHET-ANCHOR-01"; // PATCH: businessArea suggestions also for businessAreaSearch input
+  page.__VERSION = "v1.4.4-AO-TRAININGS-VERKSAMHET-ANCHOR-01"; // PATCH: optional courseTrack (no storage) for AI anchor/context
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -102,6 +106,10 @@ DoD:
     // Chapter/step
     D.courseTitle = byId("courseTitle");
     D.courseStep = byId("courseStep");
+
+    // (FÖRSLAG) Course Track (optional, no storage)
+    // Rekommenderat id i trainings.html: courseTrack (SELECT/INPUT)
+    D.courseTrack = byId("courseTrack");
 
     // Level/goals (goals never sent to AI)
     D.goalsLevel = byId("goalsLevel");
@@ -267,6 +275,42 @@ DoD:
 
   function deepClone(obj) {
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
+  }
+
+  /* =========================
+     BLOCK 5.1/19 — (FÖRSLAG) Course track helpers (NO STORAGE)
+  ========================== */
+  function normalizeCourseTrack(raw) {
+    const s = normStr(raw).toLowerCase();
+    if (!s) return "course1";
+
+    // allow numeric & labels
+    if (s === "1" || s === "course1" || s === "kurs1" || s === "grund" || s === "grundkurs" || s === "standard") return "course1";
+    if (s === "2" || s === "course2" || s === "kurs2" || s === "tillämpning" || s === "tillampning" || s === "coach" || s === "ledarspår" || s === "ledarspar") return "course2";
+
+    // tolerant: if it starts with "1" or "2"
+    if (s.indexOf("1") === 0) return "course1";
+    if (s.indexOf("2") === 0) return "course2";
+
+    return "course1";
+  }
+
+  function courseTrackLabel(track) {
+    const t = normalizeCourseTrack(track);
+    return (t === "course2") ? "Tillämpning" : "Grund";
+  }
+
+  function readCourseTrackFromUi() {
+    // Optional DOM; fail-closed default
+    try {
+      const el = dom && dom.courseTrack ? dom.courseTrack : null;
+      if (!el) return "course1";
+      const tag = String(el.tagName || "").toUpperCase();
+      if (tag === "SELECT") return normalizeCourseTrack(el.value);
+      return normalizeCourseTrack(el.value);
+    } catch (_) {
+      return "course1";
+    }
   }
 
   /* =========================
@@ -1025,6 +1069,8 @@ DoD:
 
     // AO: verksamhet (PATCH: fungerar även när UI använder businessAreaSearch som rutan)
     state.draft.businessArea = readBusinessAreaFromInputs();
+
+    // (FÖRSLAG) courseTrack sparas INTE (no storage)
   }
 
   /* =========================
@@ -1039,6 +1085,7 @@ DoD:
         lockReason: state.lockReason || "",
         selectedId: state.selectedId || "",
         aiAnchorLine: state.aiAnchorLine || "",
+        courseTrack: readCourseTrackFromUi(), // NO STORAGE
         draft: state.draft ? state.draft : null,
         trainingsCount: Array.isArray(state.trainings) ? state.trainings.length : 0,
         trainings: Array.isArray(state.trainings) ? state.trainings : [],
@@ -1395,19 +1442,27 @@ DoD:
     const courseStep = parseCourseStep(dom && dom.courseStep && dom.courseStep.value);
     const goalsLevel = normStr(dom && dom.goalsLevel && dom.goalsLevel.value) || "normal";
     const businessArea = normStr(readBusinessAreaFromInputs());
-    return { module, area, businessArea, courseTitle, courseStep, goalsLevel, goals: "" };
+
+    // (FÖRSLAG) courseTrack from UI only, no storage
+    const track = readCourseTrackFromUi();
+
+    return { module, area, businessArea, courseTitle, courseStep, goalsLevel, goals: "", track };
   }
 
   function buildAiAnchorLine() {
     const s = snapshotEditorStateForAi();
     const level = normalizeLevel(s.goalsLevel);
+    const tLabel = courseTrackLabel(s.track);
+
     const parts = [
       "Modul: " + (s.module || "—"),
       "Område: " + (s.area || "—"),
       "Kapitel: " + (s.courseTitle || "—"),
       "Steg: " + (s.courseStep || "—"),
       "Nivå: " + (level || "normal"),
-      "Verksamhet: " + (s.businessArea || "—")
+      "Verksamhet: " + (s.businessArea || "—"),
+      // (FÖRSLAG) extra signal to worker (still XSS-safe)
+      "Kurs-spår: " + (tLabel || "Grund")
     ];
     const line = parts.join(" • ");
     return scrubObjectObjectToken(line);
@@ -1425,6 +1480,9 @@ DoD:
     const subjectTitle = normStr(s.area) || normStr(s.module) || "";
     const anchorLine = buildAiAnchorLine();
 
+    const track = normalizeCourseTrack(s.track);
+    const trackLabel = courseTrackLabel(track);
+
     if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
       const ctx = DEPS.core.buildAiContext(s) || {};
       try {
@@ -1433,6 +1491,11 @@ DoD:
 
         // AO: ankare
         ctx.anchor = anchorLine;
+
+        // (FÖRSLAG) course track (NO STORAGE)
+        if (!ctx.course || typeof ctx.course !== "object") ctx.course = {};
+        ctx.course.track = track;
+        ctx.course.trackLabel = trackLabel;
 
         // P0: business alias (explicit parameter) + backwards-compat subject.businessArea
         if (s.businessArea) ctx.business = s.businessArea;
@@ -1453,6 +1516,8 @@ DoD:
       course: {
         chapter: s.courseTitle,
         step: s.courseStep,
+        track: track,
+        trackLabel: trackLabel,
         title: (DEPS.core && DEPS.core.composeTitle)
           ? DEPS.core.composeTitle(s.courseTitle, s.courseStep, s.area || "—")
           : (s.courseTitle + " • Steg " + s.courseStep + " • " + (s.area || "—"))
@@ -1617,6 +1682,8 @@ DoD:
 
       renderBusinessAreaPicker();
     }
+
+    // (FÖRSLAG) courseTrack: do not bind to storage/draft; just keep whatever UI has
 
     syncDraftTitleFromFields();
 
@@ -2034,7 +2101,7 @@ DoD:
     }
 
     const controls = readAiControls();
-    const ctxObj = buildAiContextNoGoals(); // includes anchor + business, goals stripped
+    const ctxObj = buildAiContextNoGoals(); // includes anchor + business, goals stripped (+ optional track)
 
     const req = {
       mode: controls.mode,
@@ -2178,7 +2245,8 @@ DoD:
       importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0),
       questionType: controls.questionType || "auto",
       hardSelected: hardSelected,
-      anchor: state.aiAnchorLine || ""
+      anchor: state.aiAnchorLine || "",
+      courseTrack: readCourseTrackFromUi() // NO STORAGE
     };
 
     if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
@@ -2503,6 +2571,22 @@ DoD:
     dom.on(dom.area, "input", onEditorChange);
     dom.on(dom.courseTitle, "change", onEditorChange);
     dom.on(dom.courseStep, "change", onEditorChange);
+
+    // (FÖRSLAG) courseTrack affects anchor/context only (NO STORAGE)
+    dom.on(dom.courseTrack, "change", function () {
+      if (!state.draft) return;
+      renderAiAnchorRow();
+      setDirty(true);
+      updateButtons();
+      updateDebug();
+    });
+    dom.on(dom.courseTrack, "input", function () {
+      if (!state.draft) return;
+      renderAiAnchorRow();
+      setDirty(true);
+      updateButtons();
+      updateDebug();
+    });
 
     dom.on(dom.goalsLevel, "change", function () {
       if (state.draft) {
