@@ -13,11 +13,14 @@ POLICY (LÅST):
 - ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
 - AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
 
-PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
-- P0 FIX: Modul/Område-pickers stödjer både INPUT+datalist och SELECT.
-         Om SELECT: fyll options + injicera alltid aktuellt värde om det saknas (så custom inte “försvinner”).
-- P1 FIX: Wire change-events för mod/area (SELECT triggar change).
+PATCH v1.3.3-PP-SC-010-07K (AUTOPATCH P0/P1):
+- P0 FIX: Normalisering väljer inte blint raw.data. Väljer den shape som faktiskt har blocks/items (raw vs raw.data).
+- P0 FIX: Stöd för worker blocks[] där block saknar items men har kind/question/options → mappas till UI-block + item.
+- P1 FIX: generateAi normaliserar alltid från hela svaret (r) så vi kan hitta top-level blocks/items om data saknar dem.
 
+PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
+- P0 FIX: Validering av “frågetyp” använder normaliserad controls.questionType (worker-enum),
+          inte UI-råtext (som kan vara label/”MCQ (mcq_single)” etc). Förhindrar felaktig fail-closed import.
 ============================================================ */
 (function () {
   "use strict";
@@ -29,7 +32,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.3.4-PP-SC-010-07L";
+  page.__VERSION = "v1.3.4-PP-SC-010-07K";
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -225,7 +228,6 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
   function lowerKey(v) { return normStr(v).toLowerCase(); }
   function isObj(v) { return !!v && typeof v === "object" && !Array.isArray(v); }
   function upper(v) { return String(v ?? "").toUpperCase(); }
-  function tagName(el) { return el && el.tagName ? String(el.tagName).toUpperCase() : ""; }
 
   function deepClone(obj) {
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
@@ -469,10 +471,6 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
         draft: state.draft ? state.draft : null,
         trainingsCount: Array.isArray(state.trainings) ? state.trainings.length : 0,
         trainings: Array.isArray(state.trainings) ? state.trainings : [],
-        domTags: {
-          mod: tagName(dom.mod),
-          area: tagName(dom.area)
-        },
         lastAi: {
           request: page._LAST_AI_REQUEST || null,
           raw: page._LAST_AI_RAW || null,
@@ -695,50 +693,34 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     return [];
   }
 
-  function fillSelectOptions(selectEl, values, placeholder) {
-    if (!selectEl) return;
-    while (selectEl.firstChild) selectEl.removeChild(selectEl.firstChild);
+  function renderModuleDatalist() {
+    if (!dom || !dom.modList) return;
+    while (dom.modList.firstChild) dom.modList.removeChild(dom.modList.firstChild);
 
-    if (placeholder) {
-      const o0 = document.createElement("option");
-      o0.value = "";
-      o0.textContent = placeholder;
-      selectEl.appendChild(o0);
-    }
+    const fixed = safeArr(state.defaults.modules);
+    const fromData = collectModulesFromTrainings();
+    const all = uniqueSorted(fixed.concat(fromData));
 
-    for (const v of values) {
-      const o = document.createElement("option");
-      o.value = v;
-      o.textContent = v;
-      selectEl.appendChild(o);
-    }
-  }
-
-  function ensureSelectKeepsValue(selectEl, value) {
-    if (!selectEl) return;
-    const v = normStr(value);
-    if (!v) return;
-
-    // Om value inte finns bland options: injicera en option så select inte “tappar” det
-    let found = false;
-    for (let i = 0; i < selectEl.options.length; i++) {
-      if (String(selectEl.options[i].value) === v) { found = true; break; }
-    }
-    if (!found) {
-      const o = document.createElement("option");
-      o.value = v;
-      o.textContent = v + " (ej i katalog)";
-      selectEl.appendChild(o);
-    }
-  }
-
-  function fillDatalistOptions(datalistEl, values) {
-    if (!datalistEl) return;
-    while (datalistEl.firstChild) datalistEl.removeChild(datalistEl.firstChild);
-    for (const v of values) {
+    for (const m of all) {
       const opt = document.createElement("option");
-      opt.value = v;
-      datalistEl.appendChild(opt);
+      opt.value = m;
+      dom.modList.appendChild(opt);
+    }
+  }
+
+  function renderAreaDatalist() {
+    if (!dom || !dom.areaList) return;
+    while (dom.areaList.firstChild) dom.areaList.removeChild(dom.areaList.firstChild);
+
+    const modVal = normStr(dom.mod && dom.mod.value);
+    const fixed = safeArr(getAreasForModuleLoose(modVal));
+    const fromData = collectAreasFromTrainingsForModule(modVal);
+    const all = uniqueSorted(fixed.concat(fromData));
+
+    for (const a of all) {
+      const opt = document.createElement("option");
+      opt.value = a;
+      dom.areaList.appendChild(opt);
     }
   }
 
@@ -758,63 +740,34 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     return dl;
   }
 
-  // --- P0: render modul/område som INPUT+datalist eller SELECT+options ---
-  function renderModulePicker() {
-    if (!dom || !dom.mod) return;
+  function fillSelectOptions(selectEl, values, placeholder) {
+    if (!selectEl) return;
+    while (selectEl.firstChild) selectEl.removeChild(selectEl.firstChild);
 
-    const fixed = safeArr(state.defaults.modules);
-    const fromData = collectModulesFromTrainings();
-    const all = uniqueSorted(fixed.concat(fromData));
-
-    const current = normStr((state.draft && state.draft.module) ? state.draft.module : (dom.mod && dom.mod.value));
-
-    const tag = tagName(dom.mod);
-    if (tag === "SELECT") {
-      fillSelectOptions(dom.mod, all, "Välj modul…");
-      ensureSelectKeepsValue(dom.mod, current);
-      return;
+    if (placeholder) {
+      const o0 = document.createElement("option");
+      o0.value = "";
+      o0.textContent = placeholder;
+      selectEl.appendChild(o0);
     }
 
-    // INPUT/other -> datalist
-    if (dom.modList) {
-      fillDatalistOptions(dom.modList, all);
-    } else {
-      const dl = ensureDatalistForInput(dom.mod, "modList");
-      fillDatalistOptions(dl, all);
-      dom.modList = dl;
+    for (const v of values) {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = v;
+      selectEl.appendChild(o);
     }
   }
 
-  function renderAreaPicker() {
-    if (!dom || !dom.area) return;
-
-    const modVal = normStr((dom.mod && dom.mod.value) || (state.draft && state.draft.module) || "");
-    const fixed = safeArr(getAreasForModuleLoose(modVal));
-    const fromData = collectAreasFromTrainingsForModule(modVal);
-    const all = uniqueSorted(fixed.concat(fromData));
-
-    const current = normStr((state.draft && state.draft.area) ? state.draft.area : (dom.area && dom.area.value));
-
-    const tag = tagName(dom.area);
-    if (tag === "SELECT") {
-      fillSelectOptions(dom.area, all, "Välj område…");
-      ensureSelectKeepsValue(dom.area, current);
-      return;
-    }
-
-    // INPUT/other -> datalist
-    if (dom.areaList) {
-      fillDatalistOptions(dom.areaList, all);
-    } else {
-      const dl = ensureDatalistForInput(dom.area, "areaList");
-      fillDatalistOptions(dl, all);
-      dom.areaList = dl;
+  function fillDatalistOptions(datalistEl, values) {
+    if (!datalistEl) return;
+    while (datalistEl.firstChild) datalistEl.removeChild(datalistEl.firstChild);
+    for (const v of values) {
+      const opt = document.createElement("option");
+      opt.value = v;
+      datalistEl.appendChild(opt);
     }
   }
-
-  // Back-compat: gamla namn (andra block anropar dem)
-  function renderModuleDatalist() { renderModulePicker(); }
-  function renderAreaDatalist() { renderAreaPicker(); }
 
   function renderChapterAndStepPickers() {
     const chapters = safeArr(state.defaults.chapterLabels);
@@ -1033,11 +986,8 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     const d = state.draft;
     if (!d || !dom) return;
 
-    // P0: först bygg pickers, sen sätt values (så SELECT kan hålla custom värden)
-    renderModulePicker();
     if (dom.mod) dom.mod.value = normStr(d.module);
-
-    renderAreaPicker();
+    renderAreaDatalist();
     if (dom.area) dom.area.value = normStr(d.area);
 
     renderChapterAndStepPickers();
@@ -1128,7 +1078,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     state.selectedId = normStr(id);
     state.draft = deepClone(state.trainings[idx]);
     setDirty(false);
-    renderAreaPicker();
+    renderAreaDatalist();
     updateUiAll();
   }
 
@@ -1173,8 +1123,8 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     state.showAll = false;
 
     setDirty(false);
-    renderModulePicker();
-    renderAreaPicker();
+    renderModuleDatalist();
+    renderAreaDatalist();
     renderChapterAndStepPickers();
     updateUiAll();
   }
@@ -1196,8 +1146,8 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     state.selectedId = "";
     state.draft = null;
     setDirty(false);
-    renderModulePicker();
-    renderAreaPicker();
+    renderModuleDatalist();
+    renderAreaDatalist();
     updateUiAll();
   }
 
@@ -1215,8 +1165,8 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     state.draft = null;
     state.showAll = false;
     setDirty(false);
-    renderModulePicker();
-    renderAreaPicker();
+    renderModuleDatalist();
+    renderAreaDatalist();
     updateUiAll();
   }
 
@@ -1273,8 +1223,8 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
 
     setDirty(false);
     DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
-    renderModulePicker();
-    renderAreaPicker();
+    renderModuleDatalist();
+    renderAreaDatalist();
     updateUiAll();
   }
 
@@ -1342,7 +1292,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
   /* =========================
      BLOCK 16/18 — AI hooks (health + generate)
   ========================== */
-  // (AI-koden oförändrad från senaste sanning)
+
   // ---------- AI: Health ----------
   async function testAi() {
     try {
@@ -1409,14 +1359,18 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     };
   }
 
+  // ---------- Controls ----------
   function readAiControls() {
+    // aiContent kan vara "blocks"|"questions" – men UI kan även ha etiketter som "Provfrågor + facit".
     const raw = normStr(dom && dom.aiContent && dom.aiContent.value) || "blocks";
     const rawLower = raw.toLowerCase();
 
+    // Robust normalisering av content
     let content = "blocks";
     if (rawLower === "questions" || rawLower.includes("provfrå") || rawLower.includes("fråga") || rawLower.includes("quiz")) content = "questions";
     else if (rawLower === "blocks" || rawLower.includes("block") || rawLower.includes("utbildning")) content = "blocks";
 
+    // mode-normalisering (worker kräver training|document)
     const mode = (content === "questions") ? "training" : normalizeMode(raw);
 
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
@@ -1430,14 +1384,21 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     return { content, mode, count, questionType, feedbackEnabled, _uiQuestionType: questionTypeUi };
   }
 
+  // ---------- UI hint ----------
   function setAiHint(text) {
     if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
     if (dom && dom.aiHint && dom.setText) dom.setText(dom.aiHint, String(text || ""));
   }
 
-  // (resten av AI-normalisering/validering/generate är oförändrad — behåller din senaste sanning)
   // ---------- Normalize AI response into blocks/items ----------
   function normalizeAiBlocksFromAny(raw) {
+    // Stöd fler shapes + “blocks(meta) + items(data)” (vanligt worker-format)
+    // Shape A: { blocks:[{title, items:[...]}] }
+    // Shape B: { data:{ blocks:[...] } }  (MEN: data kan vara meta-only)
+    // Shape C: { items:[...] } (wrap till 1 block)
+    // Shape D: blocks(meta) + items(separat) => para indexvis eller wrap
+    // Shape E: blocks[] där block saknar items men har kind/question/options → block=>item
+
     function hasBlocksOrItems(obj) {
       if (!obj) return false;
       if (Array.isArray(obj)) return true;
@@ -1452,9 +1413,11 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
       if (!r) return null;
       const d = (r && r.data) ? r.data : null;
 
+      // välj den som faktiskt har blocks/items (inte bara att data finns)
       if (hasBlocksOrItems(d)) return d;
       if (hasBlocksOrItems(r)) return r;
 
+      // om data finns men saknar content: returnera data ändå (för bättre feltext)
       return d || r;
     }
 
@@ -1467,10 +1430,14 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
         : null;
 
     if (Array.isArray(blocksCand)) {
+      // 1) inline-items?
       const hasInlineItems = blocksCand.some(b => b && Array.isArray(b.items) && b.items.length);
 
+      // 2) blocks är bara metadata men items finns separat
       if (!hasInlineItems && itemsCand && itemsCand.length) {
         const out = [];
+
+        // Om samma längd: para 1 item per block
         if (blocksCand.length === itemsCand.length) {
           for (let i = 0; i < blocksCand.length; i++) {
             const b = blocksCand[i];
@@ -1482,10 +1449,12 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
           return { ok: true, blocks: out };
         }
 
+        // Annars: wrap alla items till ett block (ta titel från första blocket om finns)
         const firstTitle = normStr(blocksCand[0] && (blocksCand[0].title || blocksCand[0].heading || blocksCand[0].name)) || "";
         return { ok: true, blocks: [{ title: firstTitle, items: itemsCand.slice() }] };
       }
 
+      // 3) blocks[] saknar items men har question-ish fält → mappa till item
       const out2 = [];
       for (const b of blocksCand) {
         const title = normStr(b && (b.title || b.heading || b.name)) || "";
@@ -1496,6 +1465,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
           continue;
         }
 
+        // “question in block” fallback
         if (b && typeof b === "object") {
           const q = normStr(b.question || b.q || b.text || "");
           const opts = Array.isArray(b.options) ? b.options.slice() : null;
@@ -1510,6 +1480,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
 
           if (q && hasAnyAnswerShape) {
             const item = {};
+            // kopiera relevanta fält (minimalt, safe)
             item.question = q;
             if (opts) item.options = opts;
             if (b.correctIndex != null) item.correctIndex = b.correctIndex;
@@ -1521,6 +1492,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
             if (typeof b.explanation === "string") item.explanation = b.explanation;
             if (typeof b.feedback === "string") item.feedback = b.feedback;
 
+            // type/kind
             item.type = "question";
             out2.push({ title, items: [item] });
             continue;
@@ -1548,6 +1520,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     return { ok: false, reason: "AI-svar har okänt format (kan inte importera)." };
   }
 
+  // ---------- Validate question item ----------
   function validateQuestionItem(it, hardTypeOrAuto) {
     if (!it || typeof it !== "object") return { ok: false, reason: "Fråga är inte ett objekt." };
 
@@ -1556,6 +1529,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
 
     const ht = normStr(hardTypeOrAuto).toLowerCase() || "auto";
 
+    // Auto måste ha facit/struktur
     if (ht === "auto") {
       const opts = Array.isArray(it.options) ? it.options : null;
       const hasSingle = opts && opts.length >= 2 && Number.isFinite(Number(it.correctIndex));
@@ -1612,10 +1586,12 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     return { ok: false, reason: "Okänd frågetyp (explicit vald): " + ht };
   }
 
+  // ---------- AI Generate ----------
   async function generateAi() {
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
 
+    // Synka först (så AI får rätt modul/område/kapitel/steg)
     syncDraftFromInputs();
     syncDraftTitleFromFields();
 
@@ -1634,10 +1610,11 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
     const controls = readAiControls();
     const ctxObj = buildAiContextNoGoals();
 
+    // P0: Skicka INTE extra metadata som modellen kan “eka” tillbaka (contextText/subject).
     const req = {
-      mode: controls.mode,
-      count: controls.count,
-      context: ctxObj,
+      mode: controls.mode,               // training|document
+      count: controls.count,             // 1..12
+      context: ctxObj,                   // NO goals
       language: "sv",
       questionType: controls.questionType || "auto",
       feedbackEnabled: !!controls.feedbackEnabled
@@ -1674,6 +1651,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
       return;
     }
 
+    // Normalisera → blocks/items (P1: normalisera alltid från HELA svaret, så vi kan hitta top-level blocks/items)
     const norm = normalizeAiBlocksFromAny(r);
     page._LAST_AI_NORM = deepClone(norm);
 
@@ -1684,24 +1662,31 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
       return;
     }
 
-    const hardSelected = isHardQuestionTypeSelected(controls._uiQuestionType);
-    const hardType = hardSelected ? normStr(controls._uiQuestionType).toLowerCase() : "auto";
+    // Sanitera + validera (fail-closed)
+    // P0 FIX: använd normaliserad enum från controls.questionType (inte UI-label)
+    const normalizedQt = normStr(controls.questionType).toLowerCase() || "auto";
+    const hardType = (normalizedQt && normalizedQt !== "auto") ? normalizedQt : "auto";
+    const hardSelected = (hardType !== "auto");
 
     const incomingBlocks = [];
     for (const b of safeArr(norm.blocks)) {
       const items = safeArr(b && b.items).map(x => {
+        // 1) Strängar -> alltid objekt (så store/contract inte failar)
         if (typeof x === "string") {
           const t = scrubObjectObjectToken(x);
           return { type: "info", text: t };
         }
 
+        // 2) Objekt -> sanera + säkerställ type
         if (x && typeof x === "object") {
           const obj = sanitizeAiItemInPlace(deepClone(x)) || {};
           if (!obj.type || typeof obj.type !== "string") {
+            // Heuristik: om den ser ut som en fråga, märk som question annars info
             const hasQ = !!normStr(obj.question || obj.q || obj.text || "");
             const hasOpts = Array.isArray(obj.options) && obj.options.length >= 2;
             obj.type = (hasQ && (hasOpts || obj.correct != null || obj.answer != null || obj.expected != null)) ? "question" : "info";
           }
+          // Om contract har normalizeItem: kör den (safe + stabil schema)
           if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
             return DEPS.contract.normalizeItem(obj);
           }
@@ -1713,8 +1698,10 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
 
       if (!items.length) continue;
 
+      // Om användaren har valt provfrågor: kräver question-format
       if (controls.content === "questions") {
         for (const it of items) {
+          // Strängar kan inte ge facit -> men vi mappade strängar till info -> stoppa i questions-läge
           if (it && it.type === "info") {
             DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
             setAiHint("Du valde provfrågor men AI gav text/info utan facit. Import stoppad (fail-closed).");
@@ -1746,9 +1733,12 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
 
     page._LAST_AI_PICK = {
       importedBlocks: incomingBlocks.length,
-      importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0)
+      importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0),
+      questionType: controls.questionType || "auto",
+      hardSelected: hardSelected
     };
 
+    // Importera till draft (append)
     if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
     for (const nb of incomingBlocks) state.draft.blocks.push(nb);
 
@@ -1819,7 +1809,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
       if (!isWriterAllowed()) return;
       if (dom.mod) dom.mod.value = "";
       if (dom.area) dom.area.value = "";
-      renderAreaPicker();
+      renderAreaDatalist();
       syncDraftFromInputs();
       syncDraftTitleFromFields();
       setDirty(true);
@@ -1836,7 +1826,7 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
       if (!state.draft) return;
 
       syncDraftFromInputs();
-      renderAreaPicker();
+      renderAreaDatalist();
       syncDraftTitleFromFields();
 
       setDirty(true);
@@ -1844,12 +1834,8 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
       updateDebug();
     };
 
-    // P1: input + change (SELECT → change)
     dom.on(dom.mod, "input", onEditorChange);
-    dom.on(dom.mod, "change", onEditorChange);
     dom.on(dom.area, "input", onEditorChange);
-    dom.on(dom.area, "change", onEditorChange);
-
     dom.on(dom.courseTitle, "change", onEditorChange);
     dom.on(dom.courseStep, "change", onEditorChange);
 
@@ -1901,8 +1887,8 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
       clearLock();
     }
 
-    renderModulePicker();
-    renderAreaPicker();
+    renderModuleDatalist();
+    renderAreaDatalist();
     renderChapterAndStepPickers();
     state.showAll = false;
 
@@ -1920,8 +1906,8 @@ PATCH v1.3.4-PP-SC-010-07L (AUTOPATCH P0/P1):
       try {
         const r = await loadCatalogOnce();
         if (r && r.ok) {
-          renderModulePicker();
-          renderAreaPicker();
+          renderModuleDatalist();
+          renderAreaDatalist();
           renderChapterAndStepPickers();
 
           syncDraftFromInputs();
