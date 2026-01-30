@@ -21,6 +21,10 @@ PATCH v1.3.3-PP-SC-010-07K (AUTOPATCH P0/P1):
 PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
 - P0 FIX: Validering av “frågetyp” använder normaliserad controls.questionType (worker-enum),
           inte UI-råtext (som kan vara label/”MCQ (mcq_single)” etc). Förhindrar felaktig fail-closed import.
+
+PATCH v1.3.5-PP-SC-010-07K (AUTOPATCH P0):
+- P0 FIX: normalizeQuestionTypeForWorker plockar enum ur UI-label (t.ex. "MCQ (mcq_single)").
+- P0 FIX: updateAiControlsVisibility använder samma robusta content-logik som readAiControls().
 ============================================================ */
 (function () {
   "use strict";
@@ -32,7 +36,7 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.3.4-PP-SC-010-07K";
+  page.__VERSION = "v1.3.5-PP-SC-010-07K";
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -302,11 +306,25 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
   // P0: saknades i senaste sanning → kan krascha Generate om den inte finns
   // Normaliserar UI-val (inkl "auto_*") till worker-kontrakt.
   function normalizeQuestionTypeForWorker(qtUi) {
-    const s = normStr(qtUi).toLowerCase();
+    let raw = normStr(qtUi);
+    if (!raw) return "auto";
+
+    // P0 FIX: plocka enum ur parentes (ex: "MCQ (mcq_single)")
+    const par = raw.match(/\(([^)]+)\)/);
+    if (par && par[1]) raw = normStr(par[1]);
+
+    const s = raw.toLowerCase();
     if (!s) return "auto";
 
     // acceptera alla auto-varianter som "auto"
     if (s === "auto" || s.indexOf("auto") === 0) return "auto";
+
+    // P0 FIX: matcha substring om UI skickar label-ish värden
+    if (s.includes("mcq_single")) return "mcq_single";
+    if (s.includes("mcq_multi")) return "mcq_multi";
+    if (s.includes("true_false") || s.includes("sant") || s.includes("falskt") || s.includes("tf")) return "true_false";
+    if (s.includes("short_answer") || s.includes("kortsvar") || s.includes("short")) return "short_answer";
+    if (s.includes("numeric") || s.includes("number") || s.includes("tal")) return "numeric";
 
     // worker-stödda explicita typer (justera vid behov om worker har annan enum)
     if (s === "mcq_single") return "mcq_single";
@@ -1010,8 +1028,9 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
   }
 
   function updateAiControlsVisibility() {
-    const content = normStr(dom && dom.aiContent && dom.aiContent.value);
-    const isQuestions = (content === "questions");
+    // P0 FIX: använd samma robusta content-logik som generateAi/readAiControls
+    const controls = readAiControls();
+    const isQuestions = (controls && controls.content === "questions");
     if (dom && dom.questionControls && dom.show && dom.hide) {
       if (isQuestions) dom.show(dom.questionControls);
       else dom.hide(dom.questionControls);
@@ -1392,13 +1411,6 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
 
   // ---------- Normalize AI response into blocks/items ----------
   function normalizeAiBlocksFromAny(raw) {
-    // Stöd fler shapes + “blocks(meta) + items(data)” (vanligt worker-format)
-    // Shape A: { blocks:[{title, items:[...]}] }
-    // Shape B: { data:{ blocks:[...] } }  (MEN: data kan vara meta-only)
-    // Shape C: { items:[...] } (wrap till 1 block)
-    // Shape D: blocks(meta) + items(separat) => para indexvis eller wrap
-    // Shape E: blocks[] där block saknar items men har kind/question/options → block=>item
-
     function hasBlocksOrItems(obj) {
       if (!obj) return false;
       if (Array.isArray(obj)) return true;
@@ -1413,11 +1425,9 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
       if (!r) return null;
       const d = (r && r.data) ? r.data : null;
 
-      // välj den som faktiskt har blocks/items (inte bara att data finns)
       if (hasBlocksOrItems(d)) return d;
       if (hasBlocksOrItems(r)) return r;
 
-      // om data finns men saknar content: returnera data ändå (för bättre feltext)
       return d || r;
     }
 
@@ -1430,14 +1440,11 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
         : null;
 
     if (Array.isArray(blocksCand)) {
-      // 1) inline-items?
       const hasInlineItems = blocksCand.some(b => b && Array.isArray(b.items) && b.items.length);
 
-      // 2) blocks är bara metadata men items finns separat
       if (!hasInlineItems && itemsCand && itemsCand.length) {
         const out = [];
 
-        // Om samma längd: para 1 item per block
         if (blocksCand.length === itemsCand.length) {
           for (let i = 0; i < blocksCand.length; i++) {
             const b = blocksCand[i];
@@ -1449,12 +1456,10 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
           return { ok: true, blocks: out };
         }
 
-        // Annars: wrap alla items till ett block (ta titel från första blocket om finns)
         const firstTitle = normStr(blocksCand[0] && (blocksCand[0].title || blocksCand[0].heading || blocksCand[0].name)) || "";
         return { ok: true, blocks: [{ title: firstTitle, items: itemsCand.slice() }] };
       }
 
-      // 3) blocks[] saknar items men har question-ish fält → mappa till item
       const out2 = [];
       for (const b of blocksCand) {
         const title = normStr(b && (b.title || b.heading || b.name)) || "";
@@ -1465,7 +1470,6 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
           continue;
         }
 
-        // “question in block” fallback
         if (b && typeof b === "object") {
           const q = normStr(b.question || b.q || b.text || "");
           const opts = Array.isArray(b.options) ? b.options.slice() : null;
@@ -1480,7 +1484,6 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
 
           if (q && hasAnyAnswerShape) {
             const item = {};
-            // kopiera relevanta fält (minimalt, safe)
             item.question = q;
             if (opts) item.options = opts;
             if (b.correctIndex != null) item.correctIndex = b.correctIndex;
@@ -1492,7 +1495,6 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
             if (typeof b.explanation === "string") item.explanation = b.explanation;
             if (typeof b.feedback === "string") item.feedback = b.feedback;
 
-            // type/kind
             item.type = "question";
             out2.push({ title, items: [item] });
             continue;
@@ -1529,7 +1531,6 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
 
     const ht = normStr(hardTypeOrAuto).toLowerCase() || "auto";
 
-    // Auto måste ha facit/struktur
     if (ht === "auto") {
       const opts = Array.isArray(it.options) ? it.options : null;
       const hasSingle = opts && opts.length >= 2 && Number.isFinite(Number(it.correctIndex));
@@ -1591,7 +1592,6 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
 
-    // Synka först (så AI får rätt modul/område/kapitel/steg)
     syncDraftFromInputs();
     syncDraftTitleFromFields();
 
@@ -1610,11 +1610,10 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
     const controls = readAiControls();
     const ctxObj = buildAiContextNoGoals();
 
-    // P0: Skicka INTE extra metadata som modellen kan “eka” tillbaka (contextText/subject).
     const req = {
-      mode: controls.mode,               // training|document
-      count: controls.count,             // 1..12
-      context: ctxObj,                   // NO goals
+      mode: controls.mode,
+      count: controls.count,
+      context: ctxObj,
       language: "sv",
       questionType: controls.questionType || "auto",
       feedbackEnabled: !!controls.feedbackEnabled
@@ -1651,7 +1650,6 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
       return;
     }
 
-    // Normalisera → blocks/items (P1: normalisera alltid från HELA svaret, så vi kan hitta top-level blocks/items)
     const norm = normalizeAiBlocksFromAny(r);
     page._LAST_AI_NORM = deepClone(norm);
 
@@ -1662,8 +1660,6 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
       return;
     }
 
-    // Sanitera + validera (fail-closed)
-    // P0 FIX: använd normaliserad enum från controls.questionType (inte UI-label)
     const normalizedQt = normStr(controls.questionType).toLowerCase() || "auto";
     const hardType = (normalizedQt && normalizedQt !== "auto") ? normalizedQt : "auto";
     const hardSelected = (hardType !== "auto");
@@ -1671,22 +1667,18 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
     const incomingBlocks = [];
     for (const b of safeArr(norm.blocks)) {
       const items = safeArr(b && b.items).map(x => {
-        // 1) Strängar -> alltid objekt (så store/contract inte failar)
         if (typeof x === "string") {
           const t = scrubObjectObjectToken(x);
           return { type: "info", text: t };
         }
 
-        // 2) Objekt -> sanera + säkerställ type
         if (x && typeof x === "object") {
           const obj = sanitizeAiItemInPlace(deepClone(x)) || {};
           if (!obj.type || typeof obj.type !== "string") {
-            // Heuristik: om den ser ut som en fråga, märk som question annars info
             const hasQ = !!normStr(obj.question || obj.q || obj.text || "");
             const hasOpts = Array.isArray(obj.options) && obj.options.length >= 2;
             obj.type = (hasQ && (hasOpts || obj.correct != null || obj.answer != null || obj.expected != null)) ? "question" : "info";
           }
-          // Om contract har normalizeItem: kör den (safe + stabil schema)
           if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
             return DEPS.contract.normalizeItem(obj);
           }
@@ -1698,10 +1690,8 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
 
       if (!items.length) continue;
 
-      // Om användaren har valt provfrågor: kräver question-format
       if (controls.content === "questions") {
         for (const it of items) {
-          // Strängar kan inte ge facit -> men vi mappade strängar till info -> stoppa i questions-läge
           if (it && it.type === "info") {
             DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
             setAiHint("Du valde provfrågor men AI gav text/info utan facit. Import stoppad (fail-closed).");
@@ -1738,7 +1728,6 @@ PATCH v1.3.4-PP-SC-010-07K (AUTOPATCH P0):
       hardSelected: hardSelected
     };
 
-    // Importera till draft (append)
     if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
     for (const nb of incomingBlocks) state.draft.blocks.push(nb);
 
