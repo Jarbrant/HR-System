@@ -1,42 +1,42 @@
 /* ============================================================
-AO-TRAININGS-MODULAR-01 (PP-SC-010-07) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
+AO-TRAININGS-VERKSAMHET-ANCHOR-01 (PROD) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
 Projekt: HR-System (GitHub Pages / UI-only)
-Syfte: Bootstrap + state + event wiring för trainings (ADMIN create/edit).
-      Kopplar in ai-rules/v1/modules.json → Modul/Område/Kapitel/Steg.
-      + AI-generate via HRWorkerSDK (fail-closed) utan att skicka "Mål" till AI.
-      + PP-SC-010-07: Klick på item i blocklistan öppnar modal (view/edit/delete/save).
 
-TILLÄGG — AO-VERKSAMHET-SELECT-01 (PROD v1.0):
-- Lägger till stöd för "Verksamhet" (businessArea) i training-objekt (ingen ny storage-key).
-- 15 standard + Annat… + sök på 3+ bokstäver (börjar med, case-insensitive).
-- "Annat" blir valbart nästa gång genom att sidan samlar unika businessArea från alla trainings
-  (ingen ny per-training options-struktur, ingen ny key).
+Mål (Patchpaket 4):
+1) Ta bort “Titel (genererad)” som input (ingen sparning från input).
+2) Lägg till “AI-ankare / Kontext-rad” (read-only): Modul • Område • Kapitel • Steg • Nivå • Verksamhet
+   - Visuell förklaring i UI
+   - Skickas som kort sträng i AI-request (utan ny storage-key; byggs dynamiskt).
+3) Lägg till “Verksamhet” under subjectId (15 vanligaste + Annat… + sök på 3+ bokstäver).
+   - Lagring: training.businessArea (inom befintlig AO-057_TRAININGS_V1 struktur; ingen ny key).
+4) P0: Flatten/normalisera AI question-shape till stabilt UI-format, fail-closed med tydlig orsak.
 
 POLICY (LÅST):
 - UI-only • Fail-closed
-- Inga nya storage-keys (endast AO-057_TRAININGS_V1 skrivs via 03-store)
-- XSS-safe: render via 05-render.js + dom.setText (textContent/value), inga osäkra innerHTML
-- ADMIN-only write (MANAGER/SYSTEM_ADMIN read-only)
-- AI: Skicka aldrig "Mål/goals" till AI (visas för människa, inte för modellen)
+- Inga nya storage-keys (endast befintlig trainings-key via 03-store)
+- XSS-safe: endast textContent/value (ingen osäker innerHTML)
+- RBAC: SYSTEM_ADMIN read-only; ADMIN/MANAGER enligt befintlig logik
+- AI: Skicka aldrig "Mål/goals" till AI
 
-PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
-- P0 FIX: BUSINESS_DEFAULTS: "Build" → "Bygg" (AO).
-- P0 FIX: Tar bort per-training businessAreaOptions[] och bygger custom-val via unika businessArea från alla trainings.
-- P1 FIX: Nollar businessAreaQuery vid selectTraining() och createNewTraining().
-- P1 FIX: Fail-closed: om UI står på "Annat…" måste text vara icke-tom (min 2 tecken), annars stopp vid spara.
-- P1 ADD: inkluderar businessArea i AI-context (extra styrning) utan goals.
+DoD:
+- Titel-input borta (ingen wiring)
+- Ankare-rad syns och uppdateras live
+- Verksamhet under subjectId: 15+Annat, filtrering efter 3 bokstäver
+- Verksamhet sparas/laddas per training
+- AI-request inkluderar ankare-strängen
+- P0 flatten: stabil question-items eller fail-closed med tydlig orsak
 ============================================================ */
 (function () {
   "use strict";
 
   /* =========================
-     BLOCK 1/18 — Namespace + version
+     BLOCK 1/19 — Namespace + version
   ========================== */
   const NS = (window.Trainings = window.Trainings || {});
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.3.8-PP-SC-010-07L";
+  page.__VERSION = "v1.4.1-AO-TRAININGS-VERKSAMHET-ANCHOR-01"; // PATCH: P0 preserve Verksamhet SELECT value
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -45,7 +45,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   page._LAST_AI_PICK = null;
 
   /* =========================
-     BLOCK 2/18 — Deps (late-bind)
+     BLOCK 2/19 — Deps (late-bind)
   ========================== */
   const DEPS = { core: null, store: null, contract: null, render: null };
   function refreshDeps() {
@@ -61,14 +61,14 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   /* =========================
-     BLOCK 3/18 — Minimal DOM fallback
+     BLOCK 3/19 — Minimal DOM fallback
   ========================== */
   function byId(id) { return document.getElementById(String(id || "")); }
 
   function buildDomFallback() {
     const D = {};
 
-    // Elements (måste matcha befintliga id i trainings.html)
+    // Buttons
     D.btnNew = byId("btnNew");
     D.btnDelete = byId("btnDelete");
     D.btnPurge = byId("btnPurge");
@@ -88,22 +88,26 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
 
     D.btnLogout = byId("btnLogout");
 
+    // List/filter
     D.q = byId("q");
     D.fStatus = byId("fStatus");
     D.onlyProblems = byId("onlyProblems");
 
+    // Module/area
     D.mod = byId("mod");
     D.area = byId("area");
     D.modList = byId("modList");
     D.areaList = byId("areaList");
 
+    // Chapter/step
     D.courseTitle = byId("courseTitle");
     D.courseStep = byId("courseStep");
 
+    // Level/goals (goals never sent to AI)
     D.goalsLevel = byId("goalsLevel");
     D.goals = byId("goals");
 
-    // AO-VERKSAMHET-SELECT-01 (optional hooks; no-op om de saknas)
+    // AO: Verksamhet (under subjectId-raden)
     // Rekommenderade id i trainings.html:
     // - businessArea (SELECT eller INPUT)
     // - businessAreaSearch (INPUT för sök 3+ bokstäver)
@@ -114,10 +118,18 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     D.businessAreaOther = byId("businessAreaOther");
     D.businessAreaHint = byId("businessAreaHint");
 
-    D.titleDisplay = byId("titleDisplay");
+    // Display (read-only)
+    D.titleDisplay = byId("titleDisplay"); // OK som display (inte input)
     D.subjectIdText = byId("subjectIdText");
+
+    // AO: AI-ankare rad (read-only)
+    // Rekommenderat id:
+    // - aiAnchorText (div/span)
+    D.aiAnchorText = byId("aiAnchorText");
+
     D.revertHint = byId("revertHint");
 
+    // AI controls
     D.aiContent = byId("aiContent");
     D.aiCount = byId("aiCount");
     D.aiQuestionType = byId("aiQuestionType");
@@ -139,7 +151,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       if (!el) return;
       const v = String(txt ?? "");
       const tag = String(el.tagName || "").toUpperCase();
-      // P0 FIX: inputs/textarea måste sättas via value
       if (tag === "INPUT" || tag === "TEXTAREA") { el.value = v; return; }
       el.textContent = v;
     };
@@ -155,7 +166,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     return D;
   }
 
-  // bygg fallback EN gång och återanvänd helpers
   const _fallbackDom = buildDomFallback();
   if (!dom) dom = (NS.dom = _fallbackDom);
 
@@ -167,7 +177,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   if (dom && typeof dom.hide !== "function") dom.hide = _fallbackDom.hide;
 
   /* =========================
-     BLOCK 4/18 — State
+     BLOCK 4/19 — State
   ========================== */
   const state = {
     who: { role: "SYSTEM_ADMIN", empNo: "", canWrite: false },
@@ -182,8 +192,11 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     fStatus: "",
     onlyProblems: false,
 
-    // AO-VERKSAMHET-SELECT-01 (UI-only state)
+    // AO: verksamhet
     businessAreaQuery: "",
+
+    // AO: ankare (computed)
+    aiAnchorLine: "",
 
     // Catalog (ai-rules/v1/modules.json)
     catalog: null,
@@ -191,7 +204,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     catalogErr: "",
 
     defaults: {
-      // Fallback (om catalog saknas) — minimal men fungerande
       modules: [
         "Kvalitet",
         "Säkerhet & arbetsmiljö",
@@ -237,7 +249,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   page._state = state;
 
   /* =========================
-     BLOCK 5/18 — Utils
+     BLOCK 5/19 — Utils
   ========================== */
   function normStr(v) {
     return (DEPS.core && DEPS.core.normStr) ? DEPS.core.normStr(v) : String(v ?? "").trim();
@@ -251,9 +263,9 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     try { return JSON.parse(JSON.stringify(obj)); } catch (_) { return obj; }
   }
 
-  // =========================
-  // AO-VERKSAMHET-SELECT-01 — businessArea helpers (UI-only)
-  // =========================
+  /* =========================
+     BLOCK 6/19 — AO: Verksamhet (businessArea) helpers
+  ========================== */
   const BUSINESS_OTHER_LABEL = "Annat…";
   const BUSINESS_DEFAULTS = [
     "Bygg",
@@ -290,8 +302,8 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   function collectBusinessAreasFromAllTrainings() {
-    // AO: "Annat…" ska dyka upp nästa gång utan ny key och utan ny per-training struktur.
-    // Lösning: samla unika businessArea från alla trainings (exkl. defaults + tomma + "Annat…").
+    // "Annat…" ska bli valbart nästa gång utan ny key:
+    // Samla unika businessArea från alla trainings (exkl defaults + tomma).
     const out = [];
     for (const t of safeArr(state.trainings)) {
       if (!t || typeof t !== "object") continue;
@@ -301,7 +313,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       if (isBusinessDefault(v)) continue;
       out.push(v);
     }
-    // även draft-värde (så UI känns stabilt innan save)
+    // även draft-värde (för UI-stabilitet innan save)
     try {
       const dv = normStr(state.draft && state.draft.businessArea);
       if (dv && !isBusinessDefault(dv) && lowerKey(dv) !== lowerKey(BUSINESS_OTHER_LABEL)) out.push(dv);
@@ -309,15 +321,14 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     return uniqueSorted(out);
   }
 
-  function composeBusinessOptionsForUi(/* draft */) {
+  function composeBusinessOptionsForUi() {
     const custom = collectBusinessAreasFromAllTrainings();
-    const all = uniqueSorted(BUSINESS_DEFAULTS.concat(custom));
-    return all;
+    return uniqueSorted(BUSINESS_DEFAULTS.concat(custom));
   }
 
   function filterBusinessOptions(options, q) {
     const query = normStr(q).toLowerCase();
-    if (query.length < 3) return options; // ingen filtrering 0–2
+    if (query.length < 3) return options; // filtrera först vid 3+ bokstäver
     return options.filter(v => lowerKey(v).indexOf(query) === 0);
   }
 
@@ -326,8 +337,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   function ensureBusinessAreaDatalist(inputEl) {
-    // återanvänder generic helper (nedan definierad senare) - men vi behöver den här tidigt:
-    // därför: minimal inline-variant om den inte finns än
     if (!inputEl) return null;
     const tag = String(inputEl.tagName || "").toUpperCase();
     if (tag === "SELECT") return null;
@@ -371,25 +380,71 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     }
   }
 
+  // PATCH (P0): preserve selected value for SELECT across rerender/filter
+  function listHasValueCaseInsensitive(list, value) {
+    const want = lowerKey(value);
+    if (!want) return true;
+    for (const x of safeArr(list)) {
+      if (lowerKey(x) === want) return true;
+    }
+    return false;
+  }
+  function ensureValueInList(list, value) {
+    const v = normStr(value);
+    if (!v) return list;
+    if (lowerKey(v) === lowerKey(BUSINESS_OTHER_LABEL)) return list;
+    if (listHasValueCaseInsensitive(list, v)) return list;
+    const out = safeArr(list).slice();
+    out.unshift(v); // keep it visible even if filtered out
+    return out;
+  }
+  function restoreSelectValueCaseInsensitive(selectEl, desiredValue) {
+    if (!selectEl) return;
+    const want = normStr(desiredValue);
+    if (!want) return;
+    selectEl.value = want;
+    if (normStr(selectEl.value) === want) return;
+
+    // fallback: case-insensitive match to existing option values
+    const wantKey = lowerKey(want);
+    try {
+      const opts = selectEl.options ? Array.from(selectEl.options) : [];
+      for (const o of opts) {
+        const ov = normStr(o && o.value);
+        if (!ov) continue;
+        if (lowerKey(ov) === wantKey) { selectEl.value = ov; return; }
+      }
+    } catch (_) { }
+  }
+
   function renderBusinessAreaPicker() {
-    // no-op om HTML inte har fälten än
     if (!dom || !dom.businessArea) return;
 
-    const options = composeBusinessOptionsForUi(state.draft || {});
+    // PATCH (P0): snapshot current UI state before rebuild
+    const tag = String(dom.businessArea.tagName || "").toUpperCase();
+    const prevSel = normStr(dom.businessArea.value);
+    const prevOther = normStr(dom.businessAreaOther && dom.businessAreaOther.value);
+    const draftVal = normStr(state.draft && state.draft.businessArea);
+
+    const prevSelIsOther = (lowerKey(prevSel) === lowerKey(BUSINESS_OTHER_LABEL));
+    const prevEffective = prevSelIsOther ? prevOther : prevSel;
+
+    const options = composeBusinessOptionsForUi();
     const q = normStr(state.businessAreaQuery);
 
     let filtered = filterBusinessOptions(options, q);
-    // "Annat…" ska alltid finnas som val i UI
-    if (filtered && filtered.length) {
-      // ok
-    } else if (normStr(q).length >= 3) {
-      // 3+ men inga träffar: visa tomt urval + ändå "Annat…"
-      filtered = [];
+
+    // PATCH (P0): if SELECT, ensure current selection is present even when filtered
+    if (tag === "SELECT") {
+      filtered = ensureValueInList(filtered, prevSel);
+      // if draftVal is a default selection, also ensure it stays selectable
+      if (draftVal && isBusinessDefault(draftVal)) filtered = ensureValueInList(filtered, draftVal);
     }
+
+    if ((!filtered || !filtered.length) && normStr(q).length >= 3) filtered = [];
 
     const listWithOther = filtered.concat([BUSINESS_OTHER_LABEL]);
 
-    const tag = String(dom.businessArea.tagName || "").toUpperCase();
     if (tag === "SELECT") {
       fillSelectOptionsQuick(dom.businessArea, listWithOther, "Välj verksamhet…");
     } else {
@@ -397,13 +452,40 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       fillDatalistOptionsQuick(dl, listWithOther);
     }
 
-    if (normStr(q).length > 0 && normStr(q).length < 3) {
-      setBusinessHint("Skriv minst 3 bokstäver för att söka.");
-    } else {
-      setBusinessHint("");
+    if (normStr(q).length > 0 && normStr(q).length < 3) setBusinessHint("Skriv minst 3 bokstäver för att söka.");
+    else setBusinessHint("");
+
+    // PATCH (P0): restore selection + other text after rebuild (SELECT only)
+    if (tag === "SELECT") {
+      // Choose target based on prior UI state first, then draft fallback
+      let targetSel = "";
+      let targetOther = "";
+
+      if (prevSelIsOther) {
+        targetSel = BUSINESS_OTHER_LABEL;
+        targetOther = prevOther;
+      } else if (prevSel) {
+        targetSel = prevSel;
+      } else if (draftVal) {
+        if (isBusinessDefault(draftVal)) {
+          targetSel = draftVal;
+        } else {
+          targetSel = BUSINESS_OTHER_LABEL;
+          targetOther = prevOther || draftVal;
+        }
+      } else if (prevEffective && !isBusinessDefault(prevEffective)) {
+        targetSel = BUSINESS_OTHER_LABEL;
+        targetOther = prevOther || prevEffective;
+      }
+
+      if (targetSel) restoreSelectValueCaseInsensitive(dom.businessArea, targetSel);
+      if (dom.businessAreaOther) dom.businessAreaOther.value = normStr(targetOther);
+
+      // If target was a default but not found, do not force to empty; keep current value (fail-soft UI)
+      // (No storage writes happen here.)
     }
 
-    // Visa/dölj "Annat" input om det finns
+    // Show/hide other input
     if (dom.businessAreaOther && dom.show && dom.hide) {
       const selected = normStr(dom.businessArea.value);
       if (lowerKey(selected) === lowerKey(BUSINESS_OTHER_LABEL)) dom.show(dom.businessAreaOther);
@@ -415,16 +497,16 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     if (!dom || !dom.businessArea) return "";
     const sel = normStr(dom.businessArea.value);
 
-    // Om explicit "Annat…"
     if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
       const other = normStr(dom.businessAreaOther && dom.businessAreaOther.value);
-      return other; // kan vara tomt -> validering/guard stoppar save
+      return other;
     }
-
-    // Om användaren skriver fritt i input: behandla som custom
     return sel;
   }
 
+  /* =========================
+     BLOCK 7/19 — Basic helpers
+  ========================== */
   function findTrainingIndexById(id) {
     const tid = normStr(id);
     if (!tid) return -1;
@@ -455,16 +537,14 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     return m ? String(m[1]) : (raw || "1");
   }
 
-  // mode-normalisering (worker kräver training|document)
   function normalizeMode(m) {
     const s = String(m ?? "").trim().toLowerCase();
     if (s === "training" || s === "document") return s;
     if (s === "blocks" || s === "utbildning" || s === "kurs" || s === "train" || s === "trainings" || s === "training-v1" || s === "training_v1") return "training";
     if (s === "doc" || s === "dokument" || s === "documents" || s === "document-v1" || s === "document_v1") return "document";
-    return "training"; // fail-safe
+    return "training";
   }
 
-  // level-normalisering (UI → worker: intro/normal/advanced)
   function normalizeLevel(v) {
     const s = normStr(v).toLowerCase();
     if (s === "intro" || s === "inledning" || s === "introduktion") return "intro";
@@ -472,56 +552,34 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     return "normal";
   }
 
-  // UI ska inte fail-closed stoppa på "auto_*"
-  function isAutoPreferredType(qt) {
-    const s = normStr(qt).toLowerCase();
-    if (!s) return true;
-    if (s === "auto") return true;
-    if (s.indexOf("auto") === 0) return true;
-    return false;
-  }
-  function isHardQuestionTypeSelected(qt) {
-    const s = normStr(qt).toLowerCase();
-    if (!s) return false;
-    if (isAutoPreferredType(s)) return false;
-    return true;
-  }
   function isMcqType(qt) {
     const s = normStr(qt).toLowerCase();
     return (s === "mcq_single" || s === "mcq_multi" || s.indexOf("mcq") === 0);
   }
 
-  // P0: saknades i senaste sanning → kan krascha Generate om den inte finns
-  // Normaliserar UI-val (inkl "auto_*") till worker-kontrakt.
   function normalizeQuestionTypeForWorker(qtUi) {
     const s = normStr(qtUi).toLowerCase();
     if (!s) return "auto";
-
-    // acceptera alla auto-varianter som "auto"
     if (s === "auto" || s.indexOf("auto") === 0) return "auto";
 
-    // worker-stödda explicita typer (justera vid behov om worker har annan enum)
     if (s === "mcq_single") return "mcq_single";
     if (s === "mcq_multi") return "mcq_multi";
     if (s === "true_false" || s === "tf" || s === "sant_falskt" || s === "sant/falskt") return "true_false";
     if (s === "short_answer" || s === "short" || s === "kortsvar") return "short_answer";
     if (s === "numeric" || s === "number" || s === "tal") return "numeric";
-
-    // fallback: om UI skickar något okänt → auto (fail-safe)
     return "auto";
   }
 
-  // UI-sanerare för "[object Object]" + kontext-malltext (fail-closed)
   function stripContextBoilerplate(s) {
     if (typeof s !== "string") return s;
     let out = s;
-
     out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*(\(\s*kontext\s*dolt\s*\)|\[object\s+Object\])\s*/gi, " ");
     out = out.replace(/\s*\bUtgå\s+från\s+detta\s+sammanhang:\s*$/gmi, "");
     out = out.replace(/[ \t]{2,}/g, " ");
     out = out.replace(/\n{3,}/g, "\n\n");
     return out.trim();
   }
+
   function scrubObjectObjectToken(s) {
     if (typeof s !== "string") return s;
     let out = s;
@@ -529,8 +587,104 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     return stripContextBoilerplate(out);
   }
 
-  // P0: Flatten av worker-shape { question:{ text, choices[], correctChoiceId, rationale } } → UI-shape
+  /* =========================
+     BLOCK 8/19 — P0: Question flatten/normalize to stable UI shape
+  ========================== */
+  function toTextCandidate(v) {
+    if (typeof v === "string") return v;
+    if (typeof v === "number" && Number.isFinite(v)) return String(v);
+    if (isObj(v)) {
+      // vanliga fält
+      const c = v.text || v.label || v.value || v.prompt || v.question || v.title || v.heading || v.name;
+      if (typeof c === "string") return c;
+    }
+    return "";
+  }
+
+  function normalizeOptionsAny(rawOptions) {
+    // Accept:
+    // - ["A","B"]
+    // - [{text/label/value}, ...]
+    // - { choices:[...]} etc.
+    let arr = null;
+
+    if (Array.isArray(rawOptions)) arr = rawOptions.slice();
+    else if (isObj(rawOptions) && Array.isArray(rawOptions.choices)) arr = rawOptions.choices.slice();
+    else if (isObj(rawOptions) && Array.isArray(rawOptions.answers)) arr = rawOptions.answers.slice();
+    else if (isObj(rawOptions) && Array.isArray(rawOptions.options)) arr = rawOptions.options.slice();
+
+    if (!arr) return [];
+
+    const out = [];
+    for (const x of arr) {
+      const t = normStr(scrubObjectObjectToken(toTextCandidate(x)));
+      if (t) out.push(t);
+    }
+    return out;
+  }
+
+  function parseIndexMaybe(v) {
+    if (v == null) return null;
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    if (typeof v === "string") {
+      const s = v.trim();
+      if (!s) return null;
+      const n = Number(s);
+      if (Number.isFinite(n)) return n;
+      const m = s.match(/-?\d+/);
+      if (m) {
+        const n2 = Number(m[0]);
+        if (Number.isFinite(n2)) return n2;
+      }
+    }
+    return null;
+  }
+
+  function parseIndicesMaybe(v) {
+    if (Array.isArray(v)) {
+      const out = [];
+      for (const x of v) {
+        const n = parseIndexMaybe(x);
+        if (n == null) continue;
+        out.push(n);
+      }
+      return out;
+    }
+    return null;
+  }
+
+  function pickQuestionTextFromAny(it) {
+    if (!it || typeof it !== "object") return "";
+    // item.question kan vara string eller objekt
+    if (typeof it.question === "string" && normStr(it.question)) return scrubObjectObjectToken(it.question);
+
+    if (isObj(it.question)) {
+      const q = it.question;
+      const cand = q.text || q.prompt || q.question || q.heading || q.title;
+      if (typeof cand === "string" && normStr(cand)) return scrubObjectObjectToken(cand);
+
+      // choices-shape: { question:{ text, choices:[{id,text}], correctChoiceId, rationale } }
+      if (typeof q.text === "string" && normStr(q.text)) return scrubObjectObjectToken(q.text);
+    }
+
+    // fallback-källor
+    const f = it.q || it.text || it.instruction || it.prompt || it.heading || it.title;
+    if (typeof f === "string" && normStr(f)) return scrubObjectObjectToken(f);
+
+    return "";
+  }
+
+  function pickExplanationFromAny(it) {
+    if (!it || typeof it !== "object") return "";
+    if (typeof it.explanation === "string" && normStr(it.explanation)) return scrubObjectObjectToken(it.explanation);
+    if (typeof it.feedback === "string" && normStr(it.feedback)) return scrubObjectObjectToken(it.feedback);
+    if (typeof it.rationale === "string" && normStr(it.rationale)) return scrubObjectObjectToken(it.rationale);
+    if (isObj(it.question) && typeof it.question.rationale === "string" && normStr(it.question.rationale)) return scrubObjectObjectToken(it.question.rationale);
+    return "";
+  }
+
   function flattenChoiceQuestionShapeInPlace(it) {
+    // Convert worker-shape { question:{ text, choices[], correctChoiceId, rationale } } -> stable fields
     if (!it || typeof it !== "object") return it;
 
     const qObj = it.question;
@@ -540,7 +694,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     const choices = Array.isArray(qObj.choices) ? qObj.choices : null;
     if (!qText || !choices || choices.length < 2) return it;
 
-    // options från choices[].text
     const options = choices.map(c => normStr(c && c.text)).filter(Boolean);
     if (options.length < 2) return it;
 
@@ -552,7 +705,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       }
     }
 
-    // skriv om till UI-shape (endast normalisering före import)
     it.type = "question";
     it.question = scrubObjectObjectToken(qText);
     it.options = options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
@@ -565,36 +717,105 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     return it;
   }
 
+  function normalizeQuestionItemToStable(it) {
+    // Målformat:
+    // type:"question", question:"..", options:[..], correctIndex:number OR correctIndices:number[], explanation?
+    if (!it || typeof it !== "object") return { ok: false, reason: "Fråga är inte ett objekt." };
+
+    // Pre-flatten (choices-shape)
+    flattenChoiceQuestionShapeInPlace(it);
+
+    const question = normStr(pickQuestionTextFromAny(it));
+    if (!question) return { ok: false, reason: "Fråga saknar text." };
+
+    // options can come from options/choices/answers
+    let options = [];
+    if (Array.isArray(it.options)) options = normalizeOptionsAny(it.options);
+    else if (Array.isArray(it.choices)) options = normalizeOptionsAny(it.choices);
+    else if (Array.isArray(it.answers)) options = normalizeOptionsAny(it.answers);
+    else if (isObj(it.question) && Array.isArray(it.question.choices)) options = normalizeOptionsAny(it.question.choices);
+
+    // if options missing but TF shape: allow later validator in auto/explicit
+    const explanation = normStr(pickExplanationFromAny(it));
+
+    // Correct can come in many shapes:
+    // correctIndex / answerIndex
+    // correctIndices / answerIndices
+    // correct / solution / answer (fallback)
+    let correctIndex = null;
+    let correctIndices = null;
+
+    const ci = parseIndexMaybe(it.correctIndex != null ? it.correctIndex : it.answerIndex);
+    if (ci != null) correctIndex = ci;
+
+    const cis = parseIndicesMaybe(it.correctIndices != null ? it.correctIndices : it.answerIndices);
+    if (cis && cis.length) correctIndices = cis;
+
+    // Also accept numeric string in "correct" or "solution"
+    if (correctIndex == null) {
+      const tryIdx = parseIndexMaybe(it.correct != null ? it.correct : it.solution);
+      if (tryIdx != null) correctIndex = tryIdx;
+    }
+
+    // If answer is something else (string), keep as fallback fields (for non-mcq types)
+    const answerStr = (typeof it.answer === "string" && normStr(it.answer)) ? normStr(scrubObjectObjectToken(it.answer)) : "";
+    const expectedStr = (typeof it.expected === "string" && normStr(it.expected)) ? normStr(scrubObjectObjectToken(it.expected)) : "";
+    const answerNum = (typeof it.answer === "number" && Number.isFinite(it.answer)) ? it.answer : null;
+    const rangeObj = isObj(it.range) ? deepClone(it.range) : null;
+    const tfBool = (typeof it.correct === "boolean") ? it.correct : null;
+
+    // Sanitize options
+    options = safeArr(options).map(x => normStr(scrubObjectObjectToken(String(x ?? "")))).filter(Boolean);
+
+    // IMPORTANT P0: Re-validate indices AFTER options filtering
+    if (correctIndex != null && options.length) {
+      const n = Number(correctIndex);
+      if (!Number.isFinite(n)) correctIndex = null;
+      else if (n < 0 || n >= options.length) correctIndex = null;
+      else correctIndex = n;
+    }
+    if (correctIndices && options.length) {
+      const out = [];
+      for (const x of correctIndices) {
+        const n = Number(x);
+        if (!Number.isFinite(n)) continue;
+        if (n < 0 || n >= options.length) continue;
+        out.push(n);
+      }
+      correctIndices = out.length ? out : null;
+    }
+
+    const stable = {
+      type: "question",
+      question: question,
+      options: options,
+      explanation: explanation
+    };
+
+    if (correctIndices) stable.correctIndices = correctIndices;
+    else if (correctIndex != null) stable.correctIndex = correctIndex;
+
+    // Preserve non-mcq answer shapes for auto/explicit types (harmless)
+    if (tfBool != null) stable.correct = tfBool;
+    if (answerStr) stable.answer = answerStr;
+    if (expectedStr) stable.expected = expectedStr;
+    if (answerNum != null) stable.answer = answerNum;
+    if (rangeObj) stable.range = rangeObj;
+
+    return { ok: true, item: stable };
+  }
+
   function ensureItemType(it) {
-    // P0: gör rendering stabil om worker/AI saknar type
     if (!it || typeof it !== "object") return it;
 
-    // P0: flatten om frågan ligger som object-shape (choices)
     flattenChoiceQuestionShapeInPlace(it);
 
     const t = normStr(it.type).toLowerCase();
     if (t) return it;
 
-    // om question-fält finns -> question
     if (typeof it.question === "string" && normStr(it.question)) { it.type = "question"; return it; }
-
-    // om question-objekt med text/choices -> question
-    if (it.question && typeof it.question === "object" && !Array.isArray(it.question)) {
-      const q = it.question;
-      if (typeof q.text === "string" && normStr(q.text) && Array.isArray(q.choices) && q.choices.length >= 2) {
-        it.type = "question";
-        return it;
-      }
-    }
-
-    // P0: om prompt/instruction ser ut som fråga (och ev options) -> question
-    if (typeof it.prompt === "string" && normStr(it.prompt) && (Array.isArray(it.options) && it.options.length >= 2)) { it.type = "question"; return it; }
-    if (typeof it.instruction === "string" && normStr(it.instruction) && (Array.isArray(it.options) && it.options.length >= 2)) { it.type = "question"; return it; }
-
-    // om options+correct finns -> question
     if (Array.isArray(it.options) && it.options.length >= 2) { it.type = "question"; return it; }
 
-    // annars info
     it.type = "info";
     return it;
   }
@@ -602,7 +823,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   function sanitizeAiItemInPlace(item) {
     if (!item || typeof item !== "object") return item;
 
-    // P0: om question ligger som objekt (choices-shape) -> flatten tidigt
     flattenChoiceQuestionShapeInPlace(item);
 
     const keys = ["text", "instruction", "prompt", "question", "explanation", "feedback", "rationale", "reason", "title", "heading"];
@@ -611,7 +831,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       if (typeof item[k] === "string") item[k] = scrubObjectObjectToken(item[k]);
     }
 
-    // P0: scrubba även ev. question-objekt om det finns kvar (fail-safe)
     try {
       const qObj = item.question;
       if (qObj && typeof qObj === "object" && !Array.isArray(qObj)) {
@@ -621,6 +840,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
           qObj.choices = qObj.choices.map(c => {
             if (c && typeof c === "object") {
               if (typeof c.text === "string") c.text = scrubObjectObjectToken(c.text);
+              if (typeof c.label === "string") c.label = scrubObjectObjectToken(c.label);
             }
             return c;
           });
@@ -631,7 +851,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     if (Array.isArray(item.options)) {
       item.options = item.options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
     }
-    // P0: auto-sätt type om saknas
+
     ensureItemType(item);
     return item;
   }
@@ -639,19 +859,16 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   function getItemPrimaryTextForEditor(it) {
     try {
       if (!it || typeof it !== "object") return "";
-
-      // P0: om question är object med text
-      if (it.question && typeof it.question === "object" && !Array.isArray(it.question)) {
+      if (isObj(it.question)) {
         const qObj = it.question;
         const t = (typeof qObj.text === "string" && qObj.text) ? qObj.text : "";
         if (t) return scrubObjectObjectToken(String(t || ""));
       }
-
-      const cand = (typeof it.text === "string" && it.text) ? it.text
-        : (typeof it.instruction === "string" && it.instruction) ? it.instruction
-          : (typeof it.prompt === "string" && it.prompt) ? it.prompt
-            : (typeof it.question === "string" && it.question) ? it.question
-              : "";
+      const cand =
+        (typeof it.text === "string" && it.text) ? it.text :
+          (typeof it.instruction === "string" && it.instruction) ? it.instruction :
+            (typeof it.prompt === "string" && it.prompt) ? it.prompt :
+              (typeof it.question === "string" && it.question) ? it.question : "";
       return scrubObjectObjectToken(String(cand || ""));
     } catch (_) {
       return "";
@@ -659,7 +876,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   /* =========================
-     BLOCK 6/18 — Auth/role + dirty/lock
+     BLOCK 9/19 — Auth/role + dirty/lock
   ========================== */
   function getWhoFresh() {
     try {
@@ -690,7 +907,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   function isWriterAllowed() {
-    // P1: refresha who även vid locked, så UI visar korrekt roll/empNo
     const who = getWhoFresh();
     state.who = who;
 
@@ -717,7 +933,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   /* =========================
-     BLOCK 7/18 — Draft sync
+     BLOCK 10/19 — Draft sync
   ========================== */
   function syncDraftFromInputs() {
     if (!state.draft) return;
@@ -731,12 +947,12 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value) || "normal";
     if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
 
-    // AO-VERKSAMHET-SELECT-01
+    // AO: verksamhet
     if (dom && dom.businessArea) state.draft.businessArea = readBusinessAreaFromInputs();
   }
 
   /* =========================
-     BLOCK 8/18 — Debug render (XSS-safe)
+     BLOCK 11/19 — Debug render (XSS-safe)
   ========================== */
   function updateDebug() {
     try {
@@ -746,6 +962,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
         locked: !!state.locked,
         lockReason: state.lockReason || "",
         selectedId: state.selectedId || "",
+        aiAnchorLine: state.aiAnchorLine || "",
         draft: state.draft ? state.draft : null,
         trainingsCount: Array.isArray(state.trainings) ? state.trainings.length : 0,
         trainings: Array.isArray(state.trainings) ? state.trainings : [],
@@ -761,7 +978,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   /* =========================
-     BLOCK 9/18 — Worker SDK init (NO STORAGE)
+     BLOCK 12/19 — Worker SDK init (NO STORAGE)
   ========================== */
   page.__SDK_INIT_PROMISE = page.__SDK_INIT_PROMISE || null;
   page.__SDK_INIT_OK = page.__SDK_INIT_OK || false;
@@ -803,7 +1020,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   /* =========================
-     BLOCK 10/18 — Catalog loader (ai-rules/v1/modules.json)
+     BLOCK 13/19 — Catalog loader (ai-rules/v1/modules.json)
   ========================== */
   function joinUrl(base, path) {
     const b = String(base || "").replace(/\/+$/g, "");
@@ -927,7 +1144,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   /* =========================
-     BLOCK 11/18 — Datalist/select builders
+     BLOCK 14/19 — Datalists + pickers
   ========================== */
   function collectModulesFromTrainings() {
     const out = [];
@@ -1075,6 +1292,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     }
   }
 
+  // AO: title är display (read-only); vi bygger men exponerar inte som input
   function syncDraftTitleFromFields() {
     if (!state.draft) return;
 
@@ -1088,12 +1306,85 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       state.draft.title = `${chapter} • Steg ${step} • ${area}`;
     }
 
-    // P0 FIX: setText sätter value för inputs
     if (dom.titleDisplay && dom.setText) dom.setText(dom.titleDisplay, state.draft.title);
   }
 
   /* =========================
-     BLOCK 12/18 — Rendering glue + list/filter
+     BLOCK 15/19 — AO: AI Anchor (read-only + request)
+  ========================== */
+  function snapshotEditorStateForAi() {
+    const module = normStr(dom && dom.mod && dom.mod.value);
+    const area = normStr(dom && dom.area && dom.area.value);
+    const courseTitle = normStr(dom && dom.courseTitle && dom.courseTitle.value) || "Introduktion";
+    const courseStep = parseCourseStep(dom && dom.courseStep && dom.courseStep.value);
+    const goalsLevel = normStr(dom && dom.goalsLevel && dom.goalsLevel.value) || "normal";
+    const businessArea = normStr(readBusinessAreaFromInputs());
+    return { module, area, businessArea, courseTitle, courseStep, goalsLevel, goals: "" };
+  }
+
+  function buildAiAnchorLine() {
+    const s = snapshotEditorStateForAi();
+    const level = normalizeLevel(s.goalsLevel);
+    const parts = [
+      "Modul: " + (s.module || "—"),
+      "Område: " + (s.area || "—"),
+      "Kapitel: " + (s.courseTitle || "—"),
+      "Steg: " + (s.courseStep || "—"),
+      "Nivå: " + (level || "normal"),
+      "Verksamhet: " + (s.businessArea || "—")
+    ];
+    const line = parts.join(" • ");
+    return scrubObjectObjectToken(line);
+  }
+
+  function renderAiAnchorRow() {
+    const line = buildAiAnchorLine();
+    state.aiAnchorLine = line;
+    if (dom && dom.aiAnchorText && dom.setText) dom.setText(dom.aiAnchorText, line);
+  }
+
+  function buildAiContextNoGoals() {
+    const s = snapshotEditorStateForAi();
+    const level = normalizeLevel(s.goalsLevel);
+    const subjectTitle = normStr(s.area) || normStr(s.module) || "";
+    const anchorLine = buildAiAnchorLine();
+
+    if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
+      const ctx = DEPS.core.buildAiContext(s) || {};
+      try {
+        ctx.goals = "";
+        ctx.level = level;
+
+        // AO: ankare
+        ctx.anchor = anchorLine;
+
+        if (!ctx.subject || typeof ctx.subject !== "object") ctx.subject = {};
+        if (!ctx.subject.title && subjectTitle) ctx.subject.title = subjectTitle;
+
+        // AO: verksamhet + ankare
+        if (s.businessArea) ctx.subject.businessArea = s.businessArea;
+        ctx.subject.anchor = anchorLine;
+      } catch (_) { }
+      return ctx;
+    }
+
+    return {
+      anchor: anchorLine,
+      subject: { module: s.module, area: s.area, title: subjectTitle, businessArea: s.businessArea || "", anchor: anchorLine },
+      course: {
+        chapter: s.courseTitle,
+        step: s.courseStep,
+        title: (DEPS.core && DEPS.core.composeTitle)
+          ? DEPS.core.composeTitle(s.courseTitle, s.courseStep, s.area || "—")
+          : (s.courseTitle + " • Steg " + s.courseStep + " • " + (s.area || "—"))
+      },
+      level: level,
+      goals: ""
+    };
+  }
+
+  /* =========================
+     BLOCK 16/19 — Rendering glue + list/filter + pills
   ========================== */
   function computeProblemsForTraining(t) {
     if (!DEPS.contract || typeof DEPS.contract.validateTrainingForSave !== "function") return [];
@@ -1156,7 +1447,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       else if (state.catalogStatus !== "ok") DEPS.render.setLeftHint("Katalog: fallback-läge (modules.json ej laddad).");
       else DEPS.render.setLeftHint("Publicering kräver minst 1 block.");
     } else if (dom && dom.leftHint && dom.setText) {
-      // fallback
       if (state.locked) dom.setText(dom.leftHint, state.lockReason || "Låst (korrupt data).");
       else if (state.catalogStatus !== "ok") dom.setText(dom.leftHint, "Katalog: fallback-läge (modules.json ej laddad).");
       else dom.setText(dom.leftHint, "Publicering kräver minst 1 block.");
@@ -1172,8 +1462,100 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     });
   }
 
+  function updateAiControlsVisibility() {
+    const content = normStr(dom && dom.aiContent && dom.aiContent.value);
+    const isQuestions = (content === "questions");
+    if (dom && dom.questionControls && dom.show && dom.hide) {
+      if (isQuestions) dom.show(dom.questionControls);
+      else dom.hide(dom.questionControls);
+    } else if (DEPS.render && typeof DEPS.render.toggleQuestionControls === "function") {
+      DEPS.render.toggleQuestionControls(isQuestions);
+    }
+  }
+
+  function updateButtons() {
+    const writer = isWriterAllowed();
+
+    dom && dom.disable && dom.disable(dom.btnNew, !writer);
+    dom && dom.disable && dom.disable(dom.btnDelete, !writer || !state.selectedId);
+    dom && dom.disable && dom.disable(dom.btnPurge, !writer);
+
+    dom && dom.disable && dom.disable(dom.btnSaveDraft, !writer || !state.draft);
+    dom && dom.disable && dom.disable(dom.btnSavePublish, !writer || !state.draft);
+
+    dom && dom.disable && dom.disable(dom.btnGenAI, !writer || !state.draft);
+    dom && dom.disable && dom.disable(dom.btnTestAI, false);
+
+    dom && dom.disable && dom.disable(dom.btnModAll, false);
+    dom && dom.disable && dom.disable(dom.btnModClear, !writer);
+
+    updateAiControlsVisibility();
+    setDirty(state.dirty);
+  }
+
+  function fillEditorFromDraft() {
+    const d = state.draft;
+    if (!d || !dom) return;
+
+    if (dom.mod) dom.mod.value = normStr(d.module);
+    renderAreaDatalist();
+    if (dom.area) dom.area.value = normStr(d.area);
+
+    renderChapterAndStepPickers();
+    if (dom.courseTitle) dom.courseTitle.value = normStr(d.courseTitle) || "Introduktion";
+    if (dom.courseStep) dom.courseStep.value = normStr(d.courseStep) || "1";
+
+    if (dom.goalsLevel) dom.goalsLevel.value = normStr(d.goalsLevel) || "normal";
+    if (dom.goals) dom.goals.value = normStr(d.goals) || "";
+
+    // AO: verksamhet
+    if (dom.businessArea) {
+      // Ensure options exist, then set value, then rerender once (P0-safe)
+      renderBusinessAreaPicker();
+
+      const v = normStr(d.businessArea);
+      if (v) {
+        if (isBusinessDefault(v)) {
+          dom.businessArea.value = v;
+          if (dom.businessAreaOther) dom.businessAreaOther.value = "";
+        } else {
+          dom.businessArea.value = BUSINESS_OTHER_LABEL;
+          if (dom.businessAreaOther) dom.businessAreaOther.value = v;
+          else dom.businessArea.value = v;
+        }
+      }
+
+      renderBusinessAreaPicker();
+    }
+
+    syncDraftTitleFromFields();
+
+    // AO: ankare
+    renderAiAnchorRow();
+
+    const blocks = currentBlocks();
+    DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
+      blocks,
+      onEdit: function (idx) { openBlockEditor(idx); },
+      onDelete: function (idx) { deleteBlock(idx); },
+      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); }
+    });
+  }
+
+  function updateUiAll() {
+    updateTopPills();
+    updateLeftHint();
+    refreshList();
+    fillEditorFromDraft();
+    updateButtons();
+    updateDebug();
+  }
+
+  page._recalc = updateUiAll;
+  page._isWriterAllowed = isWriterAllowed;
+
   /* =========================
-     BLOCK 13/18 — Item-modal (PP-SC-010-07)
+     BLOCK 17/19 — Item modal + block editor
   ========================== */
   function itemTitleForModal(blockIdx, itemIdx, item) {
     const bi = Number(blockIdx) + 1;
@@ -1256,314 +1638,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     });
   }
 
-  function fillEditorFromDraft() {
-    const d = state.draft;
-    if (!d || !dom) return;
-
-    if (dom.mod) dom.mod.value = normStr(d.module);
-    renderAreaDatalist();
-    if (dom.area) dom.area.value = normStr(d.area);
-
-    renderChapterAndStepPickers();
-    if (dom.courseTitle) dom.courseTitle.value = normStr(d.courseTitle) || "Introduktion";
-    if (dom.courseStep) dom.courseStep.value = normStr(d.courseStep) || "1";
-
-    if (dom.goalsLevel) dom.goalsLevel.value = normStr(d.goalsLevel) || "normal";
-    if (dom.goals) dom.goals.value = normStr(d.goals) || "";
-
-    // AO-VERKSAMHET-SELECT-01: fyll verksamhet
-    if (dom.businessArea) {
-      renderBusinessAreaPicker();
-      const v = normStr(d.businessArea);
-      if (v) {
-        if (isBusinessDefault(v)) {
-          dom.businessArea.value = v;
-          if (dom.businessAreaOther) dom.businessAreaOther.value = "";
-        } else {
-          // custom -> välj "Annat…" om möjligt och fyll other
-          dom.businessArea.value = BUSINESS_OTHER_LABEL;
-          if (dom.businessAreaOther) dom.businessAreaOther.value = v;
-          else dom.businessArea.value = v; // om vi inte har separat other-input
-        }
-      } else {
-        // tomt
-        // lämna som placeholder/blank
-      }
-      renderBusinessAreaPicker();
-    }
-
-    syncDraftTitleFromFields();
-
-    const blocks = currentBlocks();
-
-    DEPS.render && DEPS.render.renderBlocksList && DEPS.render.renderBlocksList({
-      blocks,
-      onEdit: function (idx) { openBlockEditor(idx); },
-      onDelete: function (idx) { deleteBlock(idx); },
-      onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); }
-    });
-  }
-
-  function updateAiControlsVisibility() {
-    const content = normStr(dom && dom.aiContent && dom.aiContent.value);
-    const isQuestions = (content === "questions");
-    if (dom && dom.questionControls && dom.show && dom.hide) {
-      if (isQuestions) dom.show(dom.questionControls);
-      else dom.hide(dom.questionControls);
-    } else if (DEPS.render && typeof DEPS.render.toggleQuestionControls === "function") {
-      DEPS.render.toggleQuestionControls(isQuestions);
-    }
-  }
-
-  function updateButtons() {
-    const writer = isWriterAllowed();
-
-    dom && dom.disable && dom.disable(dom.btnNew, !writer);
-    dom && dom.disable && dom.disable(dom.btnDelete, !writer || !state.selectedId);
-    dom && dom.disable && dom.disable(dom.btnPurge, !writer);
-
-    dom && dom.disable && dom.disable(dom.btnSaveDraft, !writer || !state.draft);
-    dom && dom.disable && dom.disable(dom.btnSavePublish, !writer || !state.draft);
-
-    dom && dom.disable && dom.disable(dom.btnGenAI, !writer || !state.draft);
-    dom && dom.disable && dom.disable(dom.btnTestAI, false);
-
-    dom && dom.disable && dom.disable(dom.btnModAll, false);
-    dom && dom.disable && dom.disable(dom.btnModClear, !writer);
-
-    updateAiControlsVisibility();
-    setDirty(state.dirty);
-  }
-
-  function updateUiAll() {
-    updateTopPills();
-    updateLeftHint();
-    refreshList();
-    fillEditorFromDraft();
-    updateButtons();
-    updateDebug();
-  }
-
-  page._recalc = updateUiAll;
-  page._isWriterAllowed = isWriterAllowed;
-
-  /* =========================
-     BLOCK 14/18 — Selection / CRUD
-  ========================== */
-  function tryCloseItemModal() {
-    try {
-      if (!DEPS.render) return;
-      if (typeof DEPS.render.closeItemModal === "function") { DEPS.render.closeItemModal(); return; }
-      if (typeof DEPS.render.hideItemModal === "function") { DEPS.render.hideItemModal(); return; }
-    } catch (_) { }
-  }
-
-  function selectTraining(id) {
-    tryCloseItemModal();
-
-    const idx = findTrainingIndexById(id);
-    if (idx < 0) {
-      state.selectedId = "";
-      state.draft = null;
-      setDirty(false);
-      updateUiAll();
-      return;
-    }
-
-    // P1: nolla verksamhets-sök vid selection (undvik "tom lista" efter byt)
-    state.businessAreaQuery = "";
-    if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
-
-    state.selectedId = normStr(id);
-    state.draft = deepClone(state.trainings[idx]);
-    setDirty(false);
-    renderAreaDatalist();
-
-    renderBusinessAreaPicker();
-    updateUiAll();
-  }
-
-  function newTrainingTemplate() {
-    const who = getWhoFresh();
-    const chapter = "Introduktion";
-    const step = "1";
-    const area = "—";
-    const title = (DEPS.core && typeof DEPS.core.composeTitle === "function")
-      ? DEPS.core.composeTitle(chapter, step, area)
-      : `${chapter} • Steg ${step} • ${area}`;
-
-    return {
-      id: (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now()),
-      status: "draft",
-      module: "",
-      area: "",
-      businessArea: "", // AO-VERKSAMHET-SELECT-01
-      courseTitle: chapter,
-      courseStep: step,
-      goalsLevel: "normal",
-      goals: "",
-      title: title,
-      blocks: [],
-      meta: { createdAt: Date.now(), createdBy: who.empNo || "" }
-    };
-  }
-
-  function createNewTraining() {
-    if (!isWriterAllowed()) return;
-
-    // P1: nolla verksamhets-sök vid new (undvik "tom lista" direkt)
-    state.businessAreaQuery = "";
-    if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
-
-    const t = newTrainingTemplate();
-    state.trainings.unshift(t);
-    state.selectedId = t.id;
-    state.draft = deepClone(t);
-
-    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
-    if (!s || !s.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-      return;
-    }
-
-    state.showAll = false;
-
-    setDirty(false);
-    renderModuleDatalist();
-    renderAreaDatalist();
-    renderChapterAndStepPickers();
-    renderBusinessAreaPicker();
-    updateUiAll();
-  }
-
-  function deleteSelected() {
-    if (!isWriterAllowed()) return;
-    if (!state.selectedId) return;
-
-    const idx = findTrainingIndexById(state.selectedId);
-    if (idx < 0) return;
-
-    state.trainings.splice(idx, 1);
-    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
-    if (!s || !s.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-      return;
-    }
-
-    state.selectedId = "";
-    state.draft = null;
-    setDirty(false);
-    renderModuleDatalist();
-    renderAreaDatalist();
-    updateUiAll();
-  }
-
-  function purgeAll() {
-    if (!isWriterAllowed()) return;
-
-    const p = DEPS.store && DEPS.store.purgeAll ? DEPS.store.purgeAll() : { ok: false };
-    if (!p || !p.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte rensa", "bad");
-      return;
-    }
-
-    state.trainings = [];
-    state.selectedId = "";
-    state.draft = null;
-    state.showAll = false;
-    setDirty(false);
-    renderModuleDatalist();
-    renderAreaDatalist();
-    updateUiAll();
-  }
-
-  function revertUnsaved() {
-    if (!isWriterAllowed()) return;
-    if (!state.selectedId) return;
-    const idx = findTrainingIndexById(state.selectedId);
-    if (idx < 0) return;
-
-    state.draft = deepClone(state.trainings[idx]);
-    setDirty(false);
-    renderBusinessAreaPicker();
-    updateUiAll();
-  }
-
-  function writeBackDraft(status) {
-    if (!isWriterAllowed()) return;
-    if (!state.draft) return;
-
-    syncDraftFromInputs();
-    syncDraftTitleFromFields();
-    state.draft.status = (status === "published") ? "published" : "draft";
-
-    // AO-VERKSAMHET-SELECT-01: Fail-closed guard för Annat…
-    try {
-      const sel = normStr(dom && dom.businessArea && dom.businessArea.value);
-      if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
-        const other = normStr(dom && dom.businessAreaOther && dom.businessAreaOther.value);
-        if (other.length < 2) {
-          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: Du valde Annat… men texten är tom eller för kort (minst 2 tecken).");
-          return;
-        }
-        state.draft.businessArea = other;
-      }
-
-      // fail-safe maxlängd (P1 skydd)
-      const ba = normStr(state.draft.businessArea);
-      if (ba && ba.length > 80) {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: För lång text (max 80 tecken).");
-        return;
-      }
-    } catch (_) { }
-
-    const v = (status === "published" && DEPS.contract && DEPS.contract.validateForPublish)
-      ? DEPS.contract.validateForPublish(state.draft)
-      : (DEPS.contract && DEPS.contract.validateTrainingForSave)
-        ? DEPS.contract.validateTrainingForSave(state.draft)
-        : { ok: true, reasons: [] };
-
-    if (!v.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint((v.reasons || []).join(" "));
-      return;
-    }
-
-    if (status === "published" && !hasAnyItems()) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte publicera", "bad");
-      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Publicering kräver minst 1 block/item.");
-      return;
-    }
-
-    const idx = findTrainingIndexById(state.selectedId);
-    if (idx < 0) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Saknar vald utbildning", "bad");
-      return;
-    }
-
-    state.trainings[idx] = deepClone(state.draft);
-
-    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
-    if (!s || !s.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-      return;
-    }
-
-    setDirty(false);
-    DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
-    renderModuleDatalist();
-    renderAreaDatalist();
-    renderBusinessAreaPicker();
-    updateUiAll();
-  }
-
-  /* =========================
-     BLOCK 15/18 — Blocks (baseline editor)
-  ========================== */
   function openBlockEditor(idx) {
-    // P0: fail-closed: read-only får inte edit:a
     if (!isWriterAllowed()) return;
     if (!state.draft || !DEPS.render || typeof DEPS.render.openModal !== "function") return;
 
@@ -1585,7 +1660,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     wrap.appendChild(ta);
 
     DEPS.render.openModal("Block " + (idx + 1), wrap, function () {
-      // P0: re-check writer även vid modal-save (roll kan ändras under tiden)
       if (!isWriterAllowed()) return;
 
       const txt = normStr(ta.value);
@@ -1598,7 +1672,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
           else if (typeof it0.instruction === "string") it0.instruction = txt;
           else if (typeof it0.prompt === "string") it0.prompt = txt;
           else if (typeof it0.question === "string") it0.question = txt;
-          else if (it0.question && typeof it0.question === "object" && !Array.isArray(it0.question) && typeof it0.question.text === "string") it0.question.text = txt;
+          else if (isObj(it0.question) && typeof it0.question.text === "string") it0.question.text = txt;
         } else if (typeof it0 === "string") {
           bb.items[0] = txt;
         }
@@ -1622,10 +1696,13 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   /* =========================
-     BLOCK 16/18 — AI hooks (health + generate)
+     BLOCK 18/19 — AI + normalize/import + fail-closed
   ========================== */
+  function setAiHint(text) {
+    if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
+    if (dom && dom.aiHint && dom.setText) dom.setText(dom.aiHint, String(text || ""));
+  }
 
-  // ---------- AI: Health ----------
   async function testAi() {
     try {
       if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
@@ -1649,64 +1726,14 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     }
   }
 
-  // ---------- Snapshot (NO goals to AI) ----------
-  function snapshotEditorStateForAi() {
-    const module = normStr(dom && dom.mod && dom.mod.value);
-    const area = normStr(dom && dom.area && dom.area.value);
-    const courseTitle = normStr(dom && dom.courseTitle && dom.courseTitle.value) || "Introduktion";
-    const courseStep = parseCourseStep(dom && dom.courseStep && dom.courseStep.value);
-    const goalsLevel = normStr(dom && dom.goalsLevel && dom.goalsLevel.value) || "normal";
-    const businessArea = normStr(readBusinessAreaFromInputs());
-
-    // LÅST: skickar aldrig goals till AI
-    return { module, area, businessArea, courseTitle, courseStep, goalsLevel, goals: "" };
-  }
-
-  function buildAiContextNoGoals() {
-    const s = snapshotEditorStateForAi();
-    const level = normalizeLevel(s.goalsLevel);
-    const subjectTitle = normStr(s.area) || normStr(s.module) || "";
-
-    if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
-      const ctx = DEPS.core.buildAiContext(s) || {};
-      try {
-        ctx.goals = "";
-        ctx.level = level;
-        if (!ctx.subject || typeof ctx.subject !== "object") ctx.subject = {};
-        if (!ctx.subject.title && subjectTitle) ctx.subject.title = subjectTitle;
-
-        // AO-VERKSAMHET-SELECT-01: extra styrning (ok att skicka)
-        if (s.businessArea) ctx.subject.businessArea = s.businessArea;
-      } catch (_) { }
-      return ctx;
-    }
-
-    return {
-      subject: { module: s.module, area: s.area, title: subjectTitle, businessArea: s.businessArea || "" },
-      course: {
-        chapter: s.courseTitle,
-        step: s.courseStep,
-        title: (DEPS.core && DEPS.core.composeTitle)
-          ? DEPS.core.composeTitle(s.courseTitle, s.courseStep, s.area || "—")
-          : (s.courseTitle + " • Steg " + s.courseStep + " • " + (s.area || "—"))
-      },
-      level: level,
-      goals: ""
-    };
-  }
-
-  // ---------- Controls ----------
   function readAiControls() {
-    // aiContent kan vara "blocks"|"questions" – men UI kan även ha etiketter som "Provfrågor + facit".
     const raw = normStr(dom && dom.aiContent && dom.aiContent.value) || "blocks";
     const rawLower = raw.toLowerCase();
 
-    // Robust normalisering av content
     let content = "blocks";
     if (rawLower === "questions" || rawLower.includes("provfrå") || rawLower.includes("fråga") || rawLower.includes("quiz")) content = "questions";
     else if (rawLower === "blocks" || rawLower.includes("block") || rawLower.includes("utbildning")) content = "blocks";
 
-    // mode-normalisering (worker kräver training|document)
     const mode = (content === "questions") ? "training" : normalizeMode(raw);
 
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
@@ -1720,13 +1747,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     return { content, mode, count, questionType, feedbackEnabled, _uiQuestionType: questionTypeUi };
   }
 
-  // ---------- UI hint ----------
-  function setAiHint(text) {
-    if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
-    if (dom && dom.aiHint && dom.setText) dom.setText(dom.aiHint, String(text || ""));
-  }
-
-  // ---------- Normalize AI response into blocks/items ----------
   function normalizeAiBlocksFromAny(raw) {
     function hasBlocksOrItems(obj) {
       if (!obj) return false;
@@ -1741,12 +1761,8 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     function pickBestSource(r) {
       if (!r) return null;
       const d = (r && r.data) ? r.data : null;
-
-      // välj den som faktiskt har blocks/items (inte bara att data finns)
       if (hasBlocksOrItems(d)) return d;
       if (hasBlocksOrItems(r)) return r;
-
-      // om data finns men saknar content: returnera data ändå (för bättre feltext)
       return d || r;
     }
 
@@ -1841,20 +1857,15 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     return { ok: false, reason: "AI-svar har okänt format (kan inte importera)." };
   }
 
-  // ---------- Validate question item ----------
-  function validateQuestionItem(it, hardTypeOrAuto) {
+  function validateQuestionItemStable(it, hardTypeOrAuto) {
     if (!it || typeof it !== "object") return { ok: false, reason: "Fråga är inte ett objekt." };
 
-    flattenChoiceQuestionShapeInPlace(it);
-
-    const question = normStr(
-      (typeof it.question === "string" ? it.question : "") ||
-      it.q || it.text || it.instruction || it.prompt || ""
-    );
+    const question = normStr(it.question);
     if (!question) return { ok: false, reason: "Fråga saknar text." };
 
     const ht = normStr(hardTypeOrAuto).toLowerCase() || "auto";
 
+    // auto: acceptera flera shapes, men fail-closed om helt utan facit/struktur
     if (ht === "auto") {
       const opts = Array.isArray(it.options) ? it.options : null;
       const hasSingle = opts && opts.length >= 2 && Number.isFinite(Number(it.correctIndex));
@@ -1894,6 +1905,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     if (isMcqType(ht)) {
       const opts = Array.isArray(it.options) ? it.options : [];
       if (opts.length < 2) return { ok: false, reason: "MCQ: saknar options." };
+
       if (ht === "mcq_multi") {
         const cis = Array.isArray(it.correctIndices) ? it.correctIndices : null;
         if (!cis || !cis.length) return { ok: false, reason: "MCQ multi: saknar correctIndices." };
@@ -1903,6 +1915,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
         }
         return { ok: true };
       }
+
       const ci = Number(it.correctIndex);
       if (!Number.isFinite(ci) || ci < 0 || ci >= opts.length) return { ok: false, reason: "MCQ: fel correctIndex." };
       return { ok: true };
@@ -1911,13 +1924,13 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     return { ok: false, reason: "Okänd frågetyp (explicit vald): " + ht };
   }
 
-  // ---------- AI Generate ----------
   async function generateAi() {
     if (!isWriterAllowed()) return;
     if (!state.draft) return;
 
     syncDraftFromInputs();
     syncDraftTitleFromFields();
+    renderAiAnchorRow();
 
     setAiHint("");
     DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI…", "warn");
@@ -1932,12 +1945,13 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     }
 
     const controls = readAiControls();
-    const ctxObj = buildAiContextNoGoals();
+    const ctxObj = buildAiContextNoGoals(); // includes anchor + businessArea, goals stripped
 
     const req = {
       mode: controls.mode,
       count: controls.count,
       context: ctxObj,
+      anchor: state.aiAnchorLine || ctxObj.anchor || "",
       language: "sv",
       questionType: controls.questionType || "auto",
       feedbackEnabled: !!controls.feedbackEnabled
@@ -1989,55 +2003,73 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     const hardSelected = (hardType !== "auto");
 
     const incomingBlocks = [];
+
     for (const b of safeArr(norm.blocks)) {
-      const items = safeArr(b && b.items).map(x => {
+      const itemsRaw = safeArr(b && b.items);
+      const items = [];
+
+      for (const x of itemsRaw) {
         if (typeof x === "string") {
           const t = scrubObjectObjectToken(x);
-          return { type: "info", text: t };
+          items.push({ type: "info", text: t });
+          continue;
         }
 
         if (x && typeof x === "object") {
           const obj = sanitizeAiItemInPlace(deepClone(x)) || {};
-
           flattenChoiceQuestionShapeInPlace(obj);
           ensureItemType(obj);
 
-          if (!obj.type || typeof obj.type !== "string") {
-            const hasQ = !!normStr(obj.question || obj.q || obj.text || obj.instruction || obj.prompt || "");
-            const hasOpts = Array.isArray(obj.options) && obj.options.length >= 2;
-            obj.type = (hasQ && (hasOpts || obj.correct != null || obj.answer != null || obj.expected != null)) ? "question" : "info";
-          }
+          // If questions-mode, force normalize to stable question item
+          if (controls.content === "questions") {
+            const stableR = normalizeQuestionItemToStable(obj);
+            if (!stableR.ok) {
+              DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+              setAiHint("Import stoppad (fail-closed): " + (stableR.reason || "kunde inte normalisera fråga."));
+              updateDebug();
+              return;
+            }
+            const stable = stableR.item;
 
-          if (String(obj.type || "").toLowerCase() === "question") {
-            if (!normStr(obj.question)) {
-              const q2 = normStr(obj.q || obj.text || obj.instruction || obj.prompt || "");
-              if (q2) obj.question = q2;
+            // fail-closed: require stable question + validate vs explicit type
+            const vq = validateQuestionItemStable(stable, hardType);
+            if (!vq.ok) {
+              DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+              setAiHint("Import stoppad (fail-closed): " + (vq.reason || "ogiltig fråga."));
+              updateDebug();
+              return;
+            }
+
+            // optional: contract.normalizeItem (if exists) but keep stable shape
+            if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
+              const n2 = DEPS.contract.normalizeItem(deepClone(stable));
+              items.push(n2 && typeof n2 === "object" ? n2 : stable);
+            } else {
+              items.push(stable);
+            }
+          } else {
+            // blocks-mode: keep as info/question objects as-is, but sanitized
+            if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
+              items.push(DEPS.contract.normalizeItem(obj));
+            } else {
+              items.push(obj);
             }
           }
-
-          if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
-            return DEPS.contract.normalizeItem(obj);
-          }
-          return obj;
+          continue;
         }
 
-        return null;
-      }).filter(x => x != null);
+        // ignore null/unknown
+      }
 
-      if (!items.length) continue;
+      const clean = items.filter(x => x != null);
+      if (!clean.length) continue;
 
+      // strict: if questions-mode, no info allowed
       if (controls.content === "questions") {
-        for (const it of items) {
-          if (it && it.type === "info") {
+        for (const it of clean) {
+          if (it && String(it.type || "").toLowerCase() !== "question") {
             DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-            setAiHint("Du valde provfrågor men AI gav text/info utan facit. Import stoppad (fail-closed).");
-            updateDebug();
-            return;
-          }
-          const vq = validateQuestionItem(it, hardType);
-          if (!vq.ok) {
-            DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-            setAiHint("Import stoppad (fail-closed): " + (vq.reason || "ogiltig fråga."));
+            setAiHint("Du valde provfrågor men AI gav item som inte är fråga. Import stoppad (fail-closed).");
             updateDebug();
             return;
           }
@@ -2046,7 +2078,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
 
       incomingBlocks.push({
         title: normStr(b && b.title) || "",
-        items: items
+        items: clean
       });
     }
 
@@ -2061,7 +2093,8 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       importedBlocks: incomingBlocks.length,
       importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0),
       questionType: controls.questionType || "auto",
-      hardSelected: hardSelected
+      hardSelected: hardSelected,
+      anchor: state.aiAnchorLine || ""
     };
 
     if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
@@ -2075,8 +2108,221 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
   }
 
   /* =========================
-     BLOCK 17/18 — Bootstrap + events
+     BLOCK 19/19 — Bootstrap + events + CRUD
   ========================== */
+  function tryCloseItemModal() {
+    try {
+      if (!DEPS.render) return;
+      if (typeof DEPS.render.closeItemModal === "function") { DEPS.render.closeItemModal(); return; }
+      if (typeof DEPS.render.hideItemModal === "function") { DEPS.render.hideItemModal(); return; }
+    } catch (_) { }
+  }
+
+  function selectTraining(id) {
+    tryCloseItemModal();
+
+    const idx = findTrainingIndexById(id);
+    if (idx < 0) {
+      state.selectedId = "";
+      state.draft = null;
+      setDirty(false);
+      updateUiAll();
+      return;
+    }
+
+    // reset query for verksamhet-search
+    state.businessAreaQuery = "";
+    if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
+
+    state.selectedId = normStr(id);
+    state.draft = deepClone(state.trainings[idx]);
+    setDirty(false);
+    renderAreaDatalist();
+
+    renderBusinessAreaPicker();
+    renderAiAnchorRow();
+    updateUiAll();
+  }
+
+  function newTrainingTemplate() {
+    const who = getWhoFresh();
+    const chapter = "Introduktion";
+    const step = "1";
+    const area = "—";
+    const title = (DEPS.core && typeof DEPS.core.composeTitle === "function")
+      ? DEPS.core.composeTitle(chapter, step, area)
+      : `${chapter} • Steg ${step} • ${area}`;
+
+    return {
+      id: (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now()),
+      status: "draft",
+      module: "",
+      area: "",
+      businessArea: "", // AO: verksamhet (within existing training object)
+      courseTitle: chapter,
+      courseStep: step,
+      goalsLevel: "normal",
+      goals: "",
+      title: title,
+      blocks: [],
+      meta: { createdAt: Date.now(), createdBy: who.empNo || "" }
+    };
+  }
+
+  function createNewTraining() {
+    if (!isWriterAllowed()) return;
+
+    state.businessAreaQuery = "";
+    if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
+
+    const t = newTrainingTemplate();
+    state.trainings.unshift(t);
+    state.selectedId = t.id;
+    state.draft = deepClone(t);
+
+    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
+    if (!s || !s.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+      return;
+    }
+
+    state.showAll = false;
+
+    setDirty(false);
+    renderModuleDatalist();
+    renderAreaDatalist();
+    renderChapterAndStepPickers();
+    renderBusinessAreaPicker();
+    renderAiAnchorRow();
+    updateUiAll();
+  }
+
+  function deleteSelected() {
+    if (!isWriterAllowed()) return;
+    if (!state.selectedId) return;
+
+    const idx = findTrainingIndexById(state.selectedId);
+    if (idx < 0) return;
+
+    state.trainings.splice(idx, 1);
+    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
+    if (!s || !s.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+      return;
+    }
+
+    state.selectedId = "";
+    state.draft = null;
+    setDirty(false);
+    renderModuleDatalist();
+    renderAreaDatalist();
+    updateUiAll();
+  }
+
+  function purgeAll() {
+    if (!isWriterAllowed()) return;
+
+    const p = DEPS.store && DEPS.store.purgeAll ? DEPS.store.purgeAll() : { ok: false };
+    if (!p || !p.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte rensa", "bad");
+      return;
+    }
+
+    state.trainings = [];
+    state.selectedId = "";
+    state.draft = null;
+    state.showAll = false;
+    setDirty(false);
+    renderModuleDatalist();
+    renderAreaDatalist();
+    updateUiAll();
+  }
+
+  function revertUnsaved() {
+    if (!isWriterAllowed()) return;
+    if (!state.selectedId) return;
+    const idx = findTrainingIndexById(state.selectedId);
+    if (idx < 0) return;
+
+    state.draft = deepClone(state.trainings[idx]);
+    setDirty(false);
+    renderBusinessAreaPicker();
+    renderAiAnchorRow();
+    updateUiAll();
+  }
+
+  function writeBackDraft(status) {
+    if (!isWriterAllowed()) return;
+    if (!state.draft) return;
+
+    syncDraftFromInputs();
+    syncDraftTitleFromFields();
+    renderAiAnchorRow();
+
+    state.draft.status = (status === "published") ? "published" : "draft";
+
+    // Fail-closed: om UI står på "Annat…" måste text vara icke-tom (min 2 tecken)
+    try {
+      const sel = normStr(dom && dom.businessArea && dom.businessArea.value);
+      if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
+        const other = normStr(dom && dom.businessAreaOther && dom.businessAreaOther.value);
+        if (other.length < 2) {
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: Du valde Annat… men texten är tom eller för kort (minst 2 tecken).");
+          return;
+        }
+        state.draft.businessArea = other;
+      }
+
+      const ba = normStr(state.draft.businessArea);
+      if (ba && ba.length > 80) {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: För lång text (max 80 tecken).");
+        return;
+      }
+    } catch (_) { }
+
+    const v = (status === "published" && DEPS.contract && DEPS.contract.validateForPublish)
+      ? DEPS.contract.validateForPublish(state.draft)
+      : (DEPS.contract && DEPS.contract.validateTrainingForSave)
+        ? DEPS.contract.validateTrainingForSave(state.draft)
+        : { ok: true, reasons: [] };
+
+    if (!v.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint((v.reasons || []).join(" "));
+      return;
+    }
+
+    if (status === "published" && !hasAnyItems()) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte publicera", "bad");
+      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Publicering kräver minst 1 block/item.");
+      return;
+    }
+
+    const idx = findTrainingIndexById(state.selectedId);
+    if (idx < 0) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Saknar vald utbildning", "bad");
+      return;
+    }
+
+    state.trainings[idx] = deepClone(state.draft);
+
+    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
+    if (!s || !s.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+      return;
+    }
+
+    setDirty(false);
+    DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
+    renderModuleDatalist();
+    renderAreaDatalist();
+    renderBusinessAreaPicker();
+    renderAiAnchorRow();
+    updateUiAll();
+  }
+
   function wireEventsOnce() {
     if (page.__BOOTED === true) return;
     page.__BOOTED = true;
@@ -2099,7 +2345,6 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       if (dom.fStatus) dom.fStatus.value = "";
       if (dom.onlyProblems) dom.onlyProblems.checked = false;
 
-      // AO-VERKSAMHET-SELECT-01: rensa sökquery (UI-only)
       state.businessAreaQuery = "";
       if (dom.businessAreaSearch) dom.businessAreaSearch.value = "";
       renderBusinessAreaPicker();
@@ -2107,6 +2352,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       state.showAll = false;
       refreshList();
       updateButtons();
+      renderAiAnchorRow();
       updateDebug();
     });
 
@@ -2143,6 +2389,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       renderAreaDatalist();
       syncDraftFromInputs();
       syncDraftTitleFromFields();
+      renderAiAnchorRow();
       setDirty(true);
       updateButtons();
       updateDebug();
@@ -2159,6 +2406,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       syncDraftFromInputs();
       renderAreaDatalist();
       syncDraftTitleFromFields();
+      renderAiAnchorRow();
 
       setDirty(true);
       updateButtons();
@@ -2173,6 +2421,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     dom.on(dom.goalsLevel, "change", function () {
       if (state.draft) {
         syncDraftFromInputs();
+        renderAiAnchorRow();
         setDirty(true);
         updateButtons();
         updateDebug();
@@ -2187,25 +2436,27 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
       }
     });
 
-    // AO-VERKSAMHET-SELECT-01: events (no-op om elementen saknas)
+    // AO: verksamhet events
     dom.on(dom.businessAreaSearch, "input", function () {
       state.businessAreaQuery = normStr(dom.businessAreaSearch && dom.businessAreaSearch.value);
       renderBusinessAreaPicker();
+      renderAiAnchorRow();
       updateDebug();
     });
     dom.on(dom.businessArea, "change", function () {
       if (state.draft) {
         syncDraftFromInputs();
         renderBusinessAreaPicker();
+        renderAiAnchorRow();
         setDirty(true);
         updateButtons();
         updateDebug();
       }
     });
     dom.on(dom.businessArea, "input", function () {
-      // om businessArea är input (datalist): behandla som editor-change
       if (state.draft) {
         syncDraftFromInputs();
+        renderAiAnchorRow();
         setDirty(true);
         updateButtons();
         updateDebug();
@@ -2214,6 +2465,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     dom.on(dom.businessAreaOther, "input", function () {
       if (state.draft) {
         syncDraftFromInputs();
+        renderAiAnchorRow();
         setDirty(true);
         updateButtons();
         updateDebug();
@@ -2258,14 +2510,13 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     state.showAll = false;
 
     wireEventsOnce();
+    renderAiAnchorRow();
     updateUiAll();
     setTimeout(updateUiAll, 0);
     setTimeout(updateUiAll, 50);
     setTimeout(updateUiAll, 300);
 
-    (async function () {
-      try { await ensureSdkReady(); } catch (_) { }
-    })();
+    (async function () { try { await ensureSdkReady(); } catch (_) { } })();
 
     (async function () {
       try {
@@ -2276,6 +2527,7 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
           renderChapterAndStepPickers();
 
           syncDraftFromInputs();
+          renderAiAnchorRow();
           updateUiAll();
         } else {
           updateUiAll();
@@ -2307,8 +2559,5 @@ PATCH v1.3.8-PP-SC-010-07L (AUTOPATCH AO-VERKSAMHET-SELECT-01):
     setTimeout(tryBoot, RETRIES[attempt]);
   }
 
-  /* =========================
-     BLOCK 18/18 — Start
-  ========================== */
   try { tryBoot(); } catch (_) { setLock("BOOT: exception (fail-closed)."); updateUiAll(); }
 })();
