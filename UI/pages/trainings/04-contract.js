@@ -15,11 +15,11 @@ POLICY (LÅST):
 - XSS-safe: render via textContent/value i render (denna fil gör ingen DOM)
 - ADMIN-only write hanteras i 06-page (inte här)
 
-PATCH v1.1.1 (PP-SC-010-04C) – AUTOPATCH:
-- P0: FIX: payload.data fick inte “vinna” över root → AI-svar med root.items/root.blocks gav “okänt format”.
-      Nu: provar root först, sedan payload.data (fail-closed kvar).
-- P1: Robust typ-detektion: stöd för kind (blockId/kind) utöver type (för worker-blocks).
-- P1: extractAiItems: stöd för blocks[] som är “flat” (saknar .items) → behandlas som items.
+PATCH v1.1.2 (PP-SC-010-04D) – AUTOPATCH:
+- P0: hasAnswer accepterar nu index-facit även när correctIndex/correctIndices är numeriska strängar.
+- P0: asInt är tom-sträng-säker ("" => NaN) så tomma fält inte feltolkas som index 0.
+- P1: normType fångar mcq_* + tf/truefalse-varianter (robust typ-detektion).
+- P1: normalizeItem använder getTypeField() (samma typkäll-logik som övriga kontraktet).
 
 BLOCKS:
 1) Namespace + version
@@ -43,7 +43,7 @@ BLOCKS:
   if (NS.contract) return;
 
   const contract = (NS.contract = {});
-  contract.__VERSION = "v1.1.1-PP-SC-010-04C";
+  contract.__VERSION = "v1.1.2-PP-SC-010-04D";
 
   /* =========================
      BLOCK 2/10 — Bas-utils (no deps)
@@ -55,7 +55,11 @@ BLOCKS:
   function isNonEmptyStr(v) { return typeof v === "string" && normStr(v).length > 0; }
   function isBool(v) { return typeof v === "boolean"; }
   function isNum(v) { return typeof v === "number" && Number.isFinite(v); }
+
+  // P0: tom-sträng-säker int-parsning
   function asInt(v) {
+    if (v == null) return NaN;
+    if (typeof v === "string" && v.trim() === "") return NaN;
     const n = Number(v);
     return Number.isFinite(n) ? Math.trunc(n) : NaN;
   }
@@ -84,8 +88,13 @@ BLOCKS:
   function normType(v) {
     const s = normStr(v).toLowerCase();
     if (!s) return "info";
-    // stabil bas
-    if (s === "question" || s === "quiz" || s === "mcq" || s === "true_false") return "question";
+
+    // P1: robust fråga-detektion
+    // Ex: "mcq_single", "mcq_multi", "mcq", "true_false", "truefalse", "tf"
+    if (s === "question" || s === "quiz") return "question";
+    if (s === "mcq" || s.startsWith("mcq_") || s.includes("mcq")) return "question";
+    if (s === "true_false" || s === "truefalse" || s === "tf" || s.includes("true_false")) return "question";
+
     if (s === "task" || s === "assignment") return "task";
     if (s === "document" || s === "doc") return "document";
     if (s === "both") return "both";
@@ -155,6 +164,22 @@ BLOCKS:
   /* =========================
      BLOCK 5/10 — Question validation helpers
   ========================== */
+  function hasIndexAnswer(it) {
+    if (!isPlainObject(it)) return false;
+
+    const ci = asInt(it.correctIndex);
+    const ai = asInt(it.answerIndex);
+    if (Number.isFinite(ci) && ci >= 0) return true;
+    if (Number.isFinite(ai) && ai >= 0) return true;
+
+    const cis = Array.isArray(it.correctIndices) ? it.correctIndices.map(asInt).filter(Number.isFinite) : null;
+    const ais = Array.isArray(it.answerIndices) ? it.answerIndices.map(asInt).filter(Number.isFinite) : null;
+    if (cis && cis.length) return true;
+    if (ais && ais.length) return true;
+
+    return false;
+  }
+
   function hasAnswer(it) {
     if (!isPlainObject(it)) return false;
 
@@ -167,13 +192,8 @@ BLOCKS:
     if (isNonEmptyStr(it.solution) || isNum(it.solution) || isBool(it.solution)) return true;
     if (isNonEmptyStr(it.expected) || isNum(it.expected)) return true;
 
-    // index-baserat (MCQ)
-    if (isNum(it.correctIndex) && it.correctIndex >= 0) return true;
-    if (isNum(it.answerIndex) && it.answerIndex >= 0) return true;
-
-    // multi
-    if (Array.isArray(it.correctIndices) && it.correctIndices.length > 0) return true;
-    if (Array.isArray(it.answerIndices) && it.answerIndices.length > 0) return true;
+    // P0: index-baserat (MCQ) – acceptera även numeriska strängar
+    if (hasIndexAnswer(it)) return true;
 
     return false;
   }
@@ -235,8 +255,7 @@ BLOCKS:
         validateIndicesAgainstOptions(it, reasons);
       } else {
         // om det finns index-facit men inga options: stoppa
-        if (isPlainObject(it) && (Number.isFinite(asInt(it.correctIndex)) || Number.isFinite(asInt(it.answerIndex)) ||
-          (Array.isArray(it.correctIndices) && it.correctIndices.length) || (Array.isArray(it.answerIndices) && it.answerIndices.length))) {
+        if (isPlainObject(it) && hasIndexAnswer(it)) {
           reasons.push("Fråga saknar svarsalternativ (options/choices/answers) men har index-facit.");
         }
       }
@@ -331,8 +350,9 @@ BLOCKS:
     if (!isPlainObject(it)) return { type: "info", text: normStr(it) };
 
     const out = it; // in-place ok (06-page deepClone hanterar)
-    // GUARD: worker kan skicka kind istället för type
-    out.type = normType(out.type || out.kind);
+
+    // P1: använd samma typkäll-logik som resten av kontraktet
+    out.type = normType(getTypeField(out));
 
     // normalisera vanliga textfält
     if (typeof out.text === "string") out.text = normStr(out.text);
