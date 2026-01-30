@@ -15,28 +15,23 @@ POLICY (LÅST):
 - Ingen fetch • ingen worker
 - Read-only respekteras (render visar, callbacks hanterar write)
 
-PATCH v1.1.8 (PP-SC-010-08G) (AUTOPATCH):
-- P0: Support nested question-shape:
-      item.question = { kind:'question', text:'...', choices:[{id,text}], correctChoiceId:'c1', rationale:'...' }
-      => preview + modal + label fungerar även om item.type='info'.
-- P1: Modal edit/save: om nested question finns -> uppdatera nested (text/choices/correctChoiceId/rationale)
-      + behåll normalisering till options/correctIndex/correctIndices för kompatibilitet.
-- P2: Debug: mer info bakom window.__HR_DEBUG_TRAININGS_RENDER.
+PATCH v1.1.9 (PP-SC-010-08H) (AUTOPATCH):
+- P0: List-delegation ignorerar klick/keydown från formkontroller/knappar (framtidssäkert).
+- P1: Debug-box: renderDebug() visar/döljer debugpanel fail-soft.
+- P2: Keydown-activate ignorerar om fokus ligger i input/textarea/select.
 
 Ändringslogg (≤8):
-- v1.1.8: typeLabel/itemKind: detektera nested question-objekt
-- v1.1.8: primaryText: läs question.text när question är objekt
-- v1.1.8: extractOptions/extractCorrect/extractExplanation: stöd för question.choices/correctChoiceId/rationale
-- v1.1.8: modal-save: uppdatera nested question + normalisera facit/options
+- v1.1.9: list delegation: ignore interactive targets (button/a/input/textarea/select/label)
+- v1.1.9: renderDebug: show/hide debugBox + null-safe clear
+- v1.1.9: version bump
 
 Testnoteringar:
-- Preview: item.type='info' + item.question.text -> text syns i blockkort.
-- Modal: öppna item -> visar fråga, alternativ, facit och rationale.
-- Edit: spara -> options[] + correctIndex + correctIndices uppdateras + nested question uppdateras om den fanns.
+- Klick i listkort väljer utbildning (som tidigare).
+- Om framtida knappar/inputs läggs i listkort: klick i dem väljer inte utbildningen.
+- Debug: renderDebug(obj) visar json; renderDebug(null) döljer.
 
 Risk/edge cases:
-- Dubbel-representation (nested + platt) kan avslöja buggar i konsumenter som bara läser ena varianten,
-  men ökar kompatibilitet för UI/worker-flöden.
+- Inga funktionella ändringar i blocks/modal; endast robustare event-filter + debug-UI.
 ============================================================ */
 
 (function () {
@@ -46,7 +41,7 @@ Risk/edge cases:
   if (NS.render) return;
 
   const render = (NS.render = {});
-  render.__VERSION = "v1.1.8-PP-SC-010-08G";
+  render.__VERSION = "v1.1.9-PP-SC-010-08H";
 
   function byId(id) { return document.getElementById(String(id || "")); }
   function normStr(v) { return String(v ?? "").trim(); }
@@ -87,6 +82,16 @@ Risk/edge cases:
     if (!pillEl || !pillEl.classList) return;
     pillEl.classList.remove("ok", "warn", "bad");
     if (kind === "ok" || kind === "warn" || kind === "bad") pillEl.classList.add(kind);
+  }
+
+  function isInteractiveTarget(t) {
+    try {
+      if (!t) return false;
+      if (!t.closest) return false;
+      return !!t.closest("button,a,input,textarea,select,label");
+    } catch (_) {
+      return false;
+    }
   }
 
   /* =========================================
@@ -164,6 +169,10 @@ Risk/edge cases:
       try {
         const t = e && e.target;
         if (!t) return;
+
+        // P0: ignorera klick i interaktiva controls (framtidssäkert)
+        if (isInteractiveTarget(t)) return;
+
         const el = t.closest ? t.closest("[data-training-id]") : null;
         const id = normStr(el && el.getAttribute && el.getAttribute("data-training-id"));
         if (!id) return;
@@ -180,6 +189,10 @@ Risk/edge cases:
     EL.list.addEventListener("keydown", function (e) {
       try {
         if (!e) return;
+
+        // P2: om fokus ligger i input/textarea/select osv, trigga inte pick
+        if (isInteractiveTarget(e.target)) return;
+
         const k = e.key || e.keyCode;
         const isActivate = (k === "Enter" || k === " " || k === 13 || k === 32);
         if (!isActivate) return;
@@ -1260,11 +1273,18 @@ Risk/edge cases:
      ========================================= */
   render.renderDebug = function (obj) {
     try {
+      const has = !!obj;
+      if (EL.debugBox) {
+        if (has) dom.show(EL.debugBox);
+        else dom.hide(EL.debugBox);
+      }
       if (!EL.debugPre) return;
+      if (!has) { dom.setText(EL.debugPre, "—"); return; }
       const json = JSON.stringify(obj, null, 2);
       dom.setText(EL.debugPre, json);
     } catch (_) {
       dom.setText(EL.debugPre, "—");
+      try { if (EL.debugBox) dom.hide(EL.debugBox); } catch (_) { }
     }
   };
 })();
