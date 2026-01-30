@@ -15,10 +15,8 @@ POLICY (LÅST):
 NYCKEL (LÅST):
 - AO-057_TRAININGS_V1
 
-PATCH v1.0.0 (PP-SC-010-04):
-- Robust load med corrupt-detektion + lockReason
-- Robust save (dedupe ids, bounded size)
-- purgeAll + helper lockReasonFor()
+PATCH v1.0.1 (PP-SC-010-04) – AUTOPATCH P0:
+- P0 FIX: meta.createdAt/meta.updatedAt normaliseras robust till number (hanterar strängar/NaN).
 ============================================================ */
 (function () {
   "use strict";
@@ -27,7 +25,7 @@ PATCH v1.0.0 (PP-SC-010-04):
   if (NS.store) return;
 
   const store = (NS.store = {});
-  store.__VERSION = "v1.0.0-PP-SC-010-04";
+  store.__VERSION = "v1.0.1-PP-SC-010-04";
 
   const KEY = "AO-057_TRAININGS_V1";
   const MAX_BYTES = 1024 * 1024 * 2; // 2MB (best-effort), fail-closed om överskrids
@@ -61,6 +59,11 @@ PATCH v1.0.0 (PP-SC-010-04):
     return Object.assign({ ok: true }, extra || {});
   }
 
+  function asFiniteNumber(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
   function normalizeTraining(t) {
     // OBS: ingen ny datamodell – vi bevarar fält, men säkrar minsta shape.
     if (!isPlainObject(t)) return null;
@@ -79,8 +82,13 @@ PATCH v1.0.0 (PP-SC-010-04):
     if (!Array.isArray(out.blocks)) out.blocks = [];
 
     if (!isPlainObject(out.meta)) out.meta = {};
-    if (typeof out.meta.createdAt !== "number") out.meta.createdAt = Date.now();
-    if (typeof out.meta.updatedAt !== "number") out.meta.updatedAt = out.meta.updatedAt || 0;
+
+    // P0: robust timestamp-normalisering (string/NaN -> number)
+    const created = asFiniteNumber(out.meta.createdAt);
+    out.meta.createdAt = (created != null) ? created : Date.now();
+
+    const updated = asFiniteNumber(out.meta.updatedAt);
+    out.meta.updatedAt = (updated != null) ? updated : 0;
 
     // Minimalt skydd för stora strängar (fail-soft, inte loss av data)
     if (typeof out.title !== "string") out.title = normStr(out.title);
