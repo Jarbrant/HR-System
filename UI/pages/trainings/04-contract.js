@@ -15,11 +15,10 @@ POLICY (LÅST):
 - XSS-safe: render via textContent/value i render (denna fil gör ingen DOM)
 - ADMIN-only write hanteras i 06-page (inte här)
 
-PATCH v1.1.2 (PP-SC-010-04D) – AUTOPATCH:
-- P0: hasAnswer accepterar nu index-facit även när correctIndex/correctIndices är numeriska strängar.
-- P0: asInt är tom-sträng-säker ("" => NaN) så tomma fält inte feltolkas som index 0.
-- P1: normType fångar mcq_* + tf/truefalse-varianter (robust typ-detektion).
-- P1: normalizeItem använder getTypeField() (samma typkäll-logik som övriga kontraktet).
+PATCH v1.1.5 (PP-SC-010-04G) – AUTOPATCH:
+- P0: FIX: correctChoiceIds (multi) är nu strikt fail-closed: om något id inte mappar till giltig choice (id+text) → reason + stopp av multi-facit.
+- P1: OPT: Bygger choiceId->optionIndex-map en gång per validateIndicesAgainstOptions och återanvänder.
+- P2: Dedupe av multi-index (undviker dubbelindex i validering).
 
 BLOCKS:
 1) Namespace + version
@@ -43,7 +42,7 @@ BLOCKS:
   if (NS.contract) return;
 
   const contract = (NS.contract = {});
-  contract.__VERSION = "v1.1.2-PP-SC-010-04D";
+  contract.__VERSION = "v1.1.5-PP-SC-010-04G";
 
   /* =========================
      BLOCK 2/10 — Bas-utils (no deps)
@@ -62,6 +61,61 @@ BLOCKS:
     if (typeof v === "string" && v.trim() === "") return NaN;
     const n = Number(v);
     return Number.isFinite(n) ? Math.trunc(n) : NaN;
+  }
+
+  // P0: nested question-shape helpers
+  function getQuestionObj(it) {
+    if (!isPlainObject(it)) return null;
+    const q = it.question;
+    return isPlainObject(q) ? q : null;
+  }
+  function getQuestionText(it) {
+    const qObj = getQuestionObj(it);
+    if (qObj && isNonEmptyStr(qObj.text)) return normStr(qObj.text);
+    if (isPlainObject(it) && isNonEmptyStr(it.question)) return normStr(it.question);
+    return "";
+  }
+  function getChoicesFromQuestionObj(it) {
+    const qObj = getQuestionObj(it);
+    if (!qObj) return null;
+    return Array.isArray(qObj.choices) ? qObj.choices : null;
+  }
+
+  // P0: matcha extractOptionsText-logik för choice->option-index (filtrerar bort tomma texter)
+  function choiceTextFromObj(o) {
+    if (!isPlainObject(o)) return "";
+    return normStr(o.label) || normStr(o.text) || normStr(o.value);
+  }
+
+  // P0: bygg map { choiceId -> optionIndex } där optionIndex räknas på "giltiga option-texter"
+  function buildChoiceIdToOptionIndexMap(choices) {
+    const map = Object.create(null);
+    let optIndex = 0;
+    for (let i = 0; i < choices.length; i++) {
+      const c = choices[i];
+      if (!isPlainObject(c)) continue;
+
+      const id = normStr(c.id);
+      const txt = choiceTextFromObj(c);
+
+      // samma filter som extractOptionsText: kräver icke-tom text
+      if (!txt) continue;
+      if (!id) { optIndex++; continue; } // option finns men saknar id → kan inte mappa, men index ska ändå räknas
+
+      // första id vinner (fail-closed friendly, undvik att hoppa runt vid dubbletter)
+      if (map[id] === undefined) map[id] = optIndex;
+
+      optIndex++;
+    }
+    return map;
+  }
+
+  function choiceIdToOptionIndex(choices, id) {
+    const want = normStr(id);
+    if (!want) return -1;
+    const map = buildChoiceIdToOptionIndexMap(choices);
+    const idx = map[want];
+    return (typeof idx === "number" && Number.isFinite(idx) && idx >= 0) ? idx : -1;
   }
 
   /* =========================
@@ -89,8 +143,7 @@ BLOCKS:
     const s = normStr(v).toLowerCase();
     if (!s) return "info";
 
-    // P1: robust fråga-detektion
-    // Ex: "mcq_single", "mcq_multi", "mcq", "true_false", "truefalse", "tf"
+    // robust fråga-detektion
     if (s === "question" || s === "quiz") return "question";
     if (s === "mcq" || s.startsWith("mcq_") || s.includes("mcq")) return "question";
     if (s === "true_false" || s === "truefalse" || s === "tf" || s.includes("true_false")) return "question";
@@ -104,6 +157,11 @@ BLOCKS:
   function primaryText(it) {
     if (typeof it === "string") return normStr(it);
     if (!isPlainObject(it)) return "";
+
+    // P0: nested question.text ska räknas som primärtext
+    const qText = getQuestionText(it);
+    if (qText) return qText;
+
     return (
       normStr(it.text) ||
       normStr(it.instruction) ||
@@ -121,14 +179,20 @@ BLOCKS:
     const t = normType(getTypeField(it));
     if (t === "question") return true;
 
-    // AI kan sakna type/kind men ha question-fält
+    // P0: AI kan sakna type/kind men ha question som string eller object
     if (isNonEmptyStr(it.question)) return true;
+    if (getQuestionObj(it) && isNonEmptyStr(getQuestionText(it))) return true;
 
     return false;
   }
 
   function extractOptionsRaw(it) {
     if (!isPlainObject(it)) return [];
+
+    // P0: nested question.choices prioriteras om den finns
+    const qChoices = getChoicesFromQuestionObj(it);
+    if (Array.isArray(qChoices)) return qChoices;
+
     // vanligaste varianter
     if (Array.isArray(it.options)) return it.options;
     if (Array.isArray(it.choices)) return it.choices;
@@ -177,6 +241,13 @@ BLOCKS:
     if (cis && cis.length) return true;
     if (ais && ais.length) return true;
 
+    // P0: nested correctChoiceId/correctChoiceIds räknas som index-facit (via choices-id → optionIndex)
+    const qObj = getQuestionObj(it);
+    if (qObj) {
+      if (isNonEmptyStr(qObj.correctChoiceId)) return true;
+      if (Array.isArray(qObj.correctChoiceIds) && qObj.correctChoiceIds.map(normStr).filter(Boolean).length) return true;
+    }
+
     return false;
   }
 
@@ -192,7 +263,9 @@ BLOCKS:
     if (isNonEmptyStr(it.solution) || isNum(it.solution) || isBool(it.solution)) return true;
     if (isNonEmptyStr(it.expected) || isNum(it.expected)) return true;
 
-    // P0: index-baserat (MCQ) – acceptera även numeriska strängar
+    // P0: nested question.rationale räknas INTE som facit (bara förklaring)
+
+    // P0: index-baserat (MCQ) – acceptera även numeriska strängar + nested correctChoiceId
     if (hasIndexAnswer(it)) return true;
 
     return false;
@@ -208,26 +281,74 @@ BLOCKS:
     const cis = Array.isArray(it.correctIndices) ? it.correctIndices.map(asInt).filter(Number.isFinite) : null;
     const ais = Array.isArray(it.answerIndices) ? it.answerIndices.map(asInt).filter(Number.isFinite) : null;
 
+    // P0: nested correctChoiceId(s) → optionIndex via choices-id (matchar options-text filtering)
+    const qObj = getQuestionObj(it);
+    const qChoices = getChoicesFromQuestionObj(it);
+    let qSingleIdx = NaN;
+    let qMultiIdxs = null;
+
+    // P1: bygg map en gång per validering
+    let idMap = null;
+    function mapChoiceIdToIndex(id) {
+      const want = normStr(id);
+      if (!want) return -1;
+      if (!idMap && Array.isArray(qChoices)) idMap = buildChoiceIdToOptionIndexMap(qChoices);
+      const idx = idMap ? idMap[want] : undefined;
+      return (typeof idx === "number" && Number.isFinite(idx) && idx >= 0) ? idx : -1;
+    }
+
+    if (qObj && Array.isArray(qChoices)) {
+      if (isNonEmptyStr(qObj.correctChoiceId)) {
+        const idx = mapChoiceIdToIndex(qObj.correctChoiceId);
+        qSingleIdx = (idx >= 0) ? idx : NaN;
+        if (!Number.isFinite(qSingleIdx)) reasons.push("Fråga har correctChoiceId men id matchar ingen giltig choice (id+text krävs).");
+      }
+
+      if (Array.isArray(qObj.correctChoiceIds) && qObj.correctChoiceIds.length) {
+        // P0: fail-closed om något id inte mappar
+        const inputIds = qObj.correctChoiceIds.map(normStr).filter(Boolean);
+        if (inputIds.length) {
+          const mapped = inputIds.map(mapChoiceIdToIndex);
+          const mappedGood = mapped.filter(x => Number.isFinite(x) && x >= 0);
+          const invalidCount = mapped.filter(x => !(Number.isFinite(x) && x >= 0)).length;
+
+          if (invalidCount > 0) {
+            reasons.push("Fråga har correctChoiceIds där minst ett id inte matchar giltig choice (id+text krävs).");
+            qMultiIdxs = null; // fail-closed: “halv-valid” stoppas
+          } else if (mappedGood.length > 0) {
+            // P2: dedupe index
+            qMultiIdxs = Array.from(new Set(mappedGood));
+          } else {
+            qMultiIdxs = null;
+            reasons.push("Fråga har correctChoiceIds men inga id matchar giltiga choices (id+text krävs).");
+          }
+        } else {
+          qMultiIdxs = null;
+          reasons.push("Fråga har correctChoiceIds men inga id matchar giltiga choices (id+text krävs).");
+        }
+      }
+    }
+
     // single index present => must be in-range and options must exist
-    if (Number.isFinite(ci) || Number.isFinite(ai)) {
+    if (Number.isFinite(ci) || Number.isFinite(ai) || Number.isFinite(qSingleIdx)) {
       if (optLen < 2) {
         reasons.push("Fråga har index-facit men saknar svarsalternativ (options/choices/answers).");
         return;
       }
-      const idx = Number.isFinite(ci) ? ci : ai;
-      if (idx < 0 || idx >= optLen) reasons.push("Fråga har correctIndex/answerIndex utanför options-range.");
+      const idx = Number.isFinite(ci) ? ci : (Number.isFinite(ai) ? ai : qSingleIdx);
+      if (idx < 0 || idx >= optLen) reasons.push("Fråga har correctIndex/answerIndex/correctChoiceId utanför options-range.");
     }
 
     // multi indices present
-    if ((cis && cis.length) || (ais && ais.length)) {
+    if ((cis && cis.length) || (ais && ais.length) || (qMultiIdxs && qMultiIdxs.length)) {
       if (optLen < 2) {
-        reasons.push("Fråga har correctIndices/answerIndices men saknar svarsalternativ (options/choices/answers).");
+        reasons.push("Fråga har correctIndices/answerIndices/correctChoiceIds men saknar svarsalternativ (options/choices/answers).");
         return;
       }
-      const arr = (cis && cis.length) ? cis : ais;
+      const arr = (cis && cis.length) ? cis : ((ais && ais.length) ? ais : qMultiIdxs);
       for (const idx of arr) {
         if (idx < 0 || idx >= optLen) {
-          reasons.push("Fråga har correctIndices/answerIndices med index utanför options-range.");
+          reasons.push("Fråga har correctIndices/answerIndices/correctChoiceIds med index utanför options-range.");
           break;
         }
       }
@@ -244,14 +365,11 @@ BLOCKS:
 
     if (isQuestionLike(it)) {
       // P0: måste ha facit
-      if (!hasAnswer(it)) reasons.push("Fråga saknar facit (answer/correct/correctIndex/correctIndices).");
+      if (!hasAnswer(it)) reasons.push("Fråga saknar facit (answer/correct/correctIndex/correctIndices/correctChoiceId).");
 
       // P0: om alternativ används måste de vara användbara
       const hasOpts = hasOptions(it);
       if (hasOpts) {
-        // ok: options finns (>=2), men vi behöver att facit matchar formatet
-        // - index-baserat kontrolleras mot range
-        // - text/bool facit tillåts (kan vara fritext/TF), men om index finns måste det vara rätt
         validateIndicesAgainstOptions(it, reasons);
       } else {
         // om det finns index-facit men inga options: stoppa
@@ -319,7 +437,7 @@ BLOCKS:
     const nItems = countItems(t);
     if (nItems <= 0) reasons.push("Publicering: kräver minst 1 block/item.");
 
-    // P0: item-level strictness
+    // item-level strictness
     for (let bi = 0; bi < blocks.length; bi++) {
       const b = blocks[bi];
       const items = b && Array.isArray(b.items) ? b.items : null;
@@ -351,7 +469,7 @@ BLOCKS:
 
     const out = it; // in-place ok (06-page deepClone hanterar)
 
-    // P1: använd samma typkäll-logik som resten av kontraktet
+    // använd samma typkäll-logik som resten av kontraktet
     out.type = normType(getTypeField(out));
 
     // normalisera vanliga textfält
@@ -361,6 +479,21 @@ BLOCKS:
     if (typeof out.question === "string") out.question = normStr(out.question);
     if (typeof out.explanation === "string") out.explanation = normStr(out.explanation);
     if (typeof out.feedback === "string") out.feedback = normStr(out.feedback);
+
+    // P1: nested question-shape trim (utan att flatten)
+    const qObj = getQuestionObj(out);
+    if (qObj) {
+      if (typeof qObj.text === "string") qObj.text = normStr(qObj.text);
+      if (typeof qObj.rationale === "string") qObj.rationale = normStr(qObj.rationale);
+      if (Array.isArray(qObj.choices)) {
+        for (const c of qObj.choices) {
+          if (!isPlainObject(c)) continue;
+          if (typeof c.text === "string") c.text = normStr(c.text);
+          if (typeof c.label === "string") c.label = normStr(c.label);
+          if (typeof c.value === "string") c.value = normStr(c.value);
+        }
+      }
+    }
 
     return out;
   };
@@ -413,7 +546,7 @@ BLOCKS:
       return null;
     }
 
-    // P0 FIX: prova root först (items/blocks ligger ofta här), sedan payload.data
+    // prova root först (items/blocks ligger ofta här), sedan payload.data
     const fromRoot = tryExtractFrom(root);
     if (fromRoot) return fromRoot;
 
@@ -438,7 +571,7 @@ BLOCKS:
     }
     if (badShape > 0) reasons.push("AI-resultat innehåller ogiltiga items (ej string/object).");
 
-    // P1: Stoppa om AI ger question-like items utan facit / index-facit utan options
+    // Stoppa om AI ger question-like items utan facit / index-facit utan options
     let badQuestions = 0;
     for (const it of items) {
       if (!isQuestionLike(it)) continue;
@@ -446,12 +579,12 @@ BLOCKS:
       // kräver facit
       if (!hasAnswer(it)) { badQuestions++; continue; }
 
-      // om index-facit används krävs options och korrekt range
+      // om index-facit används krävs options och korrekt range (inkl nested correctChoiceId)
       const tmp = [];
       validateIndicesAgainstOptions(it, tmp);
       if (tmp.length) { badQuestions++; continue; }
 
-      // om options finns (<2) men modellen försöker köra MCQ => stoppa
+      // om AI skickar options men de är för få / tomma => stoppa
       const rawOpts = extractOptionsRaw(it);
       if (rawOpts.length > 0 && !hasOptions(it)) { badQuestions++; continue; }
     }
@@ -479,9 +612,9 @@ BLOCKS:
     const p = primaryText(it);
     if (!p) reasons.push("Saknar text/instruction/prompt/question.");
 
-    // question: flagga facit + ev. svarsalternativ som problem (inte nödvändigtvis stopp i draft-save)
-    if (t === "question" || isNonEmptyStr(it.question)) {
-      if (!hasAnswer(it)) reasons.push("Fråga saknar facit (answer/correct/correctIndex/correctIndices).");
+    // question: flagga facit + ev. svarsalternativ som problem
+    if (t === "question" || isNonEmptyStr(it.question) || getQuestionObj(it)) {
+      if (!hasAnswer(it)) reasons.push("Fråga saknar facit (answer/correct/correctIndex/correctIndices/correctChoiceId).");
 
       const tmp = [];
       validateIndicesAgainstOptions(it, tmp);
