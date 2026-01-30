@@ -36,7 +36,7 @@ DoD:
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.4.2-AO-TRAININGS-VERKSAMHET-ANCHOR-01"; // PATCH: nested question-shape + business list + context.business
+  page.__VERSION = "v1.4.3-AO-TRAININGS-VERKSAMHET-ANCHOR-01"; // PATCH: businessArea suggestions also for businessAreaSearch input
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -110,7 +110,7 @@ DoD:
     // AO: Verksamhet (under subjectId-raden)
     // Rekommenderade id i trainings.html:
     // - businessArea (SELECT eller INPUT)
-    // - businessAreaSearch (INPUT för sök 3+ bokstäver)
+    // - businessAreaSearch (INPUT för sök 3+ bokstäver)  <-- vissa UI använder bara denna som "rutan"
     // - businessAreaOther (INPUT för Annat…)
     // - businessAreaHint (span/div för hint)
     D.businessArea = byId("businessArea");
@@ -175,6 +175,12 @@ DoD:
   if (dom && typeof dom.setText !== "function") dom.setText = _fallbackDom.setText;
   if (dom && typeof dom.show !== "function") dom.show = _fallbackDom.show;
   if (dom && typeof dom.hide !== "function") dom.hide = _fallbackDom.hide;
+
+  // PATCH (P0 UI): Om UI bara har "businessAreaSearch" som rutan man skriver i,
+  // aliasa den till businessArea så all logik (datalist/fill/read/save) funkar.
+  if (dom && !dom.businessArea && dom.businessAreaSearch) {
+    dom.businessArea = dom.businessAreaSearch;
+  }
 
   /* =========================
      BLOCK 4/19 — State
@@ -337,6 +343,15 @@ DoD:
     if (dom && dom.businessAreaHint && dom.setText) dom.setText(dom.businessAreaHint, msg || "");
   }
 
+  // PATCH (P0 UI): välj vilken ruta som faktiskt ska få datalist (förslag).
+  // Om businessAreaSearch finns använder vi den som "picker" eftersom det är rutan användaren skriver i i vissa UI.
+  function getBusinessPickerEl() {
+    if (!dom) return null;
+    if (dom.businessAreaSearch) return dom.businessAreaSearch;
+    if (dom.businessArea) return dom.businessArea;
+    return null;
+  }
+
   function ensureBusinessAreaDatalist(inputEl) {
     if (!inputEl) return null;
     const tag = String(inputEl.tagName || "").toUpperCase();
@@ -419,11 +434,19 @@ DoD:
   }
 
   function renderBusinessAreaPicker() {
-    if (!dom || !dom.businessArea) return;
+    if (!dom) return;
+
+    // Picker är den ruta användaren skriver i (i vissa UI är det businessAreaSearch)
+    const pickerEl = getBusinessPickerEl();
+    if (!pickerEl) return;
+
+    // Vi kan fortfarande ha "businessArea" som SELECT i vissa UI – behåll stöd.
+    const baseEl = dom.businessArea || pickerEl;
+
+    const tag = String(baseEl.tagName || "").toUpperCase();
 
     // PATCH (P0): snapshot current UI state before rebuild
-    const tag = String(dom.businessArea.tagName || "").toUpperCase();
-    const prevSel = normStr(dom.businessArea.value);
+    const prevSel = normStr(baseEl.value);
     const prevOther = normStr(dom.businessAreaOther && dom.businessAreaOther.value);
     const draftVal = normStr(state.draft && state.draft.businessArea);
 
@@ -438,7 +461,6 @@ DoD:
     // PATCH (P0): if SELECT, ensure current selection is present even when filtered
     if (tag === "SELECT") {
       filtered = ensureValueInList(filtered, prevSel);
-      // if draftVal is a default selection, also ensure it stays selectable
       if (draftVal && isBusinessDefault(draftVal)) filtered = ensureValueInList(filtered, draftVal);
     }
 
@@ -447,9 +469,11 @@ DoD:
     const listWithOther = filtered.concat([BUSINESS_OTHER_LABEL]);
 
     if (tag === "SELECT") {
-      fillSelectOptionsQuick(dom.businessArea, listWithOther, "Välj verksamhet…");
+      fillSelectOptionsQuick(baseEl, listWithOther, "Välj verksamhet…");
     } else {
-      const dl = ensureBusinessAreaDatalist(dom.businessArea);
+      // PATCH (P0 UI): datalist ska kopplas till den ruta användaren skriver i.
+      // Om pickerEl != baseEl (t.ex. baseEl finns men UI skriver i search), fyll datalist på pickerEl.
+      const dl = ensureBusinessAreaDatalist(pickerEl);
       fillDatalistOptionsQuick(dl, listWithOther);
     }
 
@@ -458,7 +482,6 @@ DoD:
 
     // PATCH (P0): restore selection + other text after rebuild (SELECT only)
     if (tag === "SELECT") {
-      // Choose target based on prior UI state first, then draft fallback
       let targetSel = "";
       let targetOther = "";
 
@@ -479,27 +502,45 @@ DoD:
         targetOther = prevOther || prevEffective;
       }
 
-      if (targetSel) restoreSelectValueCaseInsensitive(dom.businessArea, targetSel);
+      if (targetSel) restoreSelectValueCaseInsensitive(baseEl, targetSel);
       if (dom.businessAreaOther) dom.businessAreaOther.value = normStr(targetOther);
     }
 
     // Show/hide other input
     if (dom.businessAreaOther && dom.show && dom.hide) {
-      const selected = normStr(dom.businessArea.value);
+      const selected = normStr(baseEl.value);
       if (lowerKey(selected) === lowerKey(BUSINESS_OTHER_LABEL)) dom.show(dom.businessAreaOther);
       else dom.hide(dom.businessAreaOther);
     }
   }
 
   function readBusinessAreaFromInputs() {
-    if (!dom || !dom.businessArea) return "";
-    const sel = normStr(dom.businessArea.value);
+    if (!dom) return "";
 
-    if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
+    // Om det finns en SELECT businessArea (klassisk), läs därifrån.
+    // Annars: läs från rutan användaren skriver i (businessAreaSearch eller businessArea input).
+    let baseEl = dom.businessArea || null;
+    const pickerEl = getBusinessPickerEl();
+
+    if (baseEl) {
+      const tag = String(baseEl.tagName || "").toUpperCase();
+      if (tag === "SELECT") {
+        const sel = normStr(baseEl.value);
+        if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
+          const other = normStr(dom.businessAreaOther && dom.businessAreaOther.value);
+          return other;
+        }
+        return sel;
+      }
+    }
+
+    // INPUT-mode (datalist)
+    const v = normStr((pickerEl && pickerEl.value) || (baseEl && baseEl.value) || "");
+    if (lowerKey(v) === lowerKey(BUSINESS_OTHER_LABEL)) {
       const other = normStr(dom.businessAreaOther && dom.businessAreaOther.value);
       return other;
     }
-    return sel;
+    return v;
   }
 
   /* =========================
@@ -982,8 +1023,8 @@ DoD:
     if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value) || "normal";
     if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
 
-    // AO: verksamhet
-    if (dom && dom.businessArea) state.draft.businessArea = readBusinessAreaFromInputs();
+    // AO: verksamhet (PATCH: fungerar även när UI använder businessAreaSearch som rutan)
+    state.draft.businessArea = readBusinessAreaFromInputs();
   }
 
   /* =========================
@@ -1546,19 +1587,31 @@ DoD:
     if (dom.goalsLevel) dom.goalsLevel.value = normStr(d.goalsLevel) || "normal";
     if (dom.goals) dom.goals.value = normStr(d.goals) || "";
 
-    // AO: verksamhet
-    if (dom.businessArea) {
+    // AO: verksamhet (PATCH: kör även om bara businessAreaSearch finns)
+    if (dom.businessArea || dom.businessAreaSearch) {
       renderBusinessAreaPicker();
 
       const v = normStr(d.businessArea);
-      if (v) {
-        if (isBusinessDefault(v)) {
-          dom.businessArea.value = v;
+      const pickerEl = getBusinessPickerEl() || dom.businessArea;
+
+      if (pickerEl && v) {
+        // INPUT-mode: bara skriv värdet i rutan
+        const tag = String((dom.businessArea && dom.businessArea.tagName) || "").toUpperCase();
+        const inputMode = (!tag || tag !== "SELECT");
+
+        if (inputMode) {
+          pickerEl.value = v;
           if (dom.businessAreaOther) dom.businessAreaOther.value = "";
         } else {
-          dom.businessArea.value = BUSINESS_OTHER_LABEL;
-          if (dom.businessAreaOther) dom.businessAreaOther.value = v;
-          else dom.businessArea.value = v;
+          // SELECT-mode: behåll tidigare logik
+          if (isBusinessDefault(v)) {
+            dom.businessArea.value = v;
+            if (dom.businessAreaOther) dom.businessAreaOther.value = "";
+          } else {
+            dom.businessArea.value = BUSINESS_OTHER_LABEL;
+            if (dom.businessAreaOther) dom.businessAreaOther.value = v;
+            else dom.businessArea.value = v;
+          }
         }
       }
 
@@ -2293,7 +2346,10 @@ DoD:
 
     // Fail-closed: om UI står på "Annat…" måste text vara icke-tom (min 2 tecken)
     try {
-      const sel = normStr(dom && dom.businessArea && dom.businessArea.value);
+      // I INPUT-mode: om användaren skrev "Annat…" så kräver vi other-text.
+      const pickerEl = getBusinessPickerEl() || (dom && dom.businessArea);
+      const sel = normStr(pickerEl && pickerEl.value);
+
       if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
         const other = normStr(dom && dom.businessAreaOther && dom.businessAreaOther.value);
         if (other.length < 2) {
@@ -2467,12 +2523,19 @@ DoD:
     });
 
     // AO: verksamhet events
+    // PATCH: businessAreaSearch driver både query (filter) och suggestions (datalist fylls på samma ruta)
     dom.on(dom.businessAreaSearch, "input", function () {
       state.businessAreaQuery = normStr(dom.businessAreaSearch && dom.businessAreaSearch.value);
       renderBusinessAreaPicker();
+      if (state.draft) {
+        syncDraftFromInputs();
+        setDirty(true);
+        updateButtons();
+      }
       renderAiAnchorRow();
       updateDebug();
     });
+
     dom.on(dom.businessArea, "change", function () {
       if (state.draft) {
         syncDraftFromInputs();
