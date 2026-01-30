@@ -20,7 +20,7 @@ POLICY (LÅST):
   if (NS.dom && NS.dom.__VERSION) return;
 
   const dom = (NS.dom = NS.dom || {});
-  dom.__VERSION = "v1.0.0-PP-SC-010-01";
+  dom.__VERSION = "v1.0.1-PP-SC-010-01";
 
   // ------------------------------------------------------------
   // Core getters
@@ -128,6 +128,19 @@ POLICY (LÅST):
   dom.goalsLevel = byId("goalsLevel");
   dom.goals = byId("goals");
 
+  // ------------------------------------------------------------
+  // Verksamhet (Business Area) — UI-hooks (måste finnas i trainings.html)
+  // ------------------------------------------------------------
+  dom.businessArea = byId("businessArea");
+  dom.businessAreaSearch = byId("businessAreaSearch");
+  dom.businessAreaOther = byId("businessAreaOther");
+  dom.businessAreaHint = byId("businessAreaHint");
+
+  // ------------------------------------------------------------
+  // AI Anchor (read-only) — UI-hook
+  // ------------------------------------------------------------
+  dom.aiAnchorText = byId("aiAnchorText");
+
   // AI controls
   dom.aiContent = byId("aiContent");
   dom.aiCount = byId("aiCount");
@@ -167,8 +180,10 @@ POLICY (LÅST):
     // Editor
     "btnModAll","btnModClear","subjectIdText","mod","area","modList","areaList",
     "courseTitle","courseStep","titleDisplay","goalsLevel","goals",
-    // AI
-    "aiContent","aiCount","questionControls","aiQuestionType","aiFeedbackEnabled","aiHint",
+    // Verksamhet
+    "businessArea","businessAreaSearch","businessAreaOther","businessAreaHint",
+    // AI Anchor + AI
+    "aiAnchorText","aiContent","aiCount","questionControls","aiQuestionType","aiFeedbackEnabled","aiHint",
     // Blocks
     "blocksList",
     // Footer
