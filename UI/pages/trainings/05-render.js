@@ -757,7 +757,7 @@ Risk/edge cases:
   };
 
   /* =========================================
-     BLOCK 07/08 – Modal: Item view/edit (question-aware)
+     BLOCK 07/08 – Modal: Item view/edit/delete/save (question-aware)
      ========================================= */
 
   function extractOptions(it) {
