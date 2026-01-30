@@ -36,7 +36,7 @@ DoD:
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.4.1-AO-TRAININGS-VERKSAMHET-ANCHOR-01"; // PATCH: P0 preserve Verksamhet SELECT value
+  page.__VERSION = "v1.4.2-AO-TRAININGS-VERKSAMHET-ANCHOR-01"; // PATCH: nested question-shape + business list + context.business
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -267,22 +267,23 @@ DoD:
      BLOCK 6/19 — AO: Verksamhet (businessArea) helpers
   ========================== */
   const BUSINESS_OTHER_LABEL = "Annat…";
+  // KRAV 3.4 — Startlista (15 vanligaste), visas A–Ö i UI via uniqueSorted(localeCompare('sv'))
   const BUSINESS_DEFAULTS = [
-    "Bygg",
-    "Butik/Handel",
-    "E-handel",
-    "Fastighet",
+    "Bygg & anläggning",
+    "Butik & retail",
+    "Ekonomi & administration",
+    "Fastighet & drift",
+    "Förskola & skola",
+    "Hälsa & vård",
     "Hotell",
-    "IT/Tech",
-    "Kontor/Administration",
-    "Lager/Logistik",
-    "Produktion/Industri",
-    "Restaurang/Café",
-    "Skola/Förskola",
-    "Städservice",
-    "Transport/Åkeri",
-    "Vård/Omsorg",
-    "Verkstad/Bilservice"
+    "Industri & produktion",
+    "IT & support",
+    "Lager & logistik",
+    "Restaurang & café",
+    "Säkerhet & bevakning",
+    "Städ & service",
+    "Transport",
+    "Äldreomsorg"
   ];
 
   function uniqueSorted(list) {
@@ -480,9 +481,6 @@ DoD:
 
       if (targetSel) restoreSelectValueCaseInsensitive(dom.businessArea, targetSel);
       if (dom.businessAreaOther) dom.businessAreaOther.value = normStr(targetOther);
-
-      // If target was a default but not found, do not force to empty; keep current value (fail-soft UI)
-      // (No storage writes happen here.)
     }
 
     // Show/hide other input
@@ -594,7 +592,6 @@ DoD:
     if (typeof v === "string") return v;
     if (typeof v === "number" && Number.isFinite(v)) return String(v);
     if (isObj(v)) {
-      // vanliga fält
       const c = v.text || v.label || v.value || v.prompt || v.question || v.title || v.heading || v.name;
       if (typeof c === "string") return c;
     }
@@ -602,10 +599,6 @@ DoD:
   }
 
   function normalizeOptionsAny(rawOptions) {
-    // Accept:
-    // - ["A","B"]
-    // - [{text/label/value}, ...]
-    // - { choices:[...]} etc.
     let arr = null;
 
     if (Array.isArray(rawOptions)) arr = rawOptions.slice();
@@ -655,20 +648,20 @@ DoD:
 
   function pickQuestionTextFromAny(it) {
     if (!it || typeof it !== "object") return "";
-    // item.question kan vara string eller objekt
-    if (typeof it.question === "string" && normStr(it.question)) return scrubObjectObjectToken(it.question);
 
-    if (isObj(it.question)) {
-      const q = it.question;
+    // P0: nested shape support
+    const src = isObj(it.data) ? it.data : it;
+
+    if (typeof src.question === "string" && normStr(src.question)) return scrubObjectObjectToken(src.question);
+
+    if (isObj(src.question)) {
+      const q = src.question;
       const cand = q.text || q.prompt || q.question || q.heading || q.title;
       if (typeof cand === "string" && normStr(cand)) return scrubObjectObjectToken(cand);
-
-      // choices-shape: { question:{ text, choices:[{id,text}], correctChoiceId, rationale } }
       if (typeof q.text === "string" && normStr(q.text)) return scrubObjectObjectToken(q.text);
     }
 
-    // fallback-källor
-    const f = it.q || it.text || it.instruction || it.prompt || it.heading || it.title;
+    const f = src.q || src.text || src.instruction || src.prompt || src.heading || src.title;
     if (typeof f === "string" && normStr(f)) return scrubObjectObjectToken(f);
 
     return "";
@@ -676,43 +669,58 @@ DoD:
 
   function pickExplanationFromAny(it) {
     if (!it || typeof it !== "object") return "";
-    if (typeof it.explanation === "string" && normStr(it.explanation)) return scrubObjectObjectToken(it.explanation);
-    if (typeof it.feedback === "string" && normStr(it.feedback)) return scrubObjectObjectToken(it.feedback);
-    if (typeof it.rationale === "string" && normStr(it.rationale)) return scrubObjectObjectToken(it.rationale);
-    if (isObj(it.question) && typeof it.question.rationale === "string" && normStr(it.question.rationale)) return scrubObjectObjectToken(it.question.rationale);
+    const src = isObj(it.data) ? it.data : it;
+
+    if (typeof src.explanation === "string" && normStr(src.explanation)) return scrubObjectObjectToken(src.explanation);
+    if (typeof src.feedback === "string" && normStr(src.feedback)) return scrubObjectObjectToken(src.feedback);
+    if (typeof src.rationale === "string" && normStr(src.rationale)) return scrubObjectObjectToken(src.rationale);
+    if (isObj(src.question) && typeof src.question.rationale === "string" && normStr(src.question.rationale)) return scrubObjectObjectToken(src.question.rationale);
     return "";
   }
 
   function flattenChoiceQuestionShapeInPlace(it) {
-    // Convert worker-shape { question:{ text, choices[], correctChoiceId, rationale } } -> stable fields
     if (!it || typeof it !== "object") return it;
 
-    const qObj = it.question;
-    if (!qObj || typeof qObj !== "object" || Array.isArray(qObj)) return it;
+    // P0: nested shape support — try both root and data
+    const root = it;
+    const data = isObj(it.data) ? it.data : null;
 
-    const qText = normStr(qObj.text || "");
-    const choices = Array.isArray(qObj.choices) ? qObj.choices : null;
-    if (!qText || !choices || choices.length < 2) return it;
+    function tryFlatten(target) {
+      if (!target || typeof target !== "object") return false;
 
-    const options = choices.map(c => normStr(c && c.text)).filter(Boolean);
-    if (options.length < 2) return it;
+      const qObj = target.question;
+      if (!qObj || typeof qObj !== "object" || Array.isArray(qObj)) return false;
 
-    const correctChoiceId = normStr(qObj.correctChoiceId || "");
-    let correctIndex = -1;
-    if (correctChoiceId) {
-      for (let i = 0; i < choices.length; i++) {
-        if (normStr(choices[i] && choices[i].id) === correctChoiceId) { correctIndex = i; break; }
+      const qText = normStr(qObj.text || "");
+      const choices = Array.isArray(qObj.choices) ? qObj.choices : null;
+      if (!qText || !choices || choices.length < 2) return false;
+
+      const options = choices.map(c => normStr(c && c.text)).filter(Boolean);
+      if (options.length < 2) return false;
+
+      const correctChoiceId = normStr(qObj.correctChoiceId || "");
+      let correctIndex = -1;
+      if (correctChoiceId) {
+        for (let i = 0; i < choices.length; i++) {
+          if (normStr(choices[i] && choices[i].id) === correctChoiceId) { correctIndex = i; break; }
+        }
       }
+
+      // Write result to root (stable destination)
+      root.type = "question";
+      root.question = scrubObjectObjectToken(qText);
+      root.options = options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
+
+      if (correctIndex >= 0 && correctIndex < root.options.length) root.correctIndex = correctIndex;
+
+      const rationale = (typeof qObj.rationale === "string") ? qObj.rationale : "";
+      if (rationale) root.explanation = scrubObjectObjectToken(rationale);
+
+      return true;
     }
 
-    it.type = "question";
-    it.question = scrubObjectObjectToken(qText);
-    it.options = options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
-
-    if (correctIndex >= 0 && correctIndex < it.options.length) it.correctIndex = correctIndex;
-
-    const rationale = (typeof qObj.rationale === "string") ? qObj.rationale : "";
-    if (rationale) it.explanation = scrubObjectObjectToken(rationale);
+    if (tryFlatten(root)) return it;
+    if (data) tryFlatten(data);
 
     return it;
   }
@@ -725,44 +733,41 @@ DoD:
     // Pre-flatten (choices-shape)
     flattenChoiceQuestionShapeInPlace(it);
 
-    const question = normStr(pickQuestionTextFromAny(it));
+    // P0: nested shape support
+    const src = isObj(it.data) ? it.data : it;
+
+    const question = normStr(pickQuestionTextFromAny({ ...it, data: src }));
     if (!question) return { ok: false, reason: "Fråga saknar text." };
 
-    // options can come from options/choices/answers
+    // options can come from options/choices/answers (root or nested)
     let options = [];
-    if (Array.isArray(it.options)) options = normalizeOptionsAny(it.options);
-    else if (Array.isArray(it.choices)) options = normalizeOptionsAny(it.choices);
-    else if (Array.isArray(it.answers)) options = normalizeOptionsAny(it.answers);
-    else if (isObj(it.question) && Array.isArray(it.question.choices)) options = normalizeOptionsAny(it.question.choices);
+    if (Array.isArray(src.options)) options = normalizeOptionsAny(src.options);
+    else if (Array.isArray(src.choices)) options = normalizeOptionsAny(src.choices);
+    else if (Array.isArray(src.answers)) options = normalizeOptionsAny(src.answers);
+    else if (isObj(src.question) && Array.isArray(src.question.choices)) options = normalizeOptionsAny(src.question.choices);
 
-    // if options missing but TF shape: allow later validator in auto/explicit
-    const explanation = normStr(pickExplanationFromAny(it));
+    const explanation = normStr(pickExplanationFromAny({ ...it, data: src }));
 
     // Correct can come in many shapes:
-    // correctIndex / answerIndex
-    // correctIndices / answerIndices
-    // correct / solution / answer (fallback)
     let correctIndex = null;
     let correctIndices = null;
 
-    const ci = parseIndexMaybe(it.correctIndex != null ? it.correctIndex : it.answerIndex);
+    const ci = parseIndexMaybe((src.correctIndex != null ? src.correctIndex : src.answerIndex));
     if (ci != null) correctIndex = ci;
 
-    const cis = parseIndicesMaybe(it.correctIndices != null ? it.correctIndices : it.answerIndices);
+    const cis = parseIndicesMaybe((src.correctIndices != null ? src.correctIndices : src.answerIndices));
     if (cis && cis.length) correctIndices = cis;
 
-    // Also accept numeric string in "correct" or "solution"
     if (correctIndex == null) {
-      const tryIdx = parseIndexMaybe(it.correct != null ? it.correct : it.solution);
+      const tryIdx = parseIndexMaybe(src.correct != null ? src.correct : src.solution);
       if (tryIdx != null) correctIndex = tryIdx;
     }
 
-    // If answer is something else (string), keep as fallback fields (for non-mcq types)
-    const answerStr = (typeof it.answer === "string" && normStr(it.answer)) ? normStr(scrubObjectObjectToken(it.answer)) : "";
-    const expectedStr = (typeof it.expected === "string" && normStr(it.expected)) ? normStr(scrubObjectObjectToken(it.expected)) : "";
-    const answerNum = (typeof it.answer === "number" && Number.isFinite(it.answer)) ? it.answer : null;
-    const rangeObj = isObj(it.range) ? deepClone(it.range) : null;
-    const tfBool = (typeof it.correct === "boolean") ? it.correct : null;
+    const answerStr = (typeof src.answer === "string" && normStr(src.answer)) ? normStr(scrubObjectObjectToken(src.answer)) : "";
+    const expectedStr = (typeof src.expected === "string" && normStr(src.expected)) ? normStr(scrubObjectObjectToken(src.expected)) : "";
+    const answerNum = (typeof src.answer === "number" && Number.isFinite(src.answer)) ? src.answer : null;
+    const rangeObj = isObj(src.range) ? deepClone(src.range) : null;
+    const tfBool = (typeof src.correct === "boolean") ? src.correct : null;
 
     // Sanitize options
     options = safeArr(options).map(x => normStr(scrubObjectObjectToken(String(x ?? "")))).filter(Boolean);
@@ -810,11 +815,17 @@ DoD:
 
     flattenChoiceQuestionShapeInPlace(it);
 
-    const t = normStr(it.type).toLowerCase();
-    if (t) return it;
+    // P0: nested type inference
+    const src = isObj(it.data) ? it.data : it;
 
-    if (typeof it.question === "string" && normStr(it.question)) { it.type = "question"; return it; }
-    if (Array.isArray(it.options) && it.options.length >= 2) { it.type = "question"; return it; }
+    const t = normStr(src.type || it.type).toLowerCase();
+    if (t) { it.type = src.type || it.type; return it; }
+
+    if (typeof src.question === "string" && normStr(src.question)) { it.type = "question"; return it; }
+    if (isObj(src.question) && typeof src.question.text === "string" && normStr(src.question.text)) { it.type = "question"; return it; }
+    if (Array.isArray(src.options) && src.options.length >= 2) { it.type = "question"; return it; }
+    if (Array.isArray(src.choices) && src.choices.length >= 2) { it.type = "question"; return it; }
+    if (Array.isArray(src.answers) && src.answers.length >= 2) { it.type = "question"; return it; }
 
     it.type = "info";
     return it;
@@ -825,10 +836,14 @@ DoD:
 
     flattenChoiceQuestionShapeInPlace(item);
 
+    // P0: nested shape scrub
+    const src = isObj(item.data) ? item.data : null;
+
     const keys = ["text", "instruction", "prompt", "question", "explanation", "feedback", "rationale", "reason", "title", "heading"];
     for (let i = 0; i < keys.length; i++) {
       const k = keys[i];
       if (typeof item[k] === "string") item[k] = scrubObjectObjectToken(item[k]);
+      if (src && typeof src[k] === "string") src[k] = scrubObjectObjectToken(src[k]);
     }
 
     try {
@@ -846,10 +861,30 @@ DoD:
           });
         }
       }
+
+      if (src) {
+        const qObj2 = src.question;
+        if (qObj2 && typeof qObj2 === "object" && !Array.isArray(qObj2)) {
+          if (typeof qObj2.text === "string") qObj2.text = scrubObjectObjectToken(qObj2.text);
+          if (typeof qObj2.rationale === "string") qObj2.rationale = scrubObjectObjectToken(qObj2.rationale);
+          if (Array.isArray(qObj2.choices)) {
+            qObj2.choices = qObj2.choices.map(c => {
+              if (c && typeof c === "object") {
+                if (typeof c.text === "string") c.text = scrubObjectObjectToken(c.text);
+                if (typeof c.label === "string") c.label = scrubObjectObjectToken(c.label);
+              }
+              return c;
+            });
+          }
+        }
+      }
     } catch (_) { }
 
     if (Array.isArray(item.options)) {
       item.options = item.options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
+    }
+    if (src && Array.isArray(src.options)) {
+      src.options = src.options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
     }
 
     ensureItemType(item);
@@ -1358,10 +1393,12 @@ DoD:
         // AO: ankare
         ctx.anchor = anchorLine;
 
+        // P0: business alias (explicit parameter) + backwards-compat subject.businessArea
+        if (s.businessArea) ctx.business = s.businessArea;
+
         if (!ctx.subject || typeof ctx.subject !== "object") ctx.subject = {};
         if (!ctx.subject.title && subjectTitle) ctx.subject.title = subjectTitle;
 
-        // AO: verksamhet + ankare
         if (s.businessArea) ctx.subject.businessArea = s.businessArea;
         ctx.subject.anchor = anchorLine;
       } catch (_) { }
@@ -1370,6 +1407,7 @@ DoD:
 
     return {
       anchor: anchorLine,
+      business: s.businessArea || "",
       subject: { module: s.module, area: s.area, title: subjectTitle, businessArea: s.businessArea || "", anchor: anchorLine },
       course: {
         chapter: s.courseTitle,
@@ -1510,7 +1548,6 @@ DoD:
 
     // AO: verksamhet
     if (dom.businessArea) {
-      // Ensure options exist, then set value, then rerender once (P0-safe)
       renderBusinessAreaPicker();
 
       const v = normStr(d.businessArea);
@@ -1865,7 +1902,6 @@ DoD:
 
     const ht = normStr(hardTypeOrAuto).toLowerCase() || "auto";
 
-    // auto: acceptera flera shapes, men fail-closed om helt utan facit/struktur
     if (ht === "auto") {
       const opts = Array.isArray(it.options) ? it.options : null;
       const hasSingle = opts && opts.length >= 2 && Number.isFinite(Number(it.correctIndex));
@@ -1945,7 +1981,7 @@ DoD:
     }
 
     const controls = readAiControls();
-    const ctxObj = buildAiContextNoGoals(); // includes anchor + businessArea, goals stripped
+    const ctxObj = buildAiContextNoGoals(); // includes anchor + business, goals stripped
 
     const req = {
       mode: controls.mode,
@@ -2020,7 +2056,6 @@ DoD:
           flattenChoiceQuestionShapeInPlace(obj);
           ensureItemType(obj);
 
-          // If questions-mode, force normalize to stable question item
           if (controls.content === "questions") {
             const stableR = normalizeQuestionItemToStable(obj);
             if (!stableR.ok) {
@@ -2031,7 +2066,6 @@ DoD:
             }
             const stable = stableR.item;
 
-            // fail-closed: require stable question + validate vs explicit type
             const vq = validateQuestionItemStable(stable, hardType);
             if (!vq.ok) {
               DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
@@ -2040,7 +2074,6 @@ DoD:
               return;
             }
 
-            // optional: contract.normalizeItem (if exists) but keep stable shape
             if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
               const n2 = DEPS.contract.normalizeItem(deepClone(stable));
               items.push(n2 && typeof n2 === "object" ? n2 : stable);
@@ -2048,7 +2081,6 @@ DoD:
               items.push(stable);
             }
           } else {
-            // blocks-mode: keep as info/question objects as-is, but sanitized
             if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
               items.push(DEPS.contract.normalizeItem(obj));
             } else {
@@ -2064,7 +2096,6 @@ DoD:
       const clean = items.filter(x => x != null);
       if (!clean.length) continue;
 
-      // strict: if questions-mode, no info allowed
       if (controls.content === "questions") {
         for (const it of clean) {
           if (it && String(it.type || "").toLowerCase() !== "question") {
@@ -2130,7 +2161,6 @@ DoD:
       return;
     }
 
-    // reset query for verksamhet-search
     state.businessAreaQuery = "";
     if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
 
