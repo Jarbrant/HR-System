@@ -20,7 +20,7 @@ POLICY (LÅST):
   if (NS.dom && NS.dom.__VERSION) return;
 
   const dom = (NS.dom = NS.dom || {});
-  dom.__VERSION = "v1.0.1-PP-SC-010-01";
+  dom.__VERSION = "v1.0.2-PP-SC-010-01";
 
   // ------------------------------------------------------------
   // Core getters
@@ -84,7 +84,7 @@ POLICY (LÅST):
   };
 
   // ------------------------------------------------------------
-  // Bind elements (MÅSTE matcha admin/trainings.html)
+  // Bind elements (MÅSTE matcha trainings.html)
   // ------------------------------------------------------------
   // Topbar / pills
   dom.contextPill = byId("contextPill");
@@ -129,7 +129,7 @@ POLICY (LÅST):
   dom.goals = byId("goals");
 
   // ------------------------------------------------------------
-  // Verksamhet (Business Area) — UI-hooks (måste finnas i trainings.html)
+  // Verksamhet (Business Area) — UI-hooks (bör finnas i trainings.html)
   // ------------------------------------------------------------
   dom.businessArea = byId("businessArea");
   dom.businessAreaSearch = byId("businessAreaSearch");
@@ -172,6 +172,9 @@ POLICY (LÅST):
   // ------------------------------------------------------------
   // Fail-closed diagnostics (utan att krascha)
   // ------------------------------------------------------------
+  // REQUIRED_IDS = sådant som sidan typiskt måste ha för att vara användbar.
+  // OPTIONAL_IDS = nya hooks/förbättringar som kan saknas tills trainings.html patchats,
+  //               men vi vill ändå rapportera dem.
   const REQUIRED_IDS = [
     // Topbar
     "contextPill","contextText","statePill","stateText","whoPill","whoText",
@@ -180,10 +183,8 @@ POLICY (LÅST):
     // Editor
     "btnModAll","btnModClear","subjectIdText","mod","area","modList","areaList",
     "courseTitle","courseStep","titleDisplay","goalsLevel","goals",
-    // Verksamhet
-    "businessArea","businessAreaSearch","businessAreaOther","businessAreaHint",
-    // AI Anchor + AI
-    "aiAnchorText","aiContent","aiCount","questionControls","aiQuestionType","aiFeedbackEnabled","aiHint",
+    // AI
+    "aiContent","aiCount","questionControls","aiQuestionType","aiFeedbackEnabled","aiHint",
     // Blocks
     "blocksList",
     // Footer
@@ -194,17 +195,42 @@ POLICY (LÅST):
     "debugBox","debugPre"
   ];
 
-  dom.missing = [];
+  const OPTIONAL_IDS = [
+    // Verksamhet (nya UI-hooks)
+    "businessArea","businessAreaSearch","businessAreaOther","businessAreaHint",
+    // AI Anchor (read-only)
+    "aiAnchorText"
+  ];
+
+  dom.missingRequired = [];
   for (let i = 0; i < REQUIRED_IDS.length; i++) {
     const id = REQUIRED_IDS[i];
-    if (!byId(id)) dom.missing.push(id);
+    if (!byId(id)) dom.missingRequired.push(id);
   }
 
+  dom.missingOptional = [];
+  for (let i = 0; i < OPTIONAL_IDS.length; i++) {
+    const id = OPTIONAL_IDS[i];
+    if (!byId(id)) dom.missingOptional.push(id);
+  }
+
+  // Bakåtkompat: dom.missing fanns tidigare som enda lista
+  dom.missing = dom.missingRequired.concat(dom.missingOptional);
+
   dom.isReady = function () {
-    return dom.missing.length === 0;
+    // Fail-closed baserat på kärnkrav, inte på optionals
+    return dom.missingRequired.length === 0;
   };
 
   dom.getMissing = function () {
     return dom.missing.slice();
+  };
+
+  dom.getMissingRequired = function () {
+    return dom.missingRequired.slice();
+  };
+
+  dom.getMissingOptional = function () {
+    return dom.missingOptional.slice();
   };
 })();
