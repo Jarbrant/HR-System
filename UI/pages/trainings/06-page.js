@@ -2758,5 +2758,5 @@ try {
    Om filen startar med: (function () {
    så MÅSTE filen sluta med: })();
 */
-})(); // <-- P0: stänger IIFE så vi slipper "Unexpected end of input"
+})();
 
