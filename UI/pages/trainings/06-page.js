@@ -1751,6 +1751,7 @@ DoD (för denna patch):
 
   /* =========================
      BLOCK 18/19 — AI + normalize/import + fail-closed (mode-based)
+     PATCH: skickar med directive + normaliserar uiMode/requestMode
   ========================== */
   function setAiHint(text) {
     if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
@@ -1786,15 +1787,19 @@ DoD (för denna patch):
 
     const sel = readAiContentSelection();
 
+    // PATCH: normalisera lägen robust (skydd mot "Mix"/"MIX")
+    const uiMode = normStr(sel && sel.uiMode).toLowerCase();           // document | mix | questions
+    const requestMode = normStr(sel && sel.requestMode).toLowerCase(); // document | training
+
     // Question controls (optional)
     const qType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
     const fb = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked || dom.aiFeedbackEnabled.value === "true"));
 
     return {
       // UI selection
-      uiMode: sel.uiMode,             // document | mix | questions
-      requestMode: sel.requestMode,   // document | training
-      directive: sel.directive || "",
+      uiMode: uiMode,                 // document | mix | questions
+      requestMode: requestMode,       // document | training
+      directive: (sel && sel.directive) ? String(sel.directive) : "",
       // common
       content: "blocks",
       count: count,
@@ -1938,15 +1943,19 @@ DoD (för denna patch):
     const controls = readAiControls();
     const ctxObj = buildAiContextNoGoals();
 
+    // PATCH: skicka med directive/uiMode tydligt (harmlöst om worker ignorerar)
     const req = {
-      mode: controls.requestMode,     // "document" | "training"
+      mode: controls.requestMode,     // "document" | "training"  (behåll för kompatibilitet)
       count: controls.count,
       context: ctxObj,
       anchor: (state.aiAnchorLine || ctxObj.anchor || ""),
       language: "sv",
 
       // Extra hints (NO STORAGE) — harmless if worker ignores
-      content: controls.uiMode,       // document | mix | questions
+      uiMode: controls.uiMode,        // document | mix | questions (alias)
+      content: controls.uiMode,       // legacy hint
+      directive: controls.directive || "",
+
       questionType: controls.questionType || "none",
       feedbackEnabled: !!controls.feedbackEnabled,
       documentOnly: (controls.uiMode === "document") || !!DOCUMENT_ONLY
