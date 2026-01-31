@@ -43,7 +43,7 @@ DoD:
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.4.5-AO-TRAININGS-VERKSAMHET-ANCHOR-01-DOCONLY"; // PATCH: doc-only enforced + RBAC + courseTrack no-dirty
+  page.__VERSION = "v1.4.6-AO-TRAININGS-VERKSAMHET-ANCHOR-01-DOCONLY"; // PATCH: UI shows document-only + request stronger + skip question items in doc-only
 
   // Document-only flag (NO STORAGE)
   const DOCUMENT_ONLY = true;
@@ -114,31 +114,23 @@ DoD:
     D.courseStep = byId("courseStep");
 
     // (FÖRSLAG) Course Track (optional, no storage)
-    // Rekommenderat id i trainings.html: courseTrack (SELECT/INPUT)
     D.courseTrack = byId("courseTrack");
 
     // Level/goals (goals never sent to AI)
     D.goalsLevel = byId("goalsLevel");
     D.goals = byId("goals");
 
-    // AO: Verksamhet (under subjectId-raden)
-    // Rekommenderade id i trainings.html:
-    // - businessArea (SELECT eller INPUT)
-    // - businessAreaSearch (INPUT för sök 3+ bokstäver)  <-- vissa UI använder bara denna som "rutan"
-    // - businessAreaOther (INPUT för Annat…)
-    // - businessAreaHint (span/div för hint)
+    // AO: Verksamhet
     D.businessArea = byId("businessArea");
     D.businessAreaSearch = byId("businessAreaSearch");
     D.businessAreaOther = byId("businessAreaOther");
     D.businessAreaHint = byId("businessAreaHint");
 
     // Display (read-only)
-    D.titleDisplay = byId("titleDisplay"); // OK som display (inte input)
+    D.titleDisplay = byId("titleDisplay");
     D.subjectIdText = byId("subjectIdText");
 
     // AO: AI-ankare rad (read-only)
-    // Rekommenderat id:
-    // - aiAnchorText (div/span)
     D.aiAnchorText = byId("aiAnchorText");
 
     D.revertHint = byId("revertHint");
@@ -194,6 +186,48 @@ DoD:
   // aliasa den till businessArea så all logik (datalist/fill/read/save) funkar.
   if (dom && !dom.businessArea && dom.businessAreaSearch) {
     dom.businessArea = dom.businessAreaSearch;
+  }
+
+  /* =========================
+     BLOCK 3.1/19 — P0 UI: Enforce document-only in dropdown
+     (NO STORAGE, fail-closed)
+  ========================== */
+  function enforceAiContentUiDocumentOnly() {
+    try {
+      if (!DOCUMENT_ONLY) return;
+      if (!dom || !dom.aiContent) return;
+
+      const el = dom.aiContent;
+      const tag = String(el.tagName || "").toUpperCase();
+      if (tag !== "SELECT") {
+        // if it's input, just set value text and disable if possible
+        try { el.value = "document"; } catch (_) { }
+        if (dom.disable) dom.disable(el, true);
+        return;
+      }
+
+      // Ensure there is a "document" option so UI can actually show it.
+      const opts = el.options ? Array.from(el.options) : [];
+      const hasDoc = opts.some(o => String(o && o.value) === "document");
+
+      if (!hasDoc) {
+        const o = document.createElement("option");
+        o.value = "document";
+        o.textContent = "Dokument (låst)";
+        el.appendChild(o);
+      } else {
+        // Rename label to avoid confusion (optional, harmless)
+        for (const o of opts) {
+          if (String(o && o.value) === "document" && o.textContent) {
+            if (o.textContent.toLowerCase().indexOf("dokument") === -1) o.textContent = "Dokument (låst)";
+          }
+        }
+      }
+
+      // Force selection + disable
+      el.value = "document";
+      if (dom.disable) dom.disable(el, true);
+    } catch (_) { }
   }
 
   /* =========================
@@ -289,15 +323,10 @@ DoD:
   function normalizeCourseTrack(raw) {
     const s = normStr(raw).toLowerCase();
     if (!s) return "course1";
-
-    // allow numeric & labels
     if (s === "1" || s === "course1" || s === "kurs1" || s === "grund" || s === "grundkurs" || s === "standard") return "course1";
     if (s === "2" || s === "course2" || s === "kurs2" || s === "tillämpning" || s === "tillampning" || s === "coach" || s === "ledarspår" || s === "ledarspar") return "course2";
-
-    // tolerant: if it starts with "1" or "2"
     if (s.indexOf("1") === 0) return "course1";
     if (s.indexOf("2") === 0) return "course2";
-
     return "course1";
   }
 
@@ -307,12 +336,9 @@ DoD:
   }
 
   function readCourseTrackFromUi() {
-    // Optional DOM; fail-closed default
     try {
       const el = dom && dom.courseTrack ? dom.courseTrack : null;
       if (!el) return "course1";
-      const tag = String(el.tagName || "").toUpperCase();
-      if (tag === "SELECT") return normalizeCourseTrack(el.value);
       return normalizeCourseTrack(el.value);
     } catch (_) {
       return "course1";
@@ -323,7 +349,6 @@ DoD:
      BLOCK 6/19 — AO: Verksamhet (businessArea) helpers
   ========================== */
   const BUSINESS_OTHER_LABEL = "Annat…";
-  // KRAV 3.4 — Startlista (15 vanligaste), visas A–Ö i UI via uniqueSorted(localeCompare('sv'))
   const BUSINESS_DEFAULTS = [
     "Bygg & anläggning",
     "Butik & retail",
@@ -359,8 +384,6 @@ DoD:
   }
 
   function collectBusinessAreasFromAllTrainings() {
-    // "Annat…" ska bli valbart nästa gång utan ny key:
-    // Samla unika businessArea från alla trainings (exkl defaults + tomma).
     const out = [];
     for (const t of safeArr(state.trainings)) {
       if (!t || typeof t !== "object") continue;
@@ -370,7 +393,6 @@ DoD:
       if (isBusinessDefault(v)) continue;
       out.push(v);
     }
-    // även draft-värde (för UI-stabilitet innan save)
     try {
       const dv = normStr(state.draft && state.draft.businessArea);
       if (dv && !isBusinessDefault(dv) && lowerKey(dv) !== lowerKey(BUSINESS_OTHER_LABEL)) out.push(dv);
@@ -385,7 +407,7 @@ DoD:
 
   function filterBusinessOptions(options, q) {
     const query = normStr(q).toLowerCase();
-    if (query.length < 3) return options; // filtrera först vid 3+ bokstäver
+    if (query.length < 3) return options;
     return options.filter(v => lowerKey(v).indexOf(query) === 0);
   }
 
@@ -393,8 +415,6 @@ DoD:
     if (dom && dom.businessAreaHint && dom.setText) dom.setText(dom.businessAreaHint, msg || "");
   }
 
-  // PATCH (P0 UI): välj vilken ruta som faktiskt ska få datalist (förslag).
-  // Om businessAreaSearch finns använder vi den som "picker" eftersom det är rutan användaren skriver i i vissa UI.
   function getBusinessPickerEl() {
     if (!dom) return null;
     if (dom.businessAreaSearch) return dom.businessAreaSearch;
@@ -446,7 +466,6 @@ DoD:
     }
   }
 
-  // PATCH (P0): preserve selected value for SELECT across rerender/filter
   function listHasValueCaseInsensitive(list, value) {
     const want = lowerKey(value);
     if (!want) return true;
@@ -461,7 +480,7 @@ DoD:
     if (lowerKey(v) === lowerKey(BUSINESS_OTHER_LABEL)) return list;
     if (listHasValueCaseInsensitive(list, v)) return list;
     const out = safeArr(list).slice();
-    out.unshift(v); // keep it visible even if filtered out
+    out.unshift(v);
     return out;
   }
   function restoreSelectValueCaseInsensitive(selectEl, desiredValue) {
@@ -471,7 +490,6 @@ DoD:
     selectEl.value = want;
     if (normStr(selectEl.value) === want) return;
 
-    // fallback: case-insensitive match to existing option values
     const wantKey = lowerKey(want);
     try {
       const opts = selectEl.options ? Array.from(selectEl.options) : [];
@@ -486,29 +504,22 @@ DoD:
   function renderBusinessAreaPicker() {
     if (!dom) return;
 
-    // Picker är den ruta användaren skriver i (i vissa UI är det businessAreaSearch)
     const pickerEl = getBusinessPickerEl();
     if (!pickerEl) return;
 
-    // Vi kan fortfarande ha "businessArea" som SELECT i vissa UI – behåll stöd.
     const baseEl = dom.businessArea || pickerEl;
-
     const tag = String(baseEl.tagName || "").toUpperCase();
 
-    // PATCH (P0): snapshot current UI state before rebuild
     const prevSel = normStr(baseEl.value);
     const prevOther = normStr(dom.businessAreaOther && dom.businessAreaOther.value);
     const draftVal = normStr(state.draft && state.draft.businessArea);
 
     const prevSelIsOther = (lowerKey(prevSel) === lowerKey(BUSINESS_OTHER_LABEL));
-    const prevEffective = prevSelIsOther ? prevOther : prevSel;
-
     const options = composeBusinessOptionsForUi();
     const q = normStr(state.businessAreaQuery);
 
     let filtered = filterBusinessOptions(options, q);
 
-    // PATCH (P0): if SELECT, ensure current selection is present even when filtered
     if (tag === "SELECT") {
       filtered = ensureValueInList(filtered, prevSel);
       if (draftVal && isBusinessDefault(draftVal)) filtered = ensureValueInList(filtered, draftVal);
@@ -521,8 +532,6 @@ DoD:
     if (tag === "SELECT") {
       fillSelectOptionsQuick(baseEl, listWithOther, "Välj verksamhet…");
     } else {
-      // PATCH (P0 UI): datalist ska kopplas till den ruta användaren skriver i.
-      // Om pickerEl != baseEl (t.ex. baseEl finns men UI skriver i search), fyll datalist på pickerEl.
       const dl = ensureBusinessAreaDatalist(pickerEl);
       fillDatalistOptionsQuick(dl, listWithOther);
     }
@@ -530,7 +539,6 @@ DoD:
     if (normStr(q).length > 0 && normStr(q).length < 3) setBusinessHint("Skriv minst 3 bokstäver för att söka.");
     else setBusinessHint("");
 
-    // PATCH (P0): restore selection + other text after rebuild (SELECT only)
     if (tag === "SELECT") {
       let targetSel = "";
       let targetOther = "";
@@ -547,16 +555,12 @@ DoD:
           targetSel = BUSINESS_OTHER_LABEL;
           targetOther = prevOther || draftVal;
         }
-      } else if (prevEffective && !isBusinessDefault(prevEffective)) {
-        targetSel = BUSINESS_OTHER_LABEL;
-        targetOther = prevOther || prevEffective;
       }
 
       if (targetSel) restoreSelectValueCaseInsensitive(baseEl, targetSel);
       if (dom.businessAreaOther) dom.businessAreaOther.value = normStr(targetOther);
     }
 
-    // Show/hide other input
     if (dom.businessAreaOther && dom.show && dom.hide) {
       const selected = normStr(baseEl.value);
       if (lowerKey(selected) === lowerKey(BUSINESS_OTHER_LABEL)) dom.show(dom.businessAreaOther);
@@ -567,8 +571,6 @@ DoD:
   function readBusinessAreaFromInputs() {
     if (!dom) return "";
 
-    // Om det finns en SELECT businessArea (klassisk), läs därifrån.
-    // Annars: läs från rutan användaren skriver i (businessAreaSearch eller businessArea input).
     let baseEl = dom.businessArea || null;
     const pickerEl = getBusinessPickerEl();
 
@@ -584,7 +586,6 @@ DoD:
       }
     }
 
-    // INPUT-mode (datalist)
     const v = normStr((pickerEl && pickerEl.value) || (baseEl && baseEl.value) || "");
     if (lowerKey(v) === lowerKey(BUSINESS_OTHER_LABEL)) {
       const other = normStr(dom.businessAreaOther && dom.businessAreaOther.value);
@@ -626,37 +627,11 @@ DoD:
     return m ? String(m[1]) : (raw || "1");
   }
 
-  function normalizeMode(m) {
-    const s = String(m ?? "").trim().toLowerCase();
-    if (s === "training" || s === "document") return s;
-    if (s === "blocks" || s === "utbildning" || s === "kurs" || s === "train" || s === "trainings" || s === "training-v1" || s === "training_v1") return "training";
-    if (s === "doc" || s === "dokument" || s === "documents" || s === "document-v1" || s === "document_v1") return "document";
-    return "training";
-  }
-
   function normalizeLevel(v) {
     const s = normStr(v).toLowerCase();
     if (s === "intro" || s === "inledning" || s === "introduktion") return "intro";
     if (s === "advanced" || s === "avancerad" || s === "avancerat" || s === "svår" || s === "hard") return "advanced";
     return "normal";
-  }
-
-  function isMcqType(qt) {
-    const s = normStr(qt).toLowerCase();
-    return (s === "mcq_single" || s === "mcq_multi" || s.indexOf("mcq") === 0);
-  }
-
-  function normalizeQuestionTypeForWorker(qtUi) {
-    const s = normStr(qtUi).toLowerCase();
-    if (!s) return "auto";
-    if (s === "auto" || s.indexOf("auto") === 0) return "auto";
-
-    if (s === "mcq_single") return "mcq_single";
-    if (s === "mcq_multi") return "mcq_multi";
-    if (s === "true_false" || s === "tf" || s === "sant_falskt" || s === "sant/falskt") return "true_false";
-    if (s === "short_answer" || s === "short" || s === "kortsvar") return "short_answer";
-    if (s === "numeric" || s === "number" || s === "tal") return "numeric";
-    return "auto";
   }
 
   function stripContextBoilerplate(s) {
@@ -677,8 +652,7 @@ DoD:
   }
 
   /* =========================
-     BLOCK 8/19 — P0: Question flatten/normalize to stable UI shape
-     (Behålls för bakåtkomp/robusthet; doc-only ska inte be om frågor.)
+     BLOCK 8/19 — P0: Question flatten/normalize (robusthet)
   ========================== */
   function toTextCandidate(v) {
     if (typeof v === "string") return v;
@@ -708,72 +682,9 @@ DoD:
     return out;
   }
 
-  function parseIndexMaybe(v) {
-    if (v == null) return null;
-    if (typeof v === "number" && Number.isFinite(v)) return v;
-    if (typeof v === "string") {
-      const s = v.trim();
-      if (!s) return null;
-      const n = Number(s);
-      if (Number.isFinite(n)) return n;
-      const m = s.match(/-?\d+/);
-      if (m) {
-        const n2 = Number(m[0]);
-        if (Number.isFinite(n2)) return n2;
-      }
-    }
-    return null;
-  }
-
-  function parseIndicesMaybe(v) {
-    if (Array.isArray(v)) {
-      const out = [];
-      for (const x of v) {
-        const n = parseIndexMaybe(x);
-        if (n == null) continue;
-        out.push(n);
-      }
-      return out;
-    }
-    return null;
-  }
-
-  function pickQuestionTextFromAny(it) {
-    if (!it || typeof it !== "object") return "";
-
-    // P0: nested shape support
-    const src = isObj(it.data) ? it.data : it;
-
-    if (typeof src.question === "string" && normStr(src.question)) return scrubObjectObjectToken(src.question);
-
-    if (isObj(src.question)) {
-      const q = src.question;
-      const cand = q.text || q.prompt || q.question || q.heading || q.title;
-      if (typeof cand === "string" && normStr(cand)) return scrubObjectObjectToken(cand);
-      if (typeof q.text === "string" && normStr(q.text)) return scrubObjectObjectToken(q.text);
-    }
-
-    const f = src.q || src.text || src.instruction || src.prompt || src.heading || src.title;
-    if (typeof f === "string" && normStr(f)) return scrubObjectObjectToken(f);
-
-    return "";
-  }
-
-  function pickExplanationFromAny(it) {
-    if (!it || typeof it !== "object") return "";
-    const src = isObj(it.data) ? it.data : it;
-
-    if (typeof src.explanation === "string" && normStr(src.explanation)) return scrubObjectObjectToken(src.explanation);
-    if (typeof src.feedback === "string" && normStr(src.feedback)) return scrubObjectObjectToken(src.feedback);
-    if (typeof src.rationale === "string" && normStr(src.rationale)) return scrubObjectObjectToken(src.rationale);
-    if (isObj(src.question) && typeof src.question.rationale === "string" && normStr(src.question.rationale)) return scrubObjectObjectToken(src.question.rationale);
-    return "";
-  }
-
   function flattenChoiceQuestionShapeInPlace(it) {
     if (!it || typeof it !== "object") return it;
 
-    // P0: nested shape support — try both root and data
     const root = it;
     const data = isObj(it.data) ? it.data : null;
 
@@ -798,7 +709,6 @@ DoD:
         }
       }
 
-      // Write result to root (stable destination)
       root.type = "question";
       root.question = scrubObjectObjectToken(qText);
       root.options = options.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
@@ -817,97 +727,11 @@ DoD:
     return it;
   }
 
-  function normalizeQuestionItemToStable(it) {
-    // Målformat:
-    // type:"question", question:"..", options:[..], correctIndex:number OR correctIndices:number[], explanation?
-    if (!it || typeof it !== "object") return { ok: false, reason: "Fråga är inte ett objekt." };
-
-    // Pre-flatten (choices-shape)
-    flattenChoiceQuestionShapeInPlace(it);
-
-    // P0: nested shape support
-    const src = isObj(it.data) ? it.data : it;
-
-    const question = normStr(pickQuestionTextFromAny({ ...it, data: src }));
-    if (!question) return { ok: false, reason: "Fråga saknar text." };
-
-    // options can come from options/choices/answers (root or nested)
-    let options = [];
-    if (Array.isArray(src.options)) options = normalizeOptionsAny(src.options);
-    else if (Array.isArray(src.choices)) options = normalizeOptionsAny(src.choices);
-    else if (Array.isArray(src.answers)) options = normalizeOptionsAny(src.answers);
-    else if (isObj(src.question) && Array.isArray(src.question.choices)) options = normalizeOptionsAny(src.question.choices);
-
-    const explanation = normStr(pickExplanationFromAny({ ...it, data: src }));
-
-    // Correct can come in many shapes:
-    let correctIndex = null;
-    let correctIndices = null;
-
-    const ci = parseIndexMaybe((src.correctIndex != null ? src.correctIndex : src.answerIndex));
-    if (ci != null) correctIndex = ci;
-
-    const cis = parseIndicesMaybe((src.correctIndices != null ? src.correctIndices : src.answerIndices));
-    if (cis && cis.length) correctIndices = cis;
-
-    if (correctIndex == null) {
-      const tryIdx = parseIndexMaybe(src.correct != null ? src.correct : src.solution);
-      if (tryIdx != null) correctIndex = tryIdx;
-    }
-
-    const answerStr = (typeof src.answer === "string" && normStr(src.answer)) ? normStr(scrubObjectObjectToken(src.answer)) : "";
-    const expectedStr = (typeof src.expected === "string" && normStr(src.expected)) ? normStr(scrubObjectObjectToken(src.expected)) : "";
-    const answerNum = (typeof src.answer === "number" && Number.isFinite(src.answer)) ? src.answer : null;
-    const rangeObj = isObj(src.range) ? deepClone(src.range) : null;
-    const tfBool = (typeof src.correct === "boolean") ? src.correct : null;
-
-    // Sanitize options
-    options = safeArr(options).map(x => normStr(scrubObjectObjectToken(String(x ?? "")))).filter(Boolean);
-
-    // IMPORTANT P0: Re-validate indices AFTER options filtering
-    if (correctIndex != null && options.length) {
-      const n = Number(correctIndex);
-      if (!Number.isFinite(n)) correctIndex = null;
-      else if (n < 0 || n >= options.length) correctIndex = null;
-      else correctIndex = n;
-    }
-    if (correctIndices && options.length) {
-      const out = [];
-      for (const x of correctIndices) {
-        const n = Number(x);
-        if (!Number.isFinite(n)) continue;
-        if (n < 0 || n >= options.length) continue;
-        out.push(n);
-      }
-      correctIndices = out.length ? out : null;
-    }
-
-    const stable = {
-      type: "question",
-      question: question,
-      options: options,
-      explanation: explanation
-    };
-
-    if (correctIndices) stable.correctIndices = correctIndices;
-    else if (correctIndex != null) stable.correctIndex = correctIndex;
-
-    // Preserve non-mcq answer shapes for auto/explicit types (harmless)
-    if (tfBool != null) stable.correct = tfBool;
-    if (answerStr) stable.answer = answerStr;
-    if (expectedStr) stable.expected = expectedStr;
-    if (answerNum != null) stable.answer = answerNum;
-    if (rangeObj) stable.range = rangeObj;
-
-    return { ok: true, item: stable };
-  }
-
   function ensureItemType(it) {
     if (!it || typeof it !== "object") return it;
 
     flattenChoiceQuestionShapeInPlace(it);
 
-    // P0: nested type inference
     const src = isObj(it.data) ? it.data : it;
 
     const t = normStr(src.type || it.type).toLowerCase();
@@ -928,7 +752,6 @@ DoD:
 
     flattenChoiceQuestionShapeInPlace(item);
 
-    // P0: nested shape scrub
     const src = isObj(item.data) ? item.data : null;
 
     const keys = ["text", "instruction", "prompt", "question", "explanation", "feedback", "rationale", "reason", "title", "heading"];
@@ -1039,10 +862,7 @@ DoD:
 
     if (state.locked) return false;
     const role = upper(who.role || "SYSTEM_ADMIN");
-
-    // PATCH (P0 RBAC): allow ADMIN + MANAGER; SYSTEM_ADMIN stays read-only
     if (role !== "ADMIN" && role !== "MANAGER") return false;
-
     if (who.canWrite === false) return false;
     return true;
   }
@@ -1077,10 +897,7 @@ DoD:
     if (dom && dom.goalsLevel) state.draft.goalsLevel = normStr(dom.goalsLevel.value) || "normal";
     if (dom && dom.goals) state.draft.goals = normStr(dom.goals.value);
 
-    // AO: verksamhet (PATCH: fungerar även när UI använder businessAreaSearch som rutan)
     state.draft.businessArea = readBusinessAreaFromInputs();
-
-    // (FÖRSLAG) courseTrack sparas INTE (no storage)
   }
 
   /* =========================
@@ -1096,7 +913,7 @@ DoD:
         lockReason: state.lockReason || "",
         selectedId: state.selectedId || "",
         aiAnchorLine: state.aiAnchorLine || "",
-        courseTrack: readCourseTrackFromUi(), // NO STORAGE
+        courseTrack: readCourseTrackFromUi(),
         draft: state.draft ? state.draft : null,
         trainingsCount: Array.isArray(state.trainings) ? state.trainings.length : 0,
         trainings: Array.isArray(state.trainings) ? state.trainings : [],
@@ -1426,7 +1243,6 @@ DoD:
     }
   }
 
-  // AO: title är display (read-only); vi bygger men exponerar inte som input
   function syncDraftTitleFromFields() {
     if (!state.draft) return;
 
@@ -1453,8 +1269,6 @@ DoD:
     const courseStep = parseCourseStep(dom && dom.courseStep && dom.courseStep.value);
     const goalsLevel = normStr(dom && dom.goalsLevel && dom.goalsLevel.value) || "normal";
     const businessArea = normStr(readBusinessAreaFromInputs());
-
-    // (FÖRSLAG) courseTrack from UI only, no storage
     const track = readCourseTrackFromUi();
 
     return { module, area, businessArea, courseTitle, courseStep, goalsLevel, goals: "", track };
@@ -1472,7 +1286,6 @@ DoD:
       "Steg: " + (s.courseStep || "—"),
       "Nivå: " + (level || "normal"),
       "Verksamhet: " + (s.businessArea || "—"),
-      // (FÖRSLAG) extra signal to worker (still XSS-safe)
       "Kurs-spår: " + (tLabel || "Grund")
     ];
     const line = parts.join(" • ");
@@ -1494,21 +1307,22 @@ DoD:
     const track = normalizeCourseTrack(s.track);
     const trackLabel = courseTrackLabel(track);
 
+    // PATCH (P0): make "document-only" explicit inside context too (NO STORAGE).
+    // Worker may ignore, but harmless.
+    const docDirective = "OUTPUT: Dokumenttext/utbildningsblock. INGA quiz/frågor. INGA facitfält.";
+
     if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
       const ctx = DEPS.core.buildAiContext(s) || {};
       try {
         ctx.goals = "";
         ctx.level = level;
 
-        // AO: ankare
         ctx.anchor = anchorLine;
 
-        // (FÖRSLAG) course track (NO STORAGE)
         if (!ctx.course || typeof ctx.course !== "object") ctx.course = {};
         ctx.course.track = track;
         ctx.course.trackLabel = trackLabel;
 
-        // P0: business alias (explicit parameter) + backwards-compat subject.businessArea
         if (s.businessArea) ctx.business = s.businessArea;
 
         if (!ctx.subject || typeof ctx.subject !== "object") ctx.subject = {};
@@ -1516,6 +1330,9 @@ DoD:
 
         if (s.businessArea) ctx.subject.businessArea = s.businessArea;
         ctx.subject.anchor = anchorLine;
+
+        // directive (NO STORAGE)
+        ctx.directive = docDirective;
       } catch (_) { }
       return ctx;
     }
@@ -1523,6 +1340,7 @@ DoD:
     return {
       anchor: anchorLine,
       business: s.businessArea || "",
+      directive: docDirective,
       subject: { module: s.module, area: s.area, title: subjectTitle, businessArea: s.businessArea || "", anchor: anchorLine },
       course: {
         chapter: s.courseTitle,
@@ -1618,14 +1436,15 @@ DoD:
   }
 
   function updateAiControlsVisibility() {
-    // PATCH: Document-only => hide question controls always
+    // Document-only => hide question controls always
     if (dom && dom.questionControls && dom.show && dom.hide) {
       dom.hide(dom.questionControls);
-      return;
-    }
-    if (DEPS.render && typeof DEPS.render.toggleQuestionControls === "function") {
+    } else if (DEPS.render && typeof DEPS.render.toggleQuestionControls === "function") {
       DEPS.render.toggleQuestionControls(false);
     }
+
+    // P0 UI: show document-only state in dropdown
+    enforceAiContentUiDocumentOnly();
   }
 
   function updateButtons() {
@@ -1663,7 +1482,6 @@ DoD:
     if (dom.goalsLevel) dom.goalsLevel.value = normStr(d.goalsLevel) || "normal";
     if (dom.goals) dom.goals.value = normStr(d.goals) || "";
 
-    // AO: verksamhet (PATCH: kör även om bara businessAreaSearch finns)
     if (dom.businessArea || dom.businessAreaSearch) {
       renderBusinessAreaPicker();
 
@@ -1671,7 +1489,6 @@ DoD:
       const pickerEl = getBusinessPickerEl() || dom.businessArea;
 
       if (pickerEl && v) {
-        // INPUT-mode: bara skriv värdet i rutan
         const tag = String((dom.businessArea && dom.businessArea.tagName) || "").toUpperCase();
         const inputMode = (!tag || tag !== "SELECT");
 
@@ -1679,7 +1496,6 @@ DoD:
           pickerEl.value = v;
           if (dom.businessAreaOther) dom.businessAreaOther.value = "";
         } else {
-          // SELECT-mode: behåll tidigare logik
           if (isBusinessDefault(v)) {
             dom.businessArea.value = v;
             if (dom.businessAreaOther) dom.businessAreaOther.value = "";
@@ -1694,11 +1510,7 @@ DoD:
       renderBusinessAreaPicker();
     }
 
-    // (FÖRSLAG) courseTrack: do not bind to storage/draft; just keep whatever UI has
-
     syncDraftTitleFromFields();
-
-    // AO: ankare
     renderAiAnchorRow();
 
     const blocks = currentBlocks();
@@ -1708,6 +1520,9 @@ DoD:
       onDelete: function (idx) { deleteBlock(idx); },
       onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); }
     });
+
+    // Ensure dropdown reflects doc-only even after render
+    enforceAiContentUiDocumentOnly();
   }
 
   function updateUiAll() {
@@ -1895,15 +1710,18 @@ DoD:
   }
 
   function readAiControls() {
-    // PATCH (DOC-ONLY): force blocks + mode=document
+    // DOC-ONLY: force mode=document always
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
     const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
+
+    // Ensure dropdown reflects this policy
+    enforceAiContentUiDocumentOnly();
 
     return {
       content: "blocks",
       mode: "document",
       count: count,
-      questionType: "auto",
+      questionType: "none",
       feedbackEnabled: false,
       _uiQuestionType: ""
     };
@@ -1967,7 +1785,6 @@ DoD:
           continue;
         }
 
-        // fallback: if block itself looks like item
         if (b && typeof b === "object") {
           const q = normStr(b.question || b.q || b.text || b.instruction || b.prompt || "");
           const opts = Array.isArray(b.options) ? b.options.slice() : null;
@@ -2041,15 +1858,21 @@ DoD:
     }
 
     const controls = readAiControls();
-    const ctxObj = buildAiContextNoGoals(); // includes anchor + business, goals stripped (+ optional track)
+    const ctxObj = buildAiContextNoGoals();
 
-    // PATCH (DOC-ONLY): force mode=document always
+    // DOC-ONLY: force mode=document + explicit "no-questions" hints
     const req = {
       mode: "document",
       count: controls.count,
       context: ctxObj,
-      anchor: state.aiAnchorLine || ctxObj.anchor || "",
-      language: "sv"
+      anchor: (state.aiAnchorLine || ctxObj.anchor || ""),
+      language: "sv",
+
+      // Extra hints (NO STORAGE) — harmless if worker ignores
+      content: "document",
+      questionType: "none",
+      feedbackEnabled: false,
+      documentOnly: true
     };
 
     page._LAST_AI_REQUEST = deepClone(req);
@@ -2094,6 +1917,7 @@ DoD:
     }
 
     const incomingBlocks = [];
+    let droppedQuestions = 0;
 
     for (const b of safeArr(norm.blocks)) {
       const itemsRaw = safeArr(b && b.items);
@@ -2111,13 +1935,13 @@ DoD:
           flattenChoiceQuestionShapeInPlace(obj);
           ensureItemType(obj);
 
-          // DOC-ONLY fail-closed: om AI returnerar frågor trots document-mode
           const t = normStr(obj.type).toLowerCase();
+
+          // PATCH (P0): DOC-ONLY should not kill the whole import immediately.
+          // Skip questions, import the rest. If all are questions -> fail-closed.
           if (DOCUMENT_ONLY && t === "question") {
-            DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-            setAiHint("Document-only: AI gav fråga/quiz-format. Import stoppad (fail-closed).");
-            updateDebug();
-            return;
+            droppedQuestions++;
+            continue;
           }
 
           if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
@@ -2127,8 +1951,6 @@ DoD:
           }
           continue;
         }
-
-        // ignore null/unknown
       }
 
       const clean = items.filter(x => x != null);
@@ -2141,8 +1963,8 @@ DoD:
     }
 
     if (!incomingBlocks.length) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Tomt AI-svar", "bad");
-      setAiHint("AI gav inga block/items att importera.");
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+      setAiHint("Document-only: AI gav bara fråga/quiz-format (0 dokumentblock). Import stoppad (fail-closed).");
       updateDebug();
       return;
     }
@@ -2150,8 +1972,9 @@ DoD:
     page._LAST_AI_PICK = {
       importedBlocks: incomingBlocks.length,
       importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0),
+      droppedQuestions: droppedQuestions,
       anchor: state.aiAnchorLine || "",
-      courseTrack: readCourseTrackFromUi(), // NO STORAGE
+      courseTrack: readCourseTrackFromUi(),
       documentOnly: !!DOCUMENT_ONLY
     };
 
@@ -2161,7 +1984,13 @@ DoD:
     setDirty(true);
     syncDraftTitleFromFields();
     DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI import OK", "ok");
-    setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items).`);
+
+    if (droppedQuestions > 0) {
+      setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items). Skippade ${droppedQuestions} fråge-items (document-only).`);
+    } else {
+      setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items).`);
+    }
+
     updateUiAll();
   }
 
@@ -2215,7 +2044,7 @@ DoD:
       status: "draft",
       module: "",
       area: "",
-      businessArea: "", // AO: verksamhet (within existing training object)
+      businessArea: "",
       courseTitle: chapter,
       courseStep: step,
       goalsLevel: "normal",
@@ -2318,9 +2147,7 @@ DoD:
 
     state.draft.status = (status === "published") ? "published" : "draft";
 
-    // Fail-closed: om UI står på "Annat…" måste text vara icke-tom (min 2 tecken)
     try {
-      // I INPUT-mode: om användaren skrev "Annat…" så kräver vi other-text.
       const pickerEl = getBusinessPickerEl() || (dom && dom.businessArea);
       const sel = normStr(pickerEl && pickerEl.value);
 
@@ -2455,13 +2282,14 @@ DoD:
       updateDebug();
     });
 
-    // Document-only: ignore aiContent changes; still keep debug stable
+    // DOC-ONLY: enforce UI state if user tries to change
     dom.on(dom.aiContent, "change", function () {
+      enforceAiContentUiDocumentOnly();
+      setAiHint("Dokumentläge är låst på denna sida (spel/frågor senare).");
       updateAiControlsVisibility();
       updateDebug();
     });
 
-    // PATCH (P1): courseTrack should NOT mark dirty (NO STORAGE)
     const onEditorChange = function (e) {
       if (!state.draft) return;
 
@@ -2488,7 +2316,6 @@ DoD:
     dom.on(dom.courseTitle, "change", onEditorChange);
     dom.on(dom.courseStep, "change", onEditorChange);
 
-    // courseTrack affects anchor/context only (NO STORAGE) => no dirty
     dom.on(dom.courseTrack, "change", onEditorChange);
     dom.on(dom.courseTrack, "input", onEditorChange);
 
@@ -2510,8 +2337,6 @@ DoD:
       }
     });
 
-    // AO: verksamhet events
-    // PATCH: businessAreaSearch driver både query (filter) och suggestions (datalist fylls på samma ruta)
     dom.on(dom.businessAreaSearch, "input", function () {
       state.businessAreaQuery = normStr(dom.businessAreaSearch && dom.businessAreaSearch.value);
       renderBusinessAreaPicker();
@@ -2592,6 +2417,10 @@ DoD:
 
     wireEventsOnce();
     renderAiAnchorRow();
+
+    // Ensure doc-only UI from first paint
+    enforceAiContentUiDocumentOnly();
+
     updateUiAll();
     setTimeout(updateUiAll, 0);
     setTimeout(updateUiAll, 50);
