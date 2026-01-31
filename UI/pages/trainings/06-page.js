@@ -2178,504 +2178,528 @@ async function generateAi() {
 }
 
   /* =========================
-     BLOCK 19/19 — Bootstrap + events + CRUD
-  ========================== */
-  function tryCloseItemModal() {
-    try {
-      if (!DEPS.render) return;
-      if (typeof DEPS.render.closeItemModal === "function") { DEPS.render.closeItemModal(); return; }
-      if (typeof DEPS.render.hideItemModal === "function") { DEPS.render.hideItemModal(); return; }
-    } catch (_) { }
-  }
+   BLOCK 19/19 — Bootstrap + events + CRUD
+   PATCH v1 (2026-01-31):
+   - BLOCK-indelning 19A–19G för enklare felsökning
+   - INGA funktionsändringar (endast struktur/kommentarer)
+========================== */
 
-  function selectTraining(id) {
-    tryCloseItemModal();
+/* -------------------------
+   BLOCK 19A — Modal helpers
+-------------------------- */
+function tryCloseItemModal() {
+  try {
+    if (!DEPS.render) return;
+    if (typeof DEPS.render.closeItemModal === "function") { DEPS.render.closeItemModal(); return; }
+    if (typeof DEPS.render.hideItemModal === "function") { DEPS.render.hideItemModal(); return; }
+  } catch (_) { }
+}
 
-    const idx = findTrainingIndexById(id);
-    if (idx < 0) {
-      state.selectedId = "";
-      state.draft = null;
-      setDirty(false);
-      updateUiAll();
-      return;
-    }
+/* -------------------------
+   BLOCK 19B — Selection (load draft)
+-------------------------- */
+function selectTraining(id) {
+  tryCloseItemModal();
 
-    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
-    ensureBusinessAreaSearchForSelectUi();
-
-    state.businessAreaQuery = "";
-    if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
-
-    state.selectedId = normStr(id);
-    state.draft = deepClone(state.trainings[idx]);
-    setDirty(false);
-    renderAreaDatalist();
-
-    renderBusinessAreaPicker();
-    renderAiAnchorRow();
-    updateUiAll();
-  }
-
-  function newTrainingTemplate() {
-    const who = getWhoFresh();
-    const chapter = "Introduktion";
-    const step = "1";
-    const area = "—";
-    const title = (DEPS.core && typeof DEPS.core.composeTitle === "function")
-      ? DEPS.core.composeTitle(chapter, step, area)
-      : `${chapter} • Steg ${step} • ${area}`;
-
-    return {
-      id: (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now()),
-      status: "draft",
-      module: "",
-      area: "",
-      businessArea: "",
-      courseTitle: chapter,
-      courseStep: step,
-      goalsLevel: "normal",
-      goals: "",
-      title: title,
-      blocks: [],
-      meta: { createdAt: Date.now(), createdBy: who.empNo || "" }
-    };
-  }
-
-  function createNewTraining() {
-    if (!isWriterAllowed()) return;
-
-    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
-    ensureBusinessAreaSearchForSelectUi();
-
-    state.businessAreaQuery = "";
-    if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
-
-    const t = newTrainingTemplate();
-    state.trainings.unshift(t);
-    state.selectedId = t.id;
-    state.draft = deepClone(t);
-
-    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
-    if (!s || !s.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-      return;
-    }
-
-    state.showAll = false;
-
-    setDirty(false);
-    renderModuleDatalist();
-    renderAreaDatalist();
-    renderChapterAndStepPickers();
-    renderBusinessAreaPicker();
-    renderAiAnchorRow();
-    updateUiAll();
-  }
-
-  function deleteSelected() {
-    if (!isWriterAllowed()) return;
-    if (!state.selectedId) return;
-
-    const idx = findTrainingIndexById(state.selectedId);
-    if (idx < 0) return;
-
-    state.trainings.splice(idx, 1);
-    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
-    if (!s || !s.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-      return;
-    }
-
+  const idx = findTrainingIndexById(id);
+  if (idx < 0) {
     state.selectedId = "";
     state.draft = null;
     setDirty(false);
-    renderModuleDatalist();
-    renderAreaDatalist();
     updateUiAll();
+    return;
   }
 
-  function purgeAll() {
-    if (!isWriterAllowed()) return;
+  // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+  ensureBusinessAreaSearchForSelectUi();
 
-    const p = DEPS.store && DEPS.store.purgeAll ? DEPS.store.purgeAll() : { ok: false };
-    if (!p || !p.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte rensa", "bad");
-      return;
+  state.businessAreaQuery = "";
+  if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
+
+  state.selectedId = normStr(id);
+  state.draft = deepClone(state.trainings[idx]);
+  setDirty(false);
+  renderAreaDatalist();
+
+  renderBusinessAreaPicker();
+  renderAiAnchorRow();
+  updateUiAll();
+}
+
+/* -------------------------
+   BLOCK 19C — Create (template + new)
+-------------------------- */
+function newTrainingTemplate() {
+  const who = getWhoFresh();
+  const chapter = "Introduktion";
+  const step = "1";
+  const area = "—";
+  const title = (DEPS.core && typeof DEPS.core.composeTitle === "function")
+    ? DEPS.core.composeTitle(chapter, step, area)
+    : `${chapter} • Steg ${step} • ${area}`;
+
+  return {
+    id: (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now()),
+    status: "draft",
+    module: "",
+    area: "",
+    businessArea: "",
+    courseTitle: chapter,
+    courseStep: step,
+    goalsLevel: "normal",
+    goals: "",
+    title: title,
+    blocks: [],
+    meta: { createdAt: Date.now(), createdBy: who.empNo || "" }
+  };
+}
+
+function createNewTraining() {
+  if (!isWriterAllowed()) return;
+
+  // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+  ensureBusinessAreaSearchForSelectUi();
+
+  state.businessAreaQuery = "";
+  if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
+
+  const t = newTrainingTemplate();
+  state.trainings.unshift(t);
+  state.selectedId = t.id;
+  state.draft = deepClone(t);
+
+  const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
+  if (!s || !s.ok) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+    return;
+  }
+
+  state.showAll = false;
+
+  setDirty(false);
+  renderModuleDatalist();
+  renderAreaDatalist();
+  renderChapterAndStepPickers();
+  renderBusinessAreaPicker();
+  renderAiAnchorRow();
+  updateUiAll();
+}
+
+/* -------------------------
+   BLOCK 19D — Delete / purge / revert
+-------------------------- */
+function deleteSelected() {
+  if (!isWriterAllowed()) return;
+  if (!state.selectedId) return;
+
+  const idx = findTrainingIndexById(state.selectedId);
+  if (idx < 0) return;
+
+  state.trainings.splice(idx, 1);
+  const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
+  if (!s || !s.ok) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+    return;
+  }
+
+  state.selectedId = "";
+  state.draft = null;
+  setDirty(false);
+  renderModuleDatalist();
+  renderAreaDatalist();
+  updateUiAll();
+}
+
+function purgeAll() {
+  if (!isWriterAllowed()) return;
+
+  const p = DEPS.store && DEPS.store.purgeAll ? DEPS.store.purgeAll() : { ok: false };
+  if (!p || !p.ok) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte rensa", "bad");
+    return;
+  }
+
+  state.trainings = [];
+  state.selectedId = "";
+  state.draft = null;
+  state.showAll = false;
+  setDirty(false);
+  renderModuleDatalist();
+  renderAreaDatalist();
+  updateUiAll();
+}
+
+function revertUnsaved() {
+  if (!isWriterAllowed()) return;
+  if (!state.selectedId) return;
+  const idx = findTrainingIndexById(state.selectedId);
+  if (idx < 0) return;
+
+  // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+  ensureBusinessAreaSearchForSelectUi();
+
+  state.draft = deepClone(state.trainings[idx]);
+  setDirty(false);
+  renderBusinessAreaPicker();
+  renderAiAnchorRow();
+  updateUiAll();
+}
+
+/* -------------------------
+   BLOCK 19E — Save / publish (write back)
+-------------------------- */
+function writeBackDraft(status) {
+  if (!isWriterAllowed()) return;
+  if (!state.draft) return;
+
+  syncDraftFromInputs();
+  syncDraftTitleFromFields();
+  renderAiAnchorRow();
+
+  state.draft.status = (status === "published") ? "published" : "draft";
+
+  try {
+    // P0 FIX: If SELECT UI + search input exists, validation must read selected value from SELECT, not from search input.
+    const pickerEl = getBusinessPickerEl() || (dom && dom.businessArea);
+    const baseEl = (dom && dom.businessArea && String(dom.businessArea.tagName || "").toUpperCase() === "SELECT")
+      ? dom.businessArea
+      : pickerEl;
+
+    const sel = normStr(baseEl && baseEl.value);
+
+    if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
+      const other = normStr(dom && dom.businessAreaOther && dom.businessAreaOther.value);
+      if (other.length < 2) {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: Du valde Annat… men texten är tom eller för kort (minst 2 tecken).");
+        return;
+      }
+      state.draft.businessArea = other;
     }
 
-    state.trainings = [];
-    state.selectedId = "";
-    state.draft = null;
-    state.showAll = false;
-    setDirty(false);
-    renderModuleDatalist();
-    renderAreaDatalist();
-    updateUiAll();
+    const ba = normStr(state.draft.businessArea);
+    if (ba && ba.length > 80) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: För lång text (max 80 tecken).");
+      return;
+    }
+  } catch (_) { }
+
+  const v = (status === "published" && DEPS.contract && DEPS.contract.validateForPublish)
+    ? DEPS.contract.validateForPublish(state.draft)
+    : (DEPS.contract && DEPS.contract.validateTrainingForSave)
+      ? DEPS.contract.validateTrainingForSave(state.draft)
+      : { ok: true, reasons: [] };
+
+  if (!v.ok) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+    DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint((v.reasons || []).join(" "));
+    return;
   }
 
-  function revertUnsaved() {
-    if (!isWriterAllowed()) return;
-    if (!state.selectedId) return;
-    const idx = findTrainingIndexById(state.selectedId);
-    if (idx < 0) return;
+  if (status === "published" && !hasAnyItems()) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte publicera", "bad");
+    DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Publicering kräver minst 1 block/item.");
+    return;
+  }
 
-    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
-    ensureBusinessAreaSearchForSelectUi();
+  const idx = findTrainingIndexById(state.selectedId);
+  if (idx < 0) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Saknar vald utbildning", "bad");
+    return;
+  }
 
-    state.draft = deepClone(state.trainings[idx]);
-    setDirty(false);
+  state.trainings[idx] = deepClone(state.draft);
+
+  const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
+  if (!s || !s.ok) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+    return;
+  }
+
+  setDirty(false);
+  DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
+  renderModuleDatalist();
+  renderAreaDatalist();
+  renderBusinessAreaPicker();
+  renderAiAnchorRow();
+  updateUiAll();
+}
+
+/* -------------------------
+   BLOCK 19F — Event wiring (once)
+-------------------------- */
+function wireEventsOnce() {
+  if (page.__BOOTED === true) return;
+  page.__BOOTED = true;
+
+  dom.on(dom.btnNew, "click", createNewTraining);
+  dom.on(dom.btnDelete, "click", deleteSelected);
+  dom.on(dom.btnPurge, "click", purgeAll);
+  dom.on(dom.btnRevert, "click", revertUnsaved);
+
+  dom.on(dom.btnSaveDraft, "click", function () { writeBackDraft("draft"); });
+  dom.on(dom.btnSavePublish, "click", function () { writeBackDraft("published"); });
+
+  dom.on(dom.btnShowAll, "click", function () { state.showAll = true; refreshList(); updateDebug(); });
+
+  dom.on(dom.btnClear, "click", function () {
+    state.q = "";
+    state.fStatus = "";
+    state.onlyProblems = false;
+    if (dom.q) dom.q.value = "";
+    if (dom.fStatus) dom.fStatus.value = "";
+    if (dom.onlyProblems) dom.onlyProblems.checked = false;
+
+    state.businessAreaQuery = "";
+    if (dom.businessAreaSearch) dom.businessAreaSearch.value = "";
     renderBusinessAreaPicker();
+
+    state.showAll = false;
+    refreshList();
+    updateButtons();
     renderAiAnchorRow();
-    updateUiAll();
-  }
+    updateDebug();
+  });
 
-  function writeBackDraft(status) {
+  dom.on(dom.q, "input", function () {
+    state.q = normStr(dom.q && dom.q.value);
+    state.showAll = state.showAll || !!state.q;
+    refreshList();
+    updateButtons();
+    updateDebug();
+  });
+
+  dom.on(dom.fStatus, "change", function () {
+    state.fStatus = normStr(dom.fStatus && dom.fStatus.value);
+    state.showAll = true;
+    refreshList();
+    updateButtons();
+    updateDebug();
+  });
+
+  dom.on(dom.onlyProblems, "change", function () {
+    state.onlyProblems = !!(dom.onlyProblems && dom.onlyProblems.checked);
+    state.showAll = true;
+    refreshList();
+    updateButtons();
+    updateDebug();
+  });
+
+  dom.on(dom.btnModAll, "click", function () { dom.mod && dom.mod.focus && dom.mod.focus(); });
+
+  dom.on(dom.btnModClear, "click", function () {
     if (!isWriterAllowed()) return;
-    if (!state.draft) return;
-
+    if (dom.mod) dom.mod.value = "";
+    if (dom.area) dom.area.value = "";
+    renderAreaDatalist();
     syncDraftFromInputs();
     syncDraftTitleFromFields();
     renderAiAnchorRow();
+    setDirty(true);
+    updateButtons();
+    updateDebug();
+  });
 
-    state.draft.status = (status === "published") ? "published" : "draft";
-
-    try {
-      // P0 FIX: If SELECT UI + search input exists, validation must read selected value from SELECT, not from search input.
-      const pickerEl = getBusinessPickerEl() || (dom && dom.businessArea);
-      const baseEl = (dom && dom.businessArea && String(dom.businessArea.tagName || "").toUpperCase() === "SELECT")
-        ? dom.businessArea
-        : pickerEl;
-
-      const sel = normStr(baseEl && baseEl.value);
-
-      if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
-        const other = normStr(dom && dom.businessAreaOther && dom.businessAreaOther.value);
-        if (other.length < 2) {
-          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-          DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: Du valde Annat… men texten är tom eller för kort (minst 2 tecken).");
-          return;
-        }
-        state.draft.businessArea = other;
-      }
-
-      const ba = normStr(state.draft.businessArea);
-      if (ba && ba.length > 80) {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: För lång text (max 80 tecken).");
-        return;
-      }
-    } catch (_) { }
-
-    const v = (status === "published" && DEPS.contract && DEPS.contract.validateForPublish)
-      ? DEPS.contract.validateForPublish(state.draft)
-      : (DEPS.contract && DEPS.contract.validateTrainingForSave)
-        ? DEPS.contract.validateTrainingForSave(state.draft)
-        : { ok: true, reasons: [] };
-
-    if (!v.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint((v.reasons || []).join(" "));
-      return;
-    }
-
-    if (status === "published" && !hasAnyItems()) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte publicera", "bad");
-      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Publicering kräver minst 1 block/item.");
-      return;
-    }
-
-    const idx = findTrainingIndexById(state.selectedId);
-    if (idx < 0) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Saknar vald utbildning", "bad");
-      return;
-    }
-
-    state.trainings[idx] = deepClone(state.draft);
-
-    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
-    if (!s || !s.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-      return;
-    }
-
-    setDirty(false);
-    DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
-    renderModuleDatalist();
-    renderAreaDatalist();
-    renderBusinessAreaPicker();
-    renderAiAnchorRow();
-    updateUiAll();
-  }
-
-  function wireEventsOnce() {
-    if (page.__BOOTED === true) return;
-    page.__BOOTED = true;
-
-    dom.on(dom.btnNew, "click", createNewTraining);
-    dom.on(dom.btnDelete, "click", deleteSelected);
-    dom.on(dom.btnPurge, "click", purgeAll);
-    dom.on(dom.btnRevert, "click", revertUnsaved);
-
-    dom.on(dom.btnSaveDraft, "click", function () { writeBackDraft("draft"); });
-    dom.on(dom.btnSavePublish, "click", function () { writeBackDraft("published"); });
-
-    dom.on(dom.btnShowAll, "click", function () { state.showAll = true; refreshList(); updateDebug(); });
-
-    dom.on(dom.btnClear, "click", function () {
-      state.q = "";
-      state.fStatus = "";
-      state.onlyProblems = false;
-      if (dom.q) dom.q.value = "";
-      if (dom.fStatus) dom.fStatus.value = "";
-      if (dom.onlyProblems) dom.onlyProblems.checked = false;
-
-      state.businessAreaQuery = "";
-      if (dom.businessAreaSearch) dom.businessAreaSearch.value = "";
-      renderBusinessAreaPicker();
-
-      state.showAll = false;
-      refreshList();
-      updateButtons();
-      renderAiAnchorRow();
-      updateDebug();
-    });
-
-    dom.on(dom.q, "input", function () {
-      state.q = normStr(dom.q && dom.q.value);
-      state.showAll = state.showAll || !!state.q;
-      refreshList();
-      updateButtons();
-      updateDebug();
-    });
-
-    dom.on(dom.fStatus, "change", function () {
-      state.fStatus = normStr(dom.fStatus && dom.fStatus.value);
-      state.showAll = true;
-      refreshList();
-      updateButtons();
-      updateDebug();
-    });
-
-    dom.on(dom.onlyProblems, "change", function () {
-      state.onlyProblems = !!(dom.onlyProblems && dom.onlyProblems.checked);
-      state.showAll = true;
-      refreshList();
-      updateButtons();
-      updateDebug();
-    });
-
-    dom.on(dom.btnModAll, "click", function () { dom.mod && dom.mod.focus && dom.mod.focus(); });
-
-    dom.on(dom.btnModClear, "click", function () {
-      if (!isWriterAllowed()) return;
-      if (dom.mod) dom.mod.value = "";
-      if (dom.area) dom.area.value = "";
-      renderAreaDatalist();
-      syncDraftFromInputs();
-      syncDraftTitleFromFields();
-      renderAiAnchorRow();
-      setDirty(true);
-      updateButtons();
-      updateDebug();
-    });
-
-    // AI-innehåll change: uppdatera UI (ingen låsning)
-    dom.on(dom.aiContent, "change", function () {
-      if (DOCUMENT_ONLY) {
-        enforceAiContentUiDocumentOnly();
-        setAiHint("Dokumentläge är låst på denna sida (legacy).");
-      } else {
-        const sel = readAiContentSelection();
-        if (sel.uiMode === "document") setAiHint("AI-innehåll: Dokument (infoblad).");
-        else if (sel.uiMode === "questions") setAiHint("AI-innehåll: Frågor & svar.");
-        else setAiHint("AI-innehåll: Mix (info + frågor).");
-      }
-      updateAiControlsVisibility();
-      updateButtons();
-      updateDebug();
-    });
-
-    const onEditorChange = function (e) {
-      if (!state.draft) return;
-
-      const tid = (e && e.target && e.target.id) ? String(e.target.id) : "";
-      if (tid === "courseTrack") {
-        renderAiAnchorRow();
-        updateButtons();
-        updateDebug();
-        return;
-      }
-
-      syncDraftFromInputs();
-      renderAreaDatalist();
-      syncDraftTitleFromFields();
-      renderAiAnchorRow();
-
-      setDirty(true);
-      updateButtons();
-      updateDebug();
-    };
-
-    dom.on(dom.mod, "input", onEditorChange);
-    dom.on(dom.area, "input", onEditorChange);
-    dom.on(dom.courseTitle, "change", onEditorChange);
-    dom.on(dom.courseStep, "change", onEditorChange);
-
-    dom.on(dom.courseTrack, "change", onEditorChange);
-    dom.on(dom.courseTrack, "input", onEditorChange);
-
-    dom.on(dom.goalsLevel, "change", function () {
-      if (state.draft) {
-        syncDraftFromInputs();
-        renderAiAnchorRow();
-        setDirty(true);
-        updateButtons();
-        updateDebug();
-      }
-    });
-    dom.on(dom.goals, "input", function () {
-      if (state.draft) {
-        syncDraftFromInputs();
-        setDirty(true);
-        updateButtons();
-        updateDebug();
-      }
-    });
-
-    dom.on(dom.businessAreaSearch, "input", function () {
-      state.businessAreaQuery = normStr(dom.businessAreaSearch && dom.businessAreaSearch.value);
-      renderBusinessAreaPicker();
-      if (state.draft) {
-        syncDraftFromInputs();
-        setDirty(true);
-        updateButtons();
-      }
-      renderAiAnchorRow();
-      updateDebug();
-    });
-
-    dom.on(dom.businessArea, "change", function () {
-      if (state.draft) {
-        syncDraftFromInputs();
-        renderBusinessAreaPicker();
-        renderAiAnchorRow();
-        setDirty(true);
-        updateButtons();
-        updateDebug();
-      }
-    });
-    dom.on(dom.businessArea, "input", function () {
-      if (state.draft) {
-        syncDraftFromInputs();
-        renderAiAnchorRow();
-        setDirty(true);
-        updateButtons();
-        updateDebug();
-      }
-    });
-    dom.on(dom.businessAreaOther, "input", function () {
-      if (state.draft) {
-        syncDraftFromInputs();
-        renderAiAnchorRow();
-        setDirty(true);
-        updateButtons();
-        updateDebug();
-      }
-    });
-
-    dom.on(dom.btnTestAI, "click", testAi);
-    dom.on(dom.btnGenAI, "click", generateAi);
-
-    dom.on(dom.btnLogout, "click", function () {
-      try {
-        if (window.HRApp && typeof window.HRApp.logout === "function") window.HRApp.logout();
-        else if (window.HRApp && typeof window.HRApp.clearSession === "function") window.HRApp.clearSession();
-      } catch (_) { }
-      location.href = "./login.html";
-    });
-  }
-
-  function bootWhenReady() {
-    if (!depsReady()) {
-      setLock("BOOT: väntar på moduler (core/store/contract/render/dom)…");
-      updateUiAll();
-      return false;
-    }
-
-    clearLock();
-    refreshDeps();
-
-    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
-    ensureBusinessAreaSearchForSelectUi();
-
-    const load = (DEPS.store && DEPS.store.load) ? DEPS.store.load() : { ok: false };
-    if (!load.ok && load.corrupt) {
-      setLock(DEPS.store && DEPS.store.lockReasonFor ? DEPS.store.lockReasonFor() : "Korrupt trainings.");
-      state.trainings = [];
+  // AI-innehåll change: uppdatera UI (ingen låsning)
+  dom.on(dom.aiContent, "change", function () {
+    if (DOCUMENT_ONLY) {
+      enforceAiContentUiDocumentOnly();
+      setAiHint("Dokumentläge är låst på denna sida (legacy).");
     } else {
-      state.trainings = safeArr(load.trainings);
-      clearLock();
+      const sel = readAiContentSelection();
+      if (sel.uiMode === "document") setAiHint("AI-innehåll: Dokument (infoblad).");
+      else if (sel.uiMode === "questions") setAiHint("AI-innehåll: Frågor & svar.");
+      else setAiHint("AI-innehåll: Mix (info + frågor).");
+    }
+    updateAiControlsVisibility();
+    updateButtons();
+    updateDebug();
+  });
+
+  const onEditorChange = function (e) {
+    if (!state.draft) return;
+
+    const tid = (e && e.target && e.target.id) ? String(e.target.id) : "";
+    if (tid === "courseTrack") {
+      renderAiAnchorRow();
+      updateButtons();
+      updateDebug();
+      return;
     }
 
-    renderModuleDatalist();
+    syncDraftFromInputs();
     renderAreaDatalist();
-    renderChapterAndStepPickers();
-    renderBusinessAreaPicker();
-    state.showAll = false;
-
-    wireEventsOnce();
+    syncDraftTitleFromFields();
     renderAiAnchorRow();
 
-    // If legacy doc-only, enforce; annars: låt dropdown fungera
-    enforceAiContentUiDocumentOnly();
+    setDirty(true);
+    updateButtons();
+    updateDebug();
+  };
 
+  dom.on(dom.mod, "input", onEditorChange);
+  dom.on(dom.area, "input", onEditorChange);
+  dom.on(dom.courseTitle, "change", onEditorChange);
+  dom.on(dom.courseStep, "change", onEditorChange);
+
+  dom.on(dom.courseTrack, "change", onEditorChange);
+  dom.on(dom.courseTrack, "input", onEditorChange);
+
+  dom.on(dom.goalsLevel, "change", function () {
+    if (state.draft) {
+      syncDraftFromInputs();
+      renderAiAnchorRow();
+      setDirty(true);
+      updateButtons();
+      updateDebug();
+    }
+  });
+  dom.on(dom.goals, "input", function () {
+    if (state.draft) {
+      syncDraftFromInputs();
+      setDirty(true);
+      updateButtons();
+      updateDebug();
+    }
+  });
+
+  dom.on(dom.businessAreaSearch, "input", function () {
+    state.businessAreaQuery = normStr(dom.businessAreaSearch && dom.businessAreaSearch.value);
+    renderBusinessAreaPicker();
+    if (state.draft) {
+      syncDraftFromInputs();
+      setDirty(true);
+      updateButtons();
+    }
+    renderAiAnchorRow();
+    updateDebug();
+  });
+
+  dom.on(dom.businessArea, "change", function () {
+    if (state.draft) {
+      syncDraftFromInputs();
+      renderBusinessAreaPicker();
+      renderAiAnchorRow();
+      setDirty(true);
+      updateButtons();
+      updateDebug();
+    }
+  });
+  dom.on(dom.businessArea, "input", function () {
+    if (state.draft) {
+      syncDraftFromInputs();
+      renderAiAnchorRow();
+      setDirty(true);
+      updateButtons();
+      updateDebug();
+    }
+  });
+  dom.on(dom.businessAreaOther, "input", function () {
+    if (state.draft) {
+      syncDraftFromInputs();
+      renderAiAnchorRow();
+      setDirty(true);
+      updateButtons();
+      updateDebug();
+    }
+  });
+
+  dom.on(dom.btnTestAI, "click", testAi);
+  dom.on(dom.btnGenAI, "click", generateAi);
+
+  dom.on(dom.btnLogout, "click", function () {
+    try {
+      if (window.HRApp && typeof window.HRApp.logout === "function") window.HRApp.logout();
+      else if (window.HRApp && typeof window.HRApp.clearSession === "function") window.HRApp.clearSession();
+    } catch (_) { }
+    location.href = "./login.html";
+  });
+}
+
+/* -------------------------
+   BLOCK 19G — Boot (deps + load + retry)
+-------------------------- */
+function bootWhenReady() {
+  if (!depsReady()) {
+    setLock("BOOT: väntar på moduler (core/store/contract/render/dom)…");
     updateUiAll();
-    setTimeout(updateUiAll, 0);
-    setTimeout(updateUiAll, 50);
-    setTimeout(updateUiAll, 300);
+    return false;
+  }
 
-    (async function () { try { await ensureSdkReady(); } catch (_) { } })();
+  clearLock();
+  refreshDeps();
 
-    (async function () {
-      try {
-        const r = await loadCatalogOnce();
-        if (r && r.ok) {
-          renderModuleDatalist();
-          renderAreaDatalist();
-          renderChapterAndStepPickers();
+  // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+  ensureBusinessAreaSearchForSelectUi();
 
-          syncDraftFromInputs();
-          renderAiAnchorRow();
-          updateUiAll();
-        } else {
-          updateUiAll();
-        }
-      } catch (_) {
-        state.catalogStatus = "error";
-        state.catalogErr = "Katalog exception.";
+  const load = (DEPS.store && DEPS.store.load) ? DEPS.store.load() : { ok: false };
+  if (!load.ok && load.corrupt) {
+    setLock(DEPS.store && DEPS.store.lockReasonFor ? DEPS.store.lockReasonFor() : "Korrupt trainings.");
+    state.trainings = [];
+  } else {
+    state.trainings = safeArr(load.trainings);
+    clearLock();
+  }
+
+  renderModuleDatalist();
+  renderAreaDatalist();
+  renderChapterAndStepPickers();
+  renderBusinessAreaPicker();
+  state.showAll = false;
+
+  wireEventsOnce();
+  renderAiAnchorRow();
+
+  // If legacy doc-only, enforce; annars: låt dropdown fungera
+  enforceAiContentUiDocumentOnly();
+
+  updateUiAll();
+  setTimeout(updateUiAll, 0);
+  setTimeout(updateUiAll, 50);
+  setTimeout(updateUiAll, 300);
+
+  (async function () { try { await ensureSdkReady(); } catch (_) { } })();
+
+  (async function () {
+    try {
+      const r = await loadCatalogOnce();
+      if (r && r.ok) {
+        renderModuleDatalist();
+        renderAreaDatalist();
+        renderChapterAndStepPickers();
+
+        syncDraftFromInputs();
+        renderAiAnchorRow();
+        updateUiAll();
+      } else {
         updateUiAll();
       }
-    })();
-
-    return true;
-  }
-
-  const RETRIES = [0, 50, 150, 300, 600, 1000];
-  let attempt = 0;
-
-  function tryBoot() {
-    const ok = bootWhenReady();
-    if (ok) return;
-
-    if (attempt >= RETRIES.length - 1) {
-      setLock("BOOT: deps saknas (core/store/contract/render/dom).");
+    } catch (_) {
+      state.catalogStatus = "error";
+      state.catalogErr = "Katalog exception.";
       updateUiAll();
-      return;
     }
+  })();
 
-    attempt++;
-    setTimeout(tryBoot, RETRIES[attempt]);
+  return true;
+}
+
+const RETRIES = [0, 50, 150, 300, 600, 1000];
+let attempt = 0;
+
+function tryBoot() {
+  const ok = bootWhenReady();
+  if (ok) return;
+
+  if (attempt >= RETRIES.length - 1) {
+    setLock("BOOT: deps saknas (core/store/contract/render/dom).");
+    updateUiAll();
+    return;
   }
 
-  try { tryBoot(); } catch (_) { setLock("BOOT: exception (fail-closed)."); updateUiAll(); }
-})();
+  attempt++;
+  setTimeout(tryBoot, RETRIES[attempt]);
+}
+
+try { tryBoot(); } catch (_) { setLock("BOOT: exception (fail-closed)."); updateUiAll(); }
