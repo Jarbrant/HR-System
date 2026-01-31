@@ -28,13 +28,22 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
 - Header-namn matchar CORS allowlist: X-Hr-Client + X-Hr-Sdk
 - Context normaliseras alltid till { text:"..." } (så Worker kan inferera + undvika tom context)
 - Payload size-check görs på UTF-8 bytes (inte string.length)
+
+PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
+- mode=document -> POST /v1/ai/document (inte /v1/ai/generate)
+- mode=training -> POST /v1/ai/training
+- Backward compatible: om /document|/training ger 404, fallback till /v1/ai/generate
+- Skickar questionType/feedbackEnabled bara i training-läge (minskar valideringsrisk i document-läge)
 ============================================================ */
 
 (function(){
   "use strict";
 
+  /* =========================
+     BLOCK 01/10 — SDK root + version + state
+  ========================== */
   const SDK = {};
-  SDK.VERSION = "1.1.3";
+  SDK.VERSION = "1.1.4";
 
   const STATE = {
     inited: false,
@@ -43,6 +52,9 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
     getToken: null
   };
 
+  /* =========================
+     BLOCK 02/10 — Small helpers (strings/objects)
+  ========================== */
   function safeStr(v){
     return (v === null || v === undefined) ? "" : String(v);
   }
@@ -57,6 +69,13 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
     return u;
   }
 
+  function isObj(v){
+    return !!v && typeof v === "object" && !Array.isArray(v);
+  }
+
+  /* =========================
+     BLOCK 03/10 — Contract helpers (mkErr/mkOk) + requestId helpers
+  ========================== */
   function mkErr(code, message, details, requestId){
     const out = {
       ok: false,
@@ -74,10 +93,6 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
     const out = { ok: true, data: (data === undefined ? null : data) };
     if (requestId) out.requestId = safeStr(requestId);
     return out;
-  }
-
-  function isObj(v){
-    return !!v && typeof v === "object" && !Array.isArray(v);
   }
 
   function getHeaderRequestId(headers){
@@ -115,6 +130,9 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
     }
   }
 
+  /* =========================
+     BLOCK 04/10 — Auth + trace headers + UTF8 bytes
+  ========================== */
   function getAuthHeader(){
     try{
       if (!STATE.requireAuth) return null;
@@ -145,6 +163,9 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
     }
   }
 
+  /* =========================
+     BLOCK 05/10 — Context normalization (always {text:"..."})
+  ========================== */
   // PATCH: context normaliseras alltid till { text:"..." }
   // - Worker läser context.text / contextText / value → vi säkrar text.
   function normalizeContext(input){
@@ -214,6 +235,9 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
     }
   }
 
+  /* =========================
+     BLOCK 06/10 — Network layer (safeFetchJson) + worker contract handling
+  ========================== */
   async function safeFetchJson(url, opts){
     try{
       const r = await fetch(url, opts);
@@ -281,13 +305,18 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
     }
   }
 
+  /* =========================
+     BLOCK 07/10 — Init guard
+  ========================== */
   function ensureInited(){
     if (!STATE.inited) return mkErr("NOT_INITED", "SDK ej initierad");
     if (!STATE.baseUrl) return mkErr("NO_BASE_URL", "Worker baseUrl saknas");
     return null;
   }
 
-  // ---------- Public API ----------
+  /* =========================
+     BLOCK 08/10 — Public API: init()
+  ========================== */
   SDK.init = function(cfg){
     try{
       const c = isObj(cfg) ? cfg : {};
@@ -315,6 +344,9 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
     }
   };
 
+  /* =========================
+     BLOCK 09/10 — Public API: health()
+  ========================== */
   SDK.health = async function(){
     const notOk = ensureInited();
     if (notOk) return notOk;
@@ -334,6 +366,9 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
     });
   };
 
+  /* =========================
+     BLOCK 10/10 — Public API: aiGenerate() (MODE endpoint fix + fallback)
+  ========================== */
   SDK.aiGenerate = async function(payload){
     const notOk = ensureInited();
     if (notOk) return notOk;
@@ -359,7 +394,10 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
       return mkErr("VALIDATION_ERROR", "language saknas", {});
     }
 
-    const url = STATE.baseUrl + "/v1/ai/generate";
+    // ✅ mode->endpoint (fixar UI_NO_QUESTIONS i document-läge)
+    const primaryPath = (mode === "document") ? "/v1/ai/document" : "/v1/ai/training";
+    const primaryUrl = STATE.baseUrl + primaryPath;
+
     let headers = {
       "Accept": "application/json",
       "Content-Type": "application/json"
@@ -370,14 +408,18 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
 
     headers = addClientTraceHeaders(headers);
 
+    // Bygg body. Skicka questionType/feedbackEnabled bara i training-läge.
     const bodyObj = {
       mode,
       count,
       language,
-      questionType,
-      feedbackEnabled,
       context: ctxObj
     };
+
+    if (mode === "training"){
+      bodyObj.questionType = questionType;
+      bodyObj.feedbackEnabled = feedbackEnabled;
+    }
 
     let body = "";
     try{
@@ -390,12 +432,26 @@ PATCH v1.1.3 (CORS+CONTEXT-CONTRACT):
       return mkErr("VALIDATION_ERROR", "Kunde inte serialisera payload", { message: safeStr(e && e.message) });
     }
 
-    return await safeFetchJson(url, {
+    // 1) Försök med mode-specifik endpoint
+    const res1 = await safeFetchJson(primaryUrl, {
       method: "POST",
       mode: "cors",
       headers,
       body
     });
+
+    // 2) Backward compatibility: om worker saknar /document|/training -> fallback till /generate
+    if (res1 && res1.ok === false && res1.error && res1.error.code === "NOT_FOUND"){
+      const fallbackUrl = STATE.baseUrl + "/v1/ai/generate";
+      return await safeFetchJson(fallbackUrl, {
+        method: "POST",
+        mode: "cors",
+        headers,
+        body
+      });
+    }
+
+    return res1;
   };
 
   // ---------- Export (hardened) ----------
