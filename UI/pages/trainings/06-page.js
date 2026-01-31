@@ -43,7 +43,7 @@ DoD:
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.4.6-AO-TRAININGS-VERKSAMHET-ANCHOR-01-DOCONLY"; // PATCH: UI shows document-only + request stronger + skip question items in doc-only
+  page.__VERSION = "v1.4.7-AO-TRAININGS-VERKSAMHET-ANCHOR-01-DOCONLY"; // PATCH: auto-create business search input for SELECT-only UIs
 
   // Document-only flag (NO STORAGE)
   const DOCUMENT_ONLY = true;
@@ -186,6 +186,48 @@ DoD:
   // aliasa den till businessArea så all logik (datalist/fill/read/save) funkar.
   if (dom && !dom.businessArea && dom.businessAreaSearch) {
     dom.businessArea = dom.businessAreaSearch;
+  }
+
+  /* =========================
+     BLOCK 3.05/19 — P0 UI: Ensure "Verksamhet search" exists for SELECT UIs
+     - If UI has <select id="businessArea"> but no input#businessAreaSearch,
+       create a lightweight search input (NO STORAGE) so 3+ bokstäver filter is possible.
+  ========================== */
+  function ensureBusinessAreaSearchForSelectUi() {
+    try {
+      if (!dom) return;
+      if (!dom.businessArea) return;
+
+      const tag = String(dom.businessArea.tagName || "").toUpperCase();
+      if (tag !== "SELECT") return;
+
+      // If already present, nothing to do.
+      if (dom.businessAreaSearch) return;
+
+      const parent = dom.businessArea.parentNode;
+      if (!parent || typeof parent.insertBefore !== "function") return;
+
+      // Avoid duplicates if something else created it.
+      const existing = byId("businessAreaSearch");
+      if (existing) {
+        dom.businessAreaSearch = existing;
+        return;
+      }
+
+      const inp = document.createElement("input");
+      inp.id = "businessAreaSearch";
+      inp.type = "text";
+      inp.autocomplete = "off";
+      inp.placeholder = "Sök verksamhet (min 3 bokstäver)…";
+      // Try to match common input styling without requiring CSS changes
+      inp.className = "input";
+      inp.setAttribute("aria-label", "Sök verksamhet");
+      inp.style.margin = "6px 0";
+      inp.style.width = "100%";
+
+      parent.insertBefore(inp, dom.businessArea);
+      dom.businessAreaSearch = inp;
+    } catch (_) { }
   }
 
   /* =========================
@@ -1471,6 +1513,9 @@ DoD:
     const d = state.draft;
     if (!d || !dom) return;
 
+    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+    ensureBusinessAreaSearchForSelectUi();
+
     if (dom.mod) dom.mod.value = normStr(d.module);
     renderAreaDatalist();
     if (dom.area) dom.area.value = normStr(d.area);
@@ -2017,6 +2062,9 @@ DoD:
       return;
     }
 
+    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+    ensureBusinessAreaSearchForSelectUi();
+
     state.businessAreaQuery = "";
     if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
 
@@ -2057,6 +2105,9 @@ DoD:
 
   function createNewTraining() {
     if (!isWriterAllowed()) return;
+
+    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+    ensureBusinessAreaSearchForSelectUi();
 
     state.businessAreaQuery = "";
     if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
@@ -2129,6 +2180,9 @@ DoD:
     if (!state.selectedId) return;
     const idx = findTrainingIndexById(state.selectedId);
     if (idx < 0) return;
+
+    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+    ensureBusinessAreaSearchForSelectUi();
 
     state.draft = deepClone(state.trainings[idx]);
     setDirty(false);
@@ -2399,6 +2453,9 @@ DoD:
 
     clearLock();
     refreshDeps();
+
+    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+    ensureBusinessAreaSearchForSelectUi();
 
     const load = (DEPS.store && DEPS.store.load) ? DEPS.store.load() : { ok: false };
     if (!load.ok && load.corrupt) {
