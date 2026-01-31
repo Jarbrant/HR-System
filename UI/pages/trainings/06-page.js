@@ -43,7 +43,7 @@ DoD:
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.4.7-AO-TRAININGS-VERKSAMHET-ANCHOR-01-DOCONLY"; // PATCH: auto-create business search input for SELECT-only UIs
+  page.__VERSION = "v1.4.8-AO-TRAININGS-VERKSAMHET-ANCHOR-01-DOCONLY"; // PATCH: P0 fix writeBackDraft SELECT+search
 
   // Document-only flag (NO STORAGE)
   const DOCUMENT_ONLY = true;
@@ -2202,8 +2202,13 @@ DoD:
     state.draft.status = (status === "published") ? "published" : "draft";
 
     try {
+      // P0 FIX: If SELECT UI + search input exists, validation must read selected value from SELECT, not from search input.
       const pickerEl = getBusinessPickerEl() || (dom && dom.businessArea);
-      const sel = normStr(pickerEl && pickerEl.value);
+      const baseEl = (dom && dom.businessArea && String(dom.businessArea.tagName || "").toUpperCase() === "SELECT")
+        ? dom.businessArea
+        : pickerEl;
+
+      const sel = normStr(baseEl && baseEl.value);
 
       if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
         const other = normStr(dom && dom.businessAreaOther && dom.businessAreaOther.value);
