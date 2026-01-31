@@ -31,7 +31,7 @@ DoD (för denna patch):
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.4.9-AO-TRAININGS-VERKSAMHET-ANCHOR-01-MODEFIX"; // PATCH: dropdown selectable + non-sticky import fail-closed
+  page.__VERSION = "v1.4.10-AO-TRAININGS-VERKSAMHET-ANCHOR-01-FLATTENFIX"; // PATCH: flatten nested question-shape + fail-closed on missing facit
 
   // NOTE: Document-only är INTE längre hårdlåst i UI.
   // Fail-closed sker per valt mode (document/questions/mix).
@@ -740,6 +740,129 @@ DoD (för denna patch):
       if (t) out.push(t);
     }
     return out;
+  }
+
+  // P0: Flatten nested question shape (root or item.data) into stable flat shape.
+  // Fail-closed: we NEVER guess facit. If correctIndex/correctIndices saknas/ogiltigt => valid=false.
+  function toIntStrict(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    const i = Math.trunc(n);
+    if (i !== n) return null;
+    return i;
+  }
+  function safeDel(obj, key) {
+    try { delete obj[key]; } catch (_) { obj[key] = undefined; }
+  }
+  function firstStr() {
+    for (let i = 0; i < arguments.length; i++) {
+      const s = arguments[i];
+      if (typeof s === "string" && normStr(s)) return normStr(s);
+    }
+    return "";
+  }
+  function extractQuestionTextAny(src) {
+    if (!src || typeof src !== "object") return "";
+    if (typeof src.question === "string") return normStr(src.question);
+    if (isObj(src.question) && typeof src.question.text === "string") return normStr(src.question.text);
+    if (typeof src.text === "string") return normStr(src.text);
+    if (typeof src.prompt === "string") return normStr(src.prompt);
+    return "";
+  }
+  function extractOptionsAny(src) {
+    if (!src || typeof src !== "object") return [];
+    if (Array.isArray(src.options)) return normalizeOptionsAny(src.options);
+    if (Array.isArray(src.choices)) return normalizeOptionsAny({ choices: src.choices });
+    if (Array.isArray(src.answers)) return normalizeOptionsAny({ answers: src.answers });
+    if (isObj(src.question) && Array.isArray(src.question.choices)) return normalizeOptionsAny({ choices: src.question.choices });
+    return [];
+  }
+  function extractCorrectIndexAny(src) {
+    if (!src || typeof src !== "object") return null;
+    const cand = (src.correctIndex != null) ? src.correctIndex
+      : (src.answerIndex != null) ? src.answerIndex
+        : (src.correctAnswerIndex != null) ? src.correctAnswerIndex
+          : null;
+    const i = toIntStrict(cand);
+    return i;
+  }
+  function extractCorrectIndicesAny(src) {
+    if (!src || typeof src !== "object") return [];
+    const cand = Array.isArray(src.correctIndices) ? src.correctIndices
+      : Array.isArray(src.correctAnswers) ? src.correctAnswers
+        : Array.isArray(src.answerIndices) ? src.answerIndices
+          : [];
+    const out = [];
+    for (const v of cand) {
+      const i = toIntStrict(v);
+      if (i != null) out.push(i);
+    }
+    return out;
+  }
+  function flattenQuestionToFlatInPlace(item) {
+    if (!item || typeof item !== "object") return { ok: false, valid: false };
+
+    const data = isObj(item.data) ? item.data : null;
+    const tRoot = normStr(item.type).toLowerCase();
+    const tData = data ? normStr(data.type).toLowerCase() : "";
+
+    const isQuestion = (tRoot === "question" || tData === "question" ||
+      typeof item.question === "string" || (data && typeof data.question === "string") ||
+      (isObj(item.question) && typeof item.question.text === "string") ||
+      (data && isObj(data.question) && typeof data.question.text === "string"));
+
+    if (!isQuestion) return { ok: true, valid: true, skipped: true };
+
+    // Prefer root fields, else fallback to data fields
+    const q = scrubObjectObjectToken(firstStr(
+      extractQuestionTextAny(item),
+      data ? extractQuestionTextAny(data) : ""
+    ));
+
+    const opts = extractOptionsAny(item).length ? extractOptionsAny(item) : (data ? extractOptionsAny(data) : []);
+    const options = opts.map(x => scrubObjectObjectToken(String(x ?? ""))).filter(Boolean);
+
+    let correctIndex = extractCorrectIndexAny(item);
+    if (correctIndex == null && data) correctIndex = extractCorrectIndexAny(data);
+
+    let correctIndices = extractCorrectIndicesAny(item);
+    if (!correctIndices.length && data) correctIndices = extractCorrectIndicesAny(data);
+
+    // Explanation mapping (best effort, not required for validity)
+    const exp = scrubObjectObjectToken(firstStr(
+      item.explanation, item.rationale, item.feedback, item.reason,
+      data ? data.explanation : "", data ? data.rationale : "", data ? data.feedback : "", data ? data.reason : ""
+    ));
+
+    // Bounds-check (only if we have options)
+    if (options.length >= 2) {
+      if (correctIndex != null && (correctIndex < 0 || correctIndex >= options.length)) correctIndex = null;
+      if (correctIndices && correctIndices.length) {
+        correctIndices = correctIndices.filter(i => i >= 0 && i < options.length);
+      }
+    } else {
+      // No valid options => cannot be a safe MCQ
+      correctIndex = null;
+      correctIndices = [];
+    }
+
+    // Write back flat
+    item.type = "question";
+    if (q) item.question = q;
+    if (options.length) item.options = options;
+
+    if (correctIndex != null) item.correctIndex = correctIndex;
+    else safeDel(item, "correctIndex");
+
+    if (correctIndices && correctIndices.length) item.correctIndices = Array.from(new Set(correctIndices));
+    else safeDel(item, "correctIndices");
+
+    if (exp) item.explanation = exp;
+
+    // Validity (fail-closed: must have q + options + facit)
+    const hasFacit = (correctIndex != null) || (Array.isArray(item.correctIndices) && item.correctIndices.length > 0);
+    const valid = !!(q && options.length >= 2 && hasFacit);
+    return { ok: true, valid: valid };
   }
 
   function flattenChoiceQuestionShapeInPlace(it) {
@@ -1615,158 +1738,158 @@ DoD (för denna patch):
    - INGA funktionsändringar (endast struktur/kommentarer)
 ========================== */
 
-/* -------------------------
-   BLOCK 17A — Modal title helper
--------------------------- */
-function itemTitleForModal(blockIdx, itemIdx, item) {
-  const bi = Number(blockIdx) + 1;
-  const ii = Number(itemIdx) + 1;
-  const kind = (item && typeof item === "object" && typeof item.type === "string") ? normStr(item.type) : "";
-  const k = kind ? (" • " + kind) : "";
-  return `Block ${bi} – Item ${ii}${k}`;
-}
+  /* -------------------------
+     BLOCK 17A — Modal title helper
+  -------------------------- */
+  function itemTitleForModal(blockIdx, itemIdx, item) {
+    const bi = Number(blockIdx) + 1;
+    const ii = Number(itemIdx) + 1;
+    const kind = (item && typeof item === "object" && typeof item.type === "string") ? normStr(item.type) : "";
+    const k = kind ? (" • " + kind) : "";
+    return `Block ${bi} – Item ${ii}${k}`;
+  }
 
-/* -------------------------
-   BLOCK 17B — Resolve draft block + item (fail-closed)
--------------------------- */
-function getDraftBlockAndItem(blockIdx, itemIdx) {
-  if (!state.draft) return { ok: false };
-  const blocks = currentBlocks();
+  /* -------------------------
+     BLOCK 17B — Resolve draft block + item (fail-closed)
+  -------------------------- */
+  function getDraftBlockAndItem(blockIdx, itemIdx) {
+    if (!state.draft) return { ok: false };
+    const blocks = currentBlocks();
 
-  if (!Array.isArray(state.draft.blocks)) state.draft.blocks = blocks.slice();
-  const b = state.draft.blocks[blockIdx];
-  if (!b || !Array.isArray(b.items)) return { ok: false };
+    if (!Array.isArray(state.draft.blocks)) state.draft.blocks = blocks.slice();
+    const b = state.draft.blocks[blockIdx];
+    if (!b || !Array.isArray(b.items)) return { ok: false };
 
-  const it = b.items[itemIdx];
-  if (it == null) return { ok: false };
+    const it = b.items[itemIdx];
+    if (it == null) return { ok: false };
 
-  return { ok: true, block: b, item: it, blocks: state.draft.blocks };
-}
+    return { ok: true, block: b, item: it, blocks: state.draft.blocks };
+  }
 
-/* -------------------------
-   BLOCK 17C — Item modal (open/save/delete)
--------------------------- */
-function openItemModal(blockIdx, itemIdx) {
-  if (!DEPS.render || typeof DEPS.render.openItemModal !== "function") return;
+  /* -------------------------
+     BLOCK 17C — Item modal (open/save/delete)
+  -------------------------- */
+  function openItemModal(blockIdx, itemIdx) {
+    if (!DEPS.render || typeof DEPS.render.openItemModal !== "function") return;
 
-  const got = getDraftBlockAndItem(blockIdx, itemIdx);
-  if (!got.ok) return;
+    const got = getDraftBlockAndItem(blockIdx, itemIdx);
+    if (!got.ok) return;
 
-  const canWrite = isWriterAllowed();
-  const item = got.item;
+    const canWrite = isWriterAllowed();
+    const item = got.item;
 
-  DEPS.render.openItemModal({
-    title: itemTitleForModal(blockIdx, itemIdx, item),
-    item: deepClone(item),
-    canWrite: canWrite,
-    onSave: function (updated) {
-      if (!isWriterAllowed()) return;
+    DEPS.render.openItemModal({
+      title: itemTitleForModal(blockIdx, itemIdx, item),
+      item: deepClone(item),
+      canWrite: canWrite,
+      onSave: function (updated) {
+        if (!isWriterAllowed()) return;
 
-      const again = getDraftBlockAndItem(blockIdx, itemIdx);
-      if (!again.ok) return;
+        const again = getDraftBlockAndItem(blockIdx, itemIdx);
+        if (!again.ok) return;
 
-      const original = again.item;
+        const original = again.item;
 
-      if (updated && typeof updated === "object") sanitizeAiItemInPlace(updated);
-      if (typeof updated === "string") updated = scrubObjectObjectToken(updated);
+        if (updated && typeof updated === "object") sanitizeAiItemInPlace(updated);
+        if (typeof updated === "string") updated = scrubObjectObjectToken(updated);
 
-      if (typeof original === "string") {
-        if (typeof updated === "string") {
-          again.block.items[itemIdx] = updated;
-        } else if (updated && typeof updated === "object") {
-          const txt = (typeof updated.text === "string" && updated.text) ||
-            (typeof updated.instruction === "string" && updated.instruction) ||
-            (typeof updated.prompt === "string" && updated.prompt) ||
-            (typeof updated.question === "string" && updated.question) || "";
-          again.block.items[itemIdx] = normStr(scrubObjectObjectToken(txt));
+        if (typeof original === "string") {
+          if (typeof updated === "string") {
+            again.block.items[itemIdx] = updated;
+          } else if (updated && typeof updated === "object") {
+            const txt = (typeof updated.text === "string" && updated.text) ||
+              (typeof updated.instruction === "string" && updated.instruction) ||
+              (typeof updated.prompt === "string" && updated.prompt) ||
+              (typeof updated.question === "string" && updated.question) || "";
+            again.block.items[itemIdx] = normStr(scrubObjectObjectToken(txt));
+          } else {
+            return;
+          }
         } else {
-          return;
+          if (updated && typeof updated === "object") again.block.items[itemIdx] = deepClone(updated);
+          else if (typeof updated === "string") again.block.items[itemIdx] = { type: "info", text: normStr(updated) };
+          else return;
         }
-      } else {
-        if (updated && typeof updated === "object") again.block.items[itemIdx] = deepClone(updated);
-        else if (typeof updated === "string") again.block.items[itemIdx] = { type: "info", text: normStr(updated) };
-        else return;
-      }
 
-      setDirty(true);
-      updateUiAll();
-    },
-    onDelete: function () {
+        setDirty(true);
+        updateUiAll();
+      },
+      onDelete: function () {
+        if (!isWriterAllowed()) return;
+
+        const again = getDraftBlockAndItem(blockIdx, itemIdx);
+        if (!again.ok) return;
+
+        again.block.items.splice(itemIdx, 1);
+
+        setDirty(true);
+        updateUiAll();
+      }
+    });
+  }
+
+  /* -------------------------
+     BLOCK 17D — Block editor (baseline edit)
+  -------------------------- */
+  function openBlockEditor(idx) {
+    if (!isWriterAllowed()) return;
+    if (!state.draft || !DEPS.render || typeof DEPS.render.openModal !== "function") return;
+
+    const blocks = currentBlocks();
+    const b = blocks[idx];
+    if (!b) return;
+
+    const wrap = document.createElement("div");
+
+    const label = document.createElement("div");
+    label.className = "muted2";
+    label.style.textAlign = "left";
+    label.textContent = "Redigera första raden i blocket (baseline).";
+    wrap.appendChild(label);
+
+    const ta = document.createElement("textarea");
+    ta.className = "textarea";
+    ta.value = getItemPrimaryTextForEditor(b.items && b.items[0] ? b.items[0] : null);
+    wrap.appendChild(ta);
+
+    DEPS.render.openModal("Block " + (idx + 1), wrap, function () {
       if (!isWriterAllowed()) return;
 
-      const again = getDraftBlockAndItem(blockIdx, itemIdx);
-      if (!again.ok) return;
-
-      again.block.items.splice(itemIdx, 1);
-
+      const txt = normStr(ta.value);
+      if (!state.draft.blocks) state.draft.blocks = blocks;
+      const bb = state.draft.blocks[idx];
+      if (bb && Array.isArray(bb.items) && bb.items[0]) {
+        const it0 = bb.items[0];
+        if (it0 && typeof it0 === "object") {
+          if (typeof it0.text === "string") it0.text = txt;
+          else if (typeof it0.instruction === "string") it0.instruction = txt;
+          else if (typeof it0.prompt === "string") it0.prompt = txt;
+          else if (typeof it0.question === "string") it0.question = txt;
+          else if (isObj(it0.question) && typeof it0.question.text === "string") it0.question.text = txt;
+        } else if (typeof it0 === "string") {
+          bb.items[0] = txt;
+        }
+      }
       setDirty(true);
       updateUiAll();
-    }
-  });
-}
+    });
+  }
 
-/* -------------------------
-   BLOCK 17D — Block editor (baseline edit)
--------------------------- */
-function openBlockEditor(idx) {
-  if (!isWriterAllowed()) return;
-  if (!state.draft || !DEPS.render || typeof DEPS.render.openModal !== "function") return;
-
-  const blocks = currentBlocks();
-  const b = blocks[idx];
-  if (!b) return;
-
-  const wrap = document.createElement("div");
-
-  const label = document.createElement("div");
-  label.className = "muted2";
-  label.style.textAlign = "left";
-  label.textContent = "Redigera första raden i blocket (baseline).";
-  wrap.appendChild(label);
-
-  const ta = document.createElement("textarea");
-  ta.className = "textarea";
-  ta.value = getItemPrimaryTextForEditor(b.items && b.items[0] ? b.items[0] : null);
-  wrap.appendChild(ta);
-
-  DEPS.render.openModal("Block " + (idx + 1), wrap, function () {
+  /* -------------------------
+     BLOCK 17E — Delete block
+  -------------------------- */
+  function deleteBlock(idx) {
     if (!isWriterAllowed()) return;
+    if (!state.draft) return;
 
-    const txt = normStr(ta.value);
-    if (!state.draft.blocks) state.draft.blocks = blocks;
-    const bb = state.draft.blocks[idx];
-    if (bb && Array.isArray(bb.items) && bb.items[0]) {
-      const it0 = bb.items[0];
-      if (it0 && typeof it0 === "object") {
-        if (typeof it0.text === "string") it0.text = txt;
-        else if (typeof it0.instruction === "string") it0.instruction = txt;
-        else if (typeof it0.prompt === "string") it0.prompt = txt;
-        else if (typeof it0.question === "string") it0.question = txt;
-        else if (isObj(it0.question) && typeof it0.question.text === "string") it0.question.text = txt;
-      } else if (typeof it0 === "string") {
-        bb.items[0] = txt;
-      }
-    }
+    const blocks = currentBlocks();
+    if (idx < 0 || idx >= blocks.length) return;
+
+    if (!Array.isArray(state.draft.blocks)) state.draft.blocks = blocks;
+    state.draft.blocks.splice(idx, 1);
     setDirty(true);
     updateUiAll();
-  });
-}
-
-/* -------------------------
-   BLOCK 17E — Delete block
--------------------------- */
-function deleteBlock(idx) {
-  if (!isWriterAllowed()) return;
-  if (!state.draft) return;
-
-  const blocks = currentBlocks();
-  if (idx < 0 || idx >= blocks.length) return;
-
-  if (!Array.isArray(state.draft.blocks)) state.draft.blocks = blocks;
-  state.draft.blocks.splice(idx, 1);
-  setDirty(true);
-  updateUiAll();
-}
+  }
 
   /* =========================
    BLOCK 18/19 — AI + normalize/import + fail-closed (mode-based)
@@ -1775,426 +1898,433 @@ function deleteBlock(idx) {
    - BLOCK-indelning 18A–18F för enklare felsökning
 ========================== */
 
-/* -------------------------
-   BLOCK 18A — UI hint helper
--------------------------- */
-function setAiHint(text) {
-  if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
-  if (dom && dom.aiHint && dom.setText) dom.setText(dom.aiHint, String(text || ""));
-}
+  /* -------------------------
+     BLOCK 18A — UI hint helper
+  -------------------------- */
+  function setAiHint(text) {
+    if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
+    if (dom && dom.aiHint && dom.setText) dom.setText(dom.aiHint, String(text || ""));
+  }
 
-/* -------------------------
-   BLOCK 18B — Worker health
--------------------------- */
-async function testAi() {
-  try {
-    if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
-      return;
+  /* -------------------------
+     BLOCK 18B — Worker health
+  -------------------------- */
+  async function testAi() {
+    try {
+      if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
+        return;
+      }
+
+      const initR = await ensureSdkReady();
+      if (!initR || initR.ok !== true) {
+        const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
+        if (code === "BASE_URL_MISSING") DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
+        else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "warn");
+        return;
+      }
+
+      const r = await window.HRWorkerSDK.health();
+      if (r && r.ok) DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI OK", "ok");
+      else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "warn");
+    } catch (_) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
     }
+  }
+
+  /* -------------------------
+     BLOCK 18C — Read AI controls
+  -------------------------- */
+  function readAiControls() {
+    const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
+    const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
+
+    const sel = readAiContentSelection();
+
+    // PATCH: normalisera lägen robust (skydd mot "Mix"/"MIX")
+    const uiMode = normStr(sel && sel.uiMode).toLowerCase();           // document | mix | questions
+    const requestMode = normStr(sel && sel.requestMode).toLowerCase(); // document | training
+
+    // Question controls (optional)
+    const qType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
+    const fb = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked || dom.aiFeedbackEnabled.value === "true"));
+
+    return {
+      // UI selection
+      uiMode: uiMode,                 // document | mix | questions
+      requestMode: requestMode,       // document | training
+      directive: (sel && sel.directive) ? String(sel.directive) : "",
+      // common
+      content: "blocks",
+      count: count,
+      questionType: qType || "none",
+      feedbackEnabled: fb,
+      _uiQuestionType: qType || ""
+    };
+  }
+
+  /* -------------------------
+     BLOCK 18D — Normalize AI response into blocks/items
+  -------------------------- */
+  function normalizeAiBlocksFromAny(raw) {
+    function hasBlocksOrItems(obj) {
+      if (!obj) return false;
+      if (Array.isArray(obj)) return true;
+      if (Array.isArray(obj.blocks)) return true;
+      if (Array.isArray(obj.trainingBlocks)) return true;
+      if (Array.isArray(obj.items)) return true;
+      if (Array.isArray(obj.questions)) return true;
+      return false;
+    }
+
+    function pickBestSource(r) {
+      if (!r) return null;
+      const d = (r && r.data) ? r.data : null;
+      if (hasBlocksOrItems(d)) return d;
+      if (hasBlocksOrItems(r)) return r;
+      return d || r;
+    }
+
+    const pick = pickBestSource(raw);
+    if (!pick) return { ok: false, reason: "AI-svar saknar data." };
+
+    const blocksCand = pick.blocks || pick.trainingBlocks || null;
+    const itemsCand = Array.isArray(pick.items) ? pick.items
+      : Array.isArray(pick.questions) ? pick.questions
+        : null;
+
+    if (Array.isArray(blocksCand)) {
+      const hasInlineItems = blocksCand.some(b => b && Array.isArray(b.items) && b.items.length);
+
+      if (!hasInlineItems && itemsCand && itemsCand.length) {
+        const out = [];
+
+        if (blocksCand.length === itemsCand.length) {
+          for (let i = 0; i < blocksCand.length; i++) {
+            const b = blocksCand[i];
+            out.push({
+              title: normStr(b && (b.title || b.heading || b.name)) || "",
+              items: [itemsCand[i]]
+            });
+          }
+          return { ok: true, blocks: out };
+        }
+
+        const firstTitle = normStr(blocksCand[0] && (blocksCand[0].title || blocksCand[0].heading || blocksCand[0].name)) || "";
+        return { ok: true, blocks: [{ title: firstTitle, items: itemsCand.slice() }] };
+      }
+
+      const out2 = [];
+      for (const b of blocksCand) {
+        const title = normStr(b && (b.title || b.heading || b.name)) || "";
+        const inline = (b && Array.isArray(b.items)) ? b.items.slice() : [];
+
+        if (inline.length) {
+          out2.push({ title, items: inline });
+          continue;
+        }
+
+        if (b && typeof b === "object") {
+          const q = normStr(b.question || b.q || b.text || b.instruction || b.prompt || "");
+          const opts = Array.isArray(b.options) ? b.options.slice() : null;
+          const hasAnyAnswerShape =
+            (opts && opts.length >= 2) ||
+            (typeof b.correct === "boolean") ||
+            (b.correctIndex != null) ||
+            (Array.isArray(b.correctIndices) && b.correctIndices.length) ||
+            (b.answer != null) ||
+            (b.expected != null) ||
+            (b.range != null);
+
+          if (q && hasAnyAnswerShape) {
+            const item = {};
+            item.question = q;
+            if (opts) item.options = opts;
+            if (b.correctIndex != null) item.correctIndex = b.correctIndex;
+            if (Array.isArray(b.correctIndices)) item.correctIndices = b.correctIndices.slice();
+            if (typeof b.correct === "boolean") item.correct = b.correct;
+            if (typeof b.answer === "string" || typeof b.answer === "number") item.answer = b.answer;
+            if (typeof b.expected === "string") item.expected = b.expected;
+            if (isObj(b.range)) item.range = deepClone(b.range);
+            if (typeof b.explanation === "string") item.explanation = b.explanation;
+            if (typeof b.feedback === "string") item.feedback = b.feedback;
+
+            item.type = "question";
+            out2.push({ title, items: [item] });
+            continue;
+          }
+        }
+      }
+
+      return out2.length ? { ok: true, blocks: out2 } : { ok: false, reason: "AI gav inga block/items." };
+    }
+
+    if (itemsCand) return { ok: true, blocks: [{ title: "", items: itemsCand.slice() }] };
+
+    if (Array.isArray(pick)) {
+      const looksLikeBlocks = pick.some(x => x && typeof x === "object" && Array.isArray(x.items));
+      if (looksLikeBlocks) {
+        const out3 = pick.map(b => ({
+          title: normStr(b && (b.title || b.heading || b.name)) || "",
+          items: Array.isArray(b && b.items) ? b.items.slice() : []
+        })).filter(b => b.items && b.items.length);
+        return out3.length ? { ok: true, blocks: out3 } : { ok: false, reason: "AI gav tomma block." };
+      }
+      return { ok: true, blocks: [{ title: "", items: pick.slice() }] };
+    }
+
+    return { ok: false, reason: "AI-svar har okänt format (kan inte importera)." };
+  }
+
+  /* -------------------------
+     BLOCK 18E — Build context NO GOALS (namespace-safe + fallback)
+  -------------------------- */
+  function buildAiContextNoGoalsSafe(draft) {
+    const s = draft || {};
+
+    // Prefer DEPS.core first (modular), then global Trainings.core
+    const coreObj = (DEPS && DEPS.core) ? DEPS.core : (window.Trainings && window.Trainings.core ? window.Trainings.core : null);
+
+    const fnNoGoals = coreObj && typeof coreObj.buildAiContextNoGoals === "function" ? coreObj.buildAiContextNoGoals : null;
+    const fnWithGoals = coreObj && typeof coreObj.buildAiContext === "function" ? coreObj.buildAiContext : null;
+
+    // Best: dedicated no-goals builder
+    if (fnNoGoals) {
+      const ctx = fnNoGoals(s);
+      // Hard safety: ensure goals cannot leak
+      if (ctx && typeof ctx === "object") ctx.goals = "";
+      return ctx;
+    }
+
+    // Fallback: build normal context but *always* strip goals before send (policy: never send goals)
+    if (fnWithGoals) {
+      const ctx = fnWithGoals(s) || {};
+      if (ctx && typeof ctx === "object") ctx.goals = "";
+      return ctx;
+    }
+
+    return null;
+  }
+
+  /* -------------------------
+     BLOCK 18F — Generate AI (request + import + fail-closed)
+  -------------------------- */
+  async function generateAi() {
+    if (!isWriterAllowed()) return;
+    if (!state.draft) return;
+
+    syncDraftFromInputs();
+    syncDraftTitleFromFields();
+    renderAiAnchorRow();
+
+    // Reset UI feedback for this run (non-sticky)
+    setAiHint("");
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI…", "warn");
 
     const initR = await ensureSdkReady();
     if (!initR || initR.ok !== true) {
       const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
       if (code === "BASE_URL_MISSING") DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
-      else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "warn");
+      else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
+      setAiHint("AI init fail-closed: " + code);
       return;
     }
 
-    const r = await window.HRWorkerSDK.health();
-    if (r && r.ok) DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI OK", "ok");
-    else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "warn");
-  } catch (_) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
-  }
-}
+    const controls = readAiControls();
 
-/* -------------------------
-   BLOCK 18C — Read AI controls
--------------------------- */
-function readAiControls() {
-  const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
-  const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
-
-  const sel = readAiContentSelection();
-
-  // PATCH: normalisera lägen robust (skydd mot "Mix"/"MIX")
-  const uiMode = normStr(sel && sel.uiMode).toLowerCase();           // document | mix | questions
-  const requestMode = normStr(sel && sel.requestMode).toLowerCase(); // document | training
-
-  // Question controls (optional)
-  const qType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
-  const fb = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked || dom.aiFeedbackEnabled.value === "true"));
-
-  return {
-    // UI selection
-    uiMode: uiMode,                 // document | mix | questions
-    requestMode: requestMode,       // document | training
-    directive: (sel && sel.directive) ? String(sel.directive) : "",
-    // common
-    content: "blocks",
-    count: count,
-    questionType: qType || "none",
-    feedbackEnabled: fb,
-    _uiQuestionType: qType || ""
-  };
-}
-
-/* -------------------------
-   BLOCK 18D — Normalize AI response into blocks/items
--------------------------- */
-function normalizeAiBlocksFromAny(raw) {
-  function hasBlocksOrItems(obj) {
-    if (!obj) return false;
-    if (Array.isArray(obj)) return true;
-    if (Array.isArray(obj.blocks)) return true;
-    if (Array.isArray(obj.trainingBlocks)) return true;
-    if (Array.isArray(obj.items)) return true;
-    if (Array.isArray(obj.questions)) return true;
-    return false;
-  }
-
-  function pickBestSource(r) {
-    if (!r) return null;
-    const d = (r && r.data) ? r.data : null;
-    if (hasBlocksOrItems(d)) return d;
-    if (hasBlocksOrItems(r)) return r;
-    return d || r;
-  }
-
-  const pick = pickBestSource(raw);
-  if (!pick) return { ok: false, reason: "AI-svar saknar data." };
-
-  const blocksCand = pick.blocks || pick.trainingBlocks || null;
-  const itemsCand = Array.isArray(pick.items) ? pick.items
-    : Array.isArray(pick.questions) ? pick.questions
-      : null;
-
-  if (Array.isArray(blocksCand)) {
-    const hasInlineItems = blocksCand.some(b => b && Array.isArray(b.items) && b.items.length);
-
-    if (!hasInlineItems && itemsCand && itemsCand.length) {
-      const out = [];
-
-      if (blocksCand.length === itemsCand.length) {
-        for (let i = 0; i < blocksCand.length; i++) {
-          const b = blocksCand[i];
-          out.push({
-            title: normStr(b && (b.title || b.heading || b.name)) || "",
-            items: [itemsCand[i]]
-          });
-        }
-        return { ok: true, blocks: out };
-      }
-
-      const firstTitle = normStr(blocksCand[0] && (blocksCand[0].title || blocksCand[0].heading || blocksCand[0].name)) || "";
-      return { ok: true, blocks: [{ title: firstTitle, items: itemsCand.slice() }] };
-    }
-
-    const out2 = [];
-    for (const b of blocksCand) {
-      const title = normStr(b && (b.title || b.heading || b.name)) || "";
-      const inline = (b && Array.isArray(b.items)) ? b.items.slice() : [];
-
-      if (inline.length) {
-        out2.push({ title, items: inline });
-        continue;
-      }
-
-      if (b && typeof b === "object") {
-        const q = normStr(b.question || b.q || b.text || b.instruction || b.prompt || "");
-        const opts = Array.isArray(b.options) ? b.options.slice() : null;
-        const hasAnyAnswerShape =
-          (opts && opts.length >= 2) ||
-          (typeof b.correct === "boolean") ||
-          (b.correctIndex != null) ||
-          (Array.isArray(b.correctIndices) && b.correctIndices.length) ||
-          (b.answer != null) ||
-          (b.expected != null) ||
-          (b.range != null);
-
-        if (q && hasAnyAnswerShape) {
-          const item = {};
-          item.question = q;
-          if (opts) item.options = opts;
-          if (b.correctIndex != null) item.correctIndex = b.correctIndex;
-          if (Array.isArray(b.correctIndices)) item.correctIndices = b.correctIndices.slice();
-          if (typeof b.correct === "boolean") item.correct = b.correct;
-          if (typeof b.answer === "string" || typeof b.answer === "number") item.answer = b.answer;
-          if (typeof b.expected === "string") item.expected = b.expected;
-          if (isObj(b.range)) item.range = deepClone(b.range);
-          if (typeof b.explanation === "string") item.explanation = b.explanation;
-          if (typeof b.feedback === "string") item.feedback = b.feedback;
-
-          item.type = "question";
-          out2.push({ title, items: [item] });
-          continue;
-        }
-      }
-    }
-
-    return out2.length ? { ok: true, blocks: out2 } : { ok: false, reason: "AI gav inga block/items." };
-  }
-
-  if (itemsCand) return { ok: true, blocks: [{ title: "", items: itemsCand.slice() }] };
-
-  if (Array.isArray(pick)) {
-    const looksLikeBlocks = pick.some(x => x && typeof x === "object" && Array.isArray(x.items));
-    if (looksLikeBlocks) {
-      const out3 = pick.map(b => ({
-        title: normStr(b && (b.title || b.heading || b.name)) || "",
-        items: Array.isArray(b && b.items) ? b.items.slice() : []
-      })).filter(b => b.items && b.items.length);
-      return out3.length ? { ok: true, blocks: out3 } : { ok: false, reason: "AI gav tomma block." };
-    }
-    return { ok: true, blocks: [{ title: "", items: pick.slice() }] };
-  }
-
-  return { ok: false, reason: "AI-svar har okänt format (kan inte importera)." };
-}
-
-/* -------------------------
-   BLOCK 18E — Build context NO GOALS (namespace-safe + fallback)
--------------------------- */
-function buildAiContextNoGoalsSafe(draft) {
-  const s = draft || {};
-
-  // Prefer DEPS.core first (modular), then global Trainings.core
-  const coreObj = (DEPS && DEPS.core) ? DEPS.core : (window.Trainings && window.Trainings.core ? window.Trainings.core : null);
-
-  const fnNoGoals = coreObj && typeof coreObj.buildAiContextNoGoals === "function" ? coreObj.buildAiContextNoGoals : null;
-  const fnWithGoals = coreObj && typeof coreObj.buildAiContext === "function" ? coreObj.buildAiContext : null;
-
-  // Best: dedicated no-goals builder
-  if (fnNoGoals) {
-    const ctx = fnNoGoals(s);
-    // Hard safety: ensure goals cannot leak
-    if (ctx && typeof ctx === "object") ctx.goals = "";
-    return ctx;
-  }
-
-  // Fallback: build normal context but *always* strip goals before send (policy: never send goals)
-  if (fnWithGoals) {
-    const ctx = fnWithGoals(s) || {};
-    if (ctx && typeof ctx === "object") ctx.goals = "";
-    return ctx;
-  }
-
-  return null;
-}
-
-/* -------------------------
-   BLOCK 18F — Generate AI (request + import + fail-closed)
--------------------------- */
-async function generateAi() {
-  if (!isWriterAllowed()) return;
-  if (!state.draft) return;
-
-  syncDraftFromInputs();
-  syncDraftTitleFromFields();
-  renderAiAnchorRow();
-
-  // Reset UI feedback for this run (non-sticky)
-  setAiHint("");
-  DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI…", "warn");
-
-  const initR = await ensureSdkReady();
-  if (!initR || initR.ok !== true) {
-    const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
-    if (code === "BASE_URL_MISSING") DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
-    else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
-    setAiHint("AI init fail-closed: " + code);
-    return;
-  }
-
-  const controls = readAiControls();
-
-  // PATCH: namespace-safe context builder (NO GOALS) — fail-closed
-  const ctxObj = buildAiContextNoGoalsSafe(state.draft || {});
-  if (!ctxObj) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-kontext saknas", "bad");
-    setAiHint("AI fail-closed: buildAiContextNoGoals/buildAiContext saknas (Trainings.core).");
-    updateDebug();
-    return;
-  }
-
-  // PATCH: skicka med directive/uiMode tydligt (harmlöst om worker ignorerar)
-  const req = {
-    mode: controls.requestMode,     // "document" | "training"  (behåll för kompatibilitet)
-    count: controls.count,
-    context: ctxObj,
-    anchor: (state.aiAnchorLine || ctxObj.anchor || ""),
-    language: "sv",
-
-    // Extra hints (NO STORAGE) — harmless if worker ignores
-    uiMode: controls.uiMode,        // document | mix | questions (alias)
-    content: controls.uiMode,       // legacy hint
-    directive: controls.directive || "",
-
-    questionType: controls.questionType || "none",
-    feedbackEnabled: !!controls.feedbackEnabled,
-    documentOnly: (controls.uiMode === "document") || !!DOCUMENT_ONLY
-  };
-
-  page._LAST_AI_REQUEST = deepClone(req);
-  page._LAST_AI_RAW = null;
-  page._LAST_AI_NORM = null;
-  page._LAST_AI_PICK = null;
-
-  let r;
-  try {
-    if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-funktion saknas", "bad");
-      setAiHint("HRWorkerSDK.aiGenerate saknas.");
+    // PATCH: namespace-safe context builder (NO GOALS) — fail-closed
+    const ctxObj = buildAiContextNoGoalsSafe(state.draft || {});
+    if (!ctxObj) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-kontext saknas", "bad");
+      setAiHint("AI fail-closed: buildAiContextNoGoals/buildAiContext saknas (Trainings.core).");
+      updateDebug();
       return;
     }
-    r = await window.HRWorkerSDK.aiGenerate(req);
-  } catch (e) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI exception", "bad");
-    setAiHint("AI exception (fail-closed).");
-    page._LAST_AI_RAW = { exception: String(e && e.message ? e.message : e) };
-    updateDebug();
-    return;
-  }
 
-  page._LAST_AI_RAW = deepClone(r);
+    // PATCH: skicka med directive/uiMode tydligt (harmlöst om worker ignorerar)
+    const req = {
+      mode: controls.requestMode,     // "document" | "training"  (behåll för kompatibilitet)
+      count: controls.count,
+      context: ctxObj,
+      anchor: (state.aiAnchorLine || ctxObj.anchor || ""),
+      language: "sv",
 
-  if (!r || r.ok !== true) {
-    const msg = (r && r.error && (r.error.message || r.error.code)) ? String(r.error.message || r.error.code) : "AI svarade inte ok.";
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
-    setAiHint(msg);
-    updateDebug();
-    return;
-  }
+      // Extra hints (NO STORAGE) — harmless if worker ignores
+      uiMode: controls.uiMode,        // document | mix | questions (alias)
+      content: controls.uiMode,       // legacy hint
+      directive: controls.directive || "",
 
-  const norm = normalizeAiBlocksFromAny(r);
-  page._LAST_AI_NORM = deepClone(norm);
+      questionType: controls.questionType || "none",
+      feedbackEnabled: !!controls.feedbackEnabled,
+      documentOnly: (controls.uiMode === "document") || !!DOCUMENT_ONLY
+    };
 
-  if (!norm.ok) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-format fel", "bad");
-    setAiHint(norm.reason || "AI gav ogiltigt format.");
-    updateDebug();
-    return;
-  }
+    page._LAST_AI_REQUEST = deepClone(req);
+    page._LAST_AI_RAW = null;
+    page._LAST_AI_NORM = null;
+    page._LAST_AI_PICK = null;
 
-  const incomingBlocks = [];
-  let questionsKept = 0;
-  let docsKept = 0;
-  let questionsDropped = 0;
-  let docsDropped = 0;
+    let r;
+    try {
+      if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-funktion saknas", "bad");
+        setAiHint("HRWorkerSDK.aiGenerate saknas.");
+        return;
+      }
+      r = await window.HRWorkerSDK.aiGenerate(req);
+    } catch (e) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI exception", "bad");
+      setAiHint("AI exception (fail-closed).");
+      page._LAST_AI_RAW = { exception: String(e && e.message ? e.message : e) };
+      updateDebug();
+      return;
+    }
 
-  for (const b of safeArr(norm.blocks)) {
-    const itemsRaw = safeArr(b && b.items);
-    const items = [];
+    page._LAST_AI_RAW = deepClone(r);
 
-    for (const x of itemsRaw) {
-      // Strings => info
-      if (typeof x === "string") {
-        const t = scrubObjectObjectToken(x);
-        const obj = { type: "info", text: t };
+    if (!r || r.ok !== true) {
+      const msg = (r && r.error && (r.error.message || r.error.code)) ? String(r.error.message || r.error.code) : "AI svarade inte ok.";
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
+      setAiHint(msg);
+      updateDebug();
+      return;
+    }
 
-        // mode filtering below
-        if (controls.uiMode === "questions") { docsDropped++; continue; }
-        items.push(obj); docsKept++;
-        continue;
+    const norm = normalizeAiBlocksFromAny(r);
+    page._LAST_AI_NORM = deepClone(norm);
+
+    if (!norm.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-format fel", "bad");
+      setAiHint(norm.reason || "AI gav ogiltigt format.");
+      updateDebug();
+      return;
+    }
+
+    const incomingBlocks = [];
+    let questionsKept = 0;
+    let docsKept = 0;
+    let questionsDropped = 0;
+    let docsDropped = 0;
+
+    for (const b of safeArr(norm.blocks)) {
+      const itemsRaw = safeArr(b && b.items);
+      const items = [];
+
+      for (const x of itemsRaw) {
+        // Strings => info
+        if (typeof x === "string") {
+          const t = scrubObjectObjectToken(x);
+          const obj = { type: "info", text: t };
+
+          // mode filtering below
+          if (controls.uiMode === "questions") { docsDropped++; continue; }
+          items.push(obj); docsKept++;
+          continue;
+        }
+
+        if (x && typeof x === "object") {
+          const obj = sanitizeAiItemInPlace(deepClone(x)) || {};
+          flattenChoiceQuestionShapeInPlace(obj);
+          ensureItemType(obj);
+
+          // P0: If question, force flat shape (root + data) and fail-closed if facit saknas/ogiltigt
+          const tPre = normStr(obj.type).toLowerCase();
+          if (tPre === "question") {
+            const flat = flattenQuestionToFlatInPlace(obj);
+            if (!flat || flat.ok !== true || flat.valid !== true) { questionsDropped++; continue; }
+          }
+
+          const t = normStr(obj.type).toLowerCase();
+
+          // Mode-based import rules (fail-closed per mode)
+          if (controls.uiMode === "document") {
+            if (t === "question") { questionsDropped++; continue; }
+            items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
+            docsKept++;
+            continue;
+          }
+
+          if (controls.uiMode === "questions") {
+            if (t !== "question") { docsDropped++; continue; }
+            items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
+            questionsKept++;
+            continue;
+          }
+
+          // mix (default)
+          items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
+          if (t === "question") questionsKept++; else docsKept++;
+          continue;
+        }
       }
 
-      if (x && typeof x === "object") {
-        const obj = sanitizeAiItemInPlace(deepClone(x)) || {};
-        flattenChoiceQuestionShapeInPlace(obj);
-        ensureItemType(obj);
+      const clean = items.filter(x => x != null);
+      if (!clean.length) continue;
 
-        const t = normStr(obj.type).toLowerCase();
+      incomingBlocks.push({
+        title: normStr(b && b.title) || "",
+        items: clean
+      });
+    }
 
-        // Mode-based import rules (fail-closed per mode)
-        if (controls.uiMode === "document") {
-          if (t === "question") { questionsDropped++; continue; }
-          items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
-          docsKept++;
-          continue;
-        }
+    // Fail-closed rules per mode (but NOT sticky)
+    if (!incomingBlocks.length) {
+      if (controls.uiMode === "document") {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+        setAiHint("Dokumentläge: AI gav bara frågor/quiz (0 dokument-items). Byt AI-innehåll till Frågor eller Mix och kör igen.");
+      } else if (controls.uiMode === "questions") {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+        setAiHint("Frågor & svar: AI gav inga giltiga question-items (saknar facit eller format). Byt till Mix eller justera kontext.");
+      } else {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+        setAiHint("Mix: AI gav inga importerbara items. Import stoppad (fail-closed).");
+      }
+      updateDebug();
+      return;
+    }
 
-        if (controls.uiMode === "questions") {
-          if (t !== "question") { docsDropped++; continue; }
-          items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
-          questionsKept++;
-          continue;
-        }
-
-        // mix (default)
-        items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
-        if (t === "question") questionsKept++; else docsKept++;
-        continue;
+    // Mode warnings (mix)
+    if (controls.uiMode === "mix" || !controls.uiMode) {
+      if (questionsKept === 0 && docsKept > 0) {
+        setAiHint("Mix: AI gav bara dokument-items (inga frågor). Importerade ändå (OK).");
+      } else if (docsKept === 0 && questionsKept > 0) {
+        setAiHint("Mix: AI gav bara frågor (inga dokument-items). Importerade ändå (OK).");
       }
     }
 
-    const clean = items.filter(x => x != null);
-    if (!clean.length) continue;
+    page._LAST_AI_PICK = {
+      uiMode: controls.uiMode,
+      requestMode: controls.requestMode,
+      importedBlocks: incomingBlocks.length,
+      importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0),
+      questionsKept: questionsKept,
+      docsKept: docsKept,
+      questionsDropped: questionsDropped,
+      docsDropped: docsDropped,
+      anchor: state.aiAnchorLine || "",
+      courseTrack: readCourseTrackFromUi(),
+      documentOnly: !!DOCUMENT_ONLY
+    };
 
-    incomingBlocks.push({
-      title: normStr(b && b.title) || "",
-      items: clean
-    });
-  }
+    if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
+    for (const nb of incomingBlocks) state.draft.blocks.push(nb);
 
-  // Fail-closed rules per mode (but NOT sticky)
-  if (!incomingBlocks.length) {
-    if (controls.uiMode === "document") {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-      setAiHint("Dokumentläge: AI gav bara frågor/quiz (0 dokument-items). Byt AI-innehåll till Frågor eller Mix och kör igen.");
-    } else if (controls.uiMode === "questions") {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-      setAiHint("Frågor & svar: AI gav inga question-items. Byt till Mix eller Dokument och kör igen, eller justera kontext.");
+    setDirty(true);
+    syncDraftTitleFromFields();
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI import OK", "ok");
+
+    if (!dom || !dom.aiHint) {
+      // no-op
     } else {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-      setAiHint("Mix: AI gav inga importerbara items. Import stoppad (fail-closed).");
+      // Provide a compact summary if hint wasn't already set
+      const already = normStr(dom.aiHint && (dom.aiHint.value || dom.aiHint.textContent));
+      if (!already) {
+        setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items).`);
+      }
     }
-    updateDebug();
-    return;
+
+    updateUiAll();
   }
-
-  // Mode warnings (mix)
-  if (controls.uiMode === "mix" || !controls.uiMode) {
-    if (questionsKept === 0 && docsKept > 0) {
-      setAiHint("Mix: AI gav bara dokument-items (inga frågor). Importerade ändå (OK).");
-    } else if (docsKept === 0 && questionsKept > 0) {
-      setAiHint("Mix: AI gav bara frågor (inga dokument-items). Importerade ändå (OK).");
-    }
-  }
-
-  page._LAST_AI_PICK = {
-    uiMode: controls.uiMode,
-    requestMode: controls.requestMode,
-    importedBlocks: incomingBlocks.length,
-    importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0),
-    questionsKept: questionsKept,
-    docsKept: docsKept,
-    questionsDropped: questionsDropped,
-    docsDropped: docsDropped,
-    anchor: state.aiAnchorLine || "",
-    courseTrack: readCourseTrackFromUi(),
-    documentOnly: !!DOCUMENT_ONLY
-  };
-
-  if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
-  for (const nb of incomingBlocks) state.draft.blocks.push(nb);
-
-  setDirty(true);
-  syncDraftTitleFromFields();
-  DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI import OK", "ok");
-
-  if (!dom || !dom.aiHint) {
-    // no-op
-  } else {
-    // Provide a compact summary if hint wasn't already set
-    const already = normStr(dom.aiHint && (dom.aiHint.value || dom.aiHint.textContent));
-    if (!already) {
-      setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items).`);
-    }
-  }
-
-  updateUiAll();
-}
 
   /* =========================
    BLOCK 19/19 — Bootstrap + events + CRUD
@@ -2203,560 +2333,559 @@ async function generateAi() {
    - Tydlig hint när write-guard stoppar (istället för tyst return)
 ========================== */
 
-/* -------------------------
-   BLOCK 19A — Helpers (modal + write-guard feedback)
--------------------------- */
-function tryCloseItemModal() {
-  try {
-    if (!DEPS.render) return;
-    if (typeof DEPS.render.closeItemModal === "function") { DEPS.render.closeItemModal(); return; }
-    if (typeof DEPS.render.hideItemModal === "function") { DEPS.render.hideItemModal(); return; }
-  } catch (_) { }
-}
-
-function writerDeniedHint(actionLabel) {
-  try {
-    const who = (typeof getWhoFresh === "function") ? getWhoFresh()
-      : (DEPS.core && typeof DEPS.core.getWho === "function") ? DEPS.core.getWho()
-        : { role: "", empNo: "", canWrite: false };
-
-    const role = normStr(who && who.role) || "okänd roll";
-    const emp = normStr(who && who.empNo) || "saknas";
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Read-only", "warn");
-    // setAiHint finns i BLOCK 18A
-    setAiHint(`${actionLabel}: stoppad (read-only). Inloggad som ${role} (empNo: ${emp}). Logga in som ADMIN för att skapa/spara.`);
-  } catch (_) { }
-}
-
-/* -------------------------
-   BLOCK 19B — Select + template
--------------------------- */
-function selectTraining(id) {
-  tryCloseItemModal();
-
-  const idx = findTrainingIndexById(id);
-  if (idx < 0) {
-    state.selectedId = "";
-    state.draft = null;
-    setDirty(false);
-    updateUiAll();
-    return;
+  /* -------------------------
+     BLOCK 19A — Helpers (modal + write-guard feedback)
+  -------------------------- */
+  function tryCloseItemModal() {
+    try {
+      if (!DEPS.render) return;
+      if (typeof DEPS.render.closeItemModal === "function") { DEPS.render.closeItemModal(); return; }
+      if (typeof DEPS.render.hideItemModal === "function") { DEPS.render.hideItemModal(); return; }
+    } catch (_) { }
   }
 
-  // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
-  ensureBusinessAreaSearchForSelectUi();
+  function writerDeniedHint(actionLabel) {
+    try {
+      const who = (typeof getWhoFresh === "function") ? getWhoFresh()
+        : (DEPS.core && typeof DEPS.core.getWho === "function") ? DEPS.core.getWho()
+          : { role: "", empNo: "", canWrite: false };
 
-  state.businessAreaQuery = "";
-  if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
+      const role = normStr(who && who.role) || "okänd roll";
+      const emp = normStr(who && who.empNo) || "saknas";
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Read-only", "warn");
+      // setAiHint finns i BLOCK 18A
+      setAiHint(`${actionLabel}: stoppad (read-only). Inloggad som ${role} (empNo: ${emp}). Logga in som ADMIN för att skapa/spara.`);
+    } catch (_) { }
+  }
 
-  state.selectedId = normStr(id);
-  state.draft = deepClone(state.trainings[idx]);
-  setDirty(false);
-  renderAreaDatalist();
+  /* -------------------------
+     BLOCK 19B — Select + template
+  -------------------------- */
+  function selectTraining(id) {
+    tryCloseItemModal();
 
-  renderBusinessAreaPicker();
-  renderAiAnchorRow();
-  updateUiAll();
-}
+    const idx = findTrainingIndexById(id);
+    if (idx < 0) {
+      state.selectedId = "";
+      state.draft = null;
+      setDirty(false);
+      updateUiAll();
+      return;
+    }
 
-function newTrainingTemplate() {
-  const who = getWhoFresh();
-  const chapter = "Introduktion";
-  const step = "1";
-  const area = "—";
-  const title = (DEPS.core && typeof DEPS.core.composeTitle === "function")
-    ? DEPS.core.composeTitle(chapter, step, area)
-    : `${chapter} • Steg ${step} • ${area}`;
-
-  return {
-    id: (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now()),
-    status: "draft",
-    module: "",
-    area: "",
-    businessArea: "",
-    courseTitle: chapter,
-    courseStep: step,
-    goalsLevel: "normal",
-    goals: "",
-    title: title,
-    blocks: [],
-    meta: { createdAt: Date.now(), createdBy: who.empNo || "" }
-  };
-}
-
-/* -------------------------
-   BLOCK 19C — CRUD: create/delete/purge/revert
--------------------------- */
-function createNewTraining() {
-  if (!isWriterAllowed()) { writerDeniedHint("Skapa ny"); return; }
-
-  try {
     // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
     ensureBusinessAreaSearchForSelectUi();
 
     state.businessAreaQuery = "";
     if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
 
-    const t = newTrainingTemplate();
-    state.trainings.unshift(t);
-    state.selectedId = t.id;
-    state.draft = deepClone(t);
+    state.selectedId = normStr(id);
+    state.draft = deepClone(state.trainings[idx]);
+    setDirty(false);
+    renderAreaDatalist();
+
+    renderBusinessAreaPicker();
+    renderAiAnchorRow();
+    updateUiAll();
+  }
+
+  function newTrainingTemplate() {
+    const who = getWhoFresh();
+    const chapter = "Introduktion";
+    const step = "1";
+    const area = "—";
+    const title = (DEPS.core && typeof DEPS.core.composeTitle === "function")
+      ? DEPS.core.composeTitle(chapter, step, area)
+      : `${chapter} • Steg ${step} • ${area}`;
+
+    return {
+      id: (DEPS.core && typeof DEPS.core.makeId === "function") ? DEPS.core.makeId("tr") : ("tr_" + Date.now()),
+      status: "draft",
+      module: "",
+      area: "",
+      businessArea: "",
+      courseTitle: chapter,
+      courseStep: step,
+      goalsLevel: "normal",
+      goals: "",
+      title: title,
+      blocks: [],
+      meta: { createdAt: Date.now(), createdBy: who.empNo || "" }
+    };
+  }
+
+  /* -------------------------
+     BLOCK 19C — CRUD: create/delete/purge/revert
+  -------------------------- */
+  function createNewTraining() {
+    if (!isWriterAllowed()) { writerDeniedHint("Skapa ny"); return; }
+
+    try {
+      // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+      ensureBusinessAreaSearchForSelectUi();
+
+      state.businessAreaQuery = "";
+      if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
+
+      const t = newTrainingTemplate();
+      state.trainings.unshift(t);
+      state.selectedId = t.id;
+      state.draft = deepClone(t);
+
+      const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
+      if (!s || !s.ok) {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+        setAiHint("Skapa ny: kunde inte spara (storage fail-closed).");
+        return;
+      }
+
+      state.showAll = false;
+
+      setDirty(false);
+      renderModuleDatalist();
+      renderAreaDatalist();
+      renderChapterAndStepPickers();
+      renderBusinessAreaPicker();
+      renderAiAnchorRow();
+      updateUiAll();
+    } catch (e) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Skapa ny fel", "bad");
+      setAiHint("Skapa ny: exception (fail-closed).");
+      try { console.error("createNewTraining exception:", e); } catch (_) { }
+    }
+  }
+
+  function deleteSelected() {
+    if (!isWriterAllowed()) { writerDeniedHint("Ta bort vald"); return; }
+    if (!state.selectedId) return;
+
+    const idx = findTrainingIndexById(state.selectedId);
+    if (idx < 0) return;
+
+    state.trainings.splice(idx, 1);
+    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
+    if (!s || !s.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+      setAiHint("Ta bort: kunde inte spara (storage fail-closed).");
+      return;
+    }
+
+    state.selectedId = "";
+    state.draft = null;
+    setDirty(false);
+    renderModuleDatalist();
+    renderAreaDatalist();
+    updateUiAll();
+  }
+
+  function purgeAll() {
+    if (!isWriterAllowed()) { writerDeniedHint("Rensa alla"); return; }
+
+    const p = DEPS.store && DEPS.store.purgeAll ? DEPS.store.purgeAll() : { ok: false };
+    if (!p || !p.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte rensa", "bad");
+      setAiHint("Rensa alla: fail-closed.");
+      return;
+    }
+
+    state.trainings = [];
+    state.selectedId = "";
+    state.draft = null;
+    state.showAll = false;
+    setDirty(false);
+    renderModuleDatalist();
+    renderAreaDatalist();
+    updateUiAll();
+  }
+
+  function revertUnsaved() {
+    if (!isWriterAllowed()) { writerDeniedHint("Ångra osparat"); return; }
+    if (!state.selectedId) return;
+    const idx = findTrainingIndexById(state.selectedId);
+    if (idx < 0) return;
+
+    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+    ensureBusinessAreaSearchForSelectUi();
+
+    state.draft = deepClone(state.trainings[idx]);
+    setDirty(false);
+    renderBusinessAreaPicker();
+    renderAiAnchorRow();
+    updateUiAll();
+  }
+
+  /* -------------------------
+     BLOCK 19D — Save/publish
+  -------------------------- */
+  function writeBackDraft(status) {
+    if (!isWriterAllowed()) { writerDeniedHint(status === "published" ? "Spara & publicera" : "Spara som utkast"); return; }
+    if (!state.draft) return;
+
+    syncDraftFromInputs();
+    syncDraftTitleFromFields();
+    renderAiAnchorRow();
+
+    state.draft.status = (status === "published") ? "published" : "draft";
+
+    try {
+      // P0 FIX: If SELECT UI + search input exists, validation must read selected value from SELECT, not from search input.
+      const pickerEl = getBusinessPickerEl() || (dom && dom.businessArea);
+      const baseEl = (dom && dom.businessArea && String(dom.businessArea.tagName || "").toUpperCase() === "SELECT")
+        ? dom.businessArea
+        : pickerEl;
+
+      const sel = normStr(baseEl && baseEl.value);
+
+      if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
+        const other = normStr(dom && dom.businessAreaOther && dom.businessAreaOther.value);
+        if (other.length < 2) {
+          DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+          setAiHint("Verksamhet: Du valde Annat… men texten är tom eller för kort (minst 2 tecken).");
+          return;
+        }
+        state.draft.businessArea = other;
+      }
+
+      const ba = normStr(state.draft.businessArea);
+      if (ba && ba.length > 80) {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+        setAiHint("Verksamhet: För lång text (max 80 tecken).");
+        return;
+      }
+    } catch (_) { }
+
+    const v = (status === "published" && DEPS.contract && DEPS.contract.validateForPublish)
+      ? DEPS.contract.validateForPublish(state.draft)
+      : (DEPS.contract && DEPS.contract.validateTrainingForSave)
+        ? DEPS.contract.validateTrainingForSave(state.draft)
+        : { ok: true, reasons: [] };
+
+    if (!v.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
+      setAiHint((v.reasons || []).join(" "));
+      return;
+    }
+
+    if (status === "published" && !hasAnyItems()) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte publicera", "bad");
+      setAiHint("Publicering kräver minst 1 block/item.");
+      return;
+    }
+
+    const idx = findTrainingIndexById(state.selectedId);
+    if (idx < 0) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Saknar vald utbildning", "bad");
+      setAiHint("Spara: saknar vald utbildning.");
+      return;
+    }
+
+    state.trainings[idx] = deepClone(state.draft);
 
     const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
     if (!s || !s.ok) {
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-      setAiHint("Skapa ny: kunde inte spara (storage fail-closed).");
+      setAiHint("Spara: storage fail-closed.");
       return;
     }
 
-    state.showAll = false;
-
     setDirty(false);
+    setAiHint("");
+    renderModuleDatalist();
+    renderAreaDatalist();
+    renderBusinessAreaPicker();
+    renderAiAnchorRow();
+    updateUiAll();
+  }
+
+  /* -------------------------
+     BLOCK 19E — Events
+  -------------------------- */
+  function wireEventsOnce() {
+    if (page.__BOOTED === true) return;
+    page.__BOOTED = true;
+
+    dom.on(dom.btnNew, "click", createNewTraining);
+    dom.on(dom.btnDelete, "click", deleteSelected);
+    dom.on(dom.btnPurge, "click", purgeAll);
+    dom.on(dom.btnRevert, "click", revertUnsaved);
+
+    dom.on(dom.btnSaveDraft, "click", function () { writeBackDraft("draft"); });
+    dom.on(dom.btnSavePublish, "click", function () { writeBackDraft("published"); });
+
+    dom.on(dom.btnShowAll, "click", function () { state.showAll = true; refreshList(); updateDebug(); });
+
+    dom.on(dom.btnClear, "click", function () {
+      state.q = "";
+      state.fStatus = "";
+      state.onlyProblems = false;
+      if (dom.q) dom.q.value = "";
+      if (dom.fStatus) dom.fStatus.value = "";
+      if (dom.onlyProblems) dom.onlyProblems.checked = false;
+
+      state.businessAreaQuery = "";
+      if (dom.businessAreaSearch) dom.businessAreaSearch.value = "";
+      renderBusinessAreaPicker();
+
+      state.showAll = false;
+      refreshList();
+      updateButtons();
+      renderAiAnchorRow();
+      updateDebug();
+    });
+
+    dom.on(dom.q, "input", function () {
+      state.q = normStr(dom.q && dom.q.value);
+      state.showAll = state.showAll || !!state.q;
+      refreshList();
+      updateButtons();
+      updateDebug();
+    });
+
+    dom.on(dom.fStatus, "change", function () {
+      state.fStatus = normStr(dom.fStatus && dom.fStatus.value);
+      state.showAll = true;
+      refreshList();
+      updateButtons();
+      updateDebug();
+    });
+
+    dom.on(dom.onlyProblems, "change", function () {
+      state.onlyProblems = !!(dom.onlyProblems && dom.onlyProblems.checked);
+      state.showAll = true;
+      refreshList();
+      updateButtons();
+      updateDebug();
+    });
+
+    dom.on(dom.btnModAll, "click", function () { dom.mod && dom.mod.focus && dom.mod.focus(); });
+
+    dom.on(dom.btnModClear, "click", function () {
+      if (!isWriterAllowed()) { writerDeniedHint("Rensa modul/område"); return; }
+      if (dom.mod) dom.mod.value = "";
+      if (dom.area) dom.area.value = "";
+      renderAreaDatalist();
+      syncDraftFromInputs();
+      syncDraftTitleFromFields();
+      renderAiAnchorRow();
+      setDirty(true);
+      updateButtons();
+      updateDebug();
+    });
+
+    // AI-innehåll change: uppdatera UI (ingen låsning)
+    dom.on(dom.aiContent, "change", function () {
+      if (DOCUMENT_ONLY) {
+        enforceAiContentUiDocumentOnly();
+        setAiHint("Dokumentläge är låst på denna sida (legacy).");
+      } else {
+        const sel = readAiContentSelection();
+        if (sel.uiMode === "document") setAiHint("AI-innehåll: Dokument (infoblad).");
+        else if (sel.uiMode === "questions") setAiHint("AI-innehåll: Frågor & svar.");
+        else setAiHint("AI-innehåll: Mix (info + frågor).");
+      }
+      updateAiControlsVisibility();
+      updateButtons();
+      updateDebug();
+    });
+
+    const onEditorChange = function (e) {
+      if (!state.draft) return;
+
+      const tid = (e && e.target && e.target.id) ? String(e.target.id) : "";
+      if (tid === "courseTrack") {
+        renderAiAnchorRow();
+        updateButtons();
+        updateDebug();
+        return;
+      }
+
+      syncDraftFromInputs();
+      renderAreaDatalist();
+      syncDraftTitleFromFields();
+      renderAiAnchorRow();
+
+      setDirty(true);
+      updateButtons();
+      updateDebug();
+    };
+
+    dom.on(dom.mod, "input", onEditorChange);
+    dom.on(dom.area, "input", onEditorChange);
+    dom.on(dom.courseTitle, "change", onEditorChange);
+    dom.on(dom.courseStep, "change", onEditorChange);
+
+    dom.on(dom.courseTrack, "change", onEditorChange);
+    dom.on(dom.courseTrack, "input", onEditorChange);
+
+    dom.on(dom.goalsLevel, "change", function () {
+      if (state.draft) {
+        syncDraftFromInputs();
+        renderAiAnchorRow();
+        setDirty(true);
+        updateButtons();
+        updateDebug();
+      }
+    });
+
+    dom.on(dom.goals, "input", function () {
+      if (state.draft) {
+        syncDraftFromInputs();
+        setDirty(true);
+        updateButtons();
+        updateDebug();
+      }
+    });
+
+    dom.on(dom.businessAreaSearch, "input", function () {
+      state.businessAreaQuery = normStr(dom.businessAreaSearch && dom.businessAreaSearch.value);
+      renderBusinessAreaPicker();
+      if (state.draft) {
+        syncDraftFromInputs();
+        setDirty(true);
+        updateButtons();
+      }
+      renderAiAnchorRow();
+      updateDebug();
+    });
+
+    dom.on(dom.businessArea, "change", function () {
+      if (state.draft) {
+        syncDraftFromInputs();
+        renderBusinessAreaPicker();
+        renderAiAnchorRow();
+        setDirty(true);
+        updateButtons();
+        updateDebug();
+      }
+    });
+
+    dom.on(dom.businessArea, "input", function () {
+      if (state.draft) {
+        syncDraftFromInputs();
+        renderAiAnchorRow();
+        setDirty(true);
+        updateButtons();
+        updateDebug();
+      }
+    });
+
+    dom.on(dom.businessAreaOther, "input", function () {
+      if (state.draft) {
+        syncDraftFromInputs();
+        renderAiAnchorRow();
+        setDirty(true);
+        updateButtons();
+        updateDebug();
+      }
+    });
+
+    dom.on(dom.btnTestAI, "click", testAi);
+    dom.on(dom.btnGenAI, "click", generateAi);
+
+    dom.on(dom.btnLogout, "click", function () {
+      try {
+        if (window.HRApp && typeof window.HRApp.logout === "function") window.HRApp.logout();
+        else if (window.HRApp && typeof window.HRApp.clearSession === "function") window.HRApp.clearSession();
+      } catch (_) { }
+      location.href = "./login.html";
+    });
+  }
+
+  /* -------------------------
+     BLOCK 19F — Boot + retry (PATCHED END-CLOSE)
+     FIX: säkra avslut + stäng filen korrekt (IIFE)
+  -------------------------- */
+  function bootWhenReady() {
+    if (!depsReady()) {
+      setLock("BOOT: väntar på moduler (core/store/contract/render/dom)…");
+      updateUiAll();
+      return false;
+    }
+
+    clearLock();
+    refreshDeps();
+
+    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+    ensureBusinessAreaSearchForSelectUi();
+
+    const load = (DEPS.store && DEPS.store.load) ? DEPS.store.load() : { ok: false };
+    if (!load.ok && load.corrupt) {
+      setLock(DEPS.store && DEPS.store.lockReasonFor ? DEPS.store.lockReasonFor() : "Korrupt trainings.");
+      state.trainings = [];
+    } else {
+      state.trainings = safeArr(load.trainings);
+      clearLock();
+    }
+
     renderModuleDatalist();
     renderAreaDatalist();
     renderChapterAndStepPickers();
     renderBusinessAreaPicker();
+    state.showAll = false;
+
+    wireEventsOnce();
     renderAiAnchorRow();
+
+    // If legacy doc-only, enforce; annars: låt dropdown fungera
+    enforceAiContentUiDocumentOnly();
+
     updateUiAll();
-  } catch (e) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Skapa ny fel", "bad");
-    setAiHint("Skapa ny: exception (fail-closed).");
-    try { console.error("createNewTraining exception:", e); } catch (_) { }
-  }
-}
+    setTimeout(updateUiAll, 0);
+    setTimeout(updateUiAll, 50);
+    setTimeout(updateUiAll, 300);
 
-function deleteSelected() {
-  if (!isWriterAllowed()) { writerDeniedHint("Ta bort vald"); return; }
-  if (!state.selectedId) return;
+    (async function () { try { await ensureSdkReady(); } catch (_) { } })();
 
-  const idx = findTrainingIndexById(state.selectedId);
-  if (idx < 0) return;
+    (async function () {
+      try {
+        const r = await loadCatalogOnce();
+        if (r && r.ok) {
+          renderModuleDatalist();
+          renderAreaDatalist();
+          renderChapterAndStepPickers();
 
-  state.trainings.splice(idx, 1);
-  const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
-  if (!s || !s.ok) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-    setAiHint("Ta bort: kunde inte spara (storage fail-closed).");
-    return;
-  }
+          syncDraftFromInputs();
+          renderAiAnchorRow();
+          updateUiAll();
+        } else {
+          updateUiAll();
+        }
+      } catch (_) {
+        state.catalogStatus = "error";
+        state.catalogErr = "Katalog exception.";
+        updateUiAll();
+      }
+    })();
 
-  state.selectedId = "";
-  state.draft = null;
-  setDirty(false);
-  renderModuleDatalist();
-  renderAreaDatalist();
-  updateUiAll();
-}
-
-function purgeAll() {
-  if (!isWriterAllowed()) { writerDeniedHint("Rensa alla"); return; }
-
-  const p = DEPS.store && DEPS.store.purgeAll ? DEPS.store.purgeAll() : { ok: false };
-  if (!p || !p.ok) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte rensa", "bad");
-    setAiHint("Rensa alla: fail-closed.");
-    return;
+    return true;
   }
 
-  state.trainings = [];
-  state.selectedId = "";
-  state.draft = null;
-  state.showAll = false;
-  setDirty(false);
-  renderModuleDatalist();
-  renderAreaDatalist();
-  updateUiAll();
-}
+  const RETRIES = [0, 50, 150, 300, 600, 1000];
+  let attempt = 0;
 
-function revertUnsaved() {
-  if (!isWriterAllowed()) { writerDeniedHint("Ångra osparat"); return; }
-  if (!state.selectedId) return;
-  const idx = findTrainingIndexById(state.selectedId);
-  if (idx < 0) return;
+  function tryBoot() {
+    const ok = bootWhenReady();
+    if (ok) return;
 
-  // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
-  ensureBusinessAreaSearchForSelectUi();
+    if (attempt >= RETRIES.length - 1) {
+      setLock("BOOT: deps saknas (core/store/contract/render/dom).");
+      updateUiAll();
+      return;
+    }
 
-  state.draft = deepClone(state.trainings[idx]);
-  setDirty(false);
-  renderBusinessAreaPicker();
-  renderAiAnchorRow();
-  updateUiAll();
-}
-
-/* -------------------------
-   BLOCK 19D — Save/publish
--------------------------- */
-function writeBackDraft(status) {
-  if (!isWriterAllowed()) { writerDeniedHint(status === "published" ? "Spara & publicera" : "Spara som utkast"); return; }
-  if (!state.draft) return;
-
-  syncDraftFromInputs();
-  syncDraftTitleFromFields();
-  renderAiAnchorRow();
-
-  state.draft.status = (status === "published") ? "published" : "draft";
+    attempt++;
+    setTimeout(tryBoot, RETRIES[attempt]);
+  }
 
   try {
-    // P0 FIX: If SELECT UI + search input exists, validation must read selected value from SELECT, not from search input.
-    const pickerEl = getBusinessPickerEl() || (dom && dom.businessArea);
-    const baseEl = (dom && dom.businessArea && String(dom.businessArea.tagName || "").toUpperCase() === "SELECT")
-      ? dom.businessArea
-      : pickerEl;
-
-    const sel = normStr(baseEl && baseEl.value);
-
-    if (lowerKey(sel) === lowerKey(BUSINESS_OTHER_LABEL)) {
-      const other = normStr(dom && dom.businessAreaOther && dom.businessAreaOther.value);
-      if (other.length < 2) {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-        setAiHint("Verksamhet: Du valde Annat… men texten är tom eller för kort (minst 2 tecken).");
-        return;
-      }
-      state.draft.businessArea = other;
-    }
-
-    const ba = normStr(state.draft.businessArea);
-    if (ba && ba.length > 80) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-      setAiHint("Verksamhet: För lång text (max 80 tecken).");
-      return;
-    }
-  } catch (_) { }
-
-  const v = (status === "published" && DEPS.contract && DEPS.contract.validateForPublish)
-    ? DEPS.contract.validateForPublish(state.draft)
-    : (DEPS.contract && DEPS.contract.validateTrainingForSave)
-      ? DEPS.contract.validateTrainingForSave(state.draft)
-      : { ok: true, reasons: [] };
-
-  if (!v.ok) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-    setAiHint((v.reasons || []).join(" "));
-    return;
-  }
-
-  if (status === "published" && !hasAnyItems()) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte publicera", "bad");
-    setAiHint("Publicering kräver minst 1 block/item.");
-    return;
-  }
-
-  const idx = findTrainingIndexById(state.selectedId);
-  if (idx < 0) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Saknar vald utbildning", "bad");
-    setAiHint("Spara: saknar vald utbildning.");
-    return;
-  }
-
-  state.trainings[idx] = deepClone(state.draft);
-
-  const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
-  if (!s || !s.ok) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-    setAiHint("Spara: storage fail-closed.");
-    return;
-  }
-
-  setDirty(false);
-  setAiHint("");
-  renderModuleDatalist();
-  renderAreaDatalist();
-  renderBusinessAreaPicker();
-  renderAiAnchorRow();
-  updateUiAll();
-}
-
-/* -------------------------
-   BLOCK 19E — Events
--------------------------- */
-function wireEventsOnce() {
-  if (page.__BOOTED === true) return;
-  page.__BOOTED = true;
-
-  dom.on(dom.btnNew, "click", createNewTraining);
-  dom.on(dom.btnDelete, "click", deleteSelected);
-  dom.on(dom.btnPurge, "click", purgeAll);
-  dom.on(dom.btnRevert, "click", revertUnsaved);
-
-  dom.on(dom.btnSaveDraft, "click", function () { writeBackDraft("draft"); });
-  dom.on(dom.btnSavePublish, "click", function () { writeBackDraft("published"); });
-
-  dom.on(dom.btnShowAll, "click", function () { state.showAll = true; refreshList(); updateDebug(); });
-
-  dom.on(dom.btnClear, "click", function () {
-    state.q = "";
-    state.fStatus = "";
-    state.onlyProblems = false;
-    if (dom.q) dom.q.value = "";
-    if (dom.fStatus) dom.fStatus.value = "";
-    if (dom.onlyProblems) dom.onlyProblems.checked = false;
-
-    state.businessAreaQuery = "";
-    if (dom.businessAreaSearch) dom.businessAreaSearch.value = "";
-    renderBusinessAreaPicker();
-
-    state.showAll = false;
-    refreshList();
-    updateButtons();
-    renderAiAnchorRow();
-    updateDebug();
-  });
-
-  dom.on(dom.q, "input", function () {
-    state.q = normStr(dom.q && dom.q.value);
-    state.showAll = state.showAll || !!state.q;
-    refreshList();
-    updateButtons();
-    updateDebug();
-  });
-
-  dom.on(dom.fStatus, "change", function () {
-    state.fStatus = normStr(dom.fStatus && dom.fStatus.value);
-    state.showAll = true;
-    refreshList();
-    updateButtons();
-    updateDebug();
-  });
-
-  dom.on(dom.onlyProblems, "change", function () {
-    state.onlyProblems = !!(dom.onlyProblems && dom.onlyProblems.checked);
-    state.showAll = true;
-    refreshList();
-    updateButtons();
-    updateDebug();
-  });
-
-  dom.on(dom.btnModAll, "click", function () { dom.mod && dom.mod.focus && dom.mod.focus(); });
-
-  dom.on(dom.btnModClear, "click", function () {
-    if (!isWriterAllowed()) { writerDeniedHint("Rensa modul/område"); return; }
-    if (dom.mod) dom.mod.value = "";
-    if (dom.area) dom.area.value = "";
-    renderAreaDatalist();
-    syncDraftFromInputs();
-    syncDraftTitleFromFields();
-    renderAiAnchorRow();
-    setDirty(true);
-    updateButtons();
-    updateDebug();
-  });
-
-  // AI-innehåll change: uppdatera UI (ingen låsning)
-  dom.on(dom.aiContent, "change", function () {
-    if (DOCUMENT_ONLY) {
-      enforceAiContentUiDocumentOnly();
-      setAiHint("Dokumentläge är låst på denna sida (legacy).");
-    } else {
-      const sel = readAiContentSelection();
-      if (sel.uiMode === "document") setAiHint("AI-innehåll: Dokument (infoblad).");
-      else if (sel.uiMode === "questions") setAiHint("AI-innehåll: Frågor & svar.");
-      else setAiHint("AI-innehåll: Mix (info + frågor).");
-    }
-    updateAiControlsVisibility();
-    updateButtons();
-    updateDebug();
-  });
-
-  const onEditorChange = function (e) {
-    if (!state.draft) return;
-
-    const tid = (e && e.target && e.target.id) ? String(e.target.id) : "";
-    if (tid === "courseTrack") {
-      renderAiAnchorRow();
-      updateButtons();
-      updateDebug();
-      return;
-    }
-
-    syncDraftFromInputs();
-    renderAreaDatalist();
-    syncDraftTitleFromFields();
-    renderAiAnchorRow();
-
-    setDirty(true);
-    updateButtons();
-    updateDebug();
-  };
-
-  dom.on(dom.mod, "input", onEditorChange);
-  dom.on(dom.area, "input", onEditorChange);
-  dom.on(dom.courseTitle, "change", onEditorChange);
-  dom.on(dom.courseStep, "change", onEditorChange);
-
-  dom.on(dom.courseTrack, "change", onEditorChange);
-  dom.on(dom.courseTrack, "input", onEditorChange);
-
-  dom.on(dom.goalsLevel, "change", function () {
-    if (state.draft) {
-      syncDraftFromInputs();
-      renderAiAnchorRow();
-      setDirty(true);
-      updateButtons();
-      updateDebug();
-    }
-  });
-
-  dom.on(dom.goals, "input", function () {
-    if (state.draft) {
-      syncDraftFromInputs();
-      setDirty(true);
-      updateButtons();
-      updateDebug();
-    }
-  });
-
-  dom.on(dom.businessAreaSearch, "input", function () {
-    state.businessAreaQuery = normStr(dom.businessAreaSearch && dom.businessAreaSearch.value);
-    renderBusinessAreaPicker();
-    if (state.draft) {
-      syncDraftFromInputs();
-      setDirty(true);
-      updateButtons();
-    }
-    renderAiAnchorRow();
-    updateDebug();
-  });
-
-  dom.on(dom.businessArea, "change", function () {
-    if (state.draft) {
-      syncDraftFromInputs();
-      renderBusinessAreaPicker();
-      renderAiAnchorRow();
-      setDirty(true);
-      updateButtons();
-      updateDebug();
-    }
-  });
-
-  dom.on(dom.businessArea, "input", function () {
-    if (state.draft) {
-      syncDraftFromInputs();
-      renderAiAnchorRow();
-      setDirty(true);
-      updateButtons();
-      updateDebug();
-    }
-  });
-
-  dom.on(dom.businessAreaOther, "input", function () {
-    if (state.draft) {
-      syncDraftFromInputs();
-      renderAiAnchorRow();
-      setDirty(true);
-      updateButtons();
-      updateDebug();
-    }
-  });
-
-  dom.on(dom.btnTestAI, "click", testAi);
-  dom.on(dom.btnGenAI, "click", generateAi);
-
-  dom.on(dom.btnLogout, "click", function () {
-    try {
-      if (window.HRApp && typeof window.HRApp.logout === "function") window.HRApp.logout();
-      else if (window.HRApp && typeof window.HRApp.clearSession === "function") window.HRApp.clearSession();
-    } catch (_) { }
-    location.href = "./login.html";
-  });
-}
-
-/* -------------------------
-   BLOCK 19F — Boot + retry (PATCHED END-CLOSE)
-   FIX: säkra avslut + stäng filen korrekt (IIFE)
--------------------------- */
-function bootWhenReady() {
-  if (!depsReady()) {
-    setLock("BOOT: väntar på moduler (core/store/contract/render/dom)…");
+    tryBoot();
+  } catch (_) {
+    setLock("BOOT: exception (fail-closed).");
     updateUiAll();
-    return false;
   }
 
-  clearLock();
-  refreshDeps();
-
-  // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
-  ensureBusinessAreaSearchForSelectUi();
-
-  const load = (DEPS.store && DEPS.store.load) ? DEPS.store.load() : { ok: false };
-  if (!load.ok && load.corrupt) {
-    setLock(DEPS.store && DEPS.store.lockReasonFor ? DEPS.store.lockReasonFor() : "Korrupt trainings.");
-    state.trainings = [];
-  } else {
-    state.trainings = safeArr(load.trainings);
-    clearLock();
-  }
-
-  renderModuleDatalist();
-  renderAreaDatalist();
-  renderChapterAndStepPickers();
-  renderBusinessAreaPicker();
-  state.showAll = false;
-
-  wireEventsOnce();
-  renderAiAnchorRow();
-
-  // If legacy doc-only, enforce; annars: låt dropdown fungera
-  enforceAiContentUiDocumentOnly();
-
-  updateUiAll();
-  setTimeout(updateUiAll, 0);
-  setTimeout(updateUiAll, 50);
-  setTimeout(updateUiAll, 300);
-
-  (async function () { try { await ensureSdkReady(); } catch (_) { } })();
-
-  (async function () {
-    try {
-      const r = await loadCatalogOnce();
-      if (r && r.ok) {
-        renderModuleDatalist();
-        renderAreaDatalist();
-        renderChapterAndStepPickers();
-
-        syncDraftFromInputs();
-        renderAiAnchorRow();
-        updateUiAll();
-      } else {
-        updateUiAll();
-      }
-    } catch (_) {
-      state.catalogStatus = "error";
-      state.catalogErr = "Katalog exception.";
-      updateUiAll();
-    }
-  })();
-
-  return true;
-}
-
-const RETRIES = [0, 50, 150, 300, 600, 1000];
-let attempt = 0;
-
-function tryBoot() {
-  const ok = bootWhenReady();
-  if (ok) return;
-
-  if (attempt >= RETRIES.length - 1) {
-    setLock("BOOT: deps saknas (core/store/contract/render/dom).");
-    updateUiAll();
-    return;
-  }
-
-  attempt++;
-  setTimeout(tryBoot, RETRIES[attempt]);
-}
-
-try {
-  tryBoot();
-} catch (_) {
-  setLock("BOOT: exception (fail-closed).");
-  updateUiAll();
-}
-
-/* ===== END FILE CLOSE (P0) =====
-   Om filen startar med: (function () {
-   så MÅSTE filen sluta med: })();
-*/
+  /* ===== END FILE CLOSE (P0) =====
+     Om filen startar med: (function () {
+     så MÅSTE filen sluta med: })();
+  */
 })();
-
