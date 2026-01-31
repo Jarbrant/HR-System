@@ -11,20 +11,24 @@ POLICY (LÅST):
 - ADMIN-only write (SYSTEM_ADMIN/MANAGER read-only)
 - Logga aldrig payload (endast felkod/orsak vid behov)
 
-PATCH v1.0.2 (PP-SC-010-03):
-- P0: Strikt auth: canWrite kräver (role===ADMIN && empNo)
-- P0: Robust roll/who-detektion: stöd för roleId/role_code/rbacRole + nested containers + normalisering
-- P0: In-memory loader för ai-rules/v1/modules.json (ingen storage, ingen DOM) + helpers för modul/område/kapitel/kurs
+PATCH v1.0.3 (PP-SC-010-03) — CORE-BLOCKS + AI-NO-GOALS HELPER
+- BLOCK-indelning (för felsökning, ingen funktionsändring)
+- Lägger till core.buildAiContextNoGoals(state) (skickar aldrig goals)
+- Lägger till core.buildAiContextText(state, extras) (valfri helper för SDK {text:"..."})
 ============================================================ */
 (function () {
   "use strict";
 
+  /* ============================================================
+     BLOCK 01/12 — Namespace + singleton-guard
+     ============================================================ */
   const NS = (window.Trainings = window.Trainings || {});
   if (NS.core) return;
-
   const core = (NS.core = {});
 
-  // ---------- time / ids ----------
+  /* ============================================================
+     BLOCK 02/12 — Time / IDs
+     ============================================================ */
   core.nowTs = function () { return Date.now(); };
 
   core.makeId = function (prefix) {
@@ -32,13 +36,17 @@ PATCH v1.0.2 (PP-SC-010-03):
     return p + "_" + core.nowTs() + "_" + Math.random().toString(16).slice(2, 8);
   };
 
-  // ---------- string helpers ----------
+  /* ============================================================
+     BLOCK 03/12 — String helpers
+     ============================================================ */
   core.normStr = function (v) { return String(v ?? "").trim(); };
   core.safeLower = function (v) { return core.normStr(v).toLowerCase(); };
 
   function upper(v) { return String(v ?? "").trim().toUpperCase(); }
 
-  // ---------- role / auth (fail-closed) ----------
+  /* ============================================================
+     BLOCK 04/12 — Role / auth (fail-closed)
+     ============================================================ */
   const ROLE_ALLOW = new Set(["SYSTEM_ADMIN", "ADMIN", "MANAGER", "EMPLOYEE", "READER", "EDITOR"]);
 
   function normRole(v) {
@@ -184,7 +192,9 @@ PATCH v1.0.2 (PP-SC-010-03):
     return (String(w.role || "").toUpperCase() === "ADMIN" && !!core.normStr(w.empNo));
   };
 
-  // ---------- fail-closed helpers ----------
+  /* ============================================================
+     BLOCK 05/12 — Fail-closed helpers
+     ============================================================ */
   core.fail = function (code, msg) {
     return { ok: false, code: String(code || "ERR"), err: String(msg || "Fel") };
   };
@@ -193,9 +203,11 @@ PATCH v1.0.2 (PP-SC-010-03):
     return Object.assign({ ok: true }, data || {});
   };
 
-  // ---------- Kursplan / titel-motor ----------
-  // LÅS: Ingen ny datamodell. Vi kodar kapitel+steg i title-strängen.
-  // Format (stabilt): "<KAPITEL> • Steg <N> • <OMRÅDE>"
+  /* ============================================================
+     BLOCK 06/12 — Kursplan / titel-motor
+     LÅS: Ingen ny datamodell. Vi kodar kapitel+steg i title-strängen.
+     Format (stabilt): "<KAPITEL> • Steg <N> • <OMRÅDE>"
+     ============================================================ */
   core.composeTitle = function (chapter, step, area) {
     const ch = core.normStr(chapter) || "Introduktion";
     const st = core.normStr(step) || "1";
@@ -239,9 +251,11 @@ PATCH v1.0.2 (PP-SC-010-03):
     return "Allmänt fokus för kapitlet.";
   };
 
-  // ---------- SubjectId (Modul → Område) ----------
-  // Målet: tappa aldrig kedjan. SubjectId blir stabilt även om användaren skriver in fritext.
-  // Format: "<module>::<area>" (lowercase, trim). Tomt => "".
+  /* ============================================================
+     BLOCK 07/12 — SubjectId (Modul → Område)
+     Målet: tappa aldrig kedjan. SubjectId blir stabilt även om användaren skriver in fritext.
+     Format: "<module>::<area>" (lowercase, trim). Tomt => "".
+     ============================================================ */
   core.composeSubjectId = function (module, area) {
     const m = core.safeLower(module);
     const a = core.safeLower(area);
@@ -256,7 +270,13 @@ PATCH v1.0.2 (PP-SC-010-03):
     return { module: core.normStr(parts[0]), area: core.normStr(parts.slice(1).join("::")) };
   };
 
-  // ---------- AI payload builder (utan DOM/storage) ----------
+  /* ============================================================
+     BLOCK 08/12 — AI context builders (utan DOM/storage)
+     POLICY: AI får inte få goals. (UI kan visa goals, men inte skicka till worker.)
+     ============================================================ */
+
+  // Bas-context (innehåller goals i objektet — får användas internt om UI behöver det,
+  // men ska INTE skickas till worker utan att goals rensas)
   core.buildAiContext = function (state) {
     const s = state || {};
     const module = core.normStr(s.module);
@@ -281,9 +301,80 @@ PATCH v1.0.2 (PP-SC-010-03):
     };
   };
 
-  // ---------- "forbidden phrases" (enkel, UI-skydd) ----------
-  // Detta är INTE en “AI-säkerhet”. Det är en liten spärr för att slippa vissa skol-instruktioner i genererat innehåll.
-  // Obs: Den ska vara liten och tydlig – och kan flyttas till worker/regler senare.
+  // ✅ Denna ska användas för worker/SDK: goals skickas aldrig
+  core.buildAiContextNoGoals = function (state) {
+    const ctx = core.buildAiContext(state || {});
+    // LÅST: skicka aldrig mål
+    ctx.goals = "";
+    return ctx;
+  };
+
+  // Valfri helper: bygg en kompakt text för SDK normalizeContext({text:"..."})
+  // (Ingen storage. Ingen loggning av payload här.)
+  core.buildAiContextText = function (state, extras) {
+    try {
+      const s = state || {};
+      const ex = (extras && typeof extras === "object") ? extras : {};
+
+      const module = core.normStr(s.module) || "—";
+      const area = core.normStr(s.area) || "—";
+      const chapter = core.normStr(s.courseTitle) || "Introduktion";
+      const step = core.normStr(s.courseStep) || "1";
+      const level = core.normStr(s.goalsLevel || "normal") || "normal";
+
+      const business =
+        core.normStr(s.business) ||
+        core.normStr(s.businessArea) ||
+        core.normStr(s.businessAreaText) ||
+        core.normStr(ex.business) ||
+        "—";
+
+      const track = core.normStr(ex.track || s.track || s.courseTrack || "course1");
+      const trackLabel = core.normStr(ex.trackLabel || s.trackLabel || s.courseTrackLabel || "Grund");
+
+      const directive = core.normStr(ex.directive || s.directive || "");
+
+      const subjectId = core.composeSubjectId(core.normStr(s.module), core.normStr(s.area));
+      const title = core.composeTitle(chapter, step, core.normStr(s.area));
+
+      const anchor = core.normStr(ex.anchor || s.anchor || "");
+
+      const payload = {
+        subject: {
+          module: core.normStr(s.module),
+          area: core.normStr(s.area),
+          subjectId: subjectId,
+          title: core.normStr(s.area) || "—",
+          businessArea: (business === "—") ? "" : business,
+          anchor: anchor || `Modul: ${module} • Område: ${area} • Kapitel: ${chapter} • Steg: ${step} • Nivå: ${level} • Verksamhet: ${business} • Kurs-spår: ${trackLabel}`
+        },
+        course: {
+          chapter,
+          step,
+          title: `${chapter} • Steg ${step} • ${area}`,
+          chapterFocus: core.getChapterFocus(chapter),
+          stepFocus: core.getStepFocus(step),
+          track,
+          trackLabel
+        },
+        level,
+        goals: "", // LÅST: aldrig mål till AI
+        anchor: anchor || `Modul: ${module} • Område: ${area} • Kapitel: ${chapter} • Steg: ${step} • Nivå: ${level} • Verksamhet: ${business} • Kurs-spår: ${trackLabel}`,
+        business: (business === "—") ? "" : business,
+        directive
+      };
+
+      // SDK kräver {text:"..."} (worker infererar från text)
+      return { text: JSON.stringify(payload) };
+    } catch (_) {
+      return { text: "" };
+    }
+  };
+
+  /* ============================================================
+     BLOCK 09/12 — "forbidden phrases" (enkel, UI-skydd)
+     Detta är INTE en “AI-säkerhet”. Det är en liten spärr för att slippa vissa skol-instruktioner i genererat innehåll.
+     ============================================================ */
   core.forbiddenPhrases = [
     "beskriv hur du tänkte",
     "utför uppgiften",
@@ -298,7 +389,9 @@ PATCH v1.0.2 (PP-SC-010-03):
     return core.forbiddenPhrases.some((p) => hay.includes(core.safeLower(p)));
   };
 
-  // ---------- Normalize worker result ----------
+  /* ============================================================
+     BLOCK 10/12 — Normalize worker result
+     ============================================================ */
   core.normalizeAiResult = function (raw) {
     const out = { items: [], blocks: [] };
     if (!raw || typeof raw !== "object") return out;
@@ -317,8 +410,10 @@ PATCH v1.0.2 (PP-SC-010-03):
     if (!cond) throw new Error(String(code || "ASSERT") + ":" + String(msg || "assert"));
   };
 
-  // ---------- Rules catalog (ai-rules/v1/modules.json) ----------
-  // No storage. No DOM. In-memory cache only.
+  /* ============================================================
+     BLOCK 11/12 — Rules catalog (ai-rules/v1/modules.json)
+     No storage. No DOM. In-memory cache only.
+     ============================================================ */
   const _catalog = {
     loaded: false,
     loading: null,
@@ -495,5 +590,8 @@ PATCH v1.0.2 (PP-SC-010-03):
     return om.map((x) => ({ id: core.normStr(x.id), title: core.normStr(x.title) }));
   };
 
-  core.__VERSION = "v1.0.2-PP-SC-010-03";
+  /* ============================================================
+     BLOCK 12/12 — Version
+     ============================================================ */
+  core.__VERSION = "v1.0.3-PP-SC-010-03";
 })();
