@@ -29,6 +29,7 @@ MODULER (NYTT):
 - v1.6 (AUTOPATCH UI-CLEAN): tog bort “hjälp/förklaring”-containers som skapar brus och gör filen lång.
   Behåller funktion + hooks (statusfält/ids), ingen logik ändrad.
 - v1.7 (AUTOPATCH UI-HELP): Info-knapp vid “Redigera” + modal med 7 rader instruktion (ingen lagring, fail-closed).
+- v1.8 (AUTOPATCH HOTFIX): Återinför AI-läge "Dokument (infoblad)" + fail-closed unlock-guard om dropdown låses felaktigt till "Dokument (låst)".
 ============================================================ -->
 <!doctype html>
 <html lang="sv">
@@ -675,6 +676,7 @@ MODULER (NYTT):
               <select class="select" id="aiContent">
                 <option value="blocks" selected>Utbildningsblock (mix)</option>
                 <option value="questions">Provfrågor + facit</option>
+                <option value="document">Dokument (infoblad)</option>
               </select>
             </div>
 
@@ -833,6 +835,60 @@ MODULER (NYTT):
       dlg.addEventListener('close', function(){
         try{ (lastFocus && lastFocus.focus) ? lastFocus.focus() : btn.focus(); }catch(_){}
       });
+    })();
+  </script>
+
+  <!-- v1.8: HOTFIX – återställ AI-innehåll om modulerna låser felaktigt till "Dokument (låst)" -->
+  <script>
+    (function(){
+      const sel = document.getElementById('aiContent');
+      if (!sel) return;
+
+      function normalizeAiContentOptionsIfBugLocked(){
+        // BUG-signatur: dropdown har 1 option och/eller texten innehåller "(låst)" och den är disabled.
+        const onlyOne = sel.options && sel.options.length === 1;
+        const firstText = (sel.options && sel.options[0]) ? String(sel.options[0].text || '') : '';
+        const looksLocked = /\(l[åa]st\)/i.test(firstText) || /document/i.test(String(sel.value || ''));
+        const isDisabled = !!sel.disabled;
+
+        // Vi ska INTE gå emot RBAC-readonly. Därför ändrar vi bara vid den tydliga bug-signaturen.
+        if (!(onlyOne && isDisabled && looksLocked)) return;
+
+        const prev = String(sel.value || 'document');
+
+        // Fail-closed: bygg om optionerna deterministiskt (ingen data, inga keys).
+        while (sel.firstChild) sel.removeChild(sel.firstChild);
+
+        const opts = [
+          { v:'blocks',   t:'Utbildningsblock (mix)' },
+          { v:'questions',t:'Provfrågor + facit' },
+          { v:'document', t:'Dokument (infoblad)' }
+        ];
+
+        for (const o of opts){
+          const opt = document.createElement('option');
+          opt.value = o.v;
+          opt.textContent = o.t; // XSS-safe
+          sel.appendChild(opt);
+        }
+
+        sel.disabled = false;
+
+        // Återställ värde om möjligt, annars default blocks.
+        if (opts.some(o => o.v === prev)){
+          sel.value = prev;
+        } else {
+          sel.value = 'blocks';
+        }
+
+        // Ping UI: trigga change så att ev. questionControls syncar.
+        try{ sel.dispatchEvent(new Event('change', { bubbles:true })); }catch(_){}
+      }
+
+      // Kör direkt + efter microtask (för att hinna efter modul-init).
+      normalizeAiContentOptionsIfBugLocked();
+      setTimeout(normalizeAiContentOptionsIfBugLocked, 0);
+      setTimeout(normalizeAiContentOptionsIfBugLocked, 60);
     })();
   </script>
 </body>
