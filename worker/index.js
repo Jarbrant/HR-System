@@ -1,14 +1,17 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.5 DOC+MIX FIX + V1-CONTRACT)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.6 SUBJECT+DOC LENGTH + NO-GOALS POLICY)
 // FIL: worker/index.js
 //
-// PATCH v1.6.5 (DOC/MIX FIX):
-// - P0: Document/Mix får inte längre “råka bli provfrågor” → UI slutar stoppa import.
+// PATCH v1.6.6 (SUBJECT “HJÄRNA” + DOC LENGTH FAIL-CLOSED):
+// - P0: Skicka aldrig "Mål/goals" till AI (bort från prompt).
+// - P0: Document/Mix får alltid text-block och valideras med minWords + sektioner.
+// - P0: Subject resolver (minst feedback_samtal + generic) injiceras som hårda krav i doc/mix.
+// - P1: Deterministic fallback för doc/mix blir utförlig (rubriker + exempel), inte 2 rader.
+//
+// Tidigare patchar bibehålls (v1.6.5 + v1.6.4 + v1.6.3):
+// - P0: Document/Mix får inte “råka bli provfrågor” → UI slutar stoppa import.
 // - P0: mode="document" ger alltid text-block (aldrig question-block).
 // - P0: mode="mix" ger också text-block (aldrig question-block) för stabilitet nu.
-// - Provfrågor+facit (questionType) fungerar som innan.
-//
-// Tidigare patchar bibehålls (v1.6.4 + v1.6.3):
 // - P0: "Förklaring" blir mini-lektion (4–6 meningar) med struktur.
 // - P0: Context unwrap/parsa context.text även när det är "dubbelt JSON".
 // - P0: Extrahera subject/course/level + focus → injiceras i prompt som hårda rubriker.
@@ -115,7 +118,7 @@ function mapTrainingBlocksToUiQuestions(blocks /*, questionTypeRaw*/) {
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.6.5";
+const VERSION = "1.6.6";
 
 // ============================================================
 // BLOCK 02B — Local utils (self-contained)  [P0: undvik import-crash]
@@ -351,9 +354,158 @@ function fmtContextForPrompt(bundle, language) {
   if (bundle.title) lines.push(`${sv ? "Titel" : "Title"}: ${bundle.title}`);
   if (bundle.chapterFocus) lines.push(`${sv ? "Kapitel-fokus" : "Chapter focus"}: ${bundle.chapterFocus}`);
   if (bundle.stepFocus) lines.push(`${sv ? "Steg-fokus" : "Step focus"}: ${bundle.stepFocus}`);
-  if (bundle.goals) lines.push(`${sv ? "Mål (för människa)" : "Goals (for humans)"}: ${bundle.goals}`);
+
+  // P0 POLICY: Skicka aldrig "Mål/goals" till AI → tas bort från prompten
+  // (bundle.goals används endast lokalt/visuellt i UI, inte i AI-anrop)
 
   return lines.join("\n");
+}
+
+// ============================================================
+// BLOCK 02F — Subject “hjärna” + doc krav (Steg 1)
+// ============================================================
+
+function countWords(text) {
+  const t = safeStr(text).trim();
+  if (!t) return 0;
+  return t.split(/\s+/g).filter(Boolean).length;
+}
+
+function joinDocBlocksText(blocks) {
+  const arr = Array.isArray(blocks) ? blocks : [];
+  const parts = [];
+  for (const b of arr) {
+    if (!b || b.kind !== "text") continue;
+    const items = Array.isArray(b.items) ? b.items : [];
+    const ti = items.find((x) => x && x.type === "textInline" && typeof x.text === "string");
+    if (!ti) continue;
+    parts.push(safeStr(ti.text));
+  }
+  return parts.join("\n\n").trim();
+}
+
+function containsAnyHeading(text, headings) {
+  const t = safeStr(text).toLowerCase();
+  for (const h of Array.isArray(headings) ? headings : []) {
+    const hh = safeStr(h).toLowerCase().trim();
+    if (!hh) continue;
+    if (t.includes(hh)) return true;
+  }
+  return false;
+}
+
+function resolveSubjectSpec(subjectIdRaw, language) {
+  const sv = language === "sv";
+  const id = safeStr(subjectIdRaw).trim() || "generic";
+
+  // NOTE: Detta är en minimal inbyggd resolver för Steg 1.
+  // När ni kopplar in ai-rules/v1/subjects/*.json i worker (via KV/R2/Assets) kan denna bytas till riktig lookup.
+  const specs = {
+    generic: {
+      id: "generic",
+      label: sv ? "Generellt" : "Generic",
+      minWordsDoc: 180,
+      requiredHeadings: sv
+        ? ["Varför", "Så gör ni", "Exempel", "Mini-checklista", "Kom ihåg"]
+        : ["Why", "How to", "Examples", "Mini checklist", "Remember"],
+      bullets: sv
+        ? [
+            "Skriv sakligt och konkret.",
+            "Använd rubriker och punktlistor.",
+            "Ge minst 2 exempel från vardagen.",
+            "Undvik provfrågor, facit och quiz-format i dokumentläge.",
+          ]
+        : [
+            "Write clearly and concretely.",
+            "Use headings and bullet lists.",
+            "Include at least 2 real-world examples.",
+            "Avoid quiz structures in document mode.",
+          ],
+      examples: sv
+        ? [
+            "Exempel: Du ska ge feedback efter ett arbetspass – börja med fakta, inte antaganden.",
+            "Exempel: I ett samtal om avvikelse – be om underlag och kom överens om nästa steg.",
+          ]
+        : [
+            "Example: Give feedback after a shift—start with facts, not assumptions.",
+            "Example: In a deviation talk—ask for evidence and agree on next steps.",
+          ],
+      forbidden: sv
+        ? ["Provfrågor", "Svarsalternativ", "correctIndex", "quiz", "facit"]
+        : ["Quiz questions", "Answer options", "correctIndex", "quiz", "answer key"],
+    },
+
+    feedback_samtal: {
+      id: "feedback_samtal",
+      label: sv ? "Feedback & samtal" : "Feedback & conversations",
+      minWordsDoc: 220,
+      requiredHeadings: sv
+        ? ["Varför finns det här", "Vad menar vi med", "Så gör ni", "Exempel", "Mini-checklista", "Vanliga fallgropar"]
+        : ["Why this exists", "What we mean by", "How to do it", "Examples", "Mini checklist", "Common pitfalls"],
+      bullets: sv
+        ? [
+            "Utgå från konkreta observationer (fakta), inte tolkningar.",
+            "Var tydlig med syfte: utveckling, kvalitet, trygghet – inte kritik.",
+            "Lyssna aktivt: spegla, sammanfatta, stäm av.",
+            "Avsluta alltid med nästa steg: vem gör vad, när följer ni upp.",
+            "Dokumentera kort om det behövs: datum, fakta, beslut, uppföljning.",
+          ]
+        : [
+            "Start from concrete observations (facts), not interpretations.",
+            "Be clear on the purpose: development, quality, safety—not criticism.",
+            "Listen actively: reflect, summarize, confirm.",
+            "Always end with next steps: who does what, follow-up time.",
+            "Document briefly if needed: date, facts, decisions, follow-up.",
+          ],
+      examples: sv
+        ? [
+            "Exempel 1 (kort feedback): “Jag såg att checklistan inte signerades i dag. Hur blev det så? Vad behöver du för att det ska fungera i morgon?”",
+            "Exempel 2 (svårt samtal): “När vi saknar underlag blir beslut osäkra. Jag vill att vi hittar en rutin som funkar för dig och teamet.”",
+            "Exempel 3 (uppföljning): “Vi testar lösning X i en vecka. På fredag stämmer vi av vad som fungerade och vad som behöver justeras.”",
+          ]
+        : [
+            "Example 1 (quick feedback): “I noticed the checklist wasn’t signed today. What happened? What do you need for it to work tomorrow?”",
+            "Example 2 (hard talk): “Without evidence, decisions become unsafe. Let’s find a routine that works for you and the team.”",
+            "Example 3 (follow-up): “We try solution X for one week, then review what worked and adjust.”",
+          ],
+      forbidden: sv
+        ? ["Provfrågor", "Svarsalternativ", "correctIndex", "quiz", "facit", "rätta svar"]
+        : ["Quiz questions", "Answer options", "correctIndex", "quiz", "answer key"],
+    },
+  };
+
+  return specs[id] || specs.generic;
+}
+
+function validateDocOutput({ language, subjectSpec, blocks }) {
+  const sv = language === "sv";
+  const text = joinDocBlocksText(blocks);
+  const words = countWords(text);
+
+  const minWords = Number(subjectSpec && subjectSpec.minWordsDoc) || 180;
+  if (words < minWords) {
+    return {
+      ok: false,
+      errorCode: "DOC_TOO_SHORT",
+      message: sv
+        ? `För kort infoblad (${words} ord). Minst ${minWords} ord krävs för ämnet.`
+        : `Document too short (${words} words). Minimum ${minWords} words required.`,
+    };
+  }
+
+  const reqHeads = Array.isArray(subjectSpec && subjectSpec.requiredHeadings) ? subjectSpec.requiredHeadings : [];
+  if (reqHeads.length) {
+    const hasHeading = containsAnyHeading(text, reqHeads);
+    if (!hasHeading) {
+      return {
+        ok: false,
+        errorCode: "DOC_MISSING_SECTIONS",
+        message: sv ? "Infoblad saknar tydliga rubriker/sektioner. Försök igen." : "Document lacks clear headings/sections. Try again.",
+      };
+    }
+  }
+
+  return { ok: true };
 }
 
 // ============================================================
@@ -916,7 +1068,16 @@ async function buildTrainingBlocks(input, env) {
     if (mode === "document" || mode === "mix") {
       const aiDoc = await buildDocumentBlocksWithAI(input, env);
       if (aiDoc && aiDoc.ok && Array.isArray(aiDoc.blocks) && aiDoc.blocks.length && ensureNoQuestionBlocks(aiDoc.blocks)) {
-        return { training: aiDoc, source: "cf", reason: "OK" };
+        // P0: validate doc length/sections (fail-closed)
+        const subjectSpec = aiDoc && aiDoc.__subjectSpec ? aiDoc.__subjectSpec : resolveSubjectSpec(aiDoc.subjectId, aiDoc.language);
+        const v = validateDocOutput({ language: aiDoc.language, subjectSpec, blocks: aiDoc.blocks });
+        if (v.ok) {
+          const clean = { ...aiDoc };
+          delete clean.__subjectSpec;
+          return { training: clean, source: "cf", reason: "OK" };
+        }
+        // fail-closed → fallback utförligt
+        return { training: buildDocumentBlocksDeterministic(input), source: "fallback", reason: v.errorCode || "DOC_VALIDATE_FAIL" };
       }
       // fail-closed mot frågor i doc/mix → fallback text-block
       return { training: buildDocumentBlocksDeterministic(input), source: "fallback", reason: "DOC_SCHEMA_FAIL" };
@@ -945,14 +1106,34 @@ async function buildDocumentBlocksWithAI(input, env) {
   const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
   const language = normalizeLanguage(input && input.language);
   const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
-  const subjectId = safeStr(input && input.subjectId).trim() || "generic";
+  const subjectIdRaw = safeStr(input && input.subjectId).trim() || "generic";
 
   const bundle = parseContextBundle(contextTextRaw);
-  const courseInfo = fmtContextForPrompt(bundle, language);
+  const effectiveSubjectId = safeStr(subjectIdRaw || (bundle && bundle.subjectId) || "generic").trim() || "generic";
+  const subjectSpec = resolveSubjectSpec(effectiveSubjectId, language);
 
+  const courseInfo = fmtContextForPrompt(bundle, language);
   const sv = language === "sv";
 
-  // P0: Vi ber om dokumentblock (inte frågor) och låser schema
+  const minWords = Number(subjectSpec && subjectSpec.minWordsDoc) || 180;
+  const heads = Array.isArray(subjectSpec && subjectSpec.requiredHeadings) ? subjectSpec.requiredHeadings : [];
+  const bullets = Array.isArray(subjectSpec && subjectSpec.bullets) ? subjectSpec.bullets : [];
+  const examples = Array.isArray(subjectSpec && subjectSpec.examples) ? subjectSpec.examples : [];
+  const forbidden = Array.isArray(subjectSpec && subjectSpec.forbidden) ? subjectSpec.forbidden : [];
+
+  const subjectHardFacts = [
+    sv ? "ÄMNE (hårda krav):" : "SUBJECT (hard requirements):",
+    `subjectId: ${subjectSpec.id}`,
+    `${sv ? "Titel" : "Title"}: ${subjectSpec.label}`,
+    `${sv ? "Minimilängd" : "Minimum length"}: ${minWords} ${sv ? "ord totalt" : "words total"}`,
+    heads.length ? `${sv ? "Obligatoriska rubriker" : "Required headings"}: ${heads.join(" | ")}` : "",
+    bullets.length ? `${sv ? "Punktkrav" : "Bullet requirements"}:\n- ${bullets.join("\n- ")}` : "",
+    examples.length ? `${sv ? "Exempel att använda/efterlikna" : "Examples to use/imitate"}:\n- ${examples.join("\n- ")}` : "",
+    forbidden.length ? `${sv ? "FÖRBJUDET i dokumentläge" : "FORBIDDEN in document mode"}: ${forbidden.join(", ")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
   const schemaHint = sv
     ? `Returnera ENDAST giltig JSON. Inget markdown. Inga extra rader. JSON måste börja med "{" och sluta med "}".
 Schema:
@@ -963,9 +1144,11 @@ Schema:
 }
 Regler (mycket viktiga):
 - Exakt ${count} blocks.
-- Varje block ska vara ren text (dokument-innehåll), inte frågor.
+- Total text (alla blocks ihop) ska vara minst ${minWords} ord.
+- Använd tydliga rubriker/sektioner (minst någon av: ${heads.slice(0, 6).join(" / ")}).
+- Varje block ska vara ren dokumenttext (infoblad), inte frågor.
 - Inga svarsalternativ, ingen correctIndex, inga "quiz"-fält.
-- Håll språket tydligt och sakligt, koppla till KURSINFO.`
+- Undvik meta-texter. Skriv användbart och konkret.`
     : `Return ONLY valid JSON. No markdown, no extra lines. JSON must start with "{" and end with "}".
 Schema:
 {
@@ -975,108 +1158,183 @@ Schema:
 }
 Rules (very important):
 - Exactly ${count} blocks.
+- Total text (all blocks combined) must be at least ${minWords} words.
+- Use clear headings/sections (at least one of: ${heads.slice(0, 6).join(" / ")}).
 - Each block is plain document text, not questions.
 - No options, no correctIndex, no quiz fields.
-- Keep it clear and factual, tied to COURSE INFO.`;
+- No meta text. Make it concrete and usable.`;
 
   const systemPrompt = sv
-    ? `Du skapar dokumentblock för en utbildning (HR). Du får INTE skapa provfrågor här. Följ JSON-schemat exakt.`
-    : `You create document blocks for a training. You MUST NOT create quiz questions here. Follow the JSON schema exactly.`;
+    ? `Du skapar dokumentblock (infoblad) för HR-utbildning. Du får INTE skapa provfrågor här. Följ JSON-schemat exakt.`
+    : `You create document blocks (info sheet) for HR training. You MUST NOT create quiz questions. Follow the JSON schema exactly.`;
 
   const userPrompt =
     `${courseInfo}\n\n` +
+    `${subjectHardFacts}\n\n` +
     (sv ? `LÄGE: ${mode.toUpperCase()} (dokument-innehåll)\n\n` : `MODE: ${mode.toUpperCase()} (document content)\n\n`) +
     (sv ? `KONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n\n` : `CONTEXT (raw):\n${contextTextRaw || "(none)"}\n\n`) +
-    `subjectId: ${subjectId}\n\n` +
     schemaHint;
 
   const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
 
-  let answer;
-  try {
-    answer = await env.AI.run(model, {
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    });
-  } catch (_) {
-    answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    });
+  async function runOnce(forceStricter) {
+    const extra = forceStricter
+      ? sv
+        ? `\n\nVIKTIGT: Om du svarar för kort kommer svaret att avvisas. Gör texten utförlig med rubriker + punktlistor + minst 2 konkreta exempel.`
+        : `\n\nIMPORTANT: If you answer too short, it will be rejected. Make it detailed with headings + bullets + at least 2 concrete examples.`
+      : "";
+
+    let answer;
+    try {
+      answer = await env.AI.run(model, {
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt + extra },
+        ],
+      });
+    } catch (_) {
+      answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt + extra },
+        ],
+      });
+    }
+    return answer;
   }
 
-  const raw = isPlainObject(answer) ? answer.response || answer.result || answer.output || answer.text || answer : answer;
-  const parsed = safeJsonFromUnknown(raw);
-  if (!parsed || !isPlainObject(parsed)) return null;
+  // försök 1
+  let answer = await runOnce(false);
 
-  const rows = parseDocAiPayload(parsed);
-  if (!rows.length) return null;
+  function parseToBlocks(ans) {
+    const raw = isPlainObject(ans) ? ans.response || ans.result || ans.output || ans.text || ans : ans;
+    const parsed = safeJsonFromUnknown(raw);
+    if (!parsed || !isPlainObject(parsed)) return null;
 
-  const blocks = [];
-  for (let i = 0; i < rows.length && blocks.length < count; i++) {
-    const r = rows[i];
-    const text = safeStr(r && r.text).trim();
-    if (!text) continue;
-    blocks.push(makeTextBlock({ i: blocks.length, title: safeStr(r && r.title).trim(), text }));
+    const rows = parseDocAiPayload(parsed);
+    if (!rows.length) return null;
+
+    const blocks = [];
+    for (let i = 0; i < rows.length && blocks.length < count; i++) {
+      const r = rows[i];
+      const text = safeStr(r && r.text).trim();
+      if (!text) continue;
+      blocks.push(makeTextBlock({ i: blocks.length, title: safeStr(r && r.title).trim(), text }));
+    }
+    if (!blocks.length) return null;
+    if (!ensureNoQuestionBlocks(blocks)) return null;
+
+    // toppa upp om AI gav färre
+    while (blocks.length < count) {
+      blocks.push(
+        makeTextBlock({
+          i: blocks.length,
+          title: sv ? `Block ${blocks.length + 1}` : `Block ${blocks.length + 1}`,
+          text: sv
+            ? "Komplettera med tydlig dokumenttext kopplad till ämneskrav och kursinfo. Använd rubriker och exempel."
+            : "Add clear document text tied to subject requirements and course info. Use headings and examples.",
+        })
+      );
+    }
+    return blocks.slice(0, count);
   }
 
-  if (!blocks.length) return null;
+  let blocks = parseToBlocks(answer);
 
-  // P0: hård garanti: inga question-block i document/mix
-  if (!ensureNoQuestionBlocks(blocks)) return null;
-
-  // toppa upp om AI gav färre
-  while (blocks.length < count) {
-    blocks.push(
-      makeTextBlock({
-        i: blocks.length,
-        title: sv ? `Block ${blocks.length + 1}` : `Block ${blocks.length + 1}`,
-        text: sv ? "Komplettera med kort, tydlig dokumenttext kopplad till kursinfo." : "Add short, clear document text tied to the course info.",
-      })
-    );
+  // validera
+  if (blocks) {
+    const v = validateDocOutput({ language, subjectSpec, blocks });
+    if (!v.ok) {
+      // försök 2 (hårdare)
+      answer = await runOnce(true);
+      blocks = parseToBlocks(answer);
+      if (blocks) {
+        const v2 = validateDocOutput({ language, subjectSpec, blocks });
+        if (!v2.ok) {
+          return null; // fail-closed → caller fallback
+        }
+      } else {
+        return null;
+      }
+    }
+  } else {
+    return null;
   }
 
   return {
     ok: true,
     v: "training-blocks@v1",
     mode,
-    subjectId: (bundle && bundle.subjectId) || subjectId,
+    subjectId: effectiveSubjectId,
     language,
-    blocks: blocks.slice(0, count),
+    blocks,
+    __subjectSpec: subjectSpec, // intern (tas bort vid return)
   };
 }
 
 function buildDocumentBlocksDeterministic(input) {
-  const requestId = safeStr(input && input.requestId).trim();
   const mode = safeStr(input && input.mode).trim() || "document";
   const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
   const language = normalizeLanguage(input && input.language);
   const contextText = safeStr(input && (input.context || input.contextText)).trim();
-  const subjectId = safeStr(input && input.subjectId).trim() || "generic";
+  const subjectIdRaw = safeStr(input && input.subjectId).trim() || "generic";
 
   const bundle = parseContextBundle(contextText);
-  const sv = language === "sv";
+  const effectiveSubjectId = safeStr(subjectIdRaw || (bundle && bundle.subjectId) || "generic").trim() || "generic";
+  const subjectSpec = resolveSubjectSpec(effectiveSubjectId, language);
 
-  const bits = [];
-  if (bundle && bundle.module) bits.push(bundle.module);
-  if (bundle && bundle.area) bits.push(bundle.area);
-  if (bundle && bundle.chapter) bits.push(bundle.chapter);
-  const ctx = bits.length ? bits.join(" • ") : sv ? "Utbildning" : "Training";
+  const sv = language === "sv";
+  const ctxBits = [];
+  if (bundle && bundle.module) ctxBits.push(bundle.module);
+  if (bundle && bundle.area) ctxBits.push(bundle.area);
+  if (bundle && bundle.chapter) ctxBits.push(bundle.chapter);
+  if (bundle && bundle.step) ctxBits.push(`${sv ? "Steg" : "Step"} ${bundle.step}`);
+  const ctx = ctxBits.length ? ctxBits.join(" • ") : sv ? "Utbildning" : "Training";
+
+  const heads = Array.isArray(subjectSpec && subjectSpec.requiredHeadings) ? subjectSpec.requiredHeadings : [];
+  const bullets = Array.isArray(subjectSpec && subjectSpec.bullets) ? subjectSpec.bullets : [];
+  const examples = Array.isArray(subjectSpec && subjectSpec.examples) ? subjectSpec.examples : [];
+
+  function buildDocText(idx) {
+    const h1 = heads[0] || (sv ? "Varför finns det här" : "Why this exists");
+    const h2 = heads[1] || (sv ? "Så gör ni" : "How to do it");
+    const h3 = heads[3] || (sv ? "Exempel" : "Examples");
+    const h4 = heads[4] || (sv ? "Mini-checklista" : "Mini checklist");
+    const h5 = heads[5] || (sv ? "Vanliga fallgropar" : "Common pitfalls");
+
+    const b = bullets.length ? bullets : sv ? ["Var tydlig, konkret och respektfull.", "Avsluta med nästa steg och uppföljning."] : ["Be clear, concrete, and respectful.", "End with next steps and follow-up."];
+    const ex = examples.length ? examples : sv ? ["Exempel: Beskriv fakta, ställ en öppen fråga, kom överens om nästa steg."] : ["Example: State facts, ask an open question, agree on next steps."];
+
+    const title = sv ? `${subjectSpec.label} — del ${idx + 1}` : `${subjectSpec.label} — part ${idx + 1}`;
+
+    const text =
+      `${h1}\n` +
+      (sv
+        ? `Detta infoblad hjälper er att genomföra samtal som leder till utveckling och trygghet, inte osäkerhet. Koppla alltid till fakta och till vad ni vill uppnå i verksamheten (${ctx}).\n\n`
+        : `This info sheet helps you run conversations that lead to development and safety, not uncertainty. Always tie it to facts and the purpose in your workplace (${ctx}).\n\n`) +
+      `${h2}\n` +
+      `- ${b.slice(0, 5).join("\n- ")}\n\n` +
+      `${h3}\n` +
+      `- ${ex.slice(0, 3).join("\n- ")}\n\n` +
+      `${h4}\n` +
+      (sv
+        ? `- Vad har vi sett/hört (fakta)?\n- Vad är syftet med samtalet?\n- Vad behöver personen för att lyckas?\n- Vad gör vi nu och när följer vi upp?\n\n`
+        : `- What did we observe (facts)?\n- What is the purpose of the conversation?\n- What does the person need to succeed?\n- What do we do now and when do we follow up?\n\n`) +
+      `${h5}\n` +
+      (sv
+        ? `- Att “gissa motiv” istället för att prata om beteende.\n- Att ge otydlig feedback utan nästa steg.\n- Att hoppa över uppföljning.\n`
+        : `- Guessing motives instead of talking about behavior.\n- Giving vague feedback without next steps.\n- Skipping follow-up.\n`);
+
+    return { title, text };
+  }
 
   const blocks = [];
   for (let i = 0; i < count; i++) {
-    const title = sv ? `Dokumentblock ${i + 1}` : `Document block ${i + 1}`;
-    const text = sv
-      ? `Det här är ett dokumentblock för ${ctx}. Skriv kort, tydligt och spårbart. Utgå från kursinfo och undvik provfrågor.`
-      : `This is a document block for ${ctx}. Keep it clear and traceable. Use course info and avoid quiz questions.`;
-    blocks.push(makeTextBlock({ i, title, text }));
+    const built = buildDocText(i);
+    blocks.push(makeTextBlock({ i, title: built.title, text: built.text }));
   }
 
-  return { ok: true, v: "training-blocks@v1", mode, subjectId, language, blocks };
+  return { ok: true, v: "training-blocks@v1", mode, subjectId: effectiveSubjectId, language, blocks };
 }
 
 // ============================================================
