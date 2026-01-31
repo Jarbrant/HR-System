@@ -2199,12 +2199,12 @@ async function generateAi() {
   /* =========================
    BLOCK 19/19 — Bootstrap + events + CRUD
    PATCH v1 (2026-01-31):
-   - BLOCK-indelning 19A–19G för enklare felsökning
-   - INGA funktionsändringar (endast struktur/kommentarer)
+   - BLOCK-indelning 19A–19F för enklare felsökning
+   - Tydlig hint när write-guard stoppar (istället för tyst return)
 ========================== */
 
 /* -------------------------
-   BLOCK 19A — Modal helpers
+   BLOCK 19A — Helpers (modal + write-guard feedback)
 -------------------------- */
 function tryCloseItemModal() {
   try {
@@ -2214,8 +2214,22 @@ function tryCloseItemModal() {
   } catch (_) { }
 }
 
+function writerDeniedHint(actionLabel) {
+  try {
+    const who = (typeof getWhoFresh === "function") ? getWhoFresh()
+      : (DEPS.core && typeof DEPS.core.getWho === "function") ? DEPS.core.getWho()
+        : { role: "", empNo: "", canWrite: false };
+
+    const role = normStr(who && who.role) || "okänd roll";
+    const emp = normStr(who && who.empNo) || "saknas";
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Read-only", "warn");
+    // setAiHint finns i BLOCK 18A
+    setAiHint(`${actionLabel}: stoppad (read-only). Inloggad som ${role} (empNo: ${emp}). Logga in som ADMIN för att skapa/spara.`);
+  } catch (_) { }
+}
+
 /* -------------------------
-   BLOCK 19B — Selection (load draft)
+   BLOCK 19B — Select + template
 -------------------------- */
 function selectTraining(id) {
   tryCloseItemModal();
@@ -2245,9 +2259,6 @@ function selectTraining(id) {
   updateUiAll();
 }
 
-/* -------------------------
-   BLOCK 19C — Create (template + new)
--------------------------- */
 function newTrainingTemplate() {
   const who = getWhoFresh();
   const chapter = "Introduktion";
@@ -2273,42 +2284,49 @@ function newTrainingTemplate() {
   };
 }
 
+/* -------------------------
+   BLOCK 19C — CRUD: create/delete/purge/revert
+-------------------------- */
 function createNewTraining() {
-  if (!isWriterAllowed()) return;
+  if (!isWriterAllowed()) { writerDeniedHint("Skapa ny"); return; }
 
-  // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
-  ensureBusinessAreaSearchForSelectUi();
+  try {
+    // Ensure Verksamhet-search exists if UI is SELECT-only (no storage)
+    ensureBusinessAreaSearchForSelectUi();
 
-  state.businessAreaQuery = "";
-  if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
+    state.businessAreaQuery = "";
+    if (dom && dom.businessAreaSearch) dom.businessAreaSearch.value = "";
 
-  const t = newTrainingTemplate();
-  state.trainings.unshift(t);
-  state.selectedId = t.id;
-  state.draft = deepClone(t);
+    const t = newTrainingTemplate();
+    state.trainings.unshift(t);
+    state.selectedId = t.id;
+    state.draft = deepClone(t);
 
-  const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
-  if (!s || !s.ok) {
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
-    return;
+    const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
+    if (!s || !s.ok) {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+      setAiHint("Skapa ny: kunde inte spara (storage fail-closed).");
+      return;
+    }
+
+    state.showAll = false;
+
+    setDirty(false);
+    renderModuleDatalist();
+    renderAreaDatalist();
+    renderChapterAndStepPickers();
+    renderBusinessAreaPicker();
+    renderAiAnchorRow();
+    updateUiAll();
+  } catch (e) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Skapa ny fel", "bad");
+    setAiHint("Skapa ny: exception (fail-closed).");
+    try { console.error("createNewTraining exception:", e); } catch (_) { }
   }
-
-  state.showAll = false;
-
-  setDirty(false);
-  renderModuleDatalist();
-  renderAreaDatalist();
-  renderChapterAndStepPickers();
-  renderBusinessAreaPicker();
-  renderAiAnchorRow();
-  updateUiAll();
 }
 
-/* -------------------------
-   BLOCK 19D — Delete / purge / revert
--------------------------- */
 function deleteSelected() {
-  if (!isWriterAllowed()) return;
+  if (!isWriterAllowed()) { writerDeniedHint("Ta bort vald"); return; }
   if (!state.selectedId) return;
 
   const idx = findTrainingIndexById(state.selectedId);
@@ -2318,6 +2336,7 @@ function deleteSelected() {
   const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
   if (!s || !s.ok) {
     DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+    setAiHint("Ta bort: kunde inte spara (storage fail-closed).");
     return;
   }
 
@@ -2330,11 +2349,12 @@ function deleteSelected() {
 }
 
 function purgeAll() {
-  if (!isWriterAllowed()) return;
+  if (!isWriterAllowed()) { writerDeniedHint("Rensa alla"); return; }
 
   const p = DEPS.store && DEPS.store.purgeAll ? DEPS.store.purgeAll() : { ok: false };
   if (!p || !p.ok) {
     DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte rensa", "bad");
+    setAiHint("Rensa alla: fail-closed.");
     return;
   }
 
@@ -2349,7 +2369,7 @@ function purgeAll() {
 }
 
 function revertUnsaved() {
-  if (!isWriterAllowed()) return;
+  if (!isWriterAllowed()) { writerDeniedHint("Ångra osparat"); return; }
   if (!state.selectedId) return;
   const idx = findTrainingIndexById(state.selectedId);
   if (idx < 0) return;
@@ -2365,10 +2385,10 @@ function revertUnsaved() {
 }
 
 /* -------------------------
-   BLOCK 19E — Save / publish (write back)
+   BLOCK 19D — Save/publish
 -------------------------- */
 function writeBackDraft(status) {
-  if (!isWriterAllowed()) return;
+  if (!isWriterAllowed()) { writerDeniedHint(status === "published" ? "Spara & publicera" : "Spara som utkast"); return; }
   if (!state.draft) return;
 
   syncDraftFromInputs();
@@ -2390,7 +2410,7 @@ function writeBackDraft(status) {
       const other = normStr(dom && dom.businessAreaOther && dom.businessAreaOther.value);
       if (other.length < 2) {
         DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-        DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: Du valde Annat… men texten är tom eller för kort (minst 2 tecken).");
+        setAiHint("Verksamhet: Du valde Annat… men texten är tom eller för kort (minst 2 tecken).");
         return;
       }
       state.draft.businessArea = other;
@@ -2399,7 +2419,7 @@ function writeBackDraft(status) {
     const ba = normStr(state.draft.businessArea);
     if (ba && ba.length > 80) {
       DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-      DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Verksamhet: För lång text (max 80 tecken).");
+      setAiHint("Verksamhet: För lång text (max 80 tecken).");
       return;
     }
   } catch (_) { }
@@ -2412,19 +2432,20 @@ function writeBackDraft(status) {
 
   if (!v.ok) {
     DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte spara", "bad");
-    DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint((v.reasons || []).join(" "));
+    setAiHint((v.reasons || []).join(" "));
     return;
   }
 
   if (status === "published" && !hasAnyItems()) {
     DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kan inte publicera", "bad");
-    DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("Publicering kräver minst 1 block/item.");
+    setAiHint("Publicering kräver minst 1 block/item.");
     return;
   }
 
   const idx = findTrainingIndexById(state.selectedId);
   if (idx < 0) {
     DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Saknar vald utbildning", "bad");
+    setAiHint("Spara: saknar vald utbildning.");
     return;
   }
 
@@ -2433,11 +2454,12 @@ function writeBackDraft(status) {
   const s = DEPS.store && DEPS.store.save ? DEPS.store.save(state.trainings) : { ok: false };
   if (!s || !s.ok) {
     DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Kunde inte spara", "bad");
+    setAiHint("Spara: storage fail-closed.");
     return;
   }
 
   setDirty(false);
-  DEPS.render && DEPS.render.setAiHint && DEPS.render.setAiHint("");
+  setAiHint("");
   renderModuleDatalist();
   renderAreaDatalist();
   renderBusinessAreaPicker();
@@ -2446,7 +2468,7 @@ function writeBackDraft(status) {
 }
 
 /* -------------------------
-   BLOCK 19F — Event wiring (once)
+   BLOCK 19E — Events
 -------------------------- */
 function wireEventsOnce() {
   if (page.__BOOTED === true) return;
@@ -2508,7 +2530,7 @@ function wireEventsOnce() {
   dom.on(dom.btnModAll, "click", function () { dom.mod && dom.mod.focus && dom.mod.focus(); });
 
   dom.on(dom.btnModClear, "click", function () {
-    if (!isWriterAllowed()) return;
+    if (!isWriterAllowed()) { writerDeniedHint("Rensa modul/område"); return; }
     if (dom.mod) dom.mod.value = "";
     if (dom.area) dom.area.value = "";
     renderAreaDatalist();
@@ -2574,6 +2596,7 @@ function wireEventsOnce() {
       updateDebug();
     }
   });
+
   dom.on(dom.goals, "input", function () {
     if (state.draft) {
       syncDraftFromInputs();
@@ -2605,6 +2628,7 @@ function wireEventsOnce() {
       updateDebug();
     }
   });
+
   dom.on(dom.businessArea, "input", function () {
     if (state.draft) {
       syncDraftFromInputs();
@@ -2614,6 +2638,7 @@ function wireEventsOnce() {
       updateDebug();
     }
   });
+
   dom.on(dom.businessAreaOther, "input", function () {
     if (state.draft) {
       syncDraftFromInputs();
@@ -2637,7 +2662,7 @@ function wireEventsOnce() {
 }
 
 /* -------------------------
-   BLOCK 19G — Boot (deps + load + retry)
+   BLOCK 19F — Boot + retry
 -------------------------- */
 function bootWhenReady() {
   if (!depsReady()) {
