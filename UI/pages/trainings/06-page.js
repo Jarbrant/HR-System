@@ -1750,376 +1750,432 @@ DoD (för denna patch):
   }
 
   /* =========================
-     BLOCK 18/19 — AI + normalize/import + fail-closed (mode-based)
-     PATCH: skickar med directive + normaliserar uiMode/requestMode
-  ========================== */
-  function setAiHint(text) {
-    if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
-    if (dom && dom.aiHint && dom.setText) dom.setText(dom.aiHint, String(text || ""));
-  }
+   BLOCK 18/19 — AI + normalize/import + fail-closed (mode-based)
+   PATCH v1 (2026-01-31):
+   - FIX: buildAiContextNoGoals namespace-safe (DEPS.core / Trainings.core) + fallback via buildAiContext() där goals alltid nollas
+   - BLOCK-indelning 18A–18F för enklare felsökning
+========================== */
 
-  async function testAi() {
-    try {
-      if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
-        return;
-      }
+/* -------------------------
+   BLOCK 18A — UI hint helper
+-------------------------- */
+function setAiHint(text) {
+  if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
+  if (dom && dom.aiHint && dom.setText) dom.setText(dom.aiHint, String(text || ""));
+}
 
-      const initR = await ensureSdkReady();
-      if (!initR || initR.ok !== true) {
-        const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
-        if (code === "BASE_URL_MISSING") DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
-        else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "warn");
-        return;
-      }
-
-      const r = await window.HRWorkerSDK.health();
-      if (r && r.ok) DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI OK", "ok");
-      else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "warn");
-    } catch (_) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
+/* -------------------------
+   BLOCK 18B — Worker health
+-------------------------- */
+async function testAi() {
+  try {
+    if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.health !== "function") {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker SDK saknas", "bad");
+      return;
     }
-  }
-
-  function readAiControls() {
-    const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
-    const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
-
-    const sel = readAiContentSelection();
-
-    // PATCH: normalisera lägen robust (skydd mot "Mix"/"MIX")
-    const uiMode = normStr(sel && sel.uiMode).toLowerCase();           // document | mix | questions
-    const requestMode = normStr(sel && sel.requestMode).toLowerCase(); // document | training
-
-    // Question controls (optional)
-    const qType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
-    const fb = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked || dom.aiFeedbackEnabled.value === "true"));
-
-    return {
-      // UI selection
-      uiMode: uiMode,                 // document | mix | questions
-      requestMode: requestMode,       // document | training
-      directive: (sel && sel.directive) ? String(sel.directive) : "",
-      // common
-      content: "blocks",
-      count: count,
-      questionType: qType || "none",
-      feedbackEnabled: fb,
-      _uiQuestionType: qType || ""
-    };
-  }
-
-  function normalizeAiBlocksFromAny(raw) {
-    function hasBlocksOrItems(obj) {
-      if (!obj) return false;
-      if (Array.isArray(obj)) return true;
-      if (Array.isArray(obj.blocks)) return true;
-      if (Array.isArray(obj.trainingBlocks)) return true;
-      if (Array.isArray(obj.items)) return true;
-      if (Array.isArray(obj.questions)) return true;
-      return false;
-    }
-
-    function pickBestSource(r) {
-      if (!r) return null;
-      const d = (r && r.data) ? r.data : null;
-      if (hasBlocksOrItems(d)) return d;
-      if (hasBlocksOrItems(r)) return r;
-      return d || r;
-    }
-
-    const pick = pickBestSource(raw);
-    if (!pick) return { ok: false, reason: "AI-svar saknar data." };
-
-    const blocksCand = pick.blocks || pick.trainingBlocks || null;
-    const itemsCand = Array.isArray(pick.items) ? pick.items
-      : Array.isArray(pick.questions) ? pick.questions
-        : null;
-
-    if (Array.isArray(blocksCand)) {
-      const hasInlineItems = blocksCand.some(b => b && Array.isArray(b.items) && b.items.length);
-
-      if (!hasInlineItems && itemsCand && itemsCand.length) {
-        const out = [];
-
-        if (blocksCand.length === itemsCand.length) {
-          for (let i = 0; i < blocksCand.length; i++) {
-            const b = blocksCand[i];
-            out.push({
-              title: normStr(b && (b.title || b.heading || b.name)) || "",
-              items: [itemsCand[i]]
-            });
-          }
-          return { ok: true, blocks: out };
-        }
-
-        const firstTitle = normStr(blocksCand[0] && (blocksCand[0].title || blocksCand[0].heading || blocksCand[0].name)) || "";
-        return { ok: true, blocks: [{ title: firstTitle, items: itemsCand.slice() }] };
-      }
-
-      const out2 = [];
-      for (const b of blocksCand) {
-        const title = normStr(b && (b.title || b.heading || b.name)) || "";
-        const inline = (b && Array.isArray(b.items)) ? b.items.slice() : [];
-
-        if (inline.length) {
-          out2.push({ title, items: inline });
-          continue;
-        }
-
-        if (b && typeof b === "object") {
-          const q = normStr(b.question || b.q || b.text || b.instruction || b.prompt || "");
-          const opts = Array.isArray(b.options) ? b.options.slice() : null;
-          const hasAnyAnswerShape =
-            (opts && opts.length >= 2) ||
-            (typeof b.correct === "boolean") ||
-            (b.correctIndex != null) ||
-            (Array.isArray(b.correctIndices) && b.correctIndices.length) ||
-            (b.answer != null) ||
-            (b.expected != null) ||
-            (b.range != null);
-
-          if (q && hasAnyAnswerShape) {
-            const item = {};
-            item.question = q;
-            if (opts) item.options = opts;
-            if (b.correctIndex != null) item.correctIndex = b.correctIndex;
-            if (Array.isArray(b.correctIndices)) item.correctIndices = b.correctIndices.slice();
-            if (typeof b.correct === "boolean") item.correct = b.correct;
-            if (typeof b.answer === "string" || typeof b.answer === "number") item.answer = b.answer;
-            if (typeof b.expected === "string") item.expected = b.expected;
-            if (isObj(b.range)) item.range = deepClone(b.range);
-            if (typeof b.explanation === "string") item.explanation = b.explanation;
-            if (typeof b.feedback === "string") item.feedback = b.feedback;
-
-            item.type = "question";
-            out2.push({ title, items: [item] });
-            continue;
-          }
-        }
-      }
-
-      return out2.length ? { ok: true, blocks: out2 } : { ok: false, reason: "AI gav inga block/items." };
-    }
-
-    if (itemsCand) return { ok: true, blocks: [{ title: "", items: itemsCand.slice() }] };
-
-    if (Array.isArray(pick)) {
-      const looksLikeBlocks = pick.some(x => x && typeof x === "object" && Array.isArray(x.items));
-      if (looksLikeBlocks) {
-        const out3 = pick.map(b => ({
-          title: normStr(b && (b.title || b.heading || b.name)) || "",
-          items: Array.isArray(b && b.items) ? b.items.slice() : []
-        })).filter(b => b.items && b.items.length);
-        return out3.length ? { ok: true, blocks: out3 } : { ok: false, reason: "AI gav tomma block." };
-      }
-      return { ok: true, blocks: [{ title: "", items: pick.slice() }] };
-    }
-
-    return { ok: false, reason: "AI-svar har okänt format (kan inte importera)." };
-  }
-
-  async function generateAi() {
-    if (!isWriterAllowed()) return;
-    if (!state.draft) return;
-
-    syncDraftFromInputs();
-    syncDraftTitleFromFields();
-    renderAiAnchorRow();
-
-    // Reset UI feedback for this run (non-sticky)
-    setAiHint("");
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI…", "warn");
 
     const initR = await ensureSdkReady();
     if (!initR || initR.ok !== true) {
       const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
       if (code === "BASE_URL_MISSING") DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
-      else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
-      setAiHint("AI init fail-closed: " + code);
+      else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "warn");
       return;
     }
 
-    const controls = readAiControls();
-    const ctxObj = buildAiContextNoGoals();
-
-    // PATCH: skicka med directive/uiMode tydligt (harmlöst om worker ignorerar)
-    const req = {
-      mode: controls.requestMode,     // "document" | "training"  (behåll för kompatibilitet)
-      count: controls.count,
-      context: ctxObj,
-      anchor: (state.aiAnchorLine || ctxObj.anchor || ""),
-      language: "sv",
-
-      // Extra hints (NO STORAGE) — harmless if worker ignores
-      uiMode: controls.uiMode,        // document | mix | questions (alias)
-      content: controls.uiMode,       // legacy hint
-      directive: controls.directive || "",
-
-      questionType: controls.questionType || "none",
-      feedbackEnabled: !!controls.feedbackEnabled,
-      documentOnly: (controls.uiMode === "document") || !!DOCUMENT_ONLY
-    };
-
-    page._LAST_AI_REQUEST = deepClone(req);
-    page._LAST_AI_RAW = null;
-    page._LAST_AI_NORM = null;
-    page._LAST_AI_PICK = null;
-
-    let r;
-    try {
-      if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-funktion saknas", "bad");
-        setAiHint("HRWorkerSDK.aiGenerate saknas.");
-        return;
-      }
-      r = await window.HRWorkerSDK.aiGenerate(req);
-    } catch (e) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI exception", "bad");
-      setAiHint("AI exception (fail-closed).");
-      page._LAST_AI_RAW = { exception: String(e && e.message ? e.message : e) };
-      updateDebug();
-      return;
-    }
-
-    page._LAST_AI_RAW = deepClone(r);
-
-    if (!r || r.ok !== true) {
-      const msg = (r && r.error && (r.error.message || r.error.code)) ? String(r.error.message || r.error.code) : "AI svarade inte ok.";
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
-      setAiHint(msg);
-      updateDebug();
-      return;
-    }
-
-    const norm = normalizeAiBlocksFromAny(r);
-    page._LAST_AI_NORM = deepClone(norm);
-
-    if (!norm.ok) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-format fel", "bad");
-      setAiHint(norm.reason || "AI gav ogiltigt format.");
-      updateDebug();
-      return;
-    }
-
-    const incomingBlocks = [];
-    let questionsKept = 0;
-    let docsKept = 0;
-    let questionsDropped = 0;
-    let docsDropped = 0;
-
-    for (const b of safeArr(norm.blocks)) {
-      const itemsRaw = safeArr(b && b.items);
-      const items = [];
-
-      for (const x of itemsRaw) {
-        // Strings => info
-        if (typeof x === "string") {
-          const t = scrubObjectObjectToken(x);
-          const obj = { type: "info", text: t };
-          // mode filtering below
-          const tType = "info";
-          if (controls.uiMode === "questions") { docsDropped++; continue; }
-          items.push(obj); docsKept++;
-          continue;
-        }
-
-        if (x && typeof x === "object") {
-          const obj = sanitizeAiItemInPlace(deepClone(x)) || {};
-          flattenChoiceQuestionShapeInPlace(obj);
-          ensureItemType(obj);
-
-          const t = normStr(obj.type).toLowerCase();
-
-          // Mode-based import rules (fail-closed per mode)
-          if (controls.uiMode === "document") {
-            if (t === "question") { questionsDropped++; continue; }
-            items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
-            docsKept++;
-            continue;
-          }
-
-          if (controls.uiMode === "questions") {
-            if (t !== "question") { docsDropped++; continue; }
-            items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
-            questionsKept++;
-            continue;
-          }
-
-          // mix
-          items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
-          if (t === "question") questionsKept++; else docsKept++;
-          continue;
-        }
-      }
-
-      const clean = items.filter(x => x != null);
-      if (!clean.length) continue;
-
-      incomingBlocks.push({
-        title: normStr(b && b.title) || "",
-        items: clean
-      });
-    }
-
-    // Fail-closed rules per mode (but NOT sticky)
-    if (!incomingBlocks.length) {
-      if (controls.uiMode === "document") {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-        setAiHint("Dokumentläge: AI gav bara frågor/quiz (0 dokument-items). Byt AI-innehåll till Frågor eller Mix och kör igen.");
-      } else if (controls.uiMode === "questions") {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-        setAiHint("Frågor & svar: AI gav inga question-items. Byt till Mix eller Dokument och kör igen, eller justera kontext.");
-      } else {
-        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-        setAiHint("Mix: AI gav inga importerbara items. Import stoppad (fail-closed).");
-      }
-      updateDebug();
-      return;
-    }
-
-    // Mode warnings (mix)
-    if (controls.uiMode === "mix") {
-      if (questionsKept === 0 && docsKept > 0) {
-        setAiHint("Mix: AI gav bara dokument-items (inga frågor). Importerade ändå (OK).");
-      } else if (docsKept === 0 && questionsKept > 0) {
-        setAiHint("Mix: AI gav bara frågor (inga dokument-items). Importerade ändå (OK).");
-      }
-    }
-
-    page._LAST_AI_PICK = {
-      uiMode: controls.uiMode,
-      requestMode: controls.requestMode,
-      importedBlocks: incomingBlocks.length,
-      importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0),
-      questionsKept: questionsKept,
-      docsKept: docsKept,
-      questionsDropped: questionsDropped,
-      docsDropped: docsDropped,
-      anchor: state.aiAnchorLine || "",
-      courseTrack: readCourseTrackFromUi(),
-      documentOnly: !!DOCUMENT_ONLY
-    };
-
-    if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
-    for (const nb of incomingBlocks) state.draft.blocks.push(nb);
-
-    setDirty(true);
-    syncDraftTitleFromFields();
-    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI import OK", "ok");
-
-    if (!dom || !dom.aiHint) {
-      // no-op
-    } else {
-      // Provide a compact summary if hint wasn't already set
-      const already = normStr(dom.aiHint && (dom.aiHint.value || dom.aiHint.textContent));
-      if (!already) {
-        setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items).`);
-      }
-    }
-
-    updateUiAll();
+    const r = await window.HRWorkerSDK.health();
+    if (r && r.ok) DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI OK", "ok");
+    else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "warn");
+  } catch (_) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
   }
+}
+
+/* -------------------------
+   BLOCK 18C — Read AI controls
+-------------------------- */
+function readAiControls() {
+  const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
+  const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
+
+  const sel = readAiContentSelection();
+
+  // PATCH: normalisera lägen robust (skydd mot "Mix"/"MIX")
+  const uiMode = normStr(sel && sel.uiMode).toLowerCase();           // document | mix | questions
+  const requestMode = normStr(sel && sel.requestMode).toLowerCase(); // document | training
+
+  // Question controls (optional)
+  const qType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
+  const fb = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked || dom.aiFeedbackEnabled.value === "true"));
+
+  return {
+    // UI selection
+    uiMode: uiMode,                 // document | mix | questions
+    requestMode: requestMode,       // document | training
+    directive: (sel && sel.directive) ? String(sel.directive) : "",
+    // common
+    content: "blocks",
+    count: count,
+    questionType: qType || "none",
+    feedbackEnabled: fb,
+    _uiQuestionType: qType || ""
+  };
+}
+
+/* -------------------------
+   BLOCK 18D — Normalize AI response into blocks/items
+-------------------------- */
+function normalizeAiBlocksFromAny(raw) {
+  function hasBlocksOrItems(obj) {
+    if (!obj) return false;
+    if (Array.isArray(obj)) return true;
+    if (Array.isArray(obj.blocks)) return true;
+    if (Array.isArray(obj.trainingBlocks)) return true;
+    if (Array.isArray(obj.items)) return true;
+    if (Array.isArray(obj.questions)) return true;
+    return false;
+  }
+
+  function pickBestSource(r) {
+    if (!r) return null;
+    const d = (r && r.data) ? r.data : null;
+    if (hasBlocksOrItems(d)) return d;
+    if (hasBlocksOrItems(r)) return r;
+    return d || r;
+  }
+
+  const pick = pickBestSource(raw);
+  if (!pick) return { ok: false, reason: "AI-svar saknar data." };
+
+  const blocksCand = pick.blocks || pick.trainingBlocks || null;
+  const itemsCand = Array.isArray(pick.items) ? pick.items
+    : Array.isArray(pick.questions) ? pick.questions
+      : null;
+
+  if (Array.isArray(blocksCand)) {
+    const hasInlineItems = blocksCand.some(b => b && Array.isArray(b.items) && b.items.length);
+
+    if (!hasInlineItems && itemsCand && itemsCand.length) {
+      const out = [];
+
+      if (blocksCand.length === itemsCand.length) {
+        for (let i = 0; i < blocksCand.length; i++) {
+          const b = blocksCand[i];
+          out.push({
+            title: normStr(b && (b.title || b.heading || b.name)) || "",
+            items: [itemsCand[i]]
+          });
+        }
+        return { ok: true, blocks: out };
+      }
+
+      const firstTitle = normStr(blocksCand[0] && (blocksCand[0].title || blocksCand[0].heading || blocksCand[0].name)) || "";
+      return { ok: true, blocks: [{ title: firstTitle, items: itemsCand.slice() }] };
+    }
+
+    const out2 = [];
+    for (const b of blocksCand) {
+      const title = normStr(b && (b.title || b.heading || b.name)) || "";
+      const inline = (b && Array.isArray(b.items)) ? b.items.slice() : [];
+
+      if (inline.length) {
+        out2.push({ title, items: inline });
+        continue;
+      }
+
+      if (b && typeof b === "object") {
+        const q = normStr(b.question || b.q || b.text || b.instruction || b.prompt || "");
+        const opts = Array.isArray(b.options) ? b.options.slice() : null;
+        const hasAnyAnswerShape =
+          (opts && opts.length >= 2) ||
+          (typeof b.correct === "boolean") ||
+          (b.correctIndex != null) ||
+          (Array.isArray(b.correctIndices) && b.correctIndices.length) ||
+          (b.answer != null) ||
+          (b.expected != null) ||
+          (b.range != null);
+
+        if (q && hasAnyAnswerShape) {
+          const item = {};
+          item.question = q;
+          if (opts) item.options = opts;
+          if (b.correctIndex != null) item.correctIndex = b.correctIndex;
+          if (Array.isArray(b.correctIndices)) item.correctIndices = b.correctIndices.slice();
+          if (typeof b.correct === "boolean") item.correct = b.correct;
+          if (typeof b.answer === "string" || typeof b.answer === "number") item.answer = b.answer;
+          if (typeof b.expected === "string") item.expected = b.expected;
+          if (isObj(b.range)) item.range = deepClone(b.range);
+          if (typeof b.explanation === "string") item.explanation = b.explanation;
+          if (typeof b.feedback === "string") item.feedback = b.feedback;
+
+          item.type = "question";
+          out2.push({ title, items: [item] });
+          continue;
+        }
+      }
+    }
+
+    return out2.length ? { ok: true, blocks: out2 } : { ok: false, reason: "AI gav inga block/items." };
+  }
+
+  if (itemsCand) return { ok: true, blocks: [{ title: "", items: itemsCand.slice() }] };
+
+  if (Array.isArray(pick)) {
+    const looksLikeBlocks = pick.some(x => x && typeof x === "object" && Array.isArray(x.items));
+    if (looksLikeBlocks) {
+      const out3 = pick.map(b => ({
+        title: normStr(b && (b.title || b.heading || b.name)) || "",
+        items: Array.isArray(b && b.items) ? b.items.slice() : []
+      })).filter(b => b.items && b.items.length);
+      return out3.length ? { ok: true, blocks: out3 } : { ok: false, reason: "AI gav tomma block." };
+    }
+    return { ok: true, blocks: [{ title: "", items: pick.slice() }] };
+  }
+
+  return { ok: false, reason: "AI-svar har okänt format (kan inte importera)." };
+}
+
+/* -------------------------
+   BLOCK 18E — Build context NO GOALS (namespace-safe + fallback)
+-------------------------- */
+function buildAiContextNoGoalsSafe(draft) {
+  const s = draft || {};
+
+  // Prefer DEPS.core first (modular), then global Trainings.core
+  const coreObj = (DEPS && DEPS.core) ? DEPS.core : (window.Trainings && window.Trainings.core ? window.Trainings.core : null);
+
+  const fnNoGoals = coreObj && typeof coreObj.buildAiContextNoGoals === "function" ? coreObj.buildAiContextNoGoals : null;
+  const fnWithGoals = coreObj && typeof coreObj.buildAiContext === "function" ? coreObj.buildAiContext : null;
+
+  // Best: dedicated no-goals builder
+  if (fnNoGoals) {
+    const ctx = fnNoGoals(s);
+    // Hard safety: ensure goals cannot leak
+    if (ctx && typeof ctx === "object") ctx.goals = "";
+    return ctx;
+  }
+
+  // Fallback: build normal context but *always* strip goals before send (policy: never send goals)
+  if (fnWithGoals) {
+    const ctx = fnWithGoals(s) || {};
+    if (ctx && typeof ctx === "object") ctx.goals = "";
+    return ctx;
+  }
+
+  return null;
+}
+
+/* -------------------------
+   BLOCK 18F — Generate AI (request + import + fail-closed)
+-------------------------- */
+async function generateAi() {
+  if (!isWriterAllowed()) return;
+  if (!state.draft) return;
+
+  syncDraftFromInputs();
+  syncDraftTitleFromFields();
+  renderAiAnchorRow();
+
+  // Reset UI feedback for this run (non-sticky)
+  setAiHint("");
+  DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI…", "warn");
+
+  const initR = await ensureSdkReady();
+  if (!initR || initR.ok !== true) {
+    const code = initR && initR.error && initR.error.code ? String(initR.error.code) : "NOT_INITED";
+    if (code === "BASE_URL_MISSING") DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Worker URL saknas", "bad");
+    else DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI init fel", "bad");
+    setAiHint("AI init fail-closed: " + code);
+    return;
+  }
+
+  const controls = readAiControls();
+
+  // PATCH: namespace-safe context builder (NO GOALS) — fail-closed
+  const ctxObj = buildAiContextNoGoalsSafe(state.draft || {});
+  if (!ctxObj) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-kontext saknas", "bad");
+    setAiHint("AI fail-closed: buildAiContextNoGoals/buildAiContext saknas (Trainings.core).");
+    updateDebug();
+    return;
+  }
+
+  // PATCH: skicka med directive/uiMode tydligt (harmlöst om worker ignorerar)
+  const req = {
+    mode: controls.requestMode,     // "document" | "training"  (behåll för kompatibilitet)
+    count: controls.count,
+    context: ctxObj,
+    anchor: (state.aiAnchorLine || ctxObj.anchor || ""),
+    language: "sv",
+
+    // Extra hints (NO STORAGE) — harmless if worker ignores
+    uiMode: controls.uiMode,        // document | mix | questions (alias)
+    content: controls.uiMode,       // legacy hint
+    directive: controls.directive || "",
+
+    questionType: controls.questionType || "none",
+    feedbackEnabled: !!controls.feedbackEnabled,
+    documentOnly: (controls.uiMode === "document") || !!DOCUMENT_ONLY
+  };
+
+  page._LAST_AI_REQUEST = deepClone(req);
+  page._LAST_AI_RAW = null;
+  page._LAST_AI_NORM = null;
+  page._LAST_AI_PICK = null;
+
+  let r;
+  try {
+    if (!window.HRWorkerSDK || typeof window.HRWorkerSDK.aiGenerate !== "function") {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-funktion saknas", "bad");
+      setAiHint("HRWorkerSDK.aiGenerate saknas.");
+      return;
+    }
+    r = await window.HRWorkerSDK.aiGenerate(req);
+  } catch (e) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI exception", "bad");
+    setAiHint("AI exception (fail-closed).");
+    page._LAST_AI_RAW = { exception: String(e && e.message ? e.message : e) };
+    updateDebug();
+    return;
+  }
+
+  page._LAST_AI_RAW = deepClone(r);
+
+  if (!r || r.ok !== true) {
+    const msg = (r && r.error && (r.error.message || r.error.code)) ? String(r.error.message || r.error.code) : "AI svarade inte ok.";
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI fel", "bad");
+    setAiHint(msg);
+    updateDebug();
+    return;
+  }
+
+  const norm = normalizeAiBlocksFromAny(r);
+  page._LAST_AI_NORM = deepClone(norm);
+
+  if (!norm.ok) {
+    DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI-format fel", "bad");
+    setAiHint(norm.reason || "AI gav ogiltigt format.");
+    updateDebug();
+    return;
+  }
+
+  const incomingBlocks = [];
+  let questionsKept = 0;
+  let docsKept = 0;
+  let questionsDropped = 0;
+  let docsDropped = 0;
+
+  for (const b of safeArr(norm.blocks)) {
+    const itemsRaw = safeArr(b && b.items);
+    const items = [];
+
+    for (const x of itemsRaw) {
+      // Strings => info
+      if (typeof x === "string") {
+        const t = scrubObjectObjectToken(x);
+        const obj = { type: "info", text: t };
+
+        // mode filtering below
+        if (controls.uiMode === "questions") { docsDropped++; continue; }
+        items.push(obj); docsKept++;
+        continue;
+      }
+
+      if (x && typeof x === "object") {
+        const obj = sanitizeAiItemInPlace(deepClone(x)) || {};
+        flattenChoiceQuestionShapeInPlace(obj);
+        ensureItemType(obj);
+
+        const t = normStr(obj.type).toLowerCase();
+
+        // Mode-based import rules (fail-closed per mode)
+        if (controls.uiMode === "document") {
+          if (t === "question") { questionsDropped++; continue; }
+          items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
+          docsKept++;
+          continue;
+        }
+
+        if (controls.uiMode === "questions") {
+          if (t !== "question") { docsDropped++; continue; }
+          items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
+          questionsKept++;
+          continue;
+        }
+
+        // mix (default)
+        items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
+        if (t === "question") questionsKept++; else docsKept++;
+        continue;
+      }
+    }
+
+    const clean = items.filter(x => x != null);
+    if (!clean.length) continue;
+
+    incomingBlocks.push({
+      title: normStr(b && b.title) || "",
+      items: clean
+    });
+  }
+
+  // Fail-closed rules per mode (but NOT sticky)
+  if (!incomingBlocks.length) {
+    if (controls.uiMode === "document") {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+      setAiHint("Dokumentläge: AI gav bara frågor/quiz (0 dokument-items). Byt AI-innehåll till Frågor eller Mix och kör igen.");
+    } else if (controls.uiMode === "questions") {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+      setAiHint("Frågor & svar: AI gav inga question-items. Byt till Mix eller Dokument och kör igen, eller justera kontext.");
+    } else {
+      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+      setAiHint("Mix: AI gav inga importerbara items. Import stoppad (fail-closed).");
+    }
+    updateDebug();
+    return;
+  }
+
+  // Mode warnings (mix)
+  if (controls.uiMode === "mix" || !controls.uiMode) {
+    if (questionsKept === 0 && docsKept > 0) {
+      setAiHint("Mix: AI gav bara dokument-items (inga frågor). Importerade ändå (OK).");
+    } else if (docsKept === 0 && questionsKept > 0) {
+      setAiHint("Mix: AI gav bara frågor (inga dokument-items). Importerade ändå (OK).");
+    }
+  }
+
+  page._LAST_AI_PICK = {
+    uiMode: controls.uiMode,
+    requestMode: controls.requestMode,
+    importedBlocks: incomingBlocks.length,
+    importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0),
+    questionsKept: questionsKept,
+    docsKept: docsKept,
+    questionsDropped: questionsDropped,
+    docsDropped: docsDropped,
+    anchor: state.aiAnchorLine || "",
+    courseTrack: readCourseTrackFromUi(),
+    documentOnly: !!DOCUMENT_ONLY
+  };
+
+  if (!Array.isArray(state.draft.blocks)) state.draft.blocks = currentBlocks().slice();
+  for (const nb of incomingBlocks) state.draft.blocks.push(nb);
+
+  setDirty(true);
+  syncDraftTitleFromFields();
+  DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI import OK", "ok");
+
+  if (!dom || !dom.aiHint) {
+    // no-op
+  } else {
+    // Provide a compact summary if hint wasn't already set
+    const already = normStr(dom.aiHint && (dom.aiHint.value || dom.aiHint.textContent));
+    if (!already) {
+      setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items).`);
+    }
+  }
+
+  updateUiAll();
+}
 
   /* =========================
      BLOCK 19/19 — Bootstrap + events + CRUD
