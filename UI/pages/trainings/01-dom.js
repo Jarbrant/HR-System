@@ -3,8 +3,8 @@ AO-TRAININGS-MODULAR-01 (PP-SC-010-01) | FILE 01/06 | FIL-ID: UI/pages/trainings
 Projekt: HR-System (GitHub Pages / UI-only)
 Syfte: Stabil DOM-bindning + säkra DOM-helpers (textContent, inga innerHTML).
       Denna fil ska ENBART:
-      - hitta element via id (trainings.html)
-      - erbjuda små helpers: setText/disable/show/hide/on/clear
+      - hitta element via id (admin/trainings.html)
+      - erbjuda små helpers: setText/disable/show/hide/on/clear/make/safeFocus
       - rapportera missing-id (utan att krascha)
 
 POLICY (LÅST):
@@ -12,6 +12,11 @@ POLICY (LÅST):
 - Ingen storage här
 - Ingen affärslogik här
 - XSS-safe rendering: textContent, inga osäkra innerHTML
+
+PATCH v1.0.2 (AUTOPATCH):
+- P0 FIX: admin/trainings.html har INGET id="businessArea" → tog bort krav på det id:t.
+- P0 FIX: lade till bindning + required för datalist id="businessAreaList" (finns i HTML).
+- Backward-safe: dom.businessArea aliasar dom.businessAreaSearch (för äldre kod som råkar läsa dom.businessArea).
 ============================================================ */
 (function () {
   "use strict";
@@ -84,7 +89,7 @@ POLICY (LÅST):
   };
 
   // ------------------------------------------------------------
-  // Bind elements (MÅSTE matcha trainings.html)
+  // Bind elements (MÅSTE matcha admin/trainings.html)
   // ------------------------------------------------------------
   // Topbar / pills
   dom.contextPill = byId("contextPill");
@@ -129,12 +134,19 @@ POLICY (LÅST):
   dom.goals = byId("goals");
 
   // ------------------------------------------------------------
-  // Verksamhet (Business Area) — UI-hooks (bör finnas i trainings.html)
+  // Verksamhet (Business Area) — UI-hooks
+  // admin/trainings.html använder:
+  // - input#businessAreaSearch + datalist#businessAreaList
+  // - input#businessAreaOther (visas vid Annat…)
+  // - div#businessAreaHint (hjälp/status)
   // ------------------------------------------------------------
-  dom.businessArea = byId("businessArea");
   dom.businessAreaSearch = byId("businessAreaSearch");
+  dom.businessAreaList = byId("businessAreaList");
   dom.businessAreaOther = byId("businessAreaOther");
   dom.businessAreaHint = byId("businessAreaHint");
+
+  // Backward-safe alias (äldre kod kan råka läsa dom.businessArea)
+  dom.businessArea = dom.businessAreaSearch;
 
   // ------------------------------------------------------------
   // AI Anchor (read-only) — UI-hook
@@ -172,9 +184,6 @@ POLICY (LÅST):
   // ------------------------------------------------------------
   // Fail-closed diagnostics (utan att krascha)
   // ------------------------------------------------------------
-  // REQUIRED_IDS = sådant som sidan typiskt måste ha för att vara användbar.
-  // OPTIONAL_IDS = nya hooks/förbättringar som kan saknas tills trainings.html patchats,
-  //               men vi vill ändå rapportera dem.
   const REQUIRED_IDS = [
     // Topbar
     "contextPill","contextText","statePill","stateText","whoPill","whoText",
@@ -182,9 +191,11 @@ POLICY (LÅST):
     "q","fStatus","onlyProblems","btnShowAll","btnClear","leftHint","list","btnDelete","btnPurge","btnNew",
     // Editor
     "btnModAll","btnModClear","subjectIdText","mod","area","modList","areaList",
-    "courseTitle","courseStep","titleDisplay","goalsLevel","goals",
-    // AI
-    "aiContent","aiCount","questionControls","aiQuestionType","aiFeedbackEnabled","aiHint",
+    "courseTitle","courseStep","titleDisplay","courseTouchHint","goalsLevel","goals",
+    // Verksamhet
+    "businessAreaSearch","businessAreaList","businessAreaOther","businessAreaHint",
+    // AI Anchor + AI
+    "aiAnchorText","aiContent","aiCount","questionControls","aiQuestionType","aiFeedbackEnabled","aiHint",
     // Blocks
     "blocksList",
     // Footer
@@ -195,42 +206,17 @@ POLICY (LÅST):
     "debugBox","debugPre"
   ];
 
-  const OPTIONAL_IDS = [
-    // Verksamhet (nya UI-hooks)
-    "businessArea","businessAreaSearch","businessAreaOther","businessAreaHint",
-    // AI Anchor (read-only)
-    "aiAnchorText"
-  ];
-
-  dom.missingRequired = [];
+  dom.missing = [];
   for (let i = 0; i < REQUIRED_IDS.length; i++) {
     const id = REQUIRED_IDS[i];
-    if (!byId(id)) dom.missingRequired.push(id);
+    if (!byId(id)) dom.missing.push(id);
   }
-
-  dom.missingOptional = [];
-  for (let i = 0; i < OPTIONAL_IDS.length; i++) {
-    const id = OPTIONAL_IDS[i];
-    if (!byId(id)) dom.missingOptional.push(id);
-  }
-
-  // Bakåtkompat: dom.missing fanns tidigare som enda lista
-  dom.missing = dom.missingRequired.concat(dom.missingOptional);
 
   dom.isReady = function () {
-    // Fail-closed baserat på kärnkrav, inte på optionals
-    return dom.missingRequired.length === 0;
+    return dom.missing.length === 0;
   };
 
   dom.getMissing = function () {
     return dom.missing.slice();
-  };
-
-  dom.getMissingRequired = function () {
-    return dom.missingRequired.slice();
-  };
-
-  dom.getMissingOptional = function () {
-    return dom.missingOptional.slice();
   };
 })();
