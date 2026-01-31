@@ -2662,7 +2662,8 @@ function wireEventsOnce() {
 }
 
 /* -------------------------
-   BLOCK 19F — Boot + retry
+   BLOCK 19F — Boot + retry (PATCHED END-CLOSE)
+   FIX: säkra avslut + stäng filen korrekt (IIFE)
 -------------------------- */
 function bootWhenReady() {
   if (!depsReady()) {
@@ -2746,4 +2747,16 @@ function tryBoot() {
   setTimeout(tryBoot, RETRIES[attempt]);
 }
 
-try { tryBoot(); } catch (_) { setLock("BOOT: exception (fail-closed)."); updateUiAll(); }
+try {
+  tryBoot();
+} catch (_) {
+  setLock("BOOT: exception (fail-closed).");
+  updateUiAll();
+}
+
+/* ===== END FILE CLOSE (P0) =====
+   Om filen startar med: (function () {
+   så MÅSTE filen sluta med: })();
+*/
+})(); // <-- P0: stänger IIFE så vi slipper "Unexpected end of input"
+
