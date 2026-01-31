@@ -1,20 +1,19 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.4 VARIATION+ARC + V1-CONTRACT)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.5 DOC+MIX FIX + V1-CONTRACT)
 // FIL: worker/index.js
 //
-// PATCH v1.6.4 (EXPLANATION-LESSON):
-// - P0: "Förklaring" blir mini-lektion (4–6 meningar) med struktur:
-//       Princip → Varför rätt → Varför minst ett fel är fel → Ta med dig.
-// - P0: Gäller både CF-AI och deterministic fallback.
-// - P0: Om AI skickar för kort/ingen förklaring → workern bygger en stabil mini-lektion.
+// PATCH v1.6.5 (DOC/MIX FIX):
+// - P0: Document/Mix får inte längre “råka bli provfrågor” → UI slutar stoppa import.
+// - P0: mode="document" ger alltid text-block (aldrig question-block).
+// - P0: mode="mix" ger också text-block (aldrig question-block) för stabilitet nu.
+// - Provfrågor+facit (questionType) fungerar som innan.
 //
-// Tidigare patchar bibehålls (v1.6.3):
+// Tidigare patchar bibehålls (v1.6.4 + v1.6.3):
+// - P0: "Förklaring" blir mini-lektion (4–6 meningar) med struktur.
 // - P0: Context unwrap/parsa context.text även när det är "dubbelt JSON".
 // - P0: Extrahera subject/course/level + focus → injiceras i prompt som hårda rubriker.
-// - P0: Striktare prompt: 2–3 meningar, scenario → beslut, unika frågor, inga fluffrader.
-// - P0: Seed-shuffle av options + korrekt correctIndex (undvik att facit alltid blir 0).
-// - P0: Robustare JSON extraction behålls + fail-soft (skippa trasiga frågor, toppa upp deterministic).
-// - P0: Debug headers bibehålls: X-HR-AI + X-HR-AI-REASON (+ X-HR-AI-DBG om du redan sätter den i svar).
+// - P0: Striktare prompt + unika frågor + seed-shuffle av options + robust JSON extraction.
+// - P0: Debug headers: X-HR-AI + X-HR-AI-REASON.
 //
 // Output-contract: training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
 // ============================================================
@@ -116,7 +115,7 @@ function mapTrainingBlocksToUiQuestions(blocks /*, questionTypeRaw*/) {
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.6.4";
+const VERSION = "1.6.5";
 
 // ============================================================
 // BLOCK 02B — Local utils (self-contained)  [P0: undvik import-crash]
@@ -132,6 +131,7 @@ function normalizeLanguage(v) {
 function normalizeMode(v) {
   const s = safeStr(v).toLowerCase().trim();
   if (s === "document" || s === "doc") return "document";
+  if (s === "mix" || s === "mixed") return "mix"; // P0: tidigare blev mix -> training -> frågor -> stopp i UI
   return "training";
 }
 
@@ -295,16 +295,11 @@ function normalizeToAiQt(questionTypeRaw) {
 // ============================================================
 
 function parseContextBundle(contextTextRaw) {
-  // Förväntat i ditt fall: en sträng som ser ut som "\"{\\\"subject\\\":...}\""
-  // Vi hanterar:
-  // 1) JSON-objekt i text
-  // 2) JSON-sträng som innehåller JSON-objekt
   const raw = safeStr(contextTextRaw).trim();
   if (!raw) return null;
 
   let v = safeJsonParseLoose(raw);
   if (typeof v === "string") {
-    // andra lagret
     const v2 = safeJsonParseLoose(v);
     if (isPlainObject(v2)) v = v2;
   }
@@ -373,7 +368,6 @@ function looksLikeMiniLesson(expl, language) {
   const hasTagsEn = lower.includes("principle") || lower.includes("why correct") || lower.includes("takeaway");
   const hasTags = language === "sv" ? hasTagsSv : hasTagsEn;
 
-  // heuristik: minst ~240 tecken (ungefär 4 meningar) eller taggar
   if (hasTags) return true;
   return s.length >= 240;
 }
@@ -392,9 +386,9 @@ function buildMiniLessonExplanation({ language, bundle, pack, dim, correctText, 
   if (chapter) ctxBits.push(chapter);
   if (step) ctxBits.push(`${sv ? "Steg" : "Step"} ${step}`);
   if (level) ctxBits.push(`${sv ? "Nivå" : "Level"} ${level}`);
-  const ctx = ctxBits.length ? ctxBits.join(" • ") : (sv ? "Utbildning" : "Training");
+  const ctx = ctxBits.length ? ctxBits.join(" • ") : sv ? "Utbildning" : "Training";
 
-  const isIso = (safeStr(area).toLowerCase().includes("iso 9001") || safeStr(pack && pack.setting).toLowerCase().includes("iso 9001"));
+  const isIso = safeStr(area).toLowerCase().includes("iso 9001") || safeStr(pack && pack.setting).toLowerCase().includes("iso 9001");
 
   if (sv) {
     const p1 = `Princip: Spårbarhet betyder att ni kan visa vilka fakta som fanns och varför beslutet togs (${ctx}).`;
@@ -418,9 +412,8 @@ function ensureMiniLessonExplanation({ language, bundle, pack, dim, options, cor
   const opts = Array.isArray(options) ? options : [];
   const ci = Math.max(0, Math.min(opts.length - 1, Number(correctIndex) || 0));
 
-  const correctText = opts[ci] ? `“${opts[ci]}”` : (language === "sv" ? "välja rätt alternativ" : "choosing the correct option");
+  const correctText = opts[ci] ? `“${opts[ci]}”` : language === "sv" ? "välja rätt alternativ" : "choosing the correct option";
 
-  // välj en tydlig felkandidat att referera till
   let wrongIdx = -1;
   for (let i = 0; i < opts.length; i++) {
     if (i !== ci && safeStr(opts[i]).trim()) {
@@ -428,7 +421,7 @@ function ensureMiniLessonExplanation({ language, bundle, pack, dim, options, cor
       break;
     }
   }
-  const wrongText = wrongIdx >= 0 ? `“${opts[wrongIdx]}”` : (language === "sv" ? "gå vidare utan underlag" : "proceed without evidence");
+  const wrongText = wrongIdx >= 0 ? `“${opts[wrongIdx]}”` : language === "sv" ? "gå vidare utan underlag" : "proceed without evidence";
 
   return buildMiniLessonExplanation({ language, bundle, pack, dim, correctText, wrongText });
 }
@@ -438,7 +431,6 @@ function ensureMiniLessonExplanation({ language, bundle, pack, dim, options, cor
 // ============================================================
 
 function seededRand(seed) {
-  // enkel LCG
   let x = (seed >>> 0) || 1;
   return function () {
     x = (Math.imul(1664525, x) + 1013904223) >>> 0;
@@ -454,23 +446,79 @@ function shuffleWithCorrectIndex(options, correctIndex, seed) {
   const ci = Math.max(0, Math.min(n - 1, Number(correctIndex) || 0));
   const rand = seededRand(seed);
 
-  // Fisher-Yates, men spåra var facit hamnar
   let currentCorrect = ci;
   for (let i = n - 1; i > 0; i--) {
     const j = Math.floor(rand() * (i + 1));
     if (i === j) continue;
 
-    // swap
     const tmp = arr[i];
     arr[i] = arr[j];
     arr[j] = tmp;
 
-    // uppdatera correctIndex om vi swappade en position som påverkar facit
     if (currentCorrect === i) currentCorrect = j;
     else if (currentCorrect === j) currentCorrect = i;
   }
 
   return { options: arr, correctIndex: currentCorrect };
+}
+
+// ============================================================
+// DOC BLOCK HELPERS (P0) — så document/mix inte blir frågor
+// ============================================================
+
+function makeTextBlock({ i, title, text }) {
+  const t = safeStr(text).trim();
+  const h = safeStr(title).trim();
+  const payload = h ? `${h}\n\n${t}`.trim() : t;
+
+  return {
+    kind: "text",
+    id: `t_${i + 1}`,
+    items: [
+      {
+        type: "textInline",
+        text: payload,
+      },
+    ],
+  };
+}
+
+function parseDocAiPayload(parsed) {
+  // Tolerant: accept { blocks:[...]} eller { sections:[...]} eller { text:"..." }
+  if (!parsed || !isPlainObject(parsed)) return [];
+  const blocks = Array.isArray(parsed.blocks) ? parsed.blocks : Array.isArray(parsed.sections) ? parsed.sections : [];
+  if (blocks.length) {
+    const out = [];
+    for (const b of blocks) {
+      if (!b) continue;
+      if (typeof b === "string") {
+        out.push({ title: "", text: b });
+        continue;
+      }
+      if (isPlainObject(b)) {
+        const title = safeStr(b.title || b.heading || "").trim();
+        const text = safeStr(b.text || b.body || b.content || "").trim();
+        const line = safeStr(b.line || "").trim();
+        const merged = text || line;
+        if (!merged) continue;
+        out.push({ title, text: merged });
+      }
+    }
+    return out;
+  }
+
+  const text = safeStr(parsed.text || parsed.body || parsed.content || "").trim();
+  if (text) return [{ title: "", text }];
+  return [];
+}
+
+function ensureNoQuestionBlocks(blocks) {
+  const arr = Array.isArray(blocks) ? blocks : [];
+  for (const b of arr) {
+    if (!b) continue;
+    if (b.kind === "question") return false;
+  }
+  return true;
 }
 
 // ============================================================
@@ -507,7 +555,6 @@ function normalizeCourseSubject(subjectObj) {
 }
 
 function validateCourseSubject(course) {
-  // hotfix: fail-soft
   if (!course) return { ok: true };
   if (typeof course !== "object") return { ok: true };
   return { ok: true };
@@ -699,8 +746,8 @@ export default {
 
     const language = normalizeLanguage(languageRaw);
 
-    if (!(mode === "training" || mode === "document")) {
-      return errorJSON(400, requestId, "VALIDATION_ERROR", "mode måste vara training eller document", corsHeaders, true);
+    if (!(mode === "training" || mode === "document" || mode === "mix")) {
+      return errorJSON(400, requestId, "VALIDATION_ERROR", "mode måste vara training, document eller mix", corsHeaders, true);
     }
 
     const count = normalizeCount(countRaw);
@@ -766,6 +813,7 @@ export default {
     const topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
     let items = topBlocks;
 
+    // Provfrågor+facit (questionType) → mappa som innan
     if (isUiQuestionRequest(questionType)) {
       const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType);
       if (!mapped.ok) {
@@ -807,7 +855,7 @@ function buildCorsHeaders(origin, allowedOrigin) {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Hr-Sdk, X-Hr-Client, X-HR-SDK, X-HR-Client, X-HR-CLIENT",
-    "Vary": "Origin",
+    Vary: "Origin",
   };
 }
 
@@ -854,20 +902,186 @@ function extractBearerToken(authHeader) {
 async function buildTrainingBlocks(input, env) {
   // Returnerar {training, source:"cf"|"fallback", reason:"..."}
   const hasBinding = !!(env && env.AI && typeof env.AI.run === "function");
+  const mode = safeStr(input && input.mode).trim() || "training";
+
   if (!hasBinding) {
+    // P0: document/mix får inte bli frågor i fallback heller
+    if (mode === "document" || mode === "mix") {
+      return { training: buildDocumentBlocksDeterministic(input), source: "fallback", reason: "NO_BINDING" };
+    }
     return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "NO_BINDING" };
   }
 
   try {
+    if (mode === "document" || mode === "mix") {
+      const aiDoc = await buildDocumentBlocksWithAI(input, env);
+      if (aiDoc && aiDoc.ok && Array.isArray(aiDoc.blocks) && aiDoc.blocks.length && ensureNoQuestionBlocks(aiDoc.blocks)) {
+        return { training: aiDoc, source: "cf", reason: "OK" };
+      }
+      // fail-closed mot frågor i doc/mix → fallback text-block
+      return { training: buildDocumentBlocksDeterministic(input), source: "fallback", reason: "DOC_SCHEMA_FAIL" };
+    }
+
     const ai = await buildTrainingBlocksWithAI(input, env);
     if (ai && ai.ok && Array.isArray(ai.blocks) && ai.blocks.length) {
       return { training: ai, source: "cf", reason: "OK" };
     }
     return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "SCHEMA_FAIL" };
   } catch (_) {
+    if (mode === "document" || mode === "mix") {
+      return { training: buildDocumentBlocksDeterministic(input), source: "fallback", reason: "DOC_RUN_FAIL" };
+    }
     return { training: buildTrainingBlocksDeterministic(input), source: "fallback", reason: "RUN_FAIL" };
   }
 }
+
+// ============================================================
+// BLOCK 10A — DOCUMENT/MIX ENGINE (CF-AI + fallback text blocks)
+// ============================================================
+
+async function buildDocumentBlocksWithAI(input, env) {
+  const requestId = safeStr(input && input.requestId).trim();
+  const mode = safeStr(input && input.mode).trim() || "document"; // document|mix
+  const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
+  const language = normalizeLanguage(input && input.language);
+  const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
+  const subjectId = safeStr(input && input.subjectId).trim() || "generic";
+
+  const bundle = parseContextBundle(contextTextRaw);
+  const courseInfo = fmtContextForPrompt(bundle, language);
+
+  const sv = language === "sv";
+
+  // P0: Vi ber om dokumentblock (inte frågor) och låser schema
+  const schemaHint = sv
+    ? `Returnera ENDAST giltig JSON. Inget markdown. Inga extra rader. JSON måste börja med "{" och sluta med "}".
+Schema:
+{
+  "blocks": [
+    { "title": "string", "text": "string" }
+  ]
+}
+Regler (mycket viktiga):
+- Exakt ${count} blocks.
+- Varje block ska vara ren text (dokument-innehåll), inte frågor.
+- Inga svarsalternativ, ingen correctIndex, inga "quiz"-fält.
+- Håll språket tydligt och sakligt, koppla till KURSINFO.`
+    : `Return ONLY valid JSON. No markdown, no extra lines. JSON must start with "{" and end with "}".
+Schema:
+{
+  "blocks": [
+    { "title": "string", "text": "string" }
+  ]
+}
+Rules (very important):
+- Exactly ${count} blocks.
+- Each block is plain document text, not questions.
+- No options, no correctIndex, no quiz fields.
+- Keep it clear and factual, tied to COURSE INFO.`;
+
+  const systemPrompt = sv
+    ? `Du skapar dokumentblock för en utbildning (HR). Du får INTE skapa provfrågor här. Följ JSON-schemat exakt.`
+    : `You create document blocks for a training. You MUST NOT create quiz questions here. Follow the JSON schema exactly.`;
+
+  const userPrompt =
+    `${courseInfo}\n\n` +
+    (sv ? `LÄGE: ${mode.toUpperCase()} (dokument-innehåll)\n\n` : `MODE: ${mode.toUpperCase()} (document content)\n\n`) +
+    (sv ? `KONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n\n` : `CONTEXT (raw):\n${contextTextRaw || "(none)"}\n\n`) +
+    `subjectId: ${subjectId}\n\n` +
+    schemaHint;
+
+  const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
+
+  let answer;
+  try {
+    answer = await env.AI.run(model, {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
+  } catch (_) {
+    answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+    });
+  }
+
+  const raw = isPlainObject(answer) ? answer.response || answer.result || answer.output || answer.text || answer : answer;
+  const parsed = safeJsonFromUnknown(raw);
+  if (!parsed || !isPlainObject(parsed)) return null;
+
+  const rows = parseDocAiPayload(parsed);
+  if (!rows.length) return null;
+
+  const blocks = [];
+  for (let i = 0; i < rows.length && blocks.length < count; i++) {
+    const r = rows[i];
+    const text = safeStr(r && r.text).trim();
+    if (!text) continue;
+    blocks.push(makeTextBlock({ i: blocks.length, title: safeStr(r && r.title).trim(), text }));
+  }
+
+  if (!blocks.length) return null;
+
+  // P0: hård garanti: inga question-block i document/mix
+  if (!ensureNoQuestionBlocks(blocks)) return null;
+
+  // toppa upp om AI gav färre
+  while (blocks.length < count) {
+    blocks.push(
+      makeTextBlock({
+        i: blocks.length,
+        title: sv ? `Block ${blocks.length + 1}` : `Block ${blocks.length + 1}`,
+        text: sv ? "Komplettera med kort, tydlig dokumenttext kopplad till kursinfo." : "Add short, clear document text tied to the course info.",
+      })
+    );
+  }
+
+  return {
+    ok: true,
+    v: "training-blocks@v1",
+    mode,
+    subjectId: (bundle && bundle.subjectId) || subjectId,
+    language,
+    blocks: blocks.slice(0, count),
+  };
+}
+
+function buildDocumentBlocksDeterministic(input) {
+  const requestId = safeStr(input && input.requestId).trim();
+  const mode = safeStr(input && input.mode).trim() || "document";
+  const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
+  const language = normalizeLanguage(input && input.language);
+  const contextText = safeStr(input && (input.context || input.contextText)).trim();
+  const subjectId = safeStr(input && input.subjectId).trim() || "generic";
+
+  const bundle = parseContextBundle(contextText);
+  const sv = language === "sv";
+
+  const bits = [];
+  if (bundle && bundle.module) bits.push(bundle.module);
+  if (bundle && bundle.area) bits.push(bundle.area);
+  if (bundle && bundle.chapter) bits.push(bundle.chapter);
+  const ctx = bits.length ? bits.join(" • ") : sv ? "Utbildning" : "Training";
+
+  const blocks = [];
+  for (let i = 0; i < count; i++) {
+    const title = sv ? `Dokumentblock ${i + 1}` : `Document block ${i + 1}`;
+    const text = sv
+      ? `Det här är ett dokumentblock för ${ctx}. Skriv kort, tydligt och spårbart. Utgå från kursinfo och undvik provfrågor.`
+      : `This is a document block for ${ctx}. Keep it clear and traceable. Use course info and avoid quiz questions.`;
+    blocks.push(makeTextBlock({ i, title, text }));
+  }
+
+  return { ok: true, v: "training-blocks@v1", mode, subjectId, language, blocks };
+}
+
+// ============================================================
+// BLOCK 10B — QUESTION ENGINE (oförändrad logik)
+// ============================================================
 
 async function buildTrainingBlocksWithAI(input, env) {
   const requestId = safeStr(input && input.requestId).trim();
@@ -877,10 +1091,8 @@ async function buildTrainingBlocksWithAI(input, env) {
   const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
   const subjectId = safeStr(input && input.subjectId).trim() || "generic";
 
-  // P0: "auto" -> mcq_single i AI-ledet
   const qt = normalizeToAiQt(input && input.questionType);
 
-  // P0: unwrap kursinfo från context.text (även om den är dubbelt JSON)
   const bundle = parseContextBundle(contextTextRaw);
   const courseInfo = fmtContextForPrompt(bundle, language);
 
@@ -895,7 +1107,6 @@ async function buildTrainingBlocksWithAI(input, env) {
 
   const sv = language === "sv";
 
-  // P0: hårdare krav på “riktiga” frågor och MCQ-kvalitet + mini-lektion i explanation
   const schemaHint = sv
     ? `Returnera ENDAST giltig JSON. Inget markdown. Inga extra rader. JSON måste börja med "{" och sluta med "}".
 Schema:
@@ -948,9 +1159,7 @@ Rules (very important):
     `- place: ${pack.place}\n- setting: ${pack.setting}\n- artifact: ${pack.artifact}\n- constraintB: ${pack.constraintB}\n- twist: ${pack.twist}\n\n` +
     (sv ? `ARC (i ordning):\n${arc.join(", ")}\n\n` : `ARC (in order):\n${arc.join(", ")}\n\n`) +
     `questionType: ${qt}\n\n` +
-    (sv
-      ? `KONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n\n`
-      : `CONTEXT (raw):\n${contextTextRaw || "(none)"}\n\n`) +
+    (sv ? `KONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n\n` : `CONTEXT (raw):\n${contextTextRaw || "(none)"}\n\n`) +
     schemaHint;
 
   const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
@@ -964,7 +1173,6 @@ Rules (very important):
       ],
     });
   } catch (_) {
-    // fallback modell
     answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
       messages: [
         { role: "system", content: systemPrompt },
@@ -973,7 +1181,6 @@ Rules (very important):
     });
   }
 
-  // CF kan ge object med response: "..." (string), eller ibland direkt text/objekt.
   const raw = isPlainObject(answer) ? answer.response || answer.result || answer.output || answer.text || answer : answer;
 
   const parsed = safeJsonFromUnknown(raw);
@@ -985,14 +1192,12 @@ Rules (very important):
   const blocks = [];
   const seenStem = new Set();
 
-  // FAIL-SOFT: skippa trasiga, fyll upp senare
   for (let i = 0; i < qArr.length && blocks.length < count; i++) {
     const q = qArr[i];
 
     const stem = safeStr(q && (q.stem || q.question || q.text)).trim();
     if (!stem) continue;
 
-    // anti-duplicates (normalize whitespace)
     const key = stem.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenStem.has(key)) continue;
     seenStem.add(key);
@@ -1005,14 +1210,12 @@ Rules (very important):
     options = uniqStrings(options);
 
     if (qt === "true_false") {
-      // enforce 2
       if (options.length < 2) {
         options = sv ? ["Sant", "Falskt"] : ["True", "False"];
       } else {
         options = options.slice(0, 2);
       }
     } else {
-      // accept >=2, pad to 4
       if (options.length < 2) continue;
       options = padOptions(language, options, 4);
     }
@@ -1020,7 +1223,6 @@ Rules (very important):
     const ciRaw = Number(q && q.correctIndex);
     let correctIndex = Number.isFinite(ciRaw) && ciRaw >= 0 && ciRaw < options.length ? Math.floor(ciRaw) : 0;
 
-    // P0: seed-shuffle options så facit inte fastnar
     const seed = hash32(`${requestId}|${subjectId}|${key}|${i}`);
     const shuffled = shuffleWithCorrectIndex(options, correctIndex, seed);
     options = shuffled.options;
@@ -1041,7 +1243,6 @@ Rules (very important):
     blocks.push(makeQuestionBlockFromUi({ i: blocks.length, stem, options, correctIndex, explanation }));
   }
 
-  // toppa upp med deterministic om AI gav färre
   if (blocks.length < count) {
     const det = buildTrainingBlocksDeterministic({ ...input, count: count - blocks.length, questionType: qt });
     const detBlocks = Array.isArray(det && det.blocks) ? det.blocks : [];
@@ -1054,7 +1255,6 @@ Rules (very important):
 
   if (!blocks.length) return null;
 
-  // re-id 1..count stabilt
   const normalizedBlocks = blocks.slice(0, count).map((b, idx) => ({ ...b, id: `q_${idx + 1}` }));
 
   return {
@@ -1112,7 +1312,6 @@ function buildTrainingBlocksDeterministic(input) {
   const arc = buildStoryArc(count);
   const pack = pickScenarioPack(contextText, place, language, seedBase);
 
-  // För mini-lektion även i fallback: försök tolka bundle om den finns i contextText
   const bundle = parseContextBundle(contextText);
 
   const blocks = [];
@@ -1264,7 +1463,6 @@ function makeQuestionBlock({ i, language, pack, dim, bundle }) {
   const options = sv ? optionsSv : optionsEn;
   const correctIndex = 0;
 
-  // P0: mini-lektion även i fallback
   const explanation = ensureMiniLessonExplanation({
     language,
     bundle,
