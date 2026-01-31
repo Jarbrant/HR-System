@@ -1609,145 +1609,164 @@ DoD (för denna patch):
   page._isWriterAllowed = isWriterAllowed;
 
   /* =========================
-     BLOCK 17/19 — Item modal + block editor
-  ========================== */
-  function itemTitleForModal(blockIdx, itemIdx, item) {
-    const bi = Number(blockIdx) + 1;
-    const ii = Number(itemIdx) + 1;
-    const kind = (item && typeof item === "object" && typeof item.type === "string") ? normStr(item.type) : "";
-    const k = kind ? (" • " + kind) : "";
-    return `Block ${bi} – Item ${ii}${k}`;
-  }
+   BLOCK 17/19 — Item modal + block editor
+   PATCH v1 (2026-01-31):
+   - BLOCK-indelning 17A–17E för enklare felsökning
+   - INGA funktionsändringar (endast struktur/kommentarer)
+========================== */
 
-  function getDraftBlockAndItem(blockIdx, itemIdx) {
-    if (!state.draft) return { ok: false };
-    const blocks = currentBlocks();
+/* -------------------------
+   BLOCK 17A — Modal title helper
+-------------------------- */
+function itemTitleForModal(blockIdx, itemIdx, item) {
+  const bi = Number(blockIdx) + 1;
+  const ii = Number(itemIdx) + 1;
+  const kind = (item && typeof item === "object" && typeof item.type === "string") ? normStr(item.type) : "";
+  const k = kind ? (" • " + kind) : "";
+  return `Block ${bi} – Item ${ii}${k}`;
+}
 
-    if (!Array.isArray(state.draft.blocks)) state.draft.blocks = blocks.slice();
-    const b = state.draft.blocks[blockIdx];
-    if (!b || !Array.isArray(b.items)) return { ok: false };
+/* -------------------------
+   BLOCK 17B — Resolve draft block + item (fail-closed)
+-------------------------- */
+function getDraftBlockAndItem(blockIdx, itemIdx) {
+  if (!state.draft) return { ok: false };
+  const blocks = currentBlocks();
 
-    const it = b.items[itemIdx];
-    if (it == null) return { ok: false };
+  if (!Array.isArray(state.draft.blocks)) state.draft.blocks = blocks.slice();
+  const b = state.draft.blocks[blockIdx];
+  if (!b || !Array.isArray(b.items)) return { ok: false };
 
-    return { ok: true, block: b, item: it, blocks: state.draft.blocks };
-  }
+  const it = b.items[itemIdx];
+  if (it == null) return { ok: false };
 
-  function openItemModal(blockIdx, itemIdx) {
-    if (!DEPS.render || typeof DEPS.render.openItemModal !== "function") return;
+  return { ok: true, block: b, item: it, blocks: state.draft.blocks };
+}
 
-    const got = getDraftBlockAndItem(blockIdx, itemIdx);
-    if (!got.ok) return;
+/* -------------------------
+   BLOCK 17C — Item modal (open/save/delete)
+-------------------------- */
+function openItemModal(blockIdx, itemIdx) {
+  if (!DEPS.render || typeof DEPS.render.openItemModal !== "function") return;
 
-    const canWrite = isWriterAllowed();
-    const item = got.item;
+  const got = getDraftBlockAndItem(blockIdx, itemIdx);
+  if (!got.ok) return;
 
-    DEPS.render.openItemModal({
-      title: itemTitleForModal(blockIdx, itemIdx, item),
-      item: deepClone(item),
-      canWrite: canWrite,
-      onSave: function (updated) {
-        if (!isWriterAllowed()) return;
+  const canWrite = isWriterAllowed();
+  const item = got.item;
 
-        const again = getDraftBlockAndItem(blockIdx, itemIdx);
-        if (!again.ok) return;
-
-        const original = again.item;
-
-        if (updated && typeof updated === "object") sanitizeAiItemInPlace(updated);
-        if (typeof updated === "string") updated = scrubObjectObjectToken(updated);
-
-        if (typeof original === "string") {
-          if (typeof updated === "string") {
-            again.block.items[itemIdx] = updated;
-          } else if (updated && typeof updated === "object") {
-            const txt = (typeof updated.text === "string" && updated.text) ||
-              (typeof updated.instruction === "string" && updated.instruction) ||
-              (typeof updated.prompt === "string" && updated.prompt) ||
-              (typeof updated.question === "string" && updated.question) || "";
-            again.block.items[itemIdx] = normStr(scrubObjectObjectToken(txt));
-          } else {
-            return;
-          }
-        } else {
-          if (updated && typeof updated === "object") again.block.items[itemIdx] = deepClone(updated);
-          else if (typeof updated === "string") again.block.items[itemIdx] = { type: "info", text: normStr(updated) };
-          else return;
-        }
-
-        setDirty(true);
-        updateUiAll();
-      },
-      onDelete: function () {
-        if (!isWriterAllowed()) return;
-
-        const again = getDraftBlockAndItem(blockIdx, itemIdx);
-        if (!again.ok) return;
-
-        again.block.items.splice(itemIdx, 1);
-
-        setDirty(true);
-        updateUiAll();
-      }
-    });
-  }
-
-  function openBlockEditor(idx) {
-    if (!isWriterAllowed()) return;
-    if (!state.draft || !DEPS.render || typeof DEPS.render.openModal !== "function") return;
-
-    const blocks = currentBlocks();
-    const b = blocks[idx];
-    if (!b) return;
-
-    const wrap = document.createElement("div");
-
-    const label = document.createElement("div");
-    label.className = "muted2";
-    label.style.textAlign = "left";
-    label.textContent = "Redigera första raden i blocket (baseline).";
-    wrap.appendChild(label);
-
-    const ta = document.createElement("textarea");
-    ta.className = "textarea";
-    ta.value = getItemPrimaryTextForEditor(b.items && b.items[0] ? b.items[0] : null);
-    wrap.appendChild(ta);
-
-    DEPS.render.openModal("Block " + (idx + 1), wrap, function () {
+  DEPS.render.openItemModal({
+    title: itemTitleForModal(blockIdx, itemIdx, item),
+    item: deepClone(item),
+    canWrite: canWrite,
+    onSave: function (updated) {
       if (!isWriterAllowed()) return;
 
-      const txt = normStr(ta.value);
-      if (!state.draft.blocks) state.draft.blocks = blocks;
-      const bb = state.draft.blocks[idx];
-      if (bb && Array.isArray(bb.items) && bb.items[0]) {
-        const it0 = bb.items[0];
-        if (it0 && typeof it0 === "object") {
-          if (typeof it0.text === "string") it0.text = txt;
-          else if (typeof it0.instruction === "string") it0.instruction = txt;
-          else if (typeof it0.prompt === "string") it0.prompt = txt;
-          else if (typeof it0.question === "string") it0.question = txt;
-          else if (isObj(it0.question) && typeof it0.question.text === "string") it0.question.text = txt;
-        } else if (typeof it0 === "string") {
-          bb.items[0] = txt;
+      const again = getDraftBlockAndItem(blockIdx, itemIdx);
+      if (!again.ok) return;
+
+      const original = again.item;
+
+      if (updated && typeof updated === "object") sanitizeAiItemInPlace(updated);
+      if (typeof updated === "string") updated = scrubObjectObjectToken(updated);
+
+      if (typeof original === "string") {
+        if (typeof updated === "string") {
+          again.block.items[itemIdx] = updated;
+        } else if (updated && typeof updated === "object") {
+          const txt = (typeof updated.text === "string" && updated.text) ||
+            (typeof updated.instruction === "string" && updated.instruction) ||
+            (typeof updated.prompt === "string" && updated.prompt) ||
+            (typeof updated.question === "string" && updated.question) || "";
+          again.block.items[itemIdx] = normStr(scrubObjectObjectToken(txt));
+        } else {
+          return;
         }
+      } else {
+        if (updated && typeof updated === "object") again.block.items[itemIdx] = deepClone(updated);
+        else if (typeof updated === "string") again.block.items[itemIdx] = { type: "info", text: normStr(updated) };
+        else return;
       }
+
       setDirty(true);
       updateUiAll();
-    });
-  }
+    },
+    onDelete: function () {
+      if (!isWriterAllowed()) return;
 
-  function deleteBlock(idx) {
+      const again = getDraftBlockAndItem(blockIdx, itemIdx);
+      if (!again.ok) return;
+
+      again.block.items.splice(itemIdx, 1);
+
+      setDirty(true);
+      updateUiAll();
+    }
+  });
+}
+
+/* -------------------------
+   BLOCK 17D — Block editor (baseline edit)
+-------------------------- */
+function openBlockEditor(idx) {
+  if (!isWriterAllowed()) return;
+  if (!state.draft || !DEPS.render || typeof DEPS.render.openModal !== "function") return;
+
+  const blocks = currentBlocks();
+  const b = blocks[idx];
+  if (!b) return;
+
+  const wrap = document.createElement("div");
+
+  const label = document.createElement("div");
+  label.className = "muted2";
+  label.style.textAlign = "left";
+  label.textContent = "Redigera första raden i blocket (baseline).";
+  wrap.appendChild(label);
+
+  const ta = document.createElement("textarea");
+  ta.className = "textarea";
+  ta.value = getItemPrimaryTextForEditor(b.items && b.items[0] ? b.items[0] : null);
+  wrap.appendChild(ta);
+
+  DEPS.render.openModal("Block " + (idx + 1), wrap, function () {
     if (!isWriterAllowed()) return;
-    if (!state.draft) return;
 
-    const blocks = currentBlocks();
-    if (idx < 0 || idx >= blocks.length) return;
-
-    if (!Array.isArray(state.draft.blocks)) state.draft.blocks = blocks;
-    state.draft.blocks.splice(idx, 1);
+    const txt = normStr(ta.value);
+    if (!state.draft.blocks) state.draft.blocks = blocks;
+    const bb = state.draft.blocks[idx];
+    if (bb && Array.isArray(bb.items) && bb.items[0]) {
+      const it0 = bb.items[0];
+      if (it0 && typeof it0 === "object") {
+        if (typeof it0.text === "string") it0.text = txt;
+        else if (typeof it0.instruction === "string") it0.instruction = txt;
+        else if (typeof it0.prompt === "string") it0.prompt = txt;
+        else if (typeof it0.question === "string") it0.question = txt;
+        else if (isObj(it0.question) && typeof it0.question.text === "string") it0.question.text = txt;
+      } else if (typeof it0 === "string") {
+        bb.items[0] = txt;
+      }
+    }
     setDirty(true);
     updateUiAll();
-  }
+  });
+}
+
+/* -------------------------
+   BLOCK 17E — Delete block
+-------------------------- */
+function deleteBlock(idx) {
+  if (!isWriterAllowed()) return;
+  if (!state.draft) return;
+
+  const blocks = currentBlocks();
+  if (idx < 0 || idx >= blocks.length) return;
+
+  if (!Array.isArray(state.draft.blocks)) state.draft.blocks = blocks;
+  state.draft.blocks.splice(idx, 1);
+  setDirty(true);
+  updateUiAll();
+}
 
   /* =========================
    BLOCK 18/19 — AI + normalize/import + fail-closed (mode-based)
