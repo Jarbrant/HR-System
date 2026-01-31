@@ -1,0 +1,303 @@
+PATCH-PLAN UTAN KOD — AO-WORKER-QUESTION-QUALITY-01
+
+Fil: worker/index.js
+Mål: Subject-styrda frågor + quality gate + bättre fallback (inte “moral-quiz”).
+
+1) Nya regler (Question Spec) per subjectId
+P0 — Lägg till questionSpec i subject-resolvern
+
+Plats i fil: vid/efter resolveSubjectSpec() (din BLOCK 02F).
+
+Ny datadel per subject (minst generic + feedback_samtal)
+
+Du ska kunna få ut typ:
+
+minStemSentences / maxStemSentences
+
+Ex: 2–3 meningar (scenario + beslut + fråga).
+
+minOptions / maxOptions
+
+MCQ: exakt 4 (true_false: exakt 2).
+
+minOptionWordCount
+
+Ex: minst 3–4 ord för att undvika “Gå vidare”.
+
+forbiddenOptionPhrases (SV + EN)
+
+Ex: "som vanligt", "känns rimligt", "gör inget", "bara gissa", "skjut upp".
+
+forbiddenStemPhrases (SV + EN)
+
+Ex: "vad är bäst" + en rad, "vilket är rätt" utan scenario.
+
+requirePlausibleDistractors (bool)
+
+Tvingar “typiska misstag”, inte karikatyrer.
+
+distractorTypes (lista)
+Exempel på feltyper som ska kunna synas i alternativen:
+
+“Hoppa dokumentation”
+
+“Fråga fel person”
+
+“Fixa symtom istället för orsak”
+
+“Sätta åtgärd utan uppföljning”
+
+explanationSpec
+
+minSentences: 4
+
+mustIncludeTags: (SV) ["Princip:", "Varför rätt:", "Varför fel:", "Ta med dig:"]
+
+correctIndexBatchRules
+
+mustVary: true (i en batch får correctIndex inte vara samma för alla)
+
+minUniqueCorrectIndices: minst 2 unika i batch (om count ≥ 4)
+
+Viktigt: Du har redan doc-spec i resolveSubjectSpec() – du utökar den så att varje subject returnerar doc + question.
+
+2) Quality Gate: validera frågor som dokument (fail-closed + retry)
+P0 — Lägg till validerare för frågor
+
+Plats i fil: direkt efter dina doc-validerare (efter validateDocOutput(...) i BLOCK 02F/02E-området).
+
+Funktionellt kontrakt (utan kod)
+
+Skapa en valideringsfunktion som tar:
+
+questions[] (AI-parse)
+
+language, qt (mcq_single/multi/true_false)
+
+questionSpec (från subject)
+
+count (för batch-regler)
+
+…och returnerar:
+
+{ ok:true }
+
+eller { ok:false, errorCode:"Q_...", message:"...", detail:{...} }
+
+Exakta valideringsregler (P0)
+
+För varje fråga:
+
+Q1 — Stem/Scenario
+
+Stem måste vara 2–3 meningar (enligt spec).
+
+Sista meningen måste vara en fråga (sluta med ? eller innehålla tydlig frågeform).
+
+Måste innehålla minst 1 konkret artefakt/underlag-ord om subject kräver det (ex: “underlag”, “logg”, “signering”, “notering”, “rutin”, “checklista”).
+
+För feedback_samtal: acceptera även “observation”, “fakta”, “uppföljning”.
+
+Q2 — Options
+
+MCQ: exakt 4 options (true_false: exakt 2).
+
+Options måste vara unika (case-insensitive trim).
+
+Varje option måste vara minst X ord (spec).
+
+Options får inte innehålla förbjudna fraser (spec-listan).
+
+Minst 2 felalternativ måste vara plausibla:
+
+Dvs inte “gör inget”, “gissa”, “som vanligt”, “känns rimligt”, “skjut upp” (de är förbjudna).
+
+Felalternativen ska representera typiska misstag (distractorTypes).
+
+Q3 — correctIndex
+
+correctIndex måste vara inom range.
+
+Batch-regel: i samma svar får correctIndex inte vara samma i alla frågor när count ≥ 4.
+
+Minst 2 unika correctIndex i batch.
+
+Q4 — Explanation
+
+Måste vara minst 4 meningar.
+
+Måste innehålla taggarna:
+
+Princip:
+
+Varför rätt:
+
+Varför fel:
+
+Ta med dig:
+
+“Varför fel” måste nämna minst ett felalternativ (textmatch: ett av options-alternativen eller “felalternativet …”).
+
+Q5 — Dubbletter
+
+Inga dubbla stems i samma batch (normalisera whitespace + lowercase).
+
+Felkoder (P0)
+
+Inför konsekventa codes:
+
+Q_STEM_TOO_SHORT
+
+Q_STEM_NOT_A_QUESTION
+
+Q_OPTIONS_BAD_COUNT
+
+Q_OPTIONS_FORBIDDEN_PHRASE
+
+Q_OPTIONS_TOO_SIMILAR
+
+Q_CORRECTINDEX_INVALID
+
+Q_CORRECTINDEX_NOT_VARYING
+
+Q_EXPL_MISSING_TAGS
+
+Q_EXPL_TOO_SHORT
+
+Q_DUPLICATE_STEM
+
+3) Retry-loop i AI-frågor (1 gång)
+P0 — Om validering FAIL → gör exakt 1 retry med hårdare prompt
+
+Plats i fil: buildTrainingBlocksWithAI(...) (BLOCK 10B), efter att du gjort parsed = safeJsonFromUnknown(raw) och hittat parsed.questions.
+
+Flöde (utan kod)
+
+Parse AI-svaret → questions[]
+
+Kör validateQuestions(...)
+
+Om FAIL:
+
+Kör en ny AI.run med:
+
+samma schema
+
+en “HÅRDARE” instruktion som listar:
+
+förbjudna fraser
+
+min meningslängd
+
+krav på plausibla distraktorer
+
+krav på taggar i explanation
+
+Parse igen → validera igen
+
+Om FAIL igen → fallback
+
+P1 — Sätt X-HR-AI-REASON
+
+Plats i fil: där du redan sätter headers i fetch (BLOCK 04).
+
+Om FAIL → X-HR-AI-REASON = "Q_VALIDATE_FAIL:<errorCode>"
+
+4) Gör fallback-frågor “bra” (inte uppenbart rätt)
+
+Det här är den verkliga skillnaden du vill åt.
+
+P0 — Byt ut era 3 “dumma felalternativ”
+
+Plats i fil: makeQuestionBlock(...) i deterministic fallback (BLOCK 10 deterministiska delen).
+
+Nya principer för fallback-options (utan kod)
+
+Korrekt alternativ kan fortfarande vara “be om underlag”, men:
+
+Felalternativen ska vara realistiska misstag, t.ex:
+
+“Dokumentera observationen men bestäm inget / ingen uppföljning”
+
+“Prata med kollega X men utan att säkra fakta”
+
+“Åtgärda symtomet direkt (t.ex. ‘påminn’) utan att klargöra krav/standard”
+
+“Ta det i grupp fast personen behöver 1-1”
+
+För feedback_samtal: felalternativ ska ofta vara:
+
+tolkning istället för observation
+
+otydligt nästa steg
+
+ingen uppföljningstid
+
+för mycket “du borde”/värdering
+
+P0 — Låt correctIndex variera även i fallback
+
+Plats i fil: deterministic generation innan block byggs, eller vid option-shuffle.
+
+Du har redan seededRand, shuffleWithCorrectIndex och seed-hash.
+
+Använd seed för att:
+
+välja correctIndex ≠ alltid 0
+
+shuffla options deterministiskt
+
+P1 — Subject-spec styr fallback också
+
+Fallback ska läsa questionSpec (förbjudna fraser, min meningslängd, explanation-taggar).
+
+Om fallback råkar bryta spec → justera fallback-texten (inte AI).
+
+5) Extra förbättringar som ger “dokument-känsla” i Q/A
+P1 — “Kursinfo-krokar” i varje stem
+
+Plats i fil: makeQuestionBlock(...) och/eller i AI-promptdelen.
+
+Stem ska innehålla minst 1 ord från:
+
+modul/område/kapitel/steg (från fmtContextForPrompt)
+
+Du har redan bundle – använd den som krav i valideringen (“mustIncludeCourseTerms”: minst 1 träff om de finns).
+
+P2 — Anti-fluff: stoppa “meta”
+
+Förbjud fraser i stem/expl som:
+
+“Som AI…”
+
+“I den här frågan…”
+
+“Det korrekta svaret är…”
+
+6) Testfall (snabb QA-lista)
+
+Kör dessa 6 och titta i UI:
+
+subjectId=feedback_samtal, questionType=mcq_single, count=6
+
+Ska få 6 scenariobaserade frågor med plausibla distraktorer.
+
+Samma men count=10
+
+correctIndex måste variera (min 2 unika).
+
+subjectId=generic, questionType=mcq_single
+
+Ska kännas “allmänt HR” men fortfarande inte moral-quiz.
+
+true_false
+
+options exakt 2, explanation måste fortfarande ha taggar.
+
+Skicka en “för kort” context
+
+Frågorna ska fortfarande klara stem-längd.
+
+Tvinga fram fail (lägg in förbjudet ord i prompt om ni kan)
+
+Ska trigga retry → om fail igen → fallback → fortfarande god kvalitet.
