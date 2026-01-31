@@ -2,21 +2,9 @@
 AO-TRAININGS-VERKSAMHET-ANCHOR-01 (PROD) | FILE 06/06 | FIL-ID: UI/pages/trainings/06-page.js
 Projekt: HR-System (GitHub Pages / UI-only)
 
-Mål (Patchpaket 4):
-1) Ta bort “Titel (genererad)” som input (ingen sparning från input).
-2) Lägg till “AI-ankare / Kontext-rad” (read-only): Modul • Område • Kapitel • Steg • Nivå • Verksamhet
-   - Visuell förklaring i UI
-   - Skickas som kort sträng i AI-request (utan ny storage-key; byggs dynamiskt).
-3) Lägg till “Verksamhet” under subjectId (15 vanligaste + Annat… + sök på 3+ bokstäver).
-   - Lagring: training.businessArea (inom befintlig AO-057_TRAININGS_V1 struktur; ingen ny key).
-4) P0: Flatten/normalisera AI question-shape till stabilt UI-format, fail-closed med tydlig orsak.
-
-TILLÄGG (FÖRSLAG, UI-only, NO STORAGE):
-- Kurs-spår (Course 1 vs Course 2) som påverkar endast AI-request + ankare.
-  - DOM-id: courseTrack (valfritt; om saknas => default course1)
-
-BESLUT (2026-01): Document-only nu (låg risk, direkt nytta). Spel/frågor senare.
-- AI ska alltid köras i document-mode i denna sida (fail-closed om UI försöker “questions”).
+PATCH v1.4.9 (2026-01-31) — FIX 2 BUGGAR UTAN FUNKTIONSBORTTAG
+1) AI-innehåll dropdown går nu att byta (Dokument / Mix / Frågor & svar)
+2) “Import stoppad” låser inte flödet: fail-closed sker per mode, men du kan byta mode och köra igen
 
 POLICY (LÅST):
 - UI-only • Fail-closed
@@ -25,13 +13,13 @@ POLICY (LÅST):
 - RBAC: SYSTEM_ADMIN read-only; ADMIN/MANAGER enligt befintlig logik
 - AI: Skicka aldrig "Mål/goals" till AI
 
-DoD:
-- Titel-input borta (ingen wiring)
-- Ankare-rad syns och uppdateras live
-- Verksamhet under subjectId: 15+Annat, filtrering efter 3 bokstäver
-- Verksamhet sparas/laddas per training
-- AI-request inkluderar ankare-strängen
-- P0 flatten: stabil question-items eller fail-closed med tydlig orsak
+DoD (för denna patch):
+- Dropdown för AI-innehåll är valbar (inte disabled)
+- Generate kör igen även efter “Import stoppad” (ingen sticky lock)
+- Fail-closed per mode:
+  - Dokument: stoppa om AI gav bara questions (0 dokument-items)
+  - Frågor: stoppa om AI gav 0 question-items
+  - Mix: acceptera båda; om bara ena typen -> importera men visa hint
 ============================================================ */
 (function () {
   "use strict";
@@ -43,10 +31,11 @@ DoD:
   let dom = NS.dom;
 
   const page = (NS.page = NS.page || {});
-  page.__VERSION = "v1.4.8-AO-TRAININGS-VERKSAMHET-ANCHOR-01-DOCONLY"; // PATCH: P0 fix writeBackDraft SELECT+search
+  page.__VERSION = "v1.4.9-AO-TRAININGS-VERKSAMHET-ANCHOR-01-MODEFIX"; // PATCH: dropdown selectable + non-sticky import fail-closed
 
-  // Document-only flag (NO STORAGE)
-  const DOCUMENT_ONLY = true;
+  // NOTE: Document-only är INTE längre hårdlåst i UI.
+  // Fail-closed sker per valt mode (document/questions/mix).
+  const DOCUMENT_ONLY = false;
 
   // DevTools debug hooks (NO STORAGE)
   page._LAST_AI_REQUEST = null;
@@ -231,8 +220,8 @@ DoD:
   }
 
   /* =========================
-     BLOCK 3.1/19 — P0 UI: Enforce document-only in dropdown
-     (NO STORAGE, fail-closed)
+     BLOCK 3.1/19 — (Legacy helper) Enforce document-only in dropdown
+     - Nu används den bara om DOCUMENT_ONLY=true (default=false).
   ========================== */
   function enforceAiContentUiDocumentOnly() {
     try {
@@ -242,13 +231,11 @@ DoD:
       const el = dom.aiContent;
       const tag = String(el.tagName || "").toUpperCase();
       if (tag !== "SELECT") {
-        // if it's input, just set value text and disable if possible
         try { el.value = "document"; } catch (_) { }
         if (dom.disable) dom.disable(el, true);
         return;
       }
 
-      // Ensure there is a "document" option so UI can actually show it.
       const opts = el.options ? Array.from(el.options) : [];
       const hasDoc = opts.some(o => String(o && o.value) === "document");
 
@@ -257,19 +244,50 @@ DoD:
         o.value = "document";
         o.textContent = "Dokument (låst)";
         el.appendChild(o);
-      } else {
-        // Rename label to avoid confusion (optional, harmless)
-        for (const o of opts) {
-          if (String(o && o.value) === "document" && o.textContent) {
-            if (o.textContent.toLowerCase().indexOf("dokument") === -1) o.textContent = "Dokument (låst)";
-          }
-        }
       }
 
-      // Force selection + disable
       el.value = "document";
       if (dom.disable) dom.disable(el, true);
     } catch (_) { }
+  }
+
+  /* =========================
+     BLOCK 3.2/19 — AI mode mapper (UI -> request + validation)
+     - UI kan ha value: "document" | "mix" | "qa" | "questions" | "training" etc.
+     - Worker request-mode förblir: "document" eller "training" (kompatibilitet).
+  ========================== */
+  function readAiContentSelection() {
+    const raw = normStr(dom && dom.aiContent ? dom.aiContent.value : "");
+    const s = raw.toLowerCase();
+
+    // Default
+    let uiMode = "document";     // document | mix | questions
+    let requestMode = "document"; // document | training
+    let directive = "OUTPUT: Dokumenttext/utbildningsblock. INGA quiz/frågor. INGA facitfält.";
+
+    if (s.includes("mix")) {
+      uiMode = "mix";
+      requestMode = "training";
+      directive = "OUTPUT: MIX. Blanda info-block + frågor (om relevant). Inga onödiga facitfält.";
+    } else if (s.includes("question") || s.includes("qa") || s.includes("quiz") || s === "training") {
+      uiMode = "questions";
+      requestMode = "training";
+      directive = "OUTPUT: FRÅGOR. Skapa frågor (med tydlig fråga-text och svarsalternativ om det passar).";
+    } else if (s.includes("doc") || s.includes("info") || s === "document" || !s) {
+      uiMode = "document";
+      requestMode = "document";
+      directive = "OUTPUT: Dokumenttext/utbildningsblock. INGA quiz/frågor. INGA facitfält.";
+    }
+
+    // If page is hard doc-only (legacy), override
+    if (DOCUMENT_ONLY) {
+      uiMode = "document";
+      requestMode = "document";
+      directive = "OUTPUT: Dokumenttext/utbildningsblock. INGA quiz/frågor. INGA facitfält.";
+      enforceAiContentUiDocumentOnly();
+    }
+
+    return { raw, uiMode, requestMode, directive };
   }
 
   /* =========================
@@ -948,9 +966,11 @@ DoD:
   function updateDebug() {
     try {
       if (!dom || !dom.debugPre || !dom.setText) return;
+      const sel = readAiContentSelection();
       const payload = {
         version: page.__VERSION,
         documentOnly: !!DOCUMENT_ONLY,
+        aiContent: sel,
         locked: !!state.locked,
         lockReason: state.lockReason || "",
         selectedId: state.selectedId || "",
@@ -1349,9 +1369,8 @@ DoD:
     const track = normalizeCourseTrack(s.track);
     const trackLabel = courseTrackLabel(track);
 
-    // PATCH (P0): make "document-only" explicit inside context too (NO STORAGE).
-    // Worker may ignore, but harmless.
-    const docDirective = "OUTPUT: Dokumenttext/utbildningsblock. INGA quiz/frågor. INGA facitfält.";
+    const sel = readAiContentSelection();
+    const modeDirective = sel && sel.directive ? String(sel.directive) : "";
 
     if (DEPS.core && typeof DEPS.core.buildAiContext === "function") {
       const ctx = DEPS.core.buildAiContext(s) || {};
@@ -1374,7 +1393,7 @@ DoD:
         ctx.subject.anchor = anchorLine;
 
         // directive (NO STORAGE)
-        ctx.directive = docDirective;
+        ctx.directive = modeDirective || "";
       } catch (_) { }
       return ctx;
     }
@@ -1382,7 +1401,7 @@ DoD:
     return {
       anchor: anchorLine,
       business: s.businessArea || "",
-      directive: docDirective,
+      directive: modeDirective || "",
       subject: { module: s.module, area: s.area, title: subjectTitle, businessArea: s.businessArea || "", anchor: anchorLine },
       course: {
         chapter: s.courseTitle,
@@ -1478,15 +1497,23 @@ DoD:
   }
 
   function updateAiControlsVisibility() {
-    // Document-only => hide question controls always
-    if (dom && dom.questionControls && dom.show && dom.hide) {
-      dom.hide(dom.questionControls);
-    } else if (DEPS.render && typeof DEPS.render.toggleQuestionControls === "function") {
-      DEPS.render.toggleQuestionControls(false);
+    // Document-only => hide question controls always (legacy)
+    if (DOCUMENT_ONLY) {
+      if (dom && dom.questionControls && dom.show && dom.hide) dom.hide(dom.questionControls);
+      else if (DEPS.render && typeof DEPS.render.toggleQuestionControls === "function") DEPS.render.toggleQuestionControls(false);
+      enforceAiContentUiDocumentOnly();
+      return;
     }
 
-    // P0 UI: show document-only state in dropdown
-    enforceAiContentUiDocumentOnly();
+    // Mode-based visibility (no storage)
+    const sel = readAiContentSelection();
+    const showQ = (sel.uiMode === "questions" || sel.uiMode === "mix");
+    if (dom && dom.questionControls && dom.show && dom.hide) {
+      if (showQ) dom.show(dom.questionControls);
+      else dom.hide(dom.questionControls);
+    } else if (DEPS.render && typeof DEPS.render.toggleQuestionControls === "function") {
+      DEPS.render.toggleQuestionControls(showQ);
+    }
   }
 
   function updateButtons() {
@@ -1566,8 +1593,7 @@ DoD:
       onOpenItem: function (bIdx, iIdx) { openItemModal(bIdx, iIdx); }
     });
 
-    // Ensure dropdown reflects doc-only even after render
-    enforceAiContentUiDocumentOnly();
+    updateAiControlsVisibility();
   }
 
   function updateUiAll() {
@@ -1724,7 +1750,7 @@ DoD:
   }
 
   /* =========================
-     BLOCK 18/19 — AI + normalize/import + fail-closed (DOC-ONLY)
+     BLOCK 18/19 — AI + normalize/import + fail-closed (mode-based)
   ========================== */
   function setAiHint(text) {
     if (DEPS.render && typeof DEPS.render.setAiHint === "function") { DEPS.render.setAiHint(text || ""); return; }
@@ -1755,20 +1781,26 @@ DoD:
   }
 
   function readAiControls() {
-    // DOC-ONLY: force mode=document always
     const countRaw = normStr(dom && dom.aiCount && dom.aiCount.value) || "3";
     const count = Math.max(1, Math.min(12, Number(countRaw) || 3));
 
-    // Ensure dropdown reflects this policy
-    enforceAiContentUiDocumentOnly();
+    const sel = readAiContentSelection();
+
+    // Question controls (optional)
+    const qType = normStr(dom && dom.aiQuestionType && dom.aiQuestionType.value);
+    const fb = !!(dom && dom.aiFeedbackEnabled && (dom.aiFeedbackEnabled.checked || dom.aiFeedbackEnabled.value === "true"));
 
     return {
+      // UI selection
+      uiMode: sel.uiMode,             // document | mix | questions
+      requestMode: sel.requestMode,   // document | training
+      directive: sel.directive || "",
+      // common
       content: "blocks",
-      mode: "document",
       count: count,
-      questionType: "none",
-      feedbackEnabled: false,
-      _uiQuestionType: ""
+      questionType: qType || "none",
+      feedbackEnabled: fb,
+      _uiQuestionType: qType || ""
     };
   }
 
@@ -1890,6 +1922,7 @@ DoD:
     syncDraftTitleFromFields();
     renderAiAnchorRow();
 
+    // Reset UI feedback for this run (non-sticky)
     setAiHint("");
     DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI…", "warn");
 
@@ -1905,19 +1938,18 @@ DoD:
     const controls = readAiControls();
     const ctxObj = buildAiContextNoGoals();
 
-    // DOC-ONLY: force mode=document + explicit "no-questions" hints
     const req = {
-      mode: "document",
+      mode: controls.requestMode,     // "document" | "training"
       count: controls.count,
       context: ctxObj,
       anchor: (state.aiAnchorLine || ctxObj.anchor || ""),
       language: "sv",
 
       // Extra hints (NO STORAGE) — harmless if worker ignores
-      content: "document",
-      questionType: "none",
-      feedbackEnabled: false,
-      documentOnly: true
+      content: controls.uiMode,       // document | mix | questions
+      questionType: controls.questionType || "none",
+      feedbackEnabled: !!controls.feedbackEnabled,
+      documentOnly: (controls.uiMode === "document") || !!DOCUMENT_ONLY
     };
 
     page._LAST_AI_REQUEST = deepClone(req);
@@ -1962,16 +1994,24 @@ DoD:
     }
 
     const incomingBlocks = [];
-    let droppedQuestions = 0;
+    let questionsKept = 0;
+    let docsKept = 0;
+    let questionsDropped = 0;
+    let docsDropped = 0;
 
     for (const b of safeArr(norm.blocks)) {
       const itemsRaw = safeArr(b && b.items);
       const items = [];
 
       for (const x of itemsRaw) {
+        // Strings => info
         if (typeof x === "string") {
           const t = scrubObjectObjectToken(x);
-          items.push({ type: "info", text: t });
+          const obj = { type: "info", text: t };
+          // mode filtering below
+          const tType = "info";
+          if (controls.uiMode === "questions") { docsDropped++; continue; }
+          items.push(obj); docsKept++;
           continue;
         }
 
@@ -1982,18 +2022,24 @@ DoD:
 
           const t = normStr(obj.type).toLowerCase();
 
-          // PATCH (P0): DOC-ONLY should not kill the whole import immediately.
-          // Skip questions, import the rest. If all are questions -> fail-closed.
-          if (DOCUMENT_ONLY && t === "question") {
-            droppedQuestions++;
+          // Mode-based import rules (fail-closed per mode)
+          if (controls.uiMode === "document") {
+            if (t === "question") { questionsDropped++; continue; }
+            items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
+            docsKept++;
             continue;
           }
 
-          if (DEPS.contract && typeof DEPS.contract.normalizeItem === "function") {
-            items.push(DEPS.contract.normalizeItem(obj));
-          } else {
-            items.push(obj);
+          if (controls.uiMode === "questions") {
+            if (t !== "question") { docsDropped++; continue; }
+            items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
+            questionsKept++;
+            continue;
           }
+
+          // mix
+          items.push(DEPS.contract && typeof DEPS.contract.normalizeItem === "function" ? DEPS.contract.normalizeItem(obj) : obj);
+          if (t === "question") questionsKept++; else docsKept++;
           continue;
         }
       }
@@ -2007,17 +2053,40 @@ DoD:
       });
     }
 
+    // Fail-closed rules per mode (but NOT sticky)
     if (!incomingBlocks.length) {
-      DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
-      setAiHint("Document-only: AI gav bara fråga/quiz-format (0 dokumentblock). Import stoppad (fail-closed).");
+      if (controls.uiMode === "document") {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+        setAiHint("Dokumentläge: AI gav bara frågor/quiz (0 dokument-items). Byt AI-innehåll till Frågor eller Mix och kör igen.");
+      } else if (controls.uiMode === "questions") {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+        setAiHint("Frågor & svar: AI gav inga question-items. Byt till Mix eller Dokument och kör igen, eller justera kontext.");
+      } else {
+        DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: Import stoppad", "bad");
+        setAiHint("Mix: AI gav inga importerbara items. Import stoppad (fail-closed).");
+      }
       updateDebug();
       return;
     }
 
+    // Mode warnings (mix)
+    if (controls.uiMode === "mix") {
+      if (questionsKept === 0 && docsKept > 0) {
+        setAiHint("Mix: AI gav bara dokument-items (inga frågor). Importerade ändå (OK).");
+      } else if (docsKept === 0 && questionsKept > 0) {
+        setAiHint("Mix: AI gav bara frågor (inga dokument-items). Importerade ändå (OK).");
+      }
+    }
+
     page._LAST_AI_PICK = {
+      uiMode: controls.uiMode,
+      requestMode: controls.requestMode,
       importedBlocks: incomingBlocks.length,
       importedItems: incomingBlocks.reduce((n, b) => n + (b.items ? b.items.length : 0), 0),
-      droppedQuestions: droppedQuestions,
+      questionsKept: questionsKept,
+      docsKept: docsKept,
+      questionsDropped: questionsDropped,
+      docsDropped: docsDropped,
       anchor: state.aiAnchorLine || "",
       courseTrack: readCourseTrackFromUi(),
       documentOnly: !!DOCUMENT_ONLY
@@ -2030,10 +2099,14 @@ DoD:
     syncDraftTitleFromFields();
     DEPS.render && DEPS.render.setStatePill && DEPS.render.setStatePill("Status: AI import OK", "ok");
 
-    if (droppedQuestions > 0) {
-      setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items). Skippade ${droppedQuestions} fråge-items (document-only).`);
+    if (!dom || !dom.aiHint) {
+      // no-op
     } else {
-      setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items).`);
+      // Provide a compact summary if hint wasn't already set
+      const already = normStr(dom.aiHint && (dom.aiHint.value || dom.aiHint.textContent));
+      if (!already) {
+        setAiHint(`Importerade ${page._LAST_AI_PICK.importedBlocks} block (${page._LAST_AI_PICK.importedItems} items).`);
+      }
     }
 
     updateUiAll();
@@ -2341,11 +2414,19 @@ DoD:
       updateDebug();
     });
 
-    // DOC-ONLY: enforce UI state if user tries to change
+    // AI-innehåll change: uppdatera UI (ingen låsning)
     dom.on(dom.aiContent, "change", function () {
-      enforceAiContentUiDocumentOnly();
-      setAiHint("Dokumentläge är låst på denna sida (spel/frågor senare).");
+      if (DOCUMENT_ONLY) {
+        enforceAiContentUiDocumentOnly();
+        setAiHint("Dokumentläge är låst på denna sida (legacy).");
+      } else {
+        const sel = readAiContentSelection();
+        if (sel.uiMode === "document") setAiHint("AI-innehåll: Dokument (infoblad).");
+        else if (sel.uiMode === "questions") setAiHint("AI-innehåll: Frågor & svar.");
+        else setAiHint("AI-innehåll: Mix (info + frågor).");
+      }
       updateAiControlsVisibility();
+      updateButtons();
       updateDebug();
     });
 
@@ -2480,7 +2561,7 @@ DoD:
     wireEventsOnce();
     renderAiAnchorRow();
 
-    // Ensure doc-only UI from first paint
+    // If legacy doc-only, enforce; annars: låt dropdown fungera
     enforceAiContentUiDocumentOnly();
 
     updateUiAll();
