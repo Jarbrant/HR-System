@@ -1,16 +1,17 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.8)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.9)
 // FIL: worker/index.js
 //
-// MÅL (fixar din 422/UI_NO_QUESTIONS):
+// MÅL (fixar din 422/UI_NO_QUESTIONS + höjer kvaliteten):
 // - Worker ska ALLTID kunna leverera UI-frågor (items[]) när UI begär “frågor & svar”
-// - Tolerant mapping: hittar frågor oavsett AI/engine-shape (type/kind/data/items/blocks/children)
-// - Dokument/Mix: alltid text-block + minWords + rubriker + forbidden-guard
+// - TRAINING (frågor) ska nu ta hjälp av SAMMA subjectSpec som dokument/infoblad
+//   (ai-rules/v1/subjects/*.json via subjects/index.json) och använda bullets/examples
+//   som “ämnesguide” i prompten så frågorna blir lika bra som infotexten.
 //
-// PATCH v1.6.8 (2026-02-01) — P0 FIX:
-// 1) TRAINING: 1x retry vid AI_BAD_JSON eller AI_NO_QUESTIONS (striktare prompt andra försöket)
-// 2) TRAINING: auto -> mcq_single internt i AI-prompt (minskar “kreativa” formatfel)
-// 3) HEADERS: X-HR-AI + X-HR-AI-REASON skickas även på 422 från engine/mapping
+// PATCH v1.6.9 (2026-02-01) — P0/P1:
+// 1) TRAINING: laddar subjectSpec via resolveSubjectSpecAsync() och bygger ämnesguide i prompt
+// 2) TRAINING: krav på scenario + koppling till ämnesguide, men fortsatt STRICT JSON-only
+// 3) Bibehåller: 1x retry vid AI_BAD_JSON / AI_NO_QUESTIONS, auto->mcq_single, headers på 422
 //
 // Output-contract (bibehållet):
 // training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
@@ -231,7 +232,7 @@ function extractUiQuestionsForUi(trainingObj, blocksArr) {
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.6.8";
+const VERSION = "1.6.9";
 
 // ============================================================
 // BLOCK 02B — Local utils (self-contained)
@@ -515,7 +516,17 @@ async function __loadSubjectsIndex(env) {
 
     const map = {};
 
-    if (isPlainObject(json) && Array.isArray(json.subjects)) {
+    // Stöd: {subjects:{id:{path}}} (din v1.1), eller {subjects:[{id,file}]}, eller flat map
+    if (isPlainObject(json) && isPlainObject(json.subjects)) {
+      for (const [k, v] of Object.entries(json.subjects)) {
+        const id = safeStr(k).trim();
+        const path = safeStr(v && (v.path || v.file || v.href)).trim();
+        if (!id || !path) continue;
+        const p = path.replace(/^\/+/, "");
+        if (!__isAllowedSubjectsPath(p)) continue;
+        map[id] = p;
+      }
+    } else if (isPlainObject(json) && Array.isArray(json.subjects)) {
       for (const row of json.subjects) {
         if (!row) continue;
         const id = safeStr(row.id || row.subjectId).trim();
@@ -680,6 +691,36 @@ function validateDocOutput({ language, subjectSpec, blocks }) {
   }
 
   return { ok: true };
+}
+
+// ============================================================
+// BLOCK 02G — Training prompt helpers (subjectSpec -> “ämnesguide”)
+// ============================================================
+
+function buildTrainingSubjectGuide(subjectSpec, language) {
+  const sv = language === "sv";
+  const spec = isPlainObject(subjectSpec) ? subjectSpec : {};
+  const label = safeStr(spec.label || spec.title || (sv ? "Ämne" : "Subject")).trim() || (sv ? "Ämne" : "Subject");
+  const bullets = Array.isArray(spec.bullets) ? spec.bullets.map(x => safeStr(x).trim()).filter(Boolean) : [];
+  const examples = Array.isArray(spec.examples) ? spec.examples.map(x => safeStr(x).trim()).filter(Boolean) : [];
+
+  const lines = [];
+  lines.push(sv ? "ÄMNESGUIDE (för att frågorna ska bli relevanta):" : "SUBJECT GUIDE (to keep questions relevant):");
+  lines.push(`${sv ? "Ämne" : "Subject"}: ${label}`);
+
+  if (bullets.length) {
+    lines.push(sv ? "Nyckelpunkter:" : "Key points:");
+    for (const b of bullets.slice(0, 8)) lines.push(`- ${b}`);
+  }
+
+  if (examples.length) {
+    lines.push(sv ? "Exempel att efterlikna (som scenario under fråga):" : "Examples to imitate (use as scenario in the question):");
+    for (const e of examples.slice(0, 3)) lines.push(`- ${e}`);
+  }
+
+  // Viktigt: i TRAINING är det inte “forbidden quiz” som gäller, men vi kan använda forbidden-listan
+  // som “undvik ord som triggar dokumentläge”-info. Vi använder den bara som mjuk guide.
+  return lines.join("\n").trim();
 }
 
 // ============================================================
@@ -943,10 +984,16 @@ async function buildTrainingBlocksWithAI(input, env) {
   const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
   const language = normalizeLanguage(input && input.language);
   const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
+
+  // Subject: samma som dokument (UI subjectId eller contextBundle.subjectId)
+  const subjectIdRaw = safeStr(input && input.subjectId).trim();
+  const bundle = parseContextBundle(contextTextRaw);
+  const effectiveSubjectId = safeStr(subjectIdRaw || (bundle && bundle.subjectId) || "generic").trim() || "generic";
+  const subjectSpec = await resolveSubjectSpecAsync(effectiveSubjectId, language, env);
+  const subjectGuide = buildTrainingSubjectGuide(subjectSpec, language);
+
   const questionTypeRaw = normalizeQuestionType(input && input.questionType);
   const qtForAi = effectiveTrainingQuestionType(questionTypeRaw);
-
-  const bundle = parseContextBundle(contextTextRaw);
 
   const sv = language === "sv";
   const courseInfo = fmtContextForPrompt(bundle, language);
@@ -997,15 +1044,19 @@ async function buildTrainingBlocksWithAI(input, env) {
 
     if (sv) {
       return `${courseInfo}
+
+${subjectGuide}
+
 ${modeLine}
 ${qtLine}
 
 KRAV:
 - Skapa exakt ${count} frågor.
+- Varje fråga ska vara ett litet scenario från jobbet och kopplas till ÄMNESGUIDEN.
 - Varje fråga ska ha exakt 4 svarsalternativ (c1..c4).
 - Exakt 1 korrekt svar via correctChoiceId.
-- rationale: 4–6 meningar, saklig och konkret.
-- Inga fluff-rubriker, inga listor utanför text/rationale.
+- rationale: 4–6 meningar, saklig och konkret (förklara varför korrekt och varför de andra är sämre).
+- Inga rubriker, ingen markdown, inga listor utanför rationale.
 - Returnera exakt JSON enligt schema.${strictLine}
 
 SCHEMA:
@@ -1017,14 +1068,18 @@ ${contextTextRaw || "(ingen)"}
     }
 
     return `${courseInfo}
+
+${subjectGuide}
+
 ${modeLine}
 ${qtLine}
 
 REQUIREMENTS:
 - Create exactly ${count} questions.
+- Each question must be a small workplace scenario tied to the SUBJECT GUIDE.
 - Each question has exactly 4 options (c1..c4).
 - Exactly 1 correct answer via correctChoiceId.
-- rationale: 4–6 sentences, factual and concrete.
+- rationale: 4–6 sentences, factual and concrete (why correct, why others are weaker).
 - No markdown, no extra text.
 - Return EXACT JSON per schema.${strictLine}
 
@@ -1068,7 +1123,7 @@ ${contextTextRaw || "(none)"}
       };
     }
 
-    return { ok: true, v: "training-blocks@v1", mode: "training", language, blocks: canonical };
+    return { ok: true, v: "training-blocks@v1", mode: "training", language, subjectId: effectiveSubjectId, blocks: canonical };
   }
 
   // TRY 1
