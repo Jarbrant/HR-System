@@ -1,11 +1,16 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.7)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.8)
 // FIL: worker/index.js
 //
 // MÅL (fixar din 422/UI_NO_QUESTIONS):
 // - Worker ska ALLTID kunna leverera UI-frågor (items[]) när UI begär “frågor & svar”
 // - Tolerant mapping: hittar frågor oavsett AI/engine-shape (type/kind/data/items/blocks/children)
 // - Dokument/Mix: alltid text-block + minWords + rubriker + forbidden-guard
+//
+// PATCH v1.6.8 (2026-02-01) — P0 FIX:
+// 1) TRAINING: 1x retry vid AI_BAD_JSON eller AI_NO_QUESTIONS (striktare prompt andra försöket)
+// 2) TRAINING: auto -> mcq_single internt i AI-prompt (minskar “kreativa” formatfel)
+// 3) HEADERS: X-HR-AI + X-HR-AI-REASON skickas även på 422 från engine/mapping
 //
 // Output-contract (bibehållet):
 // training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6
@@ -226,7 +231,7 @@ function extractUiQuestionsForUi(trainingObj, blocksArr) {
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.6.7";
+const VERSION = "1.6.8";
 
 // ============================================================
 // BLOCK 02B — Local utils (self-contained)
@@ -909,12 +914,38 @@ function normalizeAiQuestionBlocksToCanonical(blocks, language, count) {
   return out.slice(0, count);
 }
 
+function effectiveTrainingQuestionType(questionTypeNormalized) {
+  // P0: Auto skapar ofta “fel shape” -> tvinga mcq_single internt.
+  const qt = normalizeQuestionType(questionTypeNormalized);
+  if (!qt || qt === "auto") return "mcq_single";
+  if (qt === "mcq_multi") return "mcq_single"; // vi kör single-correct i canonical (correctChoiceId)
+  if (qt === "true_false") return "true_false";
+  if (qt === "mcq_single") return "mcq_single";
+  return "mcq_single";
+}
+
+function parseTrainingAiAnswer(answer) {
+  const raw = isPlainObject(answer) ? (answer.response || answer.result || answer.output || answer.text || answer) : answer;
+  const parsed0 = safeJsonFromUnknown(raw);
+  const parsed = coerceParsedObjOrArray(parsed0);
+  if (!parsed) return null;
+
+  // Tolerant unwrap: { ok:true, blocks:[...] } eller { training:{blocks:[...] } } eller { data:{blocks:[...] } }
+  if (isPlainObject(parsed.training)) return coerceParsedObjOrArray(parsed.training) || parsed;
+  if (isPlainObject(parsed.data)) return coerceParsedObjOrArray(parsed.data) || parsed;
+  if (isPlainObject(parsed.result)) return coerceParsedObjOrArray(parsed.result) || parsed;
+
+  return parsed;
+}
+
 async function buildTrainingBlocksWithAI(input, env) {
   const requestId = safeStr(input && input.requestId).trim();
   const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
   const language = normalizeLanguage(input && input.language);
   const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
-  const questionType = normalizeQuestionType(input && input.questionType);
+  const questionTypeRaw = normalizeQuestionType(input && input.questionType);
+  const qtForAi = effectiveTrainingQuestionType(questionTypeRaw);
+
   const bundle = parseContextBundle(contextTextRaw);
 
   const sv = language === "sv";
@@ -923,42 +954,149 @@ async function buildTrainingBlocksWithAI(input, env) {
   const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
 
   // OBS: goals skickas inte
-  const systemPrompt = sv
-    ? "Du skapar flervalsfrågor (MCQ) för HR-utbildning. Du måste returnera ENDAST giltig JSON enligt schema. Inget markdown."
-    : "You create multiple-choice questions (MCQ) for HR training. Return ONLY valid JSON per schema. No markdown.";
+  const systemPromptBase = sv
+    ? "Du skapar flervalsfrågor (MCQ) för HR-utbildning. Du måste returnera ENDAST giltig JSON enligt schema. Inget markdown. Börja med { och sluta med }."
+    : "You create multiple-choice questions (MCQ) for HR training. Return ONLY valid JSON per schema. No markdown. Start with { and end with }.";
 
-  const userPrompt = sv
-    ? `${courseInfo}\n\nLÄGE: TRAINING (frågor)\nKRAV:\n- Skapa exakt ${count} frågor.\n- Varje fråga ska ha 4 svarsalternativ.\n- Markera korrekt svar via correctChoiceId.\n- Skriv en tydlig förklaring (rationale) 4–6 meningar.\n- Frågorna ska vara sakliga och konkreta.\n- Returnera exakt JSON enligt schema.\n\nSCHEMA:\n{\n  "ok": true,\n  "mode": "training",\n  "blocks": [\n    {\n      "kind": "question",\n      "id": "q_1",\n      "items": [\n        {\n          "type": "questionInline",\n          "question": {\n            "text": \"...\",\n            "choices": [\n              { \"id\": \"c1\", \"text\": \"...\" },\n              { \"id\": \"c2\", \"text\": \"...\" },\n              { \"id\": \"c3\", \"text\": \"...\" },\n              { \"id\": \"c4\", \"text\": \"...\" }\n            ],\n            \"correctChoiceId\": \"c1\",\n            \"rationale\": \"...\"\n          }\n        }\n      ]\n    }\n  ]\n}\n\nKONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n`
-    : `${courseInfo}\n\nMODE: TRAINING (questions)\nREQUIREMENTS:\n- Create exactly ${count} questions.\n- Each question has 4 answer options.\n- Mark the correct answer using correctChoiceId.\n- Write a clear explanation (rationale) 4–6 sentences.\n- Keep it factual and concrete.\n- Return EXACT JSON per schema.\n\nSCHEMA:\n{\n  "ok": true,\n  "mode": "training",\n  "blocks": [\n    {\n      "kind": "question",\n      "id": "q_1",\n      "items": [\n        {\n          "type": "questionInline",\n          "question": {\n            "text": \"...\",\n            "choices": [\n              { \"id\": \"c1\", \"text\": \"...\" },\n              { \"id\": \"c2\", \"text\": \"...\" },\n              { \"id\": \"c3\", \"text\": \"...\" },\n              { \"id\": \"c4\", \"text\": \"...\" }\n            ],\n            \"correctChoiceId\": \"c1\",\n            \"rationale\": \"...\"\n          }\n        }\n      ]\n    }\n  ]\n}\n\nCONTEXT (raw):\n${contextTextRaw || "(none)"}\n`;
+  function buildUserPrompt({ stricter }) {
+    const strictLine = stricter
+      ? (sv
+          ? "\nVIKTIGT: OM DU SKRIVER EN ENDA RAD UTANFÖR JSON SÅ BLIR SVARET AVVISAT. INGA ```."
+          : "\nIMPORTANT: If you write ANY text outside JSON, the response is rejected. No ```.")
+      : "";
 
-  let answer;
-  try {
-    answer = await env.AI.run(model, { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }] });
-  } catch (_) {
-    // fallback model
-    answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }] });
+    const modeLine = sv ? "LÄGE: TRAINING (frågor)" : "MODE: TRAINING (questions)";
+    const qtLine = sv ? `FRÅGETYP (internt): ${qtForAi}` : `QUESTION TYPE (internal): ${qtForAi}`;
+
+    const schema = `{
+  "ok": true,
+  "mode": "training",
+  "blocks": [
+    {
+      "kind": "question",
+      "id": "q_1",
+      "items": [
+        {
+          "type": "questionInline",
+          "question": {
+            "text": "...",
+            "choices": [
+              { "id": "c1", "text": "..." },
+              { "id": "c2", "text": "..." },
+              { "id": "c3", "text": "..." },
+              { "id": "c4", "text": "..." }
+            ],
+            "correctChoiceId": "c1",
+            "rationale": "..."
+          }
+        }
+      ]
+    }
+  ]
+}`;
+
+    if (sv) {
+      return `${courseInfo}
+${modeLine}
+${qtLine}
+
+KRAV:
+- Skapa exakt ${count} frågor.
+- Varje fråga ska ha exakt 4 svarsalternativ (c1..c4).
+- Exakt 1 korrekt svar via correctChoiceId.
+- rationale: 4–6 meningar, saklig och konkret.
+- Inga fluff-rubriker, inga listor utanför text/rationale.
+- Returnera exakt JSON enligt schema.${strictLine}
+
+SCHEMA:
+${schema}
+
+KONTEKST (råtext):
+${contextTextRaw || "(ingen)"}
+`;
+    }
+
+    return `${courseInfo}
+${modeLine}
+${qtLine}
+
+REQUIREMENTS:
+- Create exactly ${count} questions.
+- Each question has exactly 4 options (c1..c4).
+- Exactly 1 correct answer via correctChoiceId.
+- rationale: 4–6 sentences, factual and concrete.
+- No markdown, no extra text.
+- Return EXACT JSON per schema.${strictLine}
+
+SCHEMA:
+${schema}
+
+CONTEXT (raw):
+${contextTextRaw || "(none)"}
+`;
   }
 
-  const raw = isPlainObject(answer) ? (answer.response || answer.result || answer.output || answer.text || answer) : answer;
-  const parsed0 = safeJsonFromUnknown(raw);
-  const parsed = coerceParsedObjOrArray(parsed0);
+  async function runOnce(stricter) {
+    const systemPrompt = stricter ? (systemPromptBase + (sv ? " ABSOLUT INGET UTANFÖR JSON." : " ABSOLUTELY NOTHING OUTSIDE JSON.")) : systemPromptBase;
+    const userPrompt = buildUserPrompt({ stricter });
+
+    let answer;
+    try {
+      answer = await env.AI.run(model, { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }] });
+    } catch (_) {
+      // fallback model
+      answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }] });
+    }
+    return answer;
+  }
+
+  function finalizeFromParsed(parsedObj) {
+    const blocksIn =
+      Array.isArray(parsedObj && parsedObj.blocks) ? parsedObj.blocks :
+      Array.isArray(parsedObj && parsedObj.items) ? parsedObj.items :
+      Array.isArray(parsedObj && parsedObj.children) ? parsedObj.children :
+      [];
+
+    const canonical = normalizeAiQuestionBlocksToCanonical(blocksIn, language, count);
+
+    if (!canonical.length || canonical.length < count) {
+      return {
+        ok: false,
+        errorCode: "AI_NO_QUESTIONS",
+        message: sv ? "AI skapade inte tillräckligt med frågor i rätt format." : "AI did not create enough questions in the required format.",
+        blocks: canonical
+      };
+    }
+
+    return { ok: true, v: "training-blocks@v1", mode: "training", language, blocks: canonical };
+  }
+
+  // TRY 1
+  let answer = await runOnce(false);
+  let parsed = parseTrainingAiAnswer(answer);
+  if (parsed) {
+    const out1 = finalizeFromParsed(parsed);
+    if (out1 && out1.ok) return out1;
+    // Retry även om JSON var okej men format/antal var fel
+  }
+
+  // TRY 2 (STRICTER)
+  answer = await runOnce(true);
+  parsed = parseTrainingAiAnswer(answer);
   if (!parsed) {
     return { ok: false, errorCode: "AI_BAD_JSON", message: sv ? "AI returnerade inte giltig JSON." : "AI did not return valid JSON.", blocks: [] };
   }
 
-  const blocksIn = Array.isArray(parsed.blocks) ? parsed.blocks : Array.isArray(parsed.items) ? parsed.items : [];
-  const canonical = normalizeAiQuestionBlocksToCanonical(blocksIn, language, count);
+  const out2 = finalizeFromParsed(parsed);
+  if (out2 && out2.ok) return out2;
 
-  if (!canonical.length || canonical.length < count) {
-    return {
-      ok: false,
-      errorCode: "AI_NO_QUESTIONS",
-      message: sv ? "AI skapade inte tillräckligt med frågor i rätt format." : "AI did not create enough questions in the required format.",
-      blocks: canonical
-    };
-  }
-
-  return { ok: true, v: "training-blocks@v1", mode: "training", language, blocks: canonical };
+  // efter retry: returnera tydligt fail-closed
+  return {
+    ok: false,
+    errorCode: safeStr(out2 && out2.errorCode).trim() || "AI_NO_QUESTIONS",
+    message: safeStr(out2 && out2.message).trim() || (sv ? "AI skapade inte frågor i rätt format." : "AI did not create questions in the required format."),
+    blocks: Array.isArray(out2 && out2.blocks) ? out2.blocks : []
+  };
 }
 
 async function buildDocumentBlocksWithAI(input, env) {
@@ -1422,13 +1560,20 @@ export default {
       return errorJSON(502, requestId, "WORKER_BUILD_FAILED", "training är ogiltig (null/ej objekt)", corsHeaders, true);
     }
 
+    // Bygg header som ska följa med även på 422 efter BUILD (P0)
+    const hdrBase = {
+      ...(corsHeaders || {}),
+      "X-HR-AI": aiSource === "cf" ? "cf" : "fallback",
+      "X-HR-AI-REASON": safeStr(aiReason || "OK"),
+    };
+
     // Om engine signalerar fel: returnera felet (inte UI_NO_QUESTIONS)
     if (training && training.ok === false) {
       const code = safeStr(training.errorCode || (training.error && training.error.code) || "AI_FAILED").trim() || "AI_FAILED";
       const msg =
         safeStr(training.message || (training.error && training.error.message) || "").trim() ||
         "AI kunde inte skapa ett giltigt svar.";
-      return errorJSON(422, requestId, code, msg, corsHeaders, true);
+      return errorJSON(422, requestId, code, msg, hdrBase, true);
     }
 
     const topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
@@ -1438,16 +1583,10 @@ export default {
     if (mode === "training" && isUiQuestionRequest(questionType)) {
       const mapped = extractUiQuestionsForUi(training, topBlocks);
       if (!mapped.ok) {
-        return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
+        return errorJSON(422, requestId, mapped.errorCode, mapped.message, hdrBase, true);
       }
       items = mapped.items;
     }
-
-    const hdr = {
-      ...(corsHeaders || {}),
-      "X-HR-AI": aiSource === "cf" ? "cf" : "fallback",
-      "X-HR-AI-REASON": safeStr(aiReason || "OK"),
-    };
 
     return okJSON(
       200,
@@ -1460,7 +1599,7 @@ export default {
         blocks: topBlocks,        // bibehållt
         mode: training.mode || mode,
       },
-      hdr,
+      hdrBase,
       requestId
     );
   },
