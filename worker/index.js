@@ -1248,6 +1248,16 @@ async function buildTrainingBlocks(input, env) {
 }
 
 // ============================================================
+// BLOCK 10 — ENGINE (A + B + C)
+// Syfte:
+// - Dokument/Mix: AI om möjligt, annars reservtext
+// - Frågor & svar (training): STRIKT AI (ingen hårdkodad reservfråga)
+// - Robust: aldrig "not defined" igen i denna del
+// ============================================================
+
+
+
+// ============================================================
 // BLOCK 10A — DOCUMENT/MIX ENGINE (CF-AI + fallback text blocks)
 // PATCH: tolerant parse (array/object) + forbidden-check i validering
 // ============================================================
@@ -1538,4 +1548,85 @@ function buildDocumentBlocksDeterministic(input) {
   }
 
   return { ok: true, v: "training-blocks@v1", mode, subjectId: effectiveSubjectId, language, blocks };
+}
+
+
+
+// ============================================================
+// BLOCK 10B — TRAINING (FRÅGOR & SVAR) — STRIKT AI
+// Viktigt: ingen hårdkodad reservfråga, men vi ger ett tydligt "stopp-svar"
+// så det aldrig kraschar med "not defined".
+// ============================================================
+
+// Denna fanns inte i din fil (därför fick du "not defined").
+// Vi gör den definierad, men den skapar INTE frågor.
+function buildTrainingBlocksDeterministic(input) {
+  const language = normalizeLanguage(input && input.language);
+  const sv = language === "sv";
+  const msg = sv
+    ? "AI kunde inte skapa frågor just nu. Försök igen."
+    : "AI could not generate questions right now. Please try again.";
+
+  return {
+    ok: false,
+    v: "training-blocks@v1",
+    mode: "training",
+    errorCode: "STRICT_AI_NO_FALLBACK",
+    message: msg,
+    blocks: [],
+  };
+}
+
+async function buildTrainingBlocksStrictAI(input, env) {
+  const hasAI = !!(env && env.AI && typeof env.AI.run === "function");
+
+  // AI saknas => tydligt stopp-svar (ingen reservfråga)
+  if (!hasAI) return buildTrainingBlocksDeterministic(input);
+
+  // Försök AI
+  const ai = await buildTrainingBlocksWithAI(input, env);
+
+  // OK => AI-blocks
+  if (ai && ai.ok && Array.isArray(ai.blocks) && ai.blocks.length) return ai;
+
+  // AI gav fel/konstigt => tydligt stopp-svar (ingen reservfråga)
+  return buildTrainingBlocksDeterministic(input);
+}
+
+
+
+// ============================================================
+// BLOCK 10C — ROUTER (väljer motor per läge)
+// - training => STRIKT AI (frågor)
+// - document/mix => AI om möjligt, annars reservtext
+// ============================================================
+
+function stripInternalSubjectSpec(obj) {
+  if (!obj || !isPlainObject(obj)) return obj;
+  const out = { ...obj };
+  if ("__subjectSpec" in out) delete out.__subjectSpec;
+  return out;
+}
+
+async function buildBlocksForMode(input, env) {
+  const mode = safeStr(input && input.mode).trim() || "training";
+
+  // Frågor & svar
+  if (mode === "training") {
+    return stripInternalSubjectSpec(await buildTrainingBlocksStrictAI(input, env));
+  }
+
+  // Dokument/Mix
+  const hasAI = !!(env && env.AI && typeof env.AI.run === "function");
+  if (!hasAI) return stripInternalSubjectSpec(buildDocumentBlocksDeterministic(input));
+
+  try {
+    const aiDoc = await buildDocumentBlocksWithAI(input, env);
+    if (aiDoc && aiDoc.ok && Array.isArray(aiDoc.blocks) && aiDoc.blocks.length && ensureNoQuestionBlocks(aiDoc.blocks)) {
+      return stripInternalSubjectSpec(aiDoc);
+    }
+    return stripInternalSubjectSpec(buildDocumentBlocksDeterministic(input));
+  } catch (_) {
+    return stripInternalSubjectSpec(buildDocumentBlocksDeterministic(input));
+  }
 }
