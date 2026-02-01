@@ -32,7 +32,11 @@
 import { isPlainObject, safeStr, safeArr } from "./utils.js";
 
 // ============================================================
-// BLOCK 01B — UI question helpers (INLINE HOTFIX)
+// BLOCK 01B — UI question helpers (INLINE HOTFIX)  [PATCH v1.6.7a]
+// Syfte: UI ska få frågor även om AI/engine svarar i annan "shape".
+// - Accepterar redan färdiga items[]
+// - Accepterar blocks[] i flera varianter (kind/type/items/data)
+// - Fail-closed: gissar aldrig facit om det saknas (men om ingen info finns alls: default 0 som tidigare)
 // ============================================================
 
 function normalizeQuestionType(qtRaw) {
@@ -56,58 +60,149 @@ function isUiQuestionRequest(questionTypeRaw) {
   return qt === "auto" || qt === "mcq_single" || qt === "mcq_multi" || qt === "true_false";
 }
 
-function mapTrainingBlocksToUiQuestions(blocks /*, questionTypeRaw*/) {
-  const out = [];
-  const arr = Array.isArray(blocks) ? blocks : [];
+// ---------- Helpers: normalisera UI-item-shape ----------
+function isNonEmptyStr(s){ return !!safeStr(s).trim(); }
 
-  for (const b of arr) {
-    if (!b || b.kind !== "question") continue;
+function normalizeUiQuestionItem(raw) {
+  // Acceptera:
+  // 1) {type:'question', question:'', options:[], correctIndex, explanation}
+  // 2) {type:'question', data:{question:'', options:[]...}}
+  // 3) {question:'', options:[]} (utan type)
+  // 4) {question:{text,...}, choices:[{text}], correctChoiceId} (AI block-shape)
+  if (!raw) return null;
 
-    const items = Array.isArray(b.items) ? b.items : [];
-    const qi = items.find((x) => x && x.type === "questionInline" && x.question);
-    const q = qi && qi.question ? qi.question : null;
-    if (!q) {
-      return { ok: false, errorCode: "UI_MAP_FAILED", message: "Question-block saknar questionInline.question" };
-    }
+  let x = raw;
+  if (isPlainObject(x) && isPlainObject(x.data)) x = x.data;
 
-    const stem = safeStr(q.text || q.question || "").trim();
-    const choices = Array.isArray(q.choices) ? q.choices : [];
-    const options = choices.map((c) => safeStr(c && c.text).trim()).filter(Boolean);
+  // Flat UI-shape
+  const qText = safeStr(x.question || x.q || "").trim();
+  const opts = Array.isArray(x.options) ? x.options : Array.isArray(x.choices) ? x.choices.map(c=> (isPlainObject(c)? c.text : c)) : [];
+  const options = opts.map(v => safeStr(v).trim()).filter(Boolean);
 
-    if (!stem) return { ok: false, errorCode: "UI_MAP_FAILED", message: "En fråga saknar text" };
-    if (options.length < 2) {
-      return { ok: false, errorCode: "UI_MAP_FAILED", message: "AI-svaret saknade giltiga svarsalternativ" };
-    }
+  // Alternate AI-ish shape (question object)
+  if ((!qText || options.length < 2) && isPlainObject(x.question)) {
+    const qq = x.question;
+    const stem = safeStr(qq.text || qq.question || "").trim();
+    const ch = Array.isArray(qq.choices) ? qq.choices : [];
+    const oo = ch.map(c => safeStr(c && c.text).trim()).filter(Boolean);
 
+    if (!stem || oo.length < 2) return null;
+
+    // Facit från choiceId/ids om de finns
     let correctIndex = -1;
     let correctIndices = null;
 
-    const correctChoiceId = safeStr(q.correctChoiceId).trim();
+    const correctChoiceId = safeStr(qq.correctChoiceId).trim();
     if (correctChoiceId) {
-      const idx = choices.findIndex((c) => safeStr(c && c.id).trim() === correctChoiceId);
-      correctIndex = idx;
+      const idx = ch.findIndex(c => safeStr(c && c.id).trim() === correctChoiceId);
+      if (idx >= 0) correctIndex = idx;
     }
 
-    const ids = Array.isArray(q.correctChoiceIds) ? q.correctChoiceIds : null;
+    const ids = Array.isArray(qq.correctChoiceIds) ? qq.correctChoiceIds : null;
     if (ids && ids.length) {
       const mapped = ids
-        .map((id) => choices.findIndex((c) => safeStr(c && c.id).trim() === safeStr(id).trim()))
-        .filter((n) => Number.isInteger(n) && n >= 0);
+        .map(id => ch.findIndex(c => safeStr(c && c.id).trim() === safeStr(id).trim()))
+        .filter(n => Number.isInteger(n) && n >= 0);
       if (mapped.length) correctIndices = mapped;
     }
 
+    // Fail-closed: gissa inte facit om helt okänt — men tidigare policy satte 0.
     if (correctIndex < 0 && (!correctIndices || !correctIndices.length)) correctIndex = 0;
 
-    const explanation = safeStr(q.rationale || q.explanation || q.feedback || "").trim();
+    const explanation = safeStr(qq.rationale || qq.explanation || qq.feedback || "").trim();
 
-    out.push({
+    return {
       type: "question",
       question: stem,
-      options,
+      options: oo,
       correctIndex,
       ...(correctIndices ? { correctIndices } : {}),
       ...(explanation ? { explanation } : {}),
-    });
+    };
+  }
+
+  // Flat fall
+  if (!qText || options.length < 2) return null;
+
+  let correctIndex = Number.isFinite(Number(x.correctIndex)) ? Number(x.correctIndex) : -1;
+  const correctIndices = Array.isArray(x.correctIndices) ? x.correctIndices.filter(n => Number.isInteger(n) && n >= 0) : null;
+
+  if (correctIndex < 0 && (!correctIndices || !correctIndices.length)) correctIndex = 0;
+
+  const explanation = safeStr(x.explanation || x.rationale || x.feedback || "").trim();
+
+  return {
+    type: "question",
+    question: qText,
+    options,
+    correctIndex,
+    ...(correctIndices && correctIndices.length ? { correctIndices } : {}),
+    ...(explanation ? { explanation } : {}),
+  };
+}
+
+function extractUiQuestionsFromAnyContainer(container) {
+  // Letar efter items[] på flera ställen:
+  // - container.items
+  // - container.data.items
+  // - container.training.items
+  // - container.data.training.items
+  const candidates = [];
+
+  try{
+    if (isPlainObject(container) && Array.isArray(container.items)) candidates.push(container.items);
+    if (isPlainObject(container) && isPlainObject(container.data) && Array.isArray(container.data.items)) candidates.push(container.data.items);
+    if (isPlainObject(container) && isPlainObject(container.training) && Array.isArray(container.training.items)) candidates.push(container.training.items);
+    if (isPlainObject(container) && isPlainObject(container.data) && isPlainObject(container.data.training) && Array.isArray(container.data.training.items)) candidates.push(container.data.training.items);
+  }catch(_){}
+
+  for (const arr of candidates) {
+    const out = [];
+    for (const it of Array.isArray(arr) ? arr : []) {
+      const norm = normalizeUiQuestionItem(it);
+      if (norm) out.push(norm);
+    }
+    if (out.length) return out;
+  }
+  return [];
+}
+
+function mapTrainingBlocksToUiQuestions(blocks) {
+  // Utökat stöd: blocks kan ha:
+  // - kind:"question" + items:[{type:"questionInline", question:{...}}]
+  // - type:"question" + question/options direkt
+  // - kind:"question" + items:[{type:"question", ...}] (flat)
+  // - block.data.{...}
+  const out = [];
+  const arr = Array.isArray(blocks) ? blocks : [];
+
+  for (const b0 of arr) {
+    if (!b0) continue;
+    const b = (isPlainObject(b0) && isPlainObject(b0.data)) ? b0.data : b0;
+
+    const kind = safeStr(b.kind || b.type || "").trim().toLowerCase();
+
+    // 1) Om blocket självt ser ut som en UI-question
+    const asItem = normalizeUiQuestionItem(b);
+    if (asItem && (kind === "question" || kind === "mcq" || kind === "quiz" || kind === "")) {
+      out.push(asItem);
+      continue;
+    }
+
+    // 2) Items inuti blocket
+    const items = Array.isArray(b.items) ? b.items : [];
+    // A) klassisk questionInline
+    const qi = items.find(x => x && x.type === "questionInline" && isPlainObject(x.question));
+    if (qi && qi.question) {
+      const norm = normalizeUiQuestionItem({ question: qi.question });
+      if (norm) out.push(norm);
+      continue;
+    }
+    // B) flat items som redan är question
+    for (const it of items) {
+      const norm = normalizeUiQuestionItem(it);
+      if (norm) out.push(norm);
+    }
   }
 
   if (!out.length) {
@@ -115,6 +210,13 @@ function mapTrainingBlocksToUiQuestions(blocks /*, questionTypeRaw*/) {
   }
 
   return { ok: true, items: out };
+}
+
+// Huvudfunktion: försök items[] först, annars blocks-mappning
+function extractUiQuestionsForUi(trainingObj, blocksArr) {
+  const fromItems = extractUiQuestionsFromAnyContainer(trainingObj);
+  if (fromItems.length) return { ok: true, items: fromItems };
+  return mapTrainingBlocksToUiQuestions(blocksArr);
 }
 
 // ============================================================
