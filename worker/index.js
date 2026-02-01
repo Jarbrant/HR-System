@@ -319,6 +319,47 @@ function extractFirstJsonObjectString(text) {
   return "";
 }
 
+// ============================================================
+// BLOCK 02B.1 — JSON array extractor (P0 HOTFIX)
+// Syfte: AI kan ibland svara med [...] istället för {...}. Vi plockar första kompletta listan.
+// ============================================================
+
+function extractFirstJsonArrayString(text) {
+  const s = safeStr(text);
+  const start = s.indexOf("[");
+  if (start < 0) return "";
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+
+    if (inStr) {
+      if (esc) {
+        esc = false;
+        continue;
+      }
+      if (ch === "\\") {
+        esc = true;
+        continue;
+      }
+      if (ch === '"') inStr = false;
+      continue;
+    }
+
+    if (ch === '"') {
+      inStr = true;
+      continue;
+    }
+    if (ch === "[") depth++;
+    if (ch === "]") depth--;
+
+    if (depth === 0) return s.slice(start, i + 1);
+  }
+  return "";
+}
+
 function safeJsonParseLoose(text) {
   const t = safeStr(text).trim();
   if (!t) return null;
@@ -328,9 +369,19 @@ function safeJsonParseLoose(text) {
   const cleaned = t.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
   try { return JSON.parse(cleaned); } catch (_) {}
 
+  // 1) Försök objekt { ... }
   const objStr = extractFirstJsonObjectString(cleaned);
-  if (!objStr) return null;
-  try { return JSON.parse(objStr); } catch (_) { return null; }
+  if (objStr) {
+    try { return JSON.parse(objStr); } catch (_) {}
+  }
+
+  // 2) Försök lista [ ... ] (P0)
+  const arrStr = extractFirstJsonArrayString(cleaned);
+  if (arrStr) {
+    try { return JSON.parse(arrStr); } catch (_) { return null; }
+  }
+
+  return null;
 }
 
 function safeJsonFromUnknown(x) {
