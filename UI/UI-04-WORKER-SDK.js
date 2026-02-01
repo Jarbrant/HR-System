@@ -34,6 +34,10 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
 - mode=training -> POST /v1/ai/training
 - Backward compatible: om /document|/training ger 404, fallback till /v1/ai/generate
 - Skickar questionType/feedbackEnabled bara i training-läge (minskar valideringsrisk i document-läge)
+
+PATCH v1.1.5 (CONTEXT-STRING-FIX) — FIXAR UI_NO_QUESTIONS:
+- Skickar context som REN TEXT (string) till Workern (inte objekt)
+- Skickar även contextText som backup (samma text)
 ============================================================ */
 
 (function(){
@@ -43,7 +47,7 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
      BLOCK 01/10 — SDK root + version + state
   ========================== */
   const SDK = {};
-  SDK.VERSION = "1.1.4";
+  SDK.VERSION = "1.1.5";
 
   const STATE = {
     inited: false,
@@ -166,8 +170,7 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
   /* =========================
      BLOCK 05/10 — Context normalization (always {text:"..."})
   ========================== */
-  // PATCH: context normaliseras alltid till { text:"..." }
-  // - Worker läser context.text / contextText / value → vi säkrar text.
+  // SDK-normalisering: vi bygger alltid ut en text som beskriver ämnet/kursen.
   function normalizeContext(input){
     try{
       if (input === null || input === undefined) return { text: "" };
@@ -177,7 +180,6 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
         const direct = trimStr(input.text || input.contextText || "");
         if (direct) return { text: direct };
 
-        // Känd shape från UI (utan ny datamodell): module/area/chapter/step
         const module = trimStr(input.module || input.modul || "");
         const area = trimStr(input.area || input.omrade || input.område || "");
         const chapter = trimStr(input.chapter || input.kapitel || "");
@@ -192,7 +194,7 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
           return { text: parts.join(" • ") };
         }
 
-        // Sista utväg: försök fånga något men håll det kort
+        // Sista utväg: JSON-string
         let s = "";
         try{
           s = JSON.stringify(input);
@@ -200,7 +202,7 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
           s = "";
         }
         s = trimStr(s);
-        if (s) return { text: s.slice(0, 2000) };
+        if (s) return { text: s.slice(0, 8000) };
         return { text: "" };
       }
 
@@ -208,27 +210,24 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
         let s = "";
         try{ s = JSON.stringify(input); }catch(_){ s = ""; }
         s = trimStr(s);
-        return { text: s.slice(0, 2000) };
+        return { text: s.slice(0, 8000) };
       }
 
       if (typeof input === "string"){
         const s = trimStr(input);
         if (!s) return { text: "" };
-        // Om någon skickar JSON-sträng, försök parsa men behåll texten om det inte är {text:""}
+
+        // Om någon skickar JSON-sträng, behåll texten (Workern kan tolka)
         try{
           const parsed = JSON.parse(s);
           if (isObj(parsed)){
             const t = trimStr(parsed.text || parsed.contextText || "");
             if (t) return { text: t };
           }
-          // annars behåll ursprungstexten (för worker-infer)
-          return { text: s };
-        }catch(_){
-          return { text: s };
-        }
+        }catch(_){}
+        return { text: s };
       }
 
-      // number/bool/etc
       return { text: trimStr(input) || safeStr(input) };
     }catch(_){
       return { text: "" };
@@ -271,7 +270,7 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
         if (r.status === 404){
           return mkErr("NOT_FOUND", msg || "Hittas ej", { status:r.status }, reqId);
         }
-        if (r.status === 400){
+        if (r.status === 400 || r.status === 422){
           return mkErr("VALIDATION_ERROR", msg || "Valideringsfel", { status:r.status, body:data || text || "" }, reqId);
         }
 
@@ -381,8 +380,9 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
     const questionType = trimStr(p.questionType || "auto");
     const feedbackEnabled = !!p.feedbackEnabled;
 
-    // Context måste vara {text:"..."} så worker kan inferera + inte få tom context
+    // Vi tar fram en TEXT som Workern kan använda direkt
     const ctxObj = normalizeContext(p.context);
+    const ctxText = trimStr(ctxObj && ctxObj.text) || "";
 
     if (!(mode === "training" || mode === "document")){
       return mkErr("VALIDATION_ERROR", "mode måste vara 'training' eller 'document'", { mode });
@@ -394,7 +394,6 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
       return mkErr("VALIDATION_ERROR", "language saknas", {});
     }
 
-    // ✅ mode->endpoint (fixar UI_NO_QUESTIONS i document-läge)
     const primaryPath = (mode === "document") ? "/v1/ai/document" : "/v1/ai/training";
     const primaryUrl = STATE.baseUrl + primaryPath;
 
@@ -408,12 +407,15 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
 
     headers = addClientTraceHeaders(headers);
 
-    // Bygg body. Skicka questionType/feedbackEnabled bara i training-läge.
+    // VIKTIGT (v1.1.5):
+    // - context skickas som STRING (inte objekt) för att undvika 422 och UI_NO_QUESTIONS
+    // - contextText skickas som backup (samma text)
     const bodyObj = {
       mode,
       count,
       language,
-      context: ctxObj
+      context: ctxText,
+      contextText: ctxText
     };
 
     if (mode === "training"){
@@ -432,7 +434,6 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
       return mkErr("VALIDATION_ERROR", "Kunde inte serialisera payload", { message: safeStr(e && e.message) });
     }
 
-    // 1) Försök med mode-specifik endpoint
     const res1 = await safeFetchJson(primaryUrl, {
       method: "POST",
       mode: "cors",
@@ -440,7 +441,6 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
       body
     });
 
-    // 2) Backward compatibility: om worker saknar /document|/training -> fallback till /generate
     if (res1 && res1.ok === false && res1.error && res1.error.code === "NOT_FOUND"){
       const fallbackUrl = STATE.baseUrl + "/v1/ai/generate";
       return await safeFetchJson(fallbackUrl, {
@@ -456,7 +456,6 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
 
   // ---------- Export (hardened) ----------
   (function exportSDK(){
-    // 1) Sätt/uppgradera via merge (fungerar även om tidigare HRWorkerSDK är låst)
     try{
       const existing = window.HRWorkerSDK;
       if (existing && typeof existing === "object"){
@@ -469,7 +468,6 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
       }
     }catch(_){}
 
-    // 2) Försök låsa med defineProperty om det är möjligt (men CONFIGURABLE=true så uppdatering inte låser fast permanent)
     try{
       const desc = Object.getOwnPropertyDescriptor(window, "HRWorkerSDK");
       const canDefine = !desc || desc.configurable === true;
@@ -483,7 +481,6 @@ PATCH v1.1.4 (AI-ENDPOINT-MODE-FIX):
       }
     }catch(_){}
 
-    // 3) Minimal trace så du ser att filen verkligen körts (inte bara laddats)
     try{
       console.info("[UI-04-WORKER-SDK] loaded v" + SDK.VERSION);
     }catch(_){}
