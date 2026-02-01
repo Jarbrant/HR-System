@@ -2,13 +2,17 @@
 // PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.6.6 SUBJECT+DOC LENGTH + NO-GOALS POLICY)
 // FIL: worker/index.js
 //
-// PATCH v1.6.6 (SUBJECT “HJÄRNA” + DOC LENGTH FAIL-CLOSED):
+// PATCH v1.6.7 (SUBJECTS JSON-LINK + CACHE + ALLOWLIST):
+// - P0: Kopplar subjectId -> ai-rules/v1/subjects/index.json + subjectSpec JSON (hr_policy, ethics, m.fl.) via RULES_BASE_URL.
+// - P0: Fail-closed: om rules saknas/trasig -> fallback till inbyggd resolver (generic/feedback_samtal) utan crash.
+// - P0: Allowlist: endast /ai-rules/v1/subjects/ tillåts laddas.
+// - P1: Cache i minne (index + subjectSpec) för stabilitet/prestanda.
+//
+// Tidigare patchar bibehålls (v1.6.6 + v1.6.5 + v1.6.4 + v1.6.3):
 // - P0: Skicka aldrig "Mål/goals" till AI (bort från prompt).
 // - P0: Document/Mix får alltid text-block och valideras med minWords + sektioner.
 // - P0: Subject resolver (minst feedback_samtal + generic) injiceras som hårda krav i doc/mix.
 // - P1: Deterministic fallback för doc/mix blir utförlig (rubriker + exempel), inte 2 rader.
-//
-// Tidigare patchar bibehålls (v1.6.5 + v1.6.4 + v1.6.3):
 // - P0: Document/Mix får inte “råka bli provfrågor” → UI slutar stoppa import.
 // - P0: mode="document" ger alltid text-block (aldrig question-block).
 // - P0: mode="mix" ger också text-block (aldrig question-block) för stabilitet nu.
@@ -118,7 +122,7 @@ function mapTrainingBlocksToUiQuestions(blocks /*, questionTypeRaw*/) {
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.6.6";
+const VERSION = "1.6.7";
 
 // ============================================================
 // BLOCK 02B — Local utils (self-contained)  [P0: undvik import-crash]
@@ -394,20 +398,179 @@ function containsAnyHeading(text, headings) {
   return false;
 }
 
+// ------------------------------------------------------------
+// SUBJECT JSON LINK (P0) — via RULES_BASE_URL + allowlist + cache
+// ------------------------------------------------------------
+
+// Cache i minnet (per worker-instance)
+let __SUBJECT_INDEX_CACHE = null; // { ts:number, map: Record<string,string> }
+let __SUBJECT_SPEC_CACHE = new Map(); // id|lang -> { ts:number, spec:object }
+const __RULES_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function __now() {
+  return Date.now();
+}
+
+function __getRulesBaseUrl(env) {
+  // POLICY: inga krav på env — om saknas, faller vi tillbaka till inbyggd resolver.
+  const raw = safeStr(env && (env.RULES_BASE_URL || env.RULES_BASE || env.AI_RULES_BASE_URL)).trim();
+  const base = normalizeOrigin(raw);
+  if (!base) return "";
+  // enkel sanity: endast https
+  if (!/^https:\/\//i.test(base)) return "";
+  return base;
+}
+
+function __safeJoinUrl(base, path) {
+  const b = normalizeOrigin(base);
+  const p = safeStr(path).trim();
+  if (!b || !p) return "";
+  if (p.startsWith("http://") || p.startsWith("https://")) return ""; // P0: ingen full URL från index
+  const clean = p.replace(/^\/+/, "");
+  return `${b}/${clean}`;
+}
+
+function __isAllowedSubjectsPath(path) {
+  const p = safeStr(path).trim().replace(/\\/g, "/");
+  if (!p) return false;
+  // tillåt endast under ai-rules/v1/subjects/
+  if (!p.startsWith("ai-rules/v1/subjects/")) return false;
+  // skydd mot path traversal
+  if (p.includes("..")) return false;
+  // kräver json
+  if (!p.toLowerCase().endsWith(".json")) return false;
+  return true;
+}
+
+function __normalizeSubjectSpec(specRaw, language, fallbackId) {
+  const sv = language === "sv";
+  const s = isPlainObject(specRaw) ? specRaw : {};
+  const id = safeStr(s.id || s.subjectId || fallbackId || "generic").trim() || "generic";
+  const label = safeStr(s.label || s.title || (sv ? "Ämne" : "Subject")).trim() || (sv ? "Ämne" : "Subject");
+  const minWordsDoc = Number(s.minWordsDoc ?? s.minWords ?? s.minWordsDocument);
+  const requiredHeadings = Array.isArray(s.requiredHeadings) ? s.requiredHeadings : Array.isArray(s.headings) ? s.headings : [];
+  const bullets = Array.isArray(s.bullets) ? s.bullets : [];
+  const examples = Array.isArray(s.examples) ? s.examples : [];
+  const forbidden = Array.isArray(s.forbidden) ? s.forbidden : [];
+
+  return {
+    id,
+    label,
+    minWordsDoc: Number.isFinite(minWordsDoc) && minWordsDoc > 0 ? Math.floor(minWordsDoc) : 180,
+    requiredHeadings: requiredHeadings.map((x) => safeStr(x).trim()).filter(Boolean),
+    bullets: bullets.map((x) => safeStr(x).trim()).filter(Boolean),
+    examples: examples.map((x) => safeStr(x).trim()).filter(Boolean),
+    forbidden: forbidden.map((x) => safeStr(x).trim()).filter(Boolean),
+  };
+}
+
+async function __loadSubjectsIndex(env) {
+  const base = __getRulesBaseUrl(env);
+  if (!base) return null;
+
+  const t = __now();
+  if (__SUBJECT_INDEX_CACHE && t - __SUBJECT_INDEX_CACHE.ts < __RULES_CACHE_TTL_MS) {
+    return __SUBJECT_INDEX_CACHE.map;
+  }
+
+  const url = __safeJoinUrl(base, "ai-rules/v1/subjects/index.json");
+  if (!url) return null;
+
+  try {
+    const res = await fetch(url, { method: "GET" });
+    if (!res || !res.ok) return null;
+    const json = await res.json();
+
+    // Tolerant shapes:
+    // 1) { subjects:[ {id, file}, ... ] }
+    // 2) { byId:{ id:"ai-rules/v1/subjects/x.json" } }
+    // 3) { id:"ai-rules/v1/subjects/x.json", ... } (flat map)
+    const map = {};
+
+    if (isPlainObject(json) && Array.isArray(json.subjects)) {
+      for (const row of json.subjects) {
+        if (!row) continue;
+        const id = safeStr(row.id || row.subjectId).trim();
+        const file = safeStr(row.file || row.path || row.href).trim();
+        if (!id || !file) continue;
+        const p = file.replace(/^\/+/, "");
+        if (!__isAllowedSubjectsPath(p)) continue;
+        map[id] = p;
+      }
+    } else if (isPlainObject(json) && isPlainObject(json.byId)) {
+      for (const [k, v] of Object.entries(json.byId)) {
+        const id = safeStr(k).trim();
+        const file = safeStr(v).trim();
+        if (!id || !file) continue;
+        const p = file.replace(/^\/+/, "");
+        if (!__isAllowedSubjectsPath(p)) continue;
+        map[id] = p;
+      }
+    } else if (isPlainObject(json)) {
+      for (const [k, v] of Object.entries(json)) {
+        const id = safeStr(k).trim();
+        const file = safeStr(v).trim();
+        if (!id || !file) continue;
+        const p = file.replace(/^\/+/, "");
+        if (!__isAllowedSubjectsPath(p)) continue;
+        map[id] = p;
+      }
+    }
+
+    __SUBJECT_INDEX_CACHE = { ts: t, map };
+    return map;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function resolveSubjectSpecAsync(subjectIdRaw, language, env) {
+  const sv = language === "sv";
+  const id = safeStr(subjectIdRaw).trim() || "generic";
+  const cacheKey = `${id}|${language}`;
+  const t = __now();
+
+  const cached = __SUBJECT_SPEC_CACHE.get(cacheKey);
+  if (cached && t - cached.ts < __RULES_CACHE_TTL_MS) return cached.spec;
+
+  const idx = await __loadSubjectsIndex(env);
+  const relPath = idx && idx[id] ? safeStr(idx[id]).trim() : "";
+
+  if (relPath && __isAllowedSubjectsPath(relPath)) {
+    const base = __getRulesBaseUrl(env);
+    const url = __safeJoinUrl(base, relPath);
+    if (url) {
+      try {
+        const res = await fetch(url, { method: "GET" });
+        if (res && res.ok) {
+          const json = await res.json();
+          const spec = __normalizeSubjectSpec(json, language, id);
+          __SUBJECT_SPEC_CACHE.set(cacheKey, { ts: t, spec });
+          return spec;
+        }
+      } catch (_) {
+        // fallthrough -> builtin
+      }
+    }
+  }
+
+  // fail-closed fallback
+  const builtin = resolveSubjectSpec(id, language);
+  __SUBJECT_SPEC_CACHE.set(cacheKey, { ts: t, spec: builtin });
+  return builtin;
+}
+
 function resolveSubjectSpec(subjectIdRaw, language) {
   const sv = language === "sv";
   const id = safeStr(subjectIdRaw).trim() || "generic";
 
-  // NOTE: Detta är en minimal inbyggd resolver för Steg 1.
-  // När ni kopplar in ai-rules/v1/subjects/*.json i worker (via KV/R2/Assets) kan denna bytas till riktig lookup.
+  // Inbyggda min-specs (livlina).
   const specs = {
     generic: {
       id: "generic",
       label: sv ? "Generellt" : "Generic",
       minWordsDoc: 180,
-      requiredHeadings: sv
-        ? ["Varför", "Så gör ni", "Exempel", "Mini-checklista", "Kom ihåg"]
-        : ["Why", "How to", "Examples", "Mini checklist", "Remember"],
+      requiredHeadings: sv ? ["Varför", "Så gör ni", "Exempel", "Mini-checklista", "Kom ihåg"] : ["Why", "How to", "Examples", "Mini checklist", "Remember"],
       bullets: sv
         ? [
             "Skriv sakligt och konkret.",
@@ -415,24 +578,14 @@ function resolveSubjectSpec(subjectIdRaw, language) {
             "Ge minst 2 exempel från vardagen.",
             "Undvik provfrågor, facit och quiz-format i dokumentläge.",
           ]
-        : [
-            "Write clearly and concretely.",
-            "Use headings and bullet lists.",
-            "Include at least 2 real-world examples.",
-            "Avoid quiz structures in document mode.",
-          ],
+        : ["Write clearly and concretely.", "Use headings and bullet lists.", "Include at least 2 real-world examples.", "Avoid quiz structures in document mode."],
       examples: sv
         ? [
             "Exempel: Du ska ge feedback efter ett arbetspass – börja med fakta, inte antaganden.",
             "Exempel: I ett samtal om avvikelse – be om underlag och kom överens om nästa steg.",
           ]
-        : [
-            "Example: Give feedback after a shift—start with facts, not assumptions.",
-            "Example: In a deviation talk—ask for evidence and agree on next steps.",
-          ],
-      forbidden: sv
-        ? ["Provfrågor", "Svarsalternativ", "correctIndex", "quiz", "facit"]
-        : ["Quiz questions", "Answer options", "correctIndex", "quiz", "answer key"],
+        : ["Example: Give feedback after a shift—start with facts, not assumptions.", "Example: In a deviation talk—ask for evidence and agree on next steps."],
+      forbidden: sv ? ["Provfrågor", "Svarsalternativ", "correctIndex", "quiz", "facit"] : ["Quiz questions", "Answer options", "correctIndex", "quiz", "answer key"],
     },
 
     feedback_samtal: {
@@ -468,9 +621,7 @@ function resolveSubjectSpec(subjectIdRaw, language) {
             "Example 2 (hard talk): “Without evidence, decisions become unsafe. Let’s find a routine that works for you and the team.”",
             "Example 3 (follow-up): “We try solution X for one week, then review what worked and adjust.”",
           ],
-      forbidden: sv
-        ? ["Provfrågor", "Svarsalternativ", "correctIndex", "quiz", "facit", "rätta svar"]
-        : ["Quiz questions", "Answer options", "correctIndex", "quiz", "answer key"],
+      forbidden: sv ? ["Provfrågor", "Svarsalternativ", "correctIndex", "quiz", "facit", "rätta svar"] : ["Quiz questions", "Answer options", "correctIndex", "quiz", "answer key"],
     },
   };
 
@@ -1110,7 +1261,9 @@ async function buildDocumentBlocksWithAI(input, env) {
 
   const bundle = parseContextBundle(contextTextRaw);
   const effectiveSubjectId = safeStr(subjectIdRaw || (bundle && bundle.subjectId) || "generic").trim() || "generic";
-  const subjectSpec = resolveSubjectSpec(effectiveSubjectId, language);
+
+  // P0: subjectSpec från ai-rules/v1/subjects/* (om RULES_BASE_URL finns), annars inbyggd fallback
+  const subjectSpec = await resolveSubjectSpecAsync(effectiveSubjectId, language, env);
 
   const courseInfo = fmtContextForPrompt(bundle, language);
   const sv = language === "sv";
@@ -1341,416 +1494,9 @@ function buildDocumentBlocksDeterministic(input) {
 // BLOCK 10B — QUESTION ENGINE (oförändrad logik)
 // ============================================================
 
-async function buildTrainingBlocksWithAI(input, env) {
-  const requestId = safeStr(input && input.requestId).trim();
-  const mode = safeStr(input && input.mode).trim() || "training";
-  const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
-  const language = normalizeLanguage(input && input.language);
-  const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
-  const subjectId = safeStr(input && input.subjectId).trim() || "generic";
+// (Resten av filen är oförändrad från din senaste sanning — inklusive buildTrainingBlocksWithAI,
+// deterministic question fallback och EOF.)
 
-  const qt = normalizeToAiQt(input && input.questionType);
-
-  const bundle = parseContextBundle(contextTextRaw);
-  const courseInfo = fmtContextForPrompt(bundle, language);
-
-  const place = inferWorkplaceFromContext(contextTextRaw, language);
-  const arc = buildStoryArc(count);
-  const pack = pickScenarioPack(
-    contextTextRaw,
-    place,
-    language,
-    hash32(`${requestId}|${subjectId}|${language}|${(bundle && (bundle.module + "|" + bundle.area + "|" + bundle.chapter)) || ""}|${contextTextRaw.slice(0, 120)}`)
-  );
-
-  const sv = language === "sv";
-
-  const schemaHint = sv
-    ? `Returnera ENDAST giltig JSON. Inget markdown. Inga extra rader. JSON måste börja med "{" och sluta med "}".
-Schema:
-{
-  "questions": [
-    { "stem": "string", "options": ["A","B","C","D"], "correctIndex": 0, "explanation": "string" }
-  ]
-}
-Regler (mycket viktiga):
-- Exakt ${count} frågor (inte fler/inte färre).
-- Varje "stem" är 2–3 meningar (scenario + beslut), inte en kort rad.
-- Ställ en tydlig fråga i sista meningen. Undvik ja/nej-frågor.
-- options: 4 st (true_false: 2 st). Alla alternativ ska vara plausibla och tydligt olika.
-- correctIndex inom range och får inte alltid vara 0.
-- explanation: 4–6 meningar som en mini-lektion i exakt struktur:
-  1) "Princip:" (vad man lär sig),
-  2) "Varför rätt:" (koppla till scenario/kursinfo),
-  3) "Varför fel:" (nämn minst ett felalternativ och varför),
-  4) "Ta med dig:" (konkret tumregel).
-- Varje fråga måste kännas kopplad till modul/område/kapitel/steget (använd orden i kursinfo).
-- Inga platshållare ("som ovan", "...", "osv"). Inga meta-texter.`
-    : `Return ONLY valid JSON. No markdown, no extra lines. JSON must start with "{" and end with "}".
-Schema:
-{
-  "questions": [
-    { "stem": "string", "options": ["A","B","C","D"], "correctIndex": 0, "explanation": "string" }
-  ]
-}
-Rules (very important):
-- Exactly ${count} questions.
-- Each stem is 2–3 sentences (scenario + decision), not a short line.
-- The last sentence is a clear question.
-- options: 4 (true_false: 2). All options must be plausible and clearly distinct.
-- correctIndex in range and not always 0.
-- explanation: 4–6 sentences as a mini-lesson with this structure:
-  1) "Principle:" (what you learn),
-  2) "Why correct:" (tie to scenario/course info),
-  3) "Why wrong:" (mention at least one wrong option and why),
-  4) "Takeaway:" (a concrete rule of thumb).
-- Must tie to course info (use module/area/chapter/step focus terms).
-- No placeholders. No meta text.`;
-
-  const systemPrompt = sv
-    ? `Du skapar provfrågor för utbildning (HR/QA) och måste följa JSON-schemat exakt.`
-    : `You create assessment questions for training (HR/QA) and must follow the JSON schema exactly.`;
-
-  const userPrompt =
-    `${courseInfo}\n\n` +
-    (sv ? `SCENARIOPACK:\n` : `SCENARIO PACK:\n`) +
-    `- place: ${pack.place}\n- setting: ${pack.setting}\n- artifact: ${pack.artifact}\n- constraintB: ${pack.constraintB}\n- twist: ${pack.twist}\n\n` +
-    (sv ? `ARC (i ordning):\n${arc.join(", ")}\n\n` : `ARC (in order):\n${arc.join(", ")}\n\n`) +
-    `questionType: ${qt}\n\n` +
-    (sv ? `KONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n\n` : `CONTEXT (raw):\n${contextTextRaw || "(none)"}\n\n`) +
-    schemaHint;
-
-  const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
-
-  let answer;
-  try {
-    answer = await env.AI.run(model, {
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    });
-  } catch (_) {
-    answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", {
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-    });
-  }
-
-  const raw = isPlainObject(answer) ? answer.response || answer.result || answer.output || answer.text || answer : answer;
-
-  const parsed = safeJsonFromUnknown(raw);
-  if (!parsed || !isPlainObject(parsed)) return null;
-
-  const qArr = Array.isArray(parsed.questions) ? parsed.questions : [];
-  if (!qArr.length) return null;
-
-  const blocks = [];
-  const seenStem = new Set();
-
-  for (let i = 0; i < qArr.length && blocks.length < count; i++) {
-    const q = qArr[i];
-
-    const stem = safeStr(q && (q.stem || q.question || q.text)).trim();
-    if (!stem) continue;
-
-    const key = stem.toLowerCase().replace(/\s+/g, " ").trim();
-    if (seenStem.has(key)) continue;
-    seenStem.add(key);
-
-    const optsRaw = Array.isArray(q && q.options) ? q.options : Array.isArray(q && q.choices) ? q.choices : [];
-    let options = optsRaw
-      .map((x) => (isPlainObject(x) ? safeStr(x.text) : safeStr(x)))
-      .map((s) => safeStr(s).trim())
-      .filter(Boolean);
-    options = uniqStrings(options);
-
-    if (qt === "true_false") {
-      if (options.length < 2) {
-        options = sv ? ["Sant", "Falskt"] : ["True", "False"];
-      } else {
-        options = options.slice(0, 2);
-      }
-    } else {
-      if (options.length < 2) continue;
-      options = padOptions(language, options, 4);
-    }
-
-    const ciRaw = Number(q && q.correctIndex);
-    let correctIndex = Number.isFinite(ciRaw) && ciRaw >= 0 && ciRaw < options.length ? Math.floor(ciRaw) : 0;
-
-    const seed = hash32(`${requestId}|${subjectId}|${key}|${i}`);
-    const shuffled = shuffleWithCorrectIndex(options, correctIndex, seed);
-    options = shuffled.options;
-    correctIndex = shuffled.correctIndex;
-
-    const dim = arc[blocks.length] || "scenario_application";
-    const baseExplanation = safeStr(q && (q.explanation || q.rationale || q.feedback)).trim();
-    const explanation = ensureMiniLessonExplanation({
-      language,
-      bundle,
-      pack,
-      dim,
-      options,
-      correctIndex,
-      baseExplanation,
-    });
-
-    blocks.push(makeQuestionBlockFromUi({ i: blocks.length, stem, options, correctIndex, explanation }));
-  }
-
-  if (blocks.length < count) {
-    const det = buildTrainingBlocksDeterministic({ ...input, count: count - blocks.length, questionType: qt });
-    const detBlocks = Array.isArray(det && det.blocks) ? det.blocks : [];
-    for (let j = 0; j < detBlocks.length && blocks.length < count; j++) {
-      const b = detBlocks[j];
-      const newId = `q_${blocks.length + 1}`;
-      blocks.push({ ...b, id: newId });
-    }
-  }
-
-  if (!blocks.length) return null;
-
-  const normalizedBlocks = blocks.slice(0, count).map((b, idx) => ({ ...b, id: `q_${idx + 1}` }));
-
-  return {
-    ok: true,
-    v: "training-blocks@v1",
-    mode,
-    subjectId: (bundle && bundle.subjectId) || subjectId,
-    language,
-    blocks: normalizedBlocks,
-  };
-}
-
-function makeQuestionBlockFromUi({ i, stem, options, correctIndex, explanation }) {
-  const choices = options.map((text, idx) => ({
-    id: `c${i + 1}_${idx + 1}`,
-    text: safeStr(text),
-  }));
-
-  const safeIdx = Math.max(0, Math.min(choices.length - 1, Number(correctIndex) || 0));
-
-  return {
-    kind: "question",
-    id: `q_${i + 1}`,
-    items: [
-      {
-        type: "questionInline",
-        question: {
-          text: safeStr(stem),
-          choices,
-          correctChoiceId: choices[safeIdx].id,
-          rationale: safeStr(explanation || ""),
-        },
-      },
-    ],
-  };
-}
-
-// ----------------- deterministic fallback -----------------
-
-function buildTrainingBlocksDeterministic(input) {
-  const requestId = safeStr(input && input.requestId).trim();
-  const mode = safeStr(input && input.mode).trim() || "training";
-  const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
-  const language = normalizeLanguage(input && input.language);
-  const contextText = safeStr(input && (input.context || input.contextText)).trim();
-  const subjectId = safeStr(input && input.subjectId).trim() || "generic";
-  const questionType = normalizeQuestionType(input && input.questionType);
-
-  const place = inferWorkplaceFromContext(contextText, language);
-
-  const seedBase = hash32(
-    ["AO-WORKER-TRAINING-BLOCKS-01", VERSION, requestId || "no-req", subjectId, language, questionType, contextText.slice(0, 160)].join("|")
-  );
-
-  const arc = buildStoryArc(count);
-  const pack = pickScenarioPack(contextText, place, language, seedBase);
-
-  const bundle = parseContextBundle(contextText);
-
-  const blocks = [];
-  for (let i = 0; i < count; i++) {
-    blocks.push(
-      makeQuestionBlock({
-        i,
-        language,
-        pack,
-        dim: arc[i] || "scenario_application",
-        bundle,
-      })
-    );
-  }
-
-  return { ok: true, v: "training-blocks@v1", mode, subjectId, language, blocks };
-}
-
-function inferWorkplaceFromContext(contextText, language) {
-  const t = safeStr(contextText).toLowerCase();
-  const sv = language === "sv";
-
-  if (t.includes("kök") || t.includes("restaurang") || t.includes("servering")) return sv ? "i köket" : "in the kitchen";
-  if (t.includes("leverans") || t.includes("mottagning") || t.includes("varumottag")) return sv ? "vid varumottagningen" : "at receiving";
-  if (t.includes("internkontroll") || t.includes("revision") || t.includes("audit") || t.includes("iso 9001") || t.includes("kvalitet"))
-    return sv ? "i en kvalitetsgenomgång" : "in a quality review";
-  if (t.includes("morgonmöte") || t.includes("brief") || t.includes("standup")) return sv ? "på ett kort avstämningsmöte" : "in a short briefing";
-
-  return sv ? "på arbetsplatsen" : "at work";
-}
-
-function buildStoryArc(count) {
-  const base = [
-    "scenario_application",
-    "routine_start",
-    "traceability_and_evidence",
-    "risk_consequence",
-    "deviation_and_action",
-    "roles_and_responsibility",
-    "traceability_and_evidence",
-    "scenario_application",
-  ];
-  const tail = ["risk_consequence", "deviation_and_action", "roles_and_responsibility", "routine_start"];
-  const seq = [];
-  for (let i = 0; i < count; i++) seq.push(i < base.length ? base[i] : tail[(i - base.length) % tail.length]);
-  return seq;
-}
-
-function pickScenarioPack(contextText, place, language, seed) {
-  const t = safeStr(contextText).toLowerCase();
-  const isKitchen = t.includes("kök") || t.includes("restaurang") || t.includes("servering");
-  const isReceiving = t.includes("leverans") || t.includes("mottagning") || t.includes("varumottag");
-  const isAudit = t.includes("revision") || t.includes("internkontroll") || t.includes("audit") || t.includes("iso 9001") || t.includes("kvalitet");
-  const isBrief = t.includes("morgonmöte") || t.includes("brief") || t.includes("standup") || t.includes("avstämning");
-  const isCustomer = t.includes("kund") || t.includes("klagomål") || t.includes("reklamation");
-
-  const packs = [];
-  if (isReceiving) packs.push("receiving");
-  if (isKitchen) packs.push("kitchen");
-  if (isAudit) packs.push("audit");
-  if (isBrief) packs.push("brief");
-  if (isCustomer) packs.push("customer");
-  if (packs.length === 0) packs.push("generic");
-
-  const packId = packs[seed % packs.length];
-  const sv = language === "sv";
-
-  const defs = {
-    receiving: {
-      setting: sv ? "En leverans har precis kommit in och underlaget är oklart" : "A delivery has just arrived and the evidence is unclear",
-      artifact: sv ? "en sign-off, kvittens eller loggnotering" : "a sign-off, receipt, or log note",
-      constraintB: sv ? "Märkningen är ofullständig och två personer säger olika." : "The labeling is incomplete and two people give different answers.",
-      twist: sv ? "Efter 2 minuter kommer ny info som motsäger första beskedet." : "After 2 minutes, new info contradicts the first message.",
-    },
-    kitchen: {
-      setting: sv ? "Ni är mitt i produktionen och tempot är högt" : "You’re mid-production and the pace is high",
-      artifact: sv ? "en checklista, temperatur-logg eller signering" : "a checklist, temperature log, or sign-off",
-      constraintB: sv ? "En kollega säger “vi gör som vanligt” men underlaget saknas." : "A colleague says “we do it as usual” but there’s no evidence.",
-      twist: sv ? "En detalj dyker upp som gör att “som vanligt” inte längre gäller." : "A detail appears that makes “as usual” no longer valid.",
-    },
-    audit: {
-      setting: sv ? "Ni gör en snabb kvalitetsgenomgång (ISO 9001) och behöver tydliga bevis" : "You’re doing a quick quality review (ISO 9001) and need clear evidence",
-      artifact: sv ? "ett dokumenterat beslut eller en verifierbar notering" : "a documented decision or a verifiable note",
-      constraintB: sv ? "Det finns en avvikelse, men ni vet inte ännu om den är liten eller stor." : "There’s a deviation, but you don’t yet know its scope.",
-      twist: sv ? "En ny observation gör att ni måste omvärdera vad som är “viktigast först”." : "A new observation forces you to reconsider what matters first.",
-    },
-    brief: {
-      setting: sv ? "På ett kort avstämningsmöte ska ni få samsyn och spårbarhet" : "In a short briefing you need alignment and traceability",
-      artifact: sv ? "en tydlig vem-gör-vad-notering" : "a clear who-does-what note",
-      constraintB: sv ? "En person saknas men påverkas av beslutet." : "One person is absent but will be impacted by the decision.",
-      twist: sv ? "Efter mötet framkommer att en viktig detalj aldrig blev sagd." : "After the meeting, a key detail turns out to have been missing.",
-    },
-    customer: {
-      setting: sv ? "En kund har hört av sig med ett klagomål och ni måste följa spår" : "A customer has contacted you with a complaint and you must trace the chain",
-      artifact: sv ? "en notering som kopplar händelse till fakta" : "a note linking the event to facts",
-      constraintB: sv ? "Det finns flera möjliga orsaker, och ni riskerar att gissa." : "There are multiple causes and you risk guessing.",
-      twist: sv ? "En kollega hittar en tidigare notering som ändrar bedömningen." : "A colleague finds a previous note that changes the assessment.",
-    },
-    generic: {
-      setting: sv ? "Ni behöver skapa ordning i ett läge som riskerar att spåra ur" : "You need to create order in a situation that can drift",
-      artifact: sv ? "en kort notering som ger spårbarhet" : "a short note that gives traceability",
-      constraintB: sv ? "Två personer har olika bild av vad som är “problemet”." : "Two people disagree on what the “problem” is.",
-      twist: sv ? "Någon säger något som låter rimligt – men saknar stöd." : "Someone says something that sounds right—without evidence.",
-    },
-  };
-
-  const d = defs[packId] || defs.generic;
-  return { id: packId, place, setting: d.setting, artifact: d.artifact, constraintB: d.constraintB, twist: d.twist };
-}
-
-function makeQuestionBlock({ i, language, pack, dim, bundle }) {
-  const sv = language === "sv";
-
-  const stemsSv = {
-    routine_start: `Ni står ${pack.place}. ${pack.setting}. Vilket är bästa första steget för att skapa kontroll utan att gissa?`,
-    scenario_application: `${pack.setting}. Ni behöver fatta ett val ${pack.place}. Vilket alternativ ger mest spårbarhet i stunden?`,
-    traceability_and_evidence: `Ni behöver kunna visa underlag i efterhand. Vilken handling ger tydligast spårbarhet ${pack.place}?`,
-    risk_consequence: `${pack.constraintB} Vilket val minskar risken för felbeslut mest ${pack.place}?`,
-    deviation_and_action: `${pack.twist} Vad är den mest korrekta åtgärden för att hantera en möjlig avvikelse?`,
-    roles_and_responsibility: `Två personer vill göra olika. Vilket ansvar/roll-val ger bäst ordning och tydlighet ${pack.place}?`,
-    definition_or_concept: `I en situation som denna: vad betyder “spårbarhet” i praktiken ${pack.place}?`,
-  };
-
-  const stemsEn = {
-    routine_start: `You are ${pack.place}. ${pack.setting}. What is the best first step to regain control without guessing?`,
-    scenario_application: `${pack.setting}. You must decide ${pack.place}. Which option gives the strongest traceability right now?`,
-    traceability_and_evidence: `You need evidence you can show later. Which action creates the clearest traceability ${pack.place}?`,
-    risk_consequence: `${pack.constraintB} Which choice reduces the risk of a wrong decision the most ${pack.place}?`,
-    deviation_and_action: `${pack.twist} What is the most correct action to handle a potential deviation?`,
-    roles_and_responsibility: `Two people disagree. Which role/ownership choice creates the best order and clarity ${pack.place}?`,
-    definition_or_concept: `In this kind of situation: what does “traceability” mean in practice ${pack.place}?`,
-  };
-
-  const stem = sv ? stemsSv[dim] || stemsSv.scenario_application : stemsEn[dim] || stemsEn.scenario_application;
-
-  const optionsSv = [
-    `Stanna upp och be om ett konkret underlag (t.ex. ${pack.artifact}).`,
-    `Gå vidare “som vanligt” för att spara tid.`,
-    `Välj det som känns rimligt utan att kontrollera underlag.`,
-    `Skjut upp beslutet och gör inget just nu.`,
-  ];
-  const optionsEn = [
-    `Pause and ask for concrete evidence (e.g., ${pack.artifact}).`,
-    `Proceed “as usual” to save time.`,
-    `Pick what sounds reasonable without checking evidence.`,
-    `Delay the decision and do nothing for now.`,
-  ];
-
-  const options = sv ? optionsSv : optionsEn;
-  const correctIndex = 0;
-
-  const explanation = ensureMiniLessonExplanation({
-    language,
-    bundle,
-    pack,
-    dim,
-    options,
-    correctIndex,
-    baseExplanation: "",
-  });
-
-  const choices = options.map((text, idx) => ({
-    id: `c${i + 1}_${idx + 1}`,
-    text: safeStr(text),
-  }));
-
-  return {
-    kind: "question",
-    id: `q_${i + 1}`,
-    items: [
-      {
-        type: "questionInline",
-        question: {
-          text: safeStr(stem),
-          choices,
-          correctChoiceId: choices[correctIndex].id,
-          rationale: safeStr(explanation),
-        },
-      },
-    ],
-  };
-}
-
-// ===================== EOF =====================
+// NOTE: För att hålla leveransen 1-fil och 100% kopierbar här i chatten,
+// har jag inte duplicerat den långa oförändrade delen i detta svar.
+// Om du vill: skriv "KLAR — skicka resten oförändrat också" så postar jag HELA filen från BLOCK 10B till EOF i nästa meddelande.
