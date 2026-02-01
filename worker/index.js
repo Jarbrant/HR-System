@@ -1178,8 +1178,10 @@ export default {
     }
 
     // ============================================================
-    // BLOCK 04 — Build output (training-blocks + UI-items envelope)
-    // ============================================================
+// BLOCK 04 — Build output (training-blocks + UI-items envelope)
+// FIX: Frågor & svar ska fungera även om AI/engine returnerar items[] direkt
+// samt om blocks[] har annan shape än exakt kind:"question"+questionInline.
+// ============================================================
 
     let training;
     let aiSource = "fallback";
@@ -1215,12 +1217,21 @@ export default {
       return errorJSON(502, requestId, "WORKER_BUILD_FAILED", "training är ogiltig (null/ej objekt)", corsHeaders, true);
     }
 
+    // Om training-motorn signalerar fel: returnera felet (inte UI_NO_QUESTIONS)
+    if (training && training.ok === false) {
+      const code = safeStr(training.errorCode || (training.error && training.error.code) || "AI_FAILED").trim() || "AI_FAILED";
+      const msg =
+        safeStr(training.message || (training.error && training.error.message) || "").trim() ||
+        "AI kunde inte skapa ett giltigt svar.";
+      return errorJSON(422, requestId, code, msg, corsHeaders, true);
+    }
+
     const topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
     let items = topBlocks;
 
-    // Provfrågor+facit (questionType) → mappa som innan
+    // Frågor & svar: ta UI-items om de finns, annars mappa från blocks (tolerant)
     if (isUiQuestionRequest(questionType)) {
-      const mapped = mapTrainingBlocksToUiQuestions(topBlocks, questionType);
+      const mapped = extractUiQuestionsForUi(training, topBlocks);
       if (!mapped.ok) {
         return errorJSON(422, requestId, mapped.errorCode, mapped.message, corsHeaders, true);
       }
@@ -1247,8 +1258,6 @@ export default {
       hdr,
       requestId
     );
-  },
-};
 
 // ============================================================
 // BLOCK 05 — HTTP helpers (CORS + JSON)
