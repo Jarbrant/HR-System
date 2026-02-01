@@ -1249,6 +1249,7 @@ async function buildTrainingBlocks(input, env) {
 
 // ============================================================
 // BLOCK 10A — DOCUMENT/MIX ENGINE (CF-AI + fallback text blocks)
+// PATCH: tolerant parse (array/object) + forbidden-check i validering
 // ============================================================
 
 async function buildDocumentBlocksWithAI(input, env) {
@@ -1330,6 +1331,16 @@ Rules (very important):
 
   const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
 
+  function containsForbidden(text, forbiddenList) {
+    const t = safeStr(text).toLowerCase();
+    for (const w of Array.isArray(forbiddenList) ? forbiddenList : []) {
+      const ww = safeStr(w).toLowerCase().trim();
+      if (!ww) continue;
+      if (t.includes(ww)) return true;
+    }
+    return false;
+  }
+
   async function runOnce(forceStricter) {
     const extra = forceStricter
       ? sv
@@ -1359,11 +1370,22 @@ Rules (very important):
   // försök 1
   let answer = await runOnce(false);
 
+  function coerceParsedShape(parsed) {
+    // Tolerera att modellen råkar returnera en array som top-level
+    if (Array.isArray(parsed)) return { blocks: parsed };
+    if (isPlainObject(parsed)) return parsed;
+    return null;
+  }
+
   function parseToBlocks(ans) {
     const raw = isPlainObject(ans) ? ans.response || ans.result || ans.output || ans.text || ans : ans;
-    const parsed = safeJsonFromUnknown(raw);
-    if (!parsed || !isPlainObject(parsed)) return null;
 
+    // safeJsonFromUnknown kan returnera object/array
+    const parsed0 = safeJsonFromUnknown(raw);
+    const parsed = coerceParsedShape(parsed0);
+    if (!parsed) return null;
+
+    // parseDocAiPayload accepterar {blocks:[...]} eller {sections:[...]} eller {text:"..."}
     const rows = parseDocAiPayload(parsed);
     if (!rows.length) return null;
 
@@ -1374,6 +1396,7 @@ Rules (very important):
       if (!text) continue;
       blocks.push(makeTextBlock({ i: blocks.length, title: safeStr(r && r.title).trim(), text }));
     }
+
     if (!blocks.length) return null;
     if (!ensureNoQuestionBlocks(blocks)) return null;
 
@@ -1389,23 +1412,41 @@ Rules (very important):
         })
       );
     }
+
     return blocks.slice(0, count);
   }
 
   let blocks = parseToBlocks(answer);
 
+  function validateAll(blocksToCheck) {
+    const v = validateDocOutput({ language, subjectSpec, blocks: blocksToCheck });
+    if (!v.ok) return v;
+
+    // Extra skydd: förbjudna quiz-ord/fields får inte förekomma i dokumenttext
+    const joined = joinDocBlocksText(blocksToCheck);
+    if (forbidden.length && containsForbidden(joined, forbidden)) {
+      return {
+        ok: false,
+        errorCode: "DOC_FORBIDDEN_CONTENT",
+        message: sv
+          ? "Infoblad råkade innehålla förbjudet quiz-/facit-innehåll. Försök igen."
+          : "Document contained forbidden quiz/answer-key content. Try again.",
+      };
+    }
+
+    return { ok: true };
+  }
+
   // validera
   if (blocks) {
-    const v = validateDocOutput({ language, subjectSpec, blocks });
+    const v = validateAll(blocks);
     if (!v.ok) {
       // försök 2 (hårdare)
       answer = await runOnce(true);
       blocks = parseToBlocks(answer);
       if (blocks) {
-        const v2 = validateDocOutput({ language, subjectSpec, blocks });
-        if (!v2.ok) {
-          return null; // fail-closed → caller fallback
-        }
+        const v2 = validateAll(blocks);
+        if (!v2.ok) return null; // fail-closed → caller fallback
       } else {
         return null;
       }
@@ -1455,8 +1496,17 @@ function buildDocumentBlocksDeterministic(input) {
     const h4 = heads[4] || (sv ? "Mini-checklista" : "Mini checklist");
     const h5 = heads[5] || (sv ? "Vanliga fallgropar" : "Common pitfalls");
 
-    const b = bullets.length ? bullets : sv ? ["Var tydlig, konkret och respektfull.", "Avsluta med nästa steg och uppföljning."] : ["Be clear, concrete, and respectful.", "End with next steps and follow-up."];
-    const ex = examples.length ? examples : sv ? ["Exempel: Beskriv fakta, ställ en öppen fråga, kom överens om nästa steg."] : ["Example: State facts, ask an open question, agree on next steps."];
+    const b = bullets.length
+      ? bullets
+      : sv
+      ? ["Var tydlig, konkret och respektfull.", "Avsluta med nästa steg och uppföljning."]
+      : ["Be clear, concrete, and respectful.", "End with next steps and follow-up."];
+
+    const ex = examples.length
+      ? examples
+      : sv
+      ? ["Exempel: Beskriv fakta, ställ en öppen fråga, kom överens om nästa steg."]
+      : ["Example: State facts, ask an open question, agree on next steps."];
 
     const title = sv ? `${subjectSpec.label} — del ${idx + 1}` : `${subjectSpec.label} — part ${idx + 1}`;
 
@@ -1489,14 +1539,3 @@ function buildDocumentBlocksDeterministic(input) {
 
   return { ok: true, v: "training-blocks@v1", mode, subjectId: effectiveSubjectId, language, blocks };
 }
-
-// ============================================================
-// BLOCK 10B — QUESTION ENGINE (oförändrad logik)
-// ============================================================
-
-// (Resten av filen är oförändrad från din senaste sanning — inklusive buildTrainingBlocksWithAI,
-// deterministic question fallback och EOF.)
-
-// NOTE: För att hålla leveransen 1-fil och 100% kopierbar här i chatten,
-// har jag inte duplicerat den långa oförändrade delen i detta svar.
-// Om du vill: skriv "KLAR — skicka resten oförändrat också" så postar jag HELA filen från BLOCK 10B till EOF i nästa meddelande.
