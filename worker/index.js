@@ -1283,47 +1283,13 @@ function validateTrainingQualityCanonical({ blocks, qSpec, language, questionTyp
   return { ok: true };
 }
 
-// ============================================================
-// BLOCK 05D — AI builder (prompt + run + fallback)
-// ============================================================
+function buildSchemaExample() {
+  const choices = [];
+  for (let i = 0; i < choicesCount; i++) {
+    choices.push(`              { "id": "c${i + 1}", "text": "..." }`);
+  }
 
-async function buildTrainingBlocksWithAI(input, env) {
-  const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
-  const language = normalizeLanguage(input && input.language);
-  const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
-  const questionTypeRaw = normalizeQuestionType(input && input.questionType);
-  const qtForAi = effectiveTrainingQuestionType(questionTypeRaw);
-
-  const bundle = parseContextBundle(contextTextRaw);
-  const subjectIdRaw = safeStr(input && input.subjectId).trim();
-  const effectiveSubjectId = safeStr(subjectIdRaw || (bundle && bundle.subjectId) || "generic").trim() || "generic";
-
-  const sv = language === "sv";
-  const courseInfo = fmtContextForPrompt(bundle, language);
-
-  const subjectSpec = await resolveSubjectSpecAsync(effectiveSubjectId, language, env);
-  const qSpec = isPlainObject(subjectSpec && subjectSpec.questionSpec) ? subjectSpec.questionSpec : {};
-  const mcq = isPlainObject(qSpec && qSpec.mcq) ? qSpec.mcq : {};
-
-  const isTF = qtForAi === "true_false";
-
-  const choicesCount = isTF ? 2 : (
-    Number.isFinite(Number(mcq.choicesCount)) ? Math.max(2, Math.min(6, Math.floor(Number(mcq.choicesCount)))) : 4
-  );
-  const minS = Number.isFinite(Number(mcq.rationaleMinSentences)) ? Math.max(1, Math.floor(Number(mcq.rationaleMinSentences))) : 4;
-  const maxS = Number.isFinite(Number(mcq.rationaleMaxSentences)) ? Math.max(minS, Math.floor(Number(mcq.rationaleMaxSentences))) : 6;
-  const mustInclude = Array.isArray(mcq.rationaleMustInclude) ? mcq.rationaleMustInclude : [];
-
-  const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
-
-  const systemPromptBase = sv
-    ? "Du skapar flervalsfrågor (MCQ) för HR-utbildning. Du måste returnera ENDAST giltig JSON enligt schema. Inget markdown. Börja med { och sluta med }."
-    : "You create multiple-choice questions (MCQ) for HR training. Return ONLY valid JSON per schema. No markdown. Start with { and end with }.";
-
-  function buildSchemaExample() {
-    const choices = [];
-    for (let i = 0; i < choicesCount; i) choices.push(`              { "id": "c${i + 1}", "text": "..." }`);
-    const schema = `{
+  const schema = `{
   "ok": true,
   "mode": "training",
   "blocks": [
@@ -1346,138 +1312,8 @@ ${choices.join(",\n")}
     }
   ]
 }`;
-    return schema;
-  }
-
-  function buildUserPrompt({ stricter }) {
-    const strictLine = stricter
-      ? (sv
-          ? "\nVIKTIGT: OM DU SKRIVER EN ENDA RAD UTANFÖR JSON SÅ BLIR SVARET AVVISAT. INGA ```."
-          : "\nIMPORTANT: If you write ANY text outside JSON, the response is rejected. No ```.")
-      : "";
-
-    const modeLine = sv ? "LÄGE: TRAINING (frågor)" : "MODE: TRAINING (questions)";
-    const qtLine = sv ? `FRÅGETYP (internt): ${qtForAi}` : `QUESTION TYPE (internal): ${qtForAi}`;
-
-    const subjectLine = sv
-      ? `ÄMNE: ${safeStr(subjectSpec && subjectSpec.label).trim() || "Generellt"} (subjectId: ${effectiveSubjectId})`
-      : `SUBJECT: ${safeStr(subjectSpec && subjectSpec.label).trim() || "Generic"} (subjectId: ${effectiveSubjectId})`;
-
-    const styleRules = Array.isArray(qSpec && qSpec.styleRules) ? qSpec.styleRules : [];
-    const topics = Array.isArray(qSpec && qSpec.topics) ? qSpec.topics : [];
-    const bad = Array.isArray(qSpec && qSpec.badPatternsToAvoid) ? qSpec.badPatternsToAvoid : [];
-    const goal = safeStr(qSpec && qSpec.goal).trim();
-
-    const qRulesBlock = [
-      sv ? "FRÅGEKRAV (subjectSpec.questionSpec):" : "QUESTION REQUIREMENTS (subjectSpec.questionSpec):",
-      goal ? (sv ? `Mål: ${goal}` : `Goal: ${goal}`) : "",
-      styleRules.length ? `${sv ? "Stilregler" : "Style rules"}:\n- ${styleRules.join("\n- ")}` : "",
-      topics.length ? `${sv ? "Ämnen att täcka" : "Topics to cover"}:\n- ${topics.join("\n- ")}` : "",
-      bad.length ? `${sv ? "Dåliga mönster att undvika" : "Bad patterns to avoid"}:\n- ${bad.join("\n- ")}` : "",
-      (mustInclude.length ? `${sv ? "Förklaring måste innehålla" : "Rationale must include"}:\n- ${mustInclude.join("\n- ")}` : "")
-    ].filter(Boolean).join("\n\n");
-
-    const schema = buildSchemaExample();
-
-    const countLine = sv ? `- Skapa exakt ${count} frågor.` : `- Create exactly ${count} questions.`;
-    const choiceLine = sv ? `- Varje fråga ska ha exakt ${choicesCount} svarsalternativ (c1..c${choicesCount}).` : `- Each question must have exactly ${choicesCount} choices (c1..c${choicesCount}).`;
-    const rationaleLine = sv ? `- rationale: ${minS}–${maxS} meningar, saklig och konkret.` : `- rationale: ${minS}–${maxS} sentences, factual and concrete.`;
-
-    const tfRule = isTF
-      ? (sv
-          ? "- true_false: svarsalternativ ska vara Sant/Falskt."
-          : "- true_false: choices must be True/False.")
-      : "";
-
-    if (sv) {
-      return `${courseInfo}
-${modeLine}
-${qtLine}
-${subjectLine}
-
-${qRulesBlock}
-
-KRAV:
-${countLine}
-${choiceLine}
-- Exakt 1 korrekt svar via correctChoiceId.
-${rationaleLine}
-${tfRule}
-- Alternativen ska vara realistiska: 1 korrekt, övriga ska vara vanliga fel/halvfel.
-- Undvik kuggfrågor och ordlekar.
-- Returnera exakt JSON enligt schema.${strictLine}
-
-SCHEMA:
-${schema}
-
-KONTEKST (råtext):
-${contextTextRaw || "(ingen)"}
-`;
-    }
-
-    return `${courseInfo}
-${modeLine}
-${qtLine}
-${subjectLine}
-
-${qRulesBlock}
-
-REQUIREMENTS:
-${countLine}
-${choiceLine}
-- Exactly 1 correct answer via correctChoiceId.
-${rationaleLine}
-${tfRule}
-- Options must be realistic: 1 correct, the rest are common mistakes/near-misses.
-- Avoid trick questions.
-- Return EXACT JSON per schema.${strictLine}
-
-SCHEMA:
-${schema}
-
-CONTEXT (raw):
-${contextTextRaw || "(none)"}
-`;
-  }
-
-  async function runOnce(stricter) {
-    const systemPrompt = stricter ? (systemPromptBase + (sv ? " ABSOLUT INGET UTANFÖR JSON." : " ABSOLUTELY NOTHING OUTSIDE JSON.")) : systemPromptBase;
-    const userPrompt = buildUserPrompt({ stricter });
-
-    let answer;
-    try {
-      answer = await env.AI.run(model, { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }] });
-    } catch (_) {
-      answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }] });
-    }
-    return answer;
-  }
-
-  function finalizeFromParsed(parsedObj) {
-    const blocksIn =
-      Array.isArray(parsedObj && parsedObj.blocks) ? parsedObj.blocks :
-      Array.isArray(parsedObj && parsedObj.items) ? parsedObj.items :
-      Array.isArray(parsedObj && parsedObj.children) ? parsedObj.children :
-      [];
-
-    const canonical = normalizeAiQuestionBlocksToCanonical(blocksIn, language, count);
-
-    if (!canonical.length || canonical.length < count) {
-      return {
-        ok: false,
-        errorCode: "AI_NO_QUESTIONS",
-        message: sv ? "AI skapade inte tillräckligt med frågor i rätt format." : "AI did not create enough questions in the required format.",
-        blocks: canonical
-      };
-    }
-
-    const qv = validateTrainingQualityCanonical({ blocks: canonical, qSpec, language, questionType: qtForAi });
-    if (!qv.ok) {
-      return { ok: false, errorCode: qv.errorCode, message: qv.message, blocks: canonical };
-    }
-
-    return { ok: true, v: "training-blocks@v1", mode: "training", language, subjectId: effectiveSubjectId, blocks: canonical };
-  }
+  return schema;
+}
 
   // ============================================================
   // BLOCK 05E — Orchestration: TRY 1 / TRY 2 / fallback
