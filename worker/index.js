@@ -952,10 +952,6 @@ function buildDocumentBlocksDeterministic(input) {
 }
 
 // ============================================================
-// BLOCK 05 — Training blocks (AI + deterministic fallback)
-// ============================================================
-
-// ============================================================
 // BLOCK 05A — Deterministic fallback builder (always returns canonical question blocks)
 // ============================================================
 
