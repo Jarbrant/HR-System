@@ -955,6 +955,10 @@ function buildDocumentBlocksDeterministic(input) {
 // BLOCK 05 — Training blocks (AI + deterministic fallback)
 // ============================================================
 
+// ============================================================
+// BLOCK 05A — Deterministic fallback builder (always returns canonical question blocks)
+// ============================================================
+
 function buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, questionType) {
   const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
   const language = normalizeLanguage(input && input.language);
@@ -989,6 +993,10 @@ function buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, qu
     step ? `${sv ? "Steg" : "Step"}: ${step}` : "",
     level ? `${sv ? "Nivå" : "Level"}: ${level}` : ""
   ].filter(Boolean).join(" • ");
+
+  // ============================================================
+  // BLOCK 05A.1 — Rationale builder (enforces sentence length + mustInclude)
+  // ============================================================
 
   function mkRationale(baseWhy, nextTimeTip) {
     const partsSv = [
@@ -1026,6 +1034,10 @@ function buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, qu
     return parts.slice(0, want).join(" ");
   }
 
+  // ============================================================
+  // BLOCK 05A.2 — Choice builder (TF or MCQ with rotation)
+  // ============================================================
+
   function mkChoices(i) {
     if (isTF) {
       return [
@@ -1053,6 +1065,10 @@ function buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, qu
     const rotated = base.slice(i % base.length).concat(base.slice(0, i % base.length));
     return rotated.slice(0, choicesCount).map((t, idx) => ({ id: `c${idx + 1}`, text: t }));
   }
+
+  // ============================================================
+  // BLOCK 05A.3 — Question block builder (canonical training-blocks@v1)
+  // ============================================================
 
   function mkQuestion(i) {
     const subjectLabel = safeStr(subjectSpec && subjectSpec.label).trim() || (sv ? "Generellt" : "Generic");
@@ -1091,6 +1107,10 @@ function buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, qu
     };
   }
 
+  // ============================================================
+  // BLOCK 05A.4 — Build N blocks
+  // ============================================================
+
   const blocks = [];
   for (let i = 0; i < count; i++) blocks.push(mkQuestion(i));
 
@@ -1104,6 +1124,10 @@ function buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, qu
     __fallback: { reason: "DETERMINISTIC_FALLBACK" }
   };
 }
+
+// ============================================================
+// BLOCK 05B — Parse/normalize AI output into stable container
+// ============================================================
 
 function coerceParsedObjOrArray(parsed) {
   if (isPlainObject(parsed)) return parsed;
@@ -1187,6 +1211,10 @@ function parseTrainingAiAnswer(answer) {
   return parsed;
 }
 
+// ============================================================
+// BLOCK 05C — Quality validation (subjectSpec.questionSpec)
+// ============================================================
+
 function validateTrainingQualityCanonical({ blocks, qSpec, language, questionType }) {
   const sv = language === "sv";
   const qs = isPlainObject(qSpec) ? qSpec : {};
@@ -1259,6 +1287,10 @@ function validateTrainingQualityCanonical({ blocks, qSpec, language, questionTyp
   return { ok: true };
 }
 
+// ============================================================
+// BLOCK 05D — AI builder (prompt + run + fallback)
+// ============================================================
+
 async function buildTrainingBlocksWithAI(input, env) {
   const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
   const language = normalizeLanguage(input && input.language);
@@ -1294,7 +1326,7 @@ async function buildTrainingBlocksWithAI(input, env) {
 
   function buildSchemaExample() {
     const choices = [];
-    for (let i = 0; i < choicesCount; i++) choices.push(`              { "id": "c${i + 1}", "text": "..." }`);
+    for (let i = 0; i < choicesCount; i) choices.push(`              { "id": "c${i + 1}", "text": "..." }`);
     const schema = `{
   "ok": true,
   "mode": "training",
@@ -1451,6 +1483,10 @@ ${contextTextRaw || "(none)"}
     return { ok: true, v: "training-blocks@v1", mode: "training", language, subjectId: effectiveSubjectId, blocks: canonical };
   }
 
+  // ============================================================
+  // BLOCK 05E — Orchestration: TRY 1 / TRY 2 / fallback
+  // ============================================================
+
   // TRY 1
   let answer = await runOnce(false);
   let parsed = parseTrainingAiAnswer(answer);
@@ -1472,166 +1508,6 @@ ${contextTextRaw || "(none)"}
 
   // P0: fallback även vid quality-fail (fail-closed och stabilt)
   return buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, qtForAi);
-}
-
-async function buildDocumentBlocksWithAI(input, env) {
-  const mode = safeStr(input && input.mode).trim() || "document";
-  const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
-  const language = normalizeLanguage(input && input.language);
-  const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
-  const subjectIdRaw = safeStr(input && input.subjectId).trim() || "generic";
-
-  const bundle = parseContextBundle(contextTextRaw);
-  const effectiveSubjectId = safeStr(subjectIdRaw || (bundle && bundle.subjectId) || "generic").trim() || "generic";
-  const subjectSpec = await resolveSubjectSpecAsync(effectiveSubjectId, language, env);
-
-  const courseInfo = fmtContextForPrompt(bundle, language);
-  const sv = language === "sv";
-
-  const minWords = Number(subjectSpec && subjectSpec.minWordsDoc) || 180;
-  const heads = Array.isArray(subjectSpec && subjectSpec.requiredHeadings) ? subjectSpec.requiredHeadings : [];
-  const bullets = Array.isArray(subjectSpec && subjectSpec.bullets) ? subjectSpec.bullets : [];
-  const examples = Array.isArray(subjectSpec && subjectSpec.examples) ? subjectSpec.examples : [];
-  const forbidden = Array.isArray(subjectSpec && subjectSpec.forbidden) ? subjectSpec.forbidden : [];
-
-  const subjectHardFacts = [
-    sv ? "ÄMNE (hårda krav):" : "SUBJECT (hard requirements):",
-    `subjectId: ${subjectSpec.id}`,
-    `${sv ? "Titel" : "Title"}: ${subjectSpec.label}`,
-    `${sv ? "Minimilängd" : "Minimum length"}: ${minWords} ${sv ? "ord totalt" : "words total"}`,
-    heads.length ? `${sv ? "Obligatoriska rubriker" : "Required headings"}: ${heads.join(" | ")}` : "",
-    bullets.length ? `${sv ? "Punktkrav" : "Bullet requirements"}:\n- ${bullets.join("\n- ")}` : "",
-    examples.length ? `${sv ? "Exempel att använda/efterlikna" : "Examples to use/imitate"}:\n- ${examples.join("\n- ")}` : "",
-    forbidden.length ? `${sv ? "FÖRBJUDET i dokumentläge" : "FORBIDDEN in document mode"}: ${forbidden.join(", ")}` : "",
-  ].filter(Boolean).join("\n");
-
-  const schemaHint = sv
-    ? `Returnera ENDAST giltig JSON. Inget markdown.
-Schema:
-{ "blocks": [ { "title": "string", "text": "string" } ] }
-Regler:
-- Exakt ${count} blocks.
-- Total text minst ${minWords} ord.
-- Använd rubriker och punktlistor.
-- Inga provfrågor, inga svarsalternativ, ingen correctIndex, ingen quiz-struktur.`
-    : `Return ONLY valid JSON. No markdown.
-Schema:
-{ "blocks": [ { "title": "string", "text": "string" } ] }
-Rules:
-- Exactly ${count} blocks.
-- Total text at least ${minWords} words.
-- Use headings and bullet lists.
-- No quiz questions, no options, no correctIndex, no quiz structure.`;
-
-  const systemPrompt = sv
-    ? "Du skapar dokumentblock (infoblad) för HR-utbildning. Du får INTE skapa provfrågor här. Följ schema exakt."
-    : "You create document blocks (info sheet) for HR training. You MUST NOT create quiz questions. Follow schema exactly.";
-
-  const userPrompt =
-    `${courseInfo}\n\n` +
-    `${subjectHardFacts}\n\n` +
-    (sv ? `LÄGE: ${mode.toUpperCase()} (dokument-innehåll)\n\n` : `MODE: ${mode.toUpperCase()} (document content)\n\n`) +
-    (sv ? `KONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n\n` : `CONTEXT (raw):\n${contextTextRaw || "(none)"}\n\n`) +
-    schemaHint;
-
-  const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
-
-  function containsForbidden(text, forbiddenList) {
-    const t = safeStr(text).toLowerCase();
-    for (const w of Array.isArray(forbiddenList) ? forbiddenList : []) {
-      const ww = safeStr(w).toLowerCase().trim();
-      if (!ww) continue;
-      if (t.includes(ww)) return true;
-    }
-    return false;
-  }
-
-  async function runOnce(forceStricter) {
-    const extra = forceStricter
-      ? (sv
-          ? "\n\nVIKTIGT: Svara utförligt. Minst 2 konkreta exempel. Använd rubriker och punktlistor."
-          : "\n\nIMPORTANT: Answer in detail. At least 2 concrete examples. Use headings and bullet lists.")
-      : "";
-
-    let answer;
-    try {
-      answer = await env.AI.run(model, { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt + extra }] });
-    } catch (_) {
-      answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt + extra }] });
-    }
-    return answer;
-  }
-
-  function parseDocRows(ans) {
-    const raw = isPlainObject(ans) ? (ans.response || ans.result || ans.output || ans.text || ans) : ans;
-    const parsed0 = safeJsonFromUnknown(raw);
-    const parsed = coerceParsedObjOrArray(parsed0);
-    if (!parsed || !isPlainObject(parsed)) return null;
-
-    const rows = Array.isArray(parsed.blocks) ? parsed.blocks : Array.isArray(parsed.sections) ? parsed.sections : null;
-    if (!rows || !rows.length) return null;
-
-    const blocks = [];
-    for (let i = 0; i < rows.length && blocks.length < count; i++) {
-      const r = rows[i];
-      if (!r) continue;
-      if (typeof r === "string") {
-        const t = safeStr(r).trim();
-        if (!t) continue;
-        blocks.push(makeTextBlock({ i: blocks.length, title: "", text: t }));
-        continue;
-      }
-      if (isPlainObject(r)) {
-        const title = safeStr(r.title || r.heading || "").trim();
-        const text = safeStr(r.text || r.body || r.content || "").trim();
-        if (!text) continue;
-        blocks.push(makeTextBlock({ i: blocks.length, title, text }));
-      }
-    }
-
-    if (!blocks.length) return null;
-    if (!ensureNoQuestionBlocks(blocks)) return null;
-
-    while (blocks.length < count) {
-      blocks.push(makeTextBlock({
-        i: blocks.length,
-        title: sv ? `Block ${blocks.length + 1}` : `Block ${blocks.length + 1}`,
-        text: sv ? "Komplettera med dokumenttext kopplad till ämnet. Lägg till rubriker och exempel." : "Add document text tied to the subject. Add headings and examples."
-      }));
-    }
-
-    return blocks.slice(0, count);
-  }
-
-  function validateAll(blocksToCheck) {
-    const v = validateDocOutput({ language, subjectSpec, blocks: blocksToCheck });
-    if (!v.ok) return v;
-
-    const joined = joinDocBlocksText(blocksToCheck);
-    if (forbidden.length && containsForbidden(joined, forbidden)) {
-      return {
-        ok: false,
-        errorCode: "DOC_FORBIDDEN_CONTENT",
-        message: sv ? "Infoblad innehöll förbjudet quiz-/facit-innehåll. Försök igen." : "Document contained forbidden quiz/answer-key content. Try again.",
-      };
-    }
-    return { ok: true };
-  }
-
-  let answer = await runOnce(false);
-  let blocks = parseDocRows(answer);
-  if (!blocks) return null;
-
-  let v = validateAll(blocks);
-  if (!v.ok) {
-    answer = await runOnce(true);
-    blocks = parseDocRows(answer);
-    if (!blocks) return null;
-    v = validateAll(blocks);
-    if (!v.ok) return null;
-  }
-
-  return { ok: true, v: "training-blocks@v1", mode, subjectId: effectiveSubjectId, language, blocks };
 }
 
 // ============================================================
