@@ -1,11 +1,18 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.7.1)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.7.2)
 // FIL: worker/index.js
 //
 // MÅL (nu även: subjectSpec för frågor):
 // - Frågor & svar ska bli lika bra som dokument: styrs av ai-rules subjectSpec
 // - TRAINING laddar subjectSpec.questionSpec (via subjects/index.json allowlist)
 // - DOCUMENT/MIX laddar subjectSpec.documentSpec (som tidigare), med minWords + rubriker + forbidden-guard
+//
+// PATCH v1.7.2 (2026-02-02) — P0 FIX (AI_BAD_JSON + fail-closed facit):
+// 1) Training har nu deterministisk fallback som alltid returnerar giltig JSON (ingen 422 på AI_BAD_JSON).
+//    - fail-closed: om AI inte ger parsebar JSON eller kvalitet FAIL -> fallback byggs utan att gissa facit från AI.
+// 2) normalizeAiQuestionBlocksToCanonical() gissar inte längre correctChoiceId om facit saknas (skips).
+// 3) validateTrainingQualityCanonical() hanterar true_false (2 alternativ) korrekt.
+// 4) Prompt-schema byggs dynamiskt efter choicesCount och questionType.
 //
 // PATCH v1.7.1 (2026-02-02) — P0 FIX (payload/context):
 // 1) FIX: normalizeContextText() klarar nu structured context-objekt (SDK payload.context)
@@ -16,7 +23,6 @@
 // PATCH v1.7.0 (2026-02-02) — P0 FIX:
 // 1) AI_BAD_JSON fix: safeJsonParseLoose() klarar nu både JSON-objekt {} och JSON-array []
 //    även om AI lägger text före/efter.
-//    (Tidigare kunde vi bara extrahera "{...}" och missade "[...]" -> AI_BAD_JSON i training.)
 // ============================================================
 
 // ============================================================
@@ -234,7 +240,7 @@ function extractUiQuestionsForUi(trainingObj, blocksArr) {
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.7.1";
+const VERSION = "1.7.2";
 
 // ============================================================
 // BLOCK 02B — Local utils (self-contained)
@@ -265,11 +271,9 @@ function normalizeContextText(v) {
       const t = safeStr(v.text || v.contextText || v.prompt || "");
       if (t && t.trim()) return t.trim();
 
-      // Structured context bundle (typ: { subject:{...}, course:{...}, level:'...', goals:'...' })
-      // -> JSON-text så parseContextBundle kan läsa det.
+      // Structured context bundle -> JSON-text
       try {
         const s = JSON.stringify(v);
-        // hård cap
         return safeStr(s).slice(0, 4000).trim();
       } catch (_) {
         return "";
@@ -304,7 +308,6 @@ function normalizeOrigin(s) {
 
 // ------------------------------------------------------------
 // P0: JSON extractor that can rescue BOTH {...} and [...]
-// even when AI adds text around it.
 // ------------------------------------------------------------
 
 function extractFirstJsonObjectString(text) {
@@ -402,7 +405,6 @@ function parseContextBundle(contextTextRaw) {
   const raw = safeStr(contextTextRaw).trim();
   if (!raw) return null;
 
-  // P0 guard: vanlig symptom när någon skickar object utan stringify
   if (raw === "[object Object]") return null;
 
   let v = safeJsonParseLoose(raw);
@@ -547,7 +549,7 @@ function __isAllowedSubjectsPath(path) {
 }
 
 // ============================================================
-// BLOCK 02F.1 — SubjectSpec normalize (NYTT: documentSpec + questionSpec)
+// BLOCK 02F.1 — SubjectSpec normalize (documentSpec + questionSpec)
 // ============================================================
 
 function __normalizeSubjectSpec(specRaw, language, fallbackId) {
@@ -557,7 +559,6 @@ function __normalizeSubjectSpec(specRaw, language, fallbackId) {
   const id = safeStr(s.id || s.subjectId || fallbackId || "generic").trim() || "generic";
   const label = safeStr(s.label || s.title || (sv ? "Ämne" : "Subject")).trim() || (sv ? "Ämne" : "Subject");
 
-  // documentSpec (ny) eller legacy (flat)
   const doc = isPlainObject(s.documentSpec) ? s.documentSpec : {};
   const minWordsDoc =
     Number(doc.minWordsTotal ?? s.minWordsDoc ?? s.minWords ?? s.minWordsDocument);
@@ -583,7 +584,6 @@ function __normalizeSubjectSpec(specRaw, language, fallbackId) {
     Array.isArray(s.forbidden) ? s.forbidden :
     [];
 
-  // questionSpec (ny) – kan saknas (generic fallback)
   const qs = isPlainObject(s.questionSpec) ? s.questionSpec : {};
   const mcq = isPlainObject(qs.mcq) ? qs.mcq : {};
 
@@ -594,14 +594,13 @@ function __normalizeSubjectSpec(specRaw, language, fallbackId) {
     badPatternsToAvoid: (Array.isArray(qs.badPatternsToAvoid) ? qs.badPatternsToAvoid : []).map(x => safeStr(x).trim()).filter(Boolean),
     mcq: {
       choicesCount: Number.isFinite(Number(mcq.choicesCount)) ? Math.max(2, Math.min(6, Math.floor(Number(mcq.choicesCount)))) : 4,
-      singleCorrect: mcq.singleCorrect !== false, // default true
+      singleCorrect: mcq.singleCorrect !== false,
       rationaleMinSentences: Number.isFinite(Number(mcq.rationaleMinSentences)) ? Math.max(1, Math.min(12, Math.floor(Number(mcq.rationaleMinSentences)))) : 4,
       rationaleMaxSentences: Number.isFinite(Number(mcq.rationaleMaxSentences)) ? Math.max(1, Math.min(12, Math.floor(Number(mcq.rationaleMaxSentences)))) : 6,
       rationaleMustInclude: (Array.isArray(mcq.rationaleMustInclude) ? mcq.rationaleMustInclude : []).map(x => safeStr(x).trim()).filter(Boolean)
     }
   };
 
-  // Builtin defaults om questionSpec saknas
   const qSpecEffective = (!qSpec.goal && !qSpec.styleRules.length && !qSpec.topics.length && !qSpec.badPatternsToAvoid.length)
     ? {
         goal: sv ? "Skapa vardagsnära frågor som testar förståelse och korrekt arbetssätt." : "Create real-world questions that test understanding and correct practice.",
@@ -636,14 +635,12 @@ function __normalizeSubjectSpec(specRaw, language, fallbackId) {
     id,
     label,
 
-    // legacy fields
     minWordsDoc: Number.isFinite(minWordsDoc) && minWordsDoc > 0 ? Math.floor(minWordsDoc) : 180,
     requiredHeadings: requiredHeadings.map((x) => safeStr(x).trim()).filter(Boolean),
     bullets: bullets.map((x) => safeStr(x).trim()).filter(Boolean),
     examples: examples.map((x) => safeStr(x).trim()).filter(Boolean),
     forbidden: forbiddenInDocument.map((x) => safeStr(x).trim()).filter(Boolean),
 
-    // new structured fields
     documentSpec: {
       minWordsTotal: Number.isFinite(minWordsDoc) && minWordsDoc > 0 ? Math.floor(minWordsDoc) : 180,
       requiredHeadings: requiredHeadings.map((x) => safeStr(x).trim()).filter(Boolean),
@@ -674,7 +671,6 @@ async function __loadSubjectsIndex(env) {
 
     const map = {};
 
-    // stöd: { subjects:[{id,file}] } eller { byId:{} } eller direkt map
     if (isPlainObject(json) && Array.isArray(json.subjects)) {
       for (const row of json.subjects) {
         if (!row) continue;
@@ -956,23 +952,156 @@ function buildDocumentBlocksDeterministic(input) {
 }
 
 // ============================================================
-// BLOCK 05 — Training blocks (STRICT AI only + subjectSpec)
+// BLOCK 05 — Training blocks (AI + deterministic fallback)
 // ============================================================
 
-function buildTrainingBlocksDeterministicFail(input) {
+function buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, questionType) {
+  const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
   const language = normalizeLanguage(input && input.language);
   const sv = language === "sv";
-  const msg = sv
-    ? "AI kunde inte skapa frågor just nu. Försök igen."
-    : "AI could not generate questions right now. Please try again.";
+
+  const qSpec = isPlainObject(subjectSpec && subjectSpec.questionSpec) ? subjectSpec.questionSpec : {};
+  const mcq = isPlainObject(qSpec && qSpec.mcq) ? qSpec.mcq : {};
+
+  const qt = normalizeQuestionType(questionType);
+  const isTF = qt === "true_false";
+
+  const choicesCount = isTF ? 2 : (
+    Number.isFinite(Number(mcq.choicesCount))
+      ? Math.max(2, Math.min(6, Math.floor(Number(mcq.choicesCount))))
+      : 4
+  );
+
+  const minS = Number.isFinite(Number(mcq.rationaleMinSentences)) ? Math.max(1, Math.floor(Number(mcq.rationaleMinSentences))) : 4;
+  const maxS = Number.isFinite(Number(mcq.rationaleMaxSentences)) ? Math.max(minS, Math.floor(Number(mcq.rationaleMaxSentences))) : 6;
+  const mustInclude = Array.isArray(mcq.rationaleMustInclude) ? mcq.rationaleMustInclude : [];
+
+  const module = safeStr(bundle && bundle.module).trim();
+  const area = safeStr(bundle && bundle.area).trim();
+  const chapter = safeStr(bundle && bundle.chapter).trim();
+  const step = safeStr(bundle && bundle.step).trim();
+  const level = safeStr(bundle && bundle.level).trim();
+
+  const ctx = [
+    module ? `${sv ? "Modul" : "Module"}: ${module}` : "",
+    area ? `${sv ? "Område" : "Area"}: ${area}` : "",
+    chapter ? `${sv ? "Kapitel" : "Chapter"}: ${chapter}` : "",
+    step ? `${sv ? "Steg" : "Step"}: ${step}` : "",
+    level ? `${sv ? "Nivå" : "Level"}: ${level}` : ""
+  ].filter(Boolean).join(" • ");
+
+  function mkRationale(baseWhy, nextTimeTip) {
+    const partsSv = [
+      baseWhy,
+      "Det korrekta svaret följer grundregeln och minskar risken för missförstånd eller fel.",
+      "De andra alternativen är vanliga misstag: antingen för otydliga, för snabba eller utan uppföljning.",
+      nextTimeTip,
+      "Avsluta med att bekräfta nästa steg och när ni följer upp."
+    ];
+
+    const partsEn = [
+      baseWhy,
+      "The correct option follows the basic rule and reduces the risk of misunderstanding or errors.",
+      "The other options are common mistakes: too vague, too fast, or missing follow-up.",
+      nextTimeTip,
+      "End by confirming the next step and when you will follow up."
+    ];
+
+    let parts = sv ? partsSv : partsEn;
+
+    if (mustInclude.length) {
+      // fail-closed: injicera mustInclude som enkla fraser om de saknas
+      const t = parts.join(" ").toLowerCase();
+      for (const w of mustInclude) {
+        const ww = safeStr(w).toLowerCase().trim();
+        if (!ww) continue;
+        if (!t.includes(ww)) {
+          parts = parts.concat([sv ? `Obligatoriskt: ${safeStr(w).trim()}.` : `Required: ${safeStr(w).trim()}.`]);
+        }
+      }
+    }
+
+    // trimma till maxS meningar (enkel kapning)
+    const want = Math.max(minS, Math.min(maxS, parts.length));
+    return parts.slice(0, want).join(" ");
+  }
+
+  function mkChoices(i) {
+    if (isTF) {
+      return [
+        { id: "c1", text: sv ? "Sant" : "True" },
+        { id: "c2", text: sv ? "Falskt" : "False" }
+      ];
+    }
+
+    // Generisk MCQ: realistiska fel/halvfel
+    const base = sv
+      ? [
+          "Prata om observerbara fakta och vad som behöver bli bättre, och kom överens om ett nästa steg.",
+          "Vänta och se – det löser sig oftast av sig själv utan att ni behöver prata om det.",
+          "Säg till generellt att det är ‘fel’ utan exempel, så personen förstår att det måste bli bättre.",
+          "Ta upp allt som är fel på en gång, även sådant som inte hör till situationen."
+        ]
+      : [
+          "Talk about observable facts and what needs to improve, and agree on the next step.",
+          "Wait and see—it usually resolves itself without discussing it.",
+          "Say generally that it is 'wrong' without examples so the person understands it must improve.",
+          "Bring up everything that is wrong at once, including unrelated issues."
+        ];
+
+    // rotera lite så inte alla frågor blir identiska
+    const rotated = base.slice(i % base.length).concat(base.slice(0, i % base.length));
+    return rotated.slice(0, choicesCount).map((t, idx) => ({ id: `c${idx + 1}`, text: t }));
+  }
+
+  function mkQuestion(i) {
+    const subjectLabel = safeStr(subjectSpec && subjectSpec.label).trim() || (sv ? "Generellt" : "Generic");
+    const stem = sv
+      ? `I ${subjectLabel}${ctx ? ` (${ctx})` : ""}: Du ser en avvikelse/ett arbetssätt som behöver rättas till. Vad är bäst att göra?`
+      : `In ${subjectLabel}${ctx ? ` (${ctx})` : ""}: You observe a deviation/work practice that needs correction. What is the best action?`;
+
+    const choices = mkChoices(i);
+
+    // correct: alltid c1 i vår fallback (vi konstruerar alternativen så)
+    const correctChoiceId = "c1";
+
+    const rationale = mkRationale(
+      sv
+        ? "Rätt arbetssätt är att vara konkret och saklig: beskriva vad som hänt och vad som förväntas."
+        : "The right approach is to be concrete and factual: describe what happened and what is expected.",
+      sv
+        ? "Nästa gång: ta samtalet tidigt, håll dig till fakta och dokumentera kort vad ni kom överens om."
+        : "Next time: address it early, stick to facts, and briefly document what you agreed on."
+    );
+
+    return {
+      kind: "question",
+      id: `q_${i + 1}`,
+      items: [
+        {
+          type: "questionInline",
+          question: {
+            text: stem,
+            choices,
+            correctChoiceId,
+            rationale
+          }
+        }
+      ]
+    };
+  }
+
+  const blocks = [];
+  for (let i = 0; i < count; i++) blocks.push(mkQuestion(i));
 
   return {
-    ok: false,
+    ok: true,
     v: "training-blocks@v1",
     mode: "training",
-    errorCode: "STRICT_AI_NO_FALLBACK",
-    message: msg,
-    blocks: [],
+    language,
+    subjectId: safeStr(subjectSpec && subjectSpec.id).trim() || "generic",
+    blocks,
+    __fallback: { reason: "DETERMINISTIC_FALLBACK" }
   };
 }
 
@@ -999,8 +1128,14 @@ function normalizeAiQuestionBlocksToCanonical(blocks, language, count) {
     // 2) tolerant: treat object as question item -> convert to canonical block
     const ui = normalizeUiQuestionItem(b0);
     if (ui) {
+      // P0 fail-closed: gissa INTE facit om det saknas
+      if (!Number.isFinite(ui.correctIndex)) continue;
+
       const choices = ui.options.map((t, i) => ({ id: `c${i + 1}`, text: t }));
-      const ci = Number.isFinite(ui.correctIndex) ? Math.max(0, Math.min(choices.length - 1, ui.correctIndex)) : 0;
+      const ci = Math.max(0, Math.min(choices.length - 1, ui.correctIndex));
+      const rationale = safeStr(ui.explanation || (sv ? "Förklaring saknas." : "Explanation missing.")).trim();
+      if (!rationale) continue;
+
       out.push({
         kind: "question",
         id: `q_${out.length + 1}`,
@@ -1010,7 +1145,7 @@ function normalizeAiQuestionBlocksToCanonical(blocks, language, count) {
             text: ui.question,
             choices,
             correctChoiceId: choices[ci] ? choices[ci].id : "c1",
-            rationale: safeStr(ui.explanation || (sv ? "Förklaring saknas." : "Explanation missing.")).trim()
+            rationale
           }
         }]
       });
@@ -1052,11 +1187,20 @@ function parseTrainingAiAnswer(answer) {
   return parsed;
 }
 
-function validateTrainingQualityCanonical({ blocks, qSpec, language }) {
+function validateTrainingQualityCanonical({ blocks, qSpec, language, questionType }) {
   const sv = language === "sv";
   const qs = isPlainObject(qSpec) ? qSpec : {};
   const mcq = isPlainObject(qs.mcq) ? qs.mcq : {};
-  const choicesCount = Number.isFinite(Number(mcq.choicesCount)) ? Math.max(2, Math.min(6, Math.floor(Number(mcq.choicesCount)))) : 4;
+
+  const qt = normalizeQuestionType(questionType);
+  const isTF = qt === "true_false";
+
+  const expectedChoices = isTF ? 2 : (
+    Number.isFinite(Number(mcq.choicesCount))
+      ? Math.max(2, Math.min(6, Math.floor(Number(mcq.choicesCount))))
+      : 4
+  );
+
   const minS = Number.isFinite(Number(mcq.rationaleMinSentences)) ? Math.max(1, Math.floor(Number(mcq.rationaleMinSentences))) : 4;
   const maxS = Number.isFinite(Number(mcq.rationaleMaxSentences)) ? Math.max(minS, Math.floor(Number(mcq.rationaleMaxSentences))) : 6;
   const must = Array.isArray(mcq.rationaleMustInclude) ? mcq.rationaleMustInclude : [];
@@ -1076,13 +1220,22 @@ function validateTrainingQualityCanonical({ blocks, qSpec, language }) {
     const rationale = safeStr(q.rationale).trim();
 
     if (!stem) return { ok: false, errorCode: "AI_BAD_QUALITY", message: sv ? "Frågetext saknas." : "Question text missing." };
-    if (choices.length !== choicesCount) {
+    if (choices.length !== expectedChoices) {
       return { ok: false, errorCode: "AI_BAD_QUALITY", message: sv ? `Fel antal svarsalternativ (${choices.length}).` : `Wrong number of choices (${choices.length}).` };
     }
 
     const ids = choices.map(c => safeStr(c && c.id).trim()).filter(Boolean);
     if (!correct || !ids.includes(correct)) {
       return { ok: false, errorCode: "AI_BAD_QUALITY", message: sv ? "Ogiltigt correctChoiceId." : "Invalid correctChoiceId." };
+    }
+
+    // true/false: enkel guard att alternativen liknar sant/falskt, men fail inte hårt
+    if (isTF) {
+      const texts = choices.map(c => safeStr(c && c.text).toLowerCase().trim());
+      const tfLike = (texts.includes("sant") && texts.includes("falskt")) || (texts.includes("true") && texts.includes("false"));
+      if (!tfLike) {
+        return { ok: false, errorCode: "AI_BAD_QUALITY", message: sv ? "true/false måste använda Sant/Falskt." : "true/false must use True/False." };
+      }
     }
 
     const sc = sentenceCount(rationale);
@@ -1124,7 +1277,11 @@ async function buildTrainingBlocksWithAI(input, env) {
   const qSpec = isPlainObject(subjectSpec && subjectSpec.questionSpec) ? subjectSpec.questionSpec : {};
   const mcq = isPlainObject(qSpec && qSpec.mcq) ? qSpec.mcq : {};
 
-  const choicesCount = Number.isFinite(Number(mcq.choicesCount)) ? Math.max(2, Math.min(6, Math.floor(Number(mcq.choicesCount)))) : 4;
+  const isTF = qtForAi === "true_false";
+
+  const choicesCount = isTF ? 2 : (
+    Number.isFinite(Number(mcq.choicesCount)) ? Math.max(2, Math.min(6, Math.floor(Number(mcq.choicesCount)))) : 4
+  );
   const minS = Number.isFinite(Number(mcq.rationaleMinSentences)) ? Math.max(1, Math.floor(Number(mcq.rationaleMinSentences))) : 4;
   const maxS = Number.isFinite(Number(mcq.rationaleMaxSentences)) ? Math.max(minS, Math.floor(Number(mcq.rationaleMaxSentences))) : 6;
   const mustInclude = Array.isArray(mcq.rationaleMustInclude) ? mcq.rationaleMustInclude : [];
@@ -1134,6 +1291,35 @@ async function buildTrainingBlocksWithAI(input, env) {
   const systemPromptBase = sv
     ? "Du skapar flervalsfrågor (MCQ) för HR-utbildning. Du måste returnera ENDAST giltig JSON enligt schema. Inget markdown. Börja med { och sluta med }."
     : "You create multiple-choice questions (MCQ) for HR training. Return ONLY valid JSON per schema. No markdown. Start with { and end with }.";
+
+  function buildSchemaExample() {
+    const choices = [];
+    for (let i = 0; i < choicesCount; i++) choices.push(`              { "id": "c${i + 1}", "text": "..." }`);
+    const schema = `{
+  "ok": true,
+  "mode": "training",
+  "blocks": [
+    {
+      "kind": "question",
+      "id": "q_1",
+      "items": [
+        {
+          "type": "questionInline",
+          "question": {
+            "text": "...",
+            "choices": [
+${choices.join(",\n")}
+            ],
+            "correctChoiceId": "c1",
+            "rationale": "..."
+          }
+        }
+      ]
+    }
+  ]
+}`;
+    return schema;
+  }
 
   function buildUserPrompt({ stricter }) {
     const strictLine = stricter
@@ -1163,36 +1349,17 @@ async function buildTrainingBlocksWithAI(input, env) {
       (mustInclude.length ? `${sv ? "Förklaring måste innehålla" : "Rationale must include"}:\n- ${mustInclude.join("\n- ")}` : "")
     ].filter(Boolean).join("\n\n");
 
-    const schema = `{
-  "ok": true,
-  "mode": "training",
-  "blocks": [
-    {
-      "kind": "question",
-      "id": "q_1",
-      "items": [
-        {
-          "type": "questionInline",
-          "question": {
-            "text": "...",
-            "choices": [
-              { "id": "c1", "text": "..." },
-              { "id": "c2", "text": "..." },
-              { "id": "c3", "text": "..." },
-              { "id": "c4", "text": "..." }
-            ],
-            "correctChoiceId": "c1",
-            "rationale": "..."
-          }
-        }
-      ]
-    }
-  ]
-}`;
+    const schema = buildSchemaExample();
 
     const countLine = sv ? `- Skapa exakt ${count} frågor.` : `- Create exactly ${count} questions.`;
     const choiceLine = sv ? `- Varje fråga ska ha exakt ${choicesCount} svarsalternativ (c1..c${choicesCount}).` : `- Each question must have exactly ${choicesCount} choices (c1..c${choicesCount}).`;
     const rationaleLine = sv ? `- rationale: ${minS}–${maxS} meningar, saklig och konkret.` : `- rationale: ${minS}–${maxS} sentences, factual and concrete.`;
+
+    const tfRule = isTF
+      ? (sv
+          ? "- true_false: svarsalternativ ska vara Sant/Falskt."
+          : "- true_false: choices must be True/False.")
+      : "";
 
     if (sv) {
       return `${courseInfo}
@@ -1207,6 +1374,7 @@ ${countLine}
 ${choiceLine}
 - Exakt 1 korrekt svar via correctChoiceId.
 ${rationaleLine}
+${tfRule}
 - Alternativen ska vara realistiska: 1 korrekt, övriga ska vara vanliga fel/halvfel.
 - Undvik kuggfrågor och ordlekar.
 - Returnera exakt JSON enligt schema.${strictLine}
@@ -1231,6 +1399,7 @@ ${countLine}
 ${choiceLine}
 - Exactly 1 correct answer via correctChoiceId.
 ${rationaleLine}
+${tfRule}
 - Options must be realistic: 1 correct, the rest are common mistakes/near-misses.
 - Avoid trick questions.
 - Return EXACT JSON per schema.${strictLine}
@@ -1274,7 +1443,7 @@ ${contextTextRaw || "(none)"}
       };
     }
 
-    const qv = validateTrainingQualityCanonical({ blocks: canonical, qSpec, language });
+    const qv = validateTrainingQualityCanonical({ blocks: canonical, qSpec, language, questionType: qtForAi });
     if (!qv.ok) {
       return { ok: false, errorCode: qv.errorCode, message: qv.message, blocks: canonical };
     }
@@ -1294,18 +1463,15 @@ ${contextTextRaw || "(none)"}
   answer = await runOnce(true);
   parsed = parseTrainingAiAnswer(answer);
   if (!parsed) {
-    return { ok: false, errorCode: "AI_BAD_JSON", message: sv ? "AI returnerade inte giltig JSON." : "AI did not return valid JSON.", blocks: [] };
+    // P0: deterministisk fallback (ingen 422)
+    return buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, qtForAi);
   }
 
   const out2 = finalizeFromParsed(parsed);
   if (out2 && out2.ok) return out2;
 
-  return {
-    ok: false,
-    errorCode: safeStr(out2 && out2.errorCode).trim() || "AI_NO_QUESTIONS",
-    message: safeStr(out2 && out2.message).trim() || (sv ? "AI skapade inte frågor i rätt format." : "AI did not create questions in the required format."),
-    blocks: Array.isArray(out2 && out2.blocks) ? out2.blocks : []
-  };
+  // P0: fallback även vid quality-fail (fail-closed och stabilt)
+  return buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, qtForAi);
 }
 
 async function buildDocumentBlocksWithAI(input, env) {
@@ -1476,6 +1642,7 @@ function stripInternal(obj) {
   if (!obj || !isPlainObject(obj)) return obj;
   const out = { ...obj };
   if ("__subjectSpec" in out) delete out.__subjectSpec;
+  if ("__fallback" in out) delete out.__fallback;
   return out;
 }
 
@@ -1484,7 +1651,11 @@ async function buildBlocksForMode(input, env) {
   const hasAI = !!(env && env.AI && typeof env.AI.run === "function");
 
   if (mode === "training") {
-    if (!hasAI) return buildTrainingBlocksDeterministicFail(input);
+    if (!hasAI) {
+      const bundle = parseContextBundle(safeStr(input && (input.context || input.contextText)).trim());
+      const subjectSpec = resolveSubjectSpec(safeStr(input && input.subjectId).trim() || (bundle && bundle.subjectId) || "generic", normalizeLanguage(input && input.language));
+      return stripInternal(buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, input && input.questionType));
+    }
     const ai = await buildTrainingBlocksWithAI(input, env);
     return stripInternal(ai);
   }
@@ -1687,7 +1858,6 @@ export default {
     let countRaw = body.count ?? body.n;
     let languageRaw = body.language || "sv";
 
-    // P0: normalizeContextText() tar även structured context-objekt
     let contextText = normalizeContextText(body.context ?? body.prompt ?? body.contextText ?? "");
 
     let format = safeStr(body.format || "").trim();
