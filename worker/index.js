@@ -915,4 +915,869 @@ function buildDocumentBlocksDeterministic(input) {
       `${h4}\n` +
       (sv
         ? `- Vad har vi sett/hört (fakta)?\n- Vad är syftet med samtalet?\n- Vad behöver personen för att lyckas?\n- Vad gör vi nu och när följer vi upp?\n\n`
-        : `- What did we observe (facts)?\n- What is the purpose of the conversation?\n- What does the person need to succeed?\n- What do we
+        : `- What did we observe (facts)?\n- What is the purpose of the conversation?\n- What does the person need to succeed?\n- What do we do now and when do we follow up?\n\n`) +
+      `${h5}\n` +
+      (sv
+        ? `- Att “gissa motiv” istället för att prata om beteende.\n- Att ge otydlig feedback utan nästa steg.\n- Att hoppa över uppföljning.\n`
+        : `- Guessing motives instead of talking about behavior.\n- Giving vague feedback without next steps.\n- Skipping follow-up.\n`);
+
+    return { title, text };
+  }
+
+  const blocks = [];
+  for (let i = 0; i < count; i++) {
+    const built = buildDocText(i);
+    blocks.push(makeTextBlock({ i, title: built.title, text: built.text }));
+  }
+
+  return { ok: true, v: "training-blocks@v1", mode, subjectId: effectiveSubjectId, language, blocks };
+}
+
+// ============================================================
+// BLOCK 05 — Training blocks (STRICT AI only + subjectSpec)
+// ============================================================
+
+function buildTrainingBlocksDeterministicFail(input) {
+  const language = normalizeLanguage(input && input.language);
+  const sv = language === "sv";
+  const msg = sv
+    ? "AI kunde inte skapa frågor just nu. Försök igen."
+    : "AI could not generate questions right now. Please try again.";
+
+  return {
+    ok: false,
+    v: "training-blocks@v1",
+    mode: "training",
+    errorCode: "STRICT_AI_NO_FALLBACK",
+    message: msg,
+    blocks: [],
+  };
+}
+
+function coerceParsedObjOrArray(parsed) {
+  if (isPlainObject(parsed)) return parsed;
+  if (Array.isArray(parsed)) return { blocks: parsed };
+  return null;
+}
+
+function normalizeAiQuestionBlocksToCanonical(blocks, language, count) {
+  const sv = language === "sv";
+  const out = [];
+
+  const arr = Array.isArray(blocks) ? blocks : [];
+  for (const b0 of arr) {
+    if (!b0) continue;
+
+    // 1) already canonical-ish
+    if (isPlainObject(b0) && (b0.kind === "question" || safeStr(b0.kind).toLowerCase() === "question") && Array.isArray(b0.items)) {
+      out.push(b0);
+      continue;
+    }
+
+    // 2) tolerant: treat object as question item -> convert to canonical block
+    const ui = normalizeUiQuestionItem(b0);
+    if (ui) {
+      const choices = ui.options.map((t, i) => ({ id: `c${i + 1}`, text: t }));
+      const ci = Number.isFinite(ui.correctIndex) ? Math.max(0, Math.min(choices.length - 1, ui.correctIndex)) : 0;
+      out.push({
+        kind: "question",
+        id: `q_${out.length + 1}`,
+        items: [{
+          type: "questionInline",
+          question: {
+            text: ui.question,
+            choices,
+            correctChoiceId: choices[ci] ? choices[ci].id : "c1",
+            rationale: safeStr(ui.explanation || (sv ? "Förklaring saknas." : "Explanation missing.")).trim()
+          }
+        }]
+      });
+      continue;
+    }
+
+    // 3) object may hold data/items
+    if (isPlainObject(b0) && isPlainObject(b0.data) && Array.isArray(b0.data.items)) {
+      const qi = b0.data.items.find(x => x && x.type === "questionInline" && isPlainObject(x.question));
+      if (qi) {
+        out.push({ kind: "question", id: `q_${out.length + 1}`, items: [qi] });
+        continue;
+      }
+    }
+  }
+
+  return out.slice(0, count);
+}
+
+function effectiveTrainingQuestionType(questionTypeNormalized) {
+  const qt = normalizeQuestionType(questionTypeNormalized);
+  if (!qt || qt === "auto") return "mcq_single";
+  if (qt === "mcq_multi") return "mcq_single";
+  if (qt === "true_false") return "true_false";
+  if (qt === "mcq_single") return "mcq_single";
+  return "mcq_single";
+}
+
+function parseTrainingAiAnswer(answer) {
+  const raw = isPlainObject(answer) ? (answer.response || answer.result || answer.output || answer.text || answer) : answer;
+  const parsed0 = safeJsonFromUnknown(raw);
+  const parsed = coerceParsedObjOrArray(parsed0);
+  if (!parsed) return null;
+
+  if (isPlainObject(parsed.training)) return coerceParsedObjOrArray(parsed.training) || parsed;
+  if (isPlainObject(parsed.data)) return coerceParsedObjOrArray(parsed.data) || parsed;
+  if (isPlainObject(parsed.result)) return coerceParsedObjOrArray(parsed.result) || parsed;
+
+  return parsed;
+}
+
+function validateTrainingQualityCanonical({ blocks, qSpec, language }) {
+  const sv = language === "sv";
+  const qs = isPlainObject(qSpec) ? qSpec : {};
+  const mcq = isPlainObject(qs.mcq) ? qs.mcq : {};
+  const choicesCount = Number.isFinite(Number(mcq.choicesCount)) ? Math.max(2, Math.min(6, Math.floor(Number(mcq.choicesCount)))) : 4;
+  const minS = Number.isFinite(Number(mcq.rationaleMinSentences)) ? Math.max(1, Math.floor(Number(mcq.rationaleMinSentences))) : 4;
+  const maxS = Number.isFinite(Number(mcq.rationaleMaxSentences)) ? Math.max(minS, Math.floor(Number(mcq.rationaleMaxSentences))) : 6;
+  const must = Array.isArray(mcq.rationaleMustInclude) ? mcq.rationaleMustInclude : [];
+
+  const arr = Array.isArray(blocks) ? blocks : [];
+  for (const b of arr) {
+    if (!b || b.kind !== "question") {
+      return { ok: false, errorCode: "AI_BAD_QUALITY", message: sv ? "Fel block-typ i training." : "Wrong block type in training." };
+    }
+    const item = Array.isArray(b.items) ? b.items.find(x => x && x.type === "questionInline" && isPlainObject(x.question)) : null;
+    if (!item) return { ok: false, errorCode: "AI_BAD_QUALITY", message: sv ? "Saknar questionInline." : "Missing questionInline." };
+
+    const q = item.question;
+    const stem = safeStr(q.text).trim();
+    const choices = Array.isArray(q.choices) ? q.choices : [];
+    const correct = safeStr(q.correctChoiceId).trim();
+    const rationale = safeStr(q.rationale).trim();
+
+    if (!stem) return { ok: false, errorCode: "AI_BAD_QUALITY", message: sv ? "Frågetext saknas." : "Question text missing." };
+    if (choices.length !== choicesCount) {
+      return { ok: false, errorCode: "AI_BAD_QUALITY", message: sv ? `Fel antal svarsalternativ (${choices.length}).` : `Wrong number of choices (${choices.length}).` };
+    }
+
+    const ids = choices.map(c => safeStr(c && c.id).trim()).filter(Boolean);
+    if (!correct || !ids.includes(correct)) {
+      return { ok: false, errorCode: "AI_BAD_QUALITY", message: sv ? "Ogiltigt correctChoiceId." : "Invalid correctChoiceId." };
+    }
+
+    const sc = sentenceCount(rationale);
+    if (sc < minS || sc > maxS) {
+      return {
+        ok: false,
+        errorCode: "AI_BAD_QUALITY",
+        message: sv ? `Förklaring har fel längd (${sc} meningar).` : `Rationale wrong length (${sc} sentences).`
+      };
+    }
+
+    if (must.length && !textIncludesAll(rationale, must)) {
+      return {
+        ok: false,
+        errorCode: "AI_BAD_QUALITY",
+        message: sv ? "Förklaring saknar obligatoriska delar (mustInclude)." : "Rationale missing required parts (mustInclude)."
+      };
+    }
+  }
+
+  return { ok: true };
+}
+
+async function buildTrainingBlocksWithAI(input, env) {
+  const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
+  const language = normalizeLanguage(input && input.language);
+  const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
+  const questionTypeRaw = normalizeQuestionType(input && input.questionType);
+  const qtForAi = effectiveTrainingQuestionType(questionTypeRaw);
+
+  const bundle = parseContextBundle(contextTextRaw);
+  const subjectIdRaw = safeStr(input && input.subjectId).trim();
+  const effectiveSubjectId = safeStr(subjectIdRaw || (bundle && bundle.subjectId) || "generic").trim() || "generic";
+
+  const sv = language === "sv";
+  const courseInfo = fmtContextForPrompt(bundle, language);
+
+  const subjectSpec = await resolveSubjectSpecAsync(effectiveSubjectId, language, env);
+  const qSpec = isPlainObject(subjectSpec && subjectSpec.questionSpec) ? subjectSpec.questionSpec : {};
+  const mcq = isPlainObject(qSpec && qSpec.mcq) ? qSpec.mcq : {};
+
+  const choicesCount = Number.isFinite(Number(mcq.choicesCount)) ? Math.max(2, Math.min(6, Math.floor(Number(mcq.choicesCount)))) : 4;
+  const minS = Number.isFinite(Number(mcq.rationaleMinSentences)) ? Math.max(1, Math.floor(Number(mcq.rationaleMinSentences))) : 4;
+  const maxS = Number.isFinite(Number(mcq.rationaleMaxSentences)) ? Math.max(minS, Math.floor(Number(mcq.rationaleMaxSentences))) : 6;
+  const mustInclude = Array.isArray(mcq.rationaleMustInclude) ? mcq.rationaleMustInclude : [];
+
+  const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
+
+  const systemPromptBase = sv
+    ? "Du skapar flervalsfrågor (MCQ) för HR-utbildning. Du måste returnera ENDAST giltig JSON enligt schema. Inget markdown. Börja med { och sluta med }."
+    : "You create multiple-choice questions (MCQ) for HR training. Return ONLY valid JSON per schema. No markdown. Start with { and end with }.";
+
+  function buildUserPrompt({ stricter }) {
+    const strictLine = stricter
+      ? (sv
+          ? "\nVIKTIGT: OM DU SKRIVER EN ENDA RAD UTANFÖR JSON SÅ BLIR SVARET AVVISAT. INGA ```."
+          : "\nIMPORTANT: If you write ANY text outside JSON, the response is rejected. No ```.")
+      : "";
+
+    const modeLine = sv ? "LÄGE: TRAINING (frågor)" : "MODE: TRAINING (questions)";
+    const qtLine = sv ? `FRÅGETYP (internt): ${qtForAi}` : `QUESTION TYPE (internal): ${qtForAi}`;
+
+    const subjectLine = sv
+      ? `ÄMNE: ${safeStr(subjectSpec && subjectSpec.label).trim() || "Generellt"} (subjectId: ${effectiveSubjectId})`
+      : `SUBJECT: ${safeStr(subjectSpec && subjectSpec.label).trim() || "Generic"} (subjectId: ${effectiveSubjectId})`;
+
+    const styleRules = Array.isArray(qSpec && qSpec.styleRules) ? qSpec.styleRules : [];
+    const topics = Array.isArray(qSpec && qSpec.topics) ? qSpec.topics : [];
+    const bad = Array.isArray(qSpec && qSpec.badPatternsToAvoid) ? qSpec.badPatternsToAvoid : [];
+    const goal = safeStr(qSpec && qSpec.goal).trim();
+
+    const qRulesBlock = [
+      sv ? "FRÅGEKRAV (subjectSpec.questionSpec):" : "QUESTION REQUIREMENTS (subjectSpec.questionSpec):",
+      goal ? (sv ? `Mål: ${goal}` : `Goal: ${goal}`) : "",
+      styleRules.length ? `${sv ? "Stilregler" : "Style rules"}:\n- ${styleRules.join("\n- ")}` : "",
+      topics.length ? `${sv ? "Ämnen att täcka" : "Topics to cover"}:\n- ${topics.join("\n- ")}` : "",
+      bad.length ? `${sv ? "Dåliga mönster att undvika" : "Bad patterns to avoid"}:\n- ${bad.join("\n- ")}` : "",
+      (mustInclude.length ? `${sv ? "Förklaring måste innehålla" : "Rationale must include"}:\n- ${mustInclude.join("\n- ")}` : "")
+    ].filter(Boolean).join("\n\n");
+
+    const schema = `{
+  "ok": true,
+  "mode": "training",
+  "blocks": [
+    {
+      "kind": "question",
+      "id": "q_1",
+      "items": [
+        {
+          "type": "questionInline",
+          "question": {
+            "text": "...",
+            "choices": [
+              { "id": "c1", "text": "..." },
+              { "id": "c2", "text": "..." },
+              { "id": "c3", "text": "..." },
+              { "id": "c4", "text": "..." }
+            ],
+            "correctChoiceId": "c1",
+            "rationale": "..."
+          }
+        }
+      ]
+    }
+  ]
+}`;
+
+    const countLine = sv ? `- Skapa exakt ${count} frågor.` : `- Create exactly ${count} questions.`;
+    const choiceLine = sv ? `- Varje fråga ska ha exakt ${choicesCount} svarsalternativ (c1..c${choicesCount}).` : `- Each question must have exactly ${choicesCount} choices (c1..c${choicesCount}).`;
+    const rationaleLine = sv ? `- rationale: ${minS}–${maxS} meningar, saklig och konkret.` : `- rationale: ${minS}–${maxS} sentences, factual and concrete.`;
+
+    if (sv) {
+      return `${courseInfo}
+${modeLine}
+${qtLine}
+${subjectLine}
+
+${qRulesBlock}
+
+KRAV:
+${countLine}
+${choiceLine}
+- Exakt 1 korrekt svar via correctChoiceId.
+${rationaleLine}
+- Alternativen ska vara realistiska: 1 korrekt, övriga ska vara vanliga fel/halvfel.
+- Undvik kuggfrågor och ordlekar.
+- Returnera exakt JSON enligt schema.${strictLine}
+
+SCHEMA:
+${schema}
+
+KONTEKST (råtext):
+${contextTextRaw || "(ingen)"}
+`;
+    }
+
+    return `${courseInfo}
+${modeLine}
+${qtLine}
+${subjectLine}
+
+${qRulesBlock}
+
+REQUIREMENTS:
+${countLine}
+${choiceLine}
+- Exactly 1 correct answer via correctChoiceId.
+${rationaleLine}
+- Options must be realistic: 1 correct, the rest are common mistakes/near-misses.
+- Avoid trick questions.
+- Return EXACT JSON per schema.${strictLine}
+
+SCHEMA:
+${schema}
+
+CONTEXT (raw):
+${contextTextRaw || "(none)"}
+`;
+  }
+
+  async function runOnce(stricter) {
+    const systemPrompt = stricter ? (systemPromptBase + (sv ? " ABSOLUT INGET UTANFÖR JSON." : " ABSOLUTELY NOTHING OUTSIDE JSON.")) : systemPromptBase;
+    const userPrompt = buildUserPrompt({ stricter });
+
+    let answer;
+    try {
+      answer = await env.AI.run(model, { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }] });
+    } catch (_) {
+      answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }] });
+    }
+    return answer;
+  }
+
+  function finalizeFromParsed(parsedObj) {
+    const blocksIn =
+      Array.isArray(parsedObj && parsedObj.blocks) ? parsedObj.blocks :
+      Array.isArray(parsedObj && parsedObj.items) ? parsedObj.items :
+      Array.isArray(parsedObj && parsedObj.children) ? parsedObj.children :
+      [];
+
+    const canonical = normalizeAiQuestionBlocksToCanonical(blocksIn, language, count);
+
+    if (!canonical.length || canonical.length < count) {
+      return {
+        ok: false,
+        errorCode: "AI_NO_QUESTIONS",
+        message: sv ? "AI skapade inte tillräckligt med frågor i rätt format." : "AI did not create enough questions in the required format.",
+        blocks: canonical
+      };
+    }
+
+    const qv = validateTrainingQualityCanonical({ blocks: canonical, qSpec, language });
+    if (!qv.ok) {
+      return { ok: false, errorCode: qv.errorCode, message: qv.message, blocks: canonical };
+    }
+
+    return { ok: true, v: "training-blocks@v1", mode: "training", language, subjectId: effectiveSubjectId, blocks: canonical };
+  }
+
+  // TRY 1
+  let answer = await runOnce(false);
+  let parsed = parseTrainingAiAnswer(answer);
+  if (parsed) {
+    const out1 = finalizeFromParsed(parsed);
+    if (out1 && out1.ok) return out1;
+  }
+
+  // TRY 2 (STRICTER)
+  answer = await runOnce(true);
+  parsed = parseTrainingAiAnswer(answer);
+  if (!parsed) {
+    return { ok: false, errorCode: "AI_BAD_JSON", message: sv ? "AI returnerade inte giltig JSON." : "AI did not return valid JSON.", blocks: [] };
+  }
+
+  const out2 = finalizeFromParsed(parsed);
+  if (out2 && out2.ok) return out2;
+
+  return {
+    ok: false,
+    errorCode: safeStr(out2 && out2.errorCode).trim() || "AI_NO_QUESTIONS",
+    message: safeStr(out2 && out2.message).trim() || (sv ? "AI skapade inte frågor i rätt format." : "AI did not create questions in the required format."),
+    blocks: Array.isArray(out2 && out2.blocks) ? out2.blocks : []
+  };
+}
+
+async function buildDocumentBlocksWithAI(input, env) {
+  const mode = safeStr(input && input.mode).trim() || "document";
+  const count = Math.max(1, Math.min(12, Number(input && input.count) || 1));
+  const language = normalizeLanguage(input && input.language);
+  const contextTextRaw = safeStr(input && (input.context || input.contextText)).trim();
+  const subjectIdRaw = safeStr(input && input.subjectId).trim() || "generic";
+
+  const bundle = parseContextBundle(contextTextRaw);
+  const effectiveSubjectId = safeStr(subjectIdRaw || (bundle && bundle.subjectId) || "generic").trim() || "generic";
+  const subjectSpec = await resolveSubjectSpecAsync(effectiveSubjectId, language, env);
+
+  const courseInfo = fmtContextForPrompt(bundle, language);
+  const sv = language === "sv";
+
+  const minWords = Number(subjectSpec && subjectSpec.minWordsDoc) || 180;
+  const heads = Array.isArray(subjectSpec && subjectSpec.requiredHeadings) ? subjectSpec.requiredHeadings : [];
+  const bullets = Array.isArray(subjectSpec && subjectSpec.bullets) ? subjectSpec.bullets : [];
+  const examples = Array.isArray(subjectSpec && subjectSpec.examples) ? subjectSpec.examples : [];
+  const forbidden = Array.isArray(subjectSpec && subjectSpec.forbidden) ? subjectSpec.forbidden : [];
+
+  const subjectHardFacts = [
+    sv ? "ÄMNE (hårda krav):" : "SUBJECT (hard requirements):",
+    `subjectId: ${subjectSpec.id}`,
+    `${sv ? "Titel" : "Title"}: ${subjectSpec.label}`,
+    `${sv ? "Minimilängd" : "Minimum length"}: ${minWords} ${sv ? "ord totalt" : "words total"}`,
+    heads.length ? `${sv ? "Obligatoriska rubriker" : "Required headings"}: ${heads.join(" | ")}` : "",
+    bullets.length ? `${sv ? "Punktkrav" : "Bullet requirements"}:\n- ${bullets.join("\n- ")}` : "",
+    examples.length ? `${sv ? "Exempel att använda/efterlikna" : "Examples to use/imitate"}:\n- ${examples.join("\n- ")}` : "",
+    forbidden.length ? `${sv ? "FÖRBJUDET i dokumentläge" : "FORBIDDEN in document mode"}: ${forbidden.join(", ")}` : "",
+  ].filter(Boolean).join("\n");
+
+  const schemaHint = sv
+    ? `Returnera ENDAST giltig JSON. Inget markdown.
+Schema:
+{ "blocks": [ { "title": "string", "text": "string" } ] }
+Regler:
+- Exakt ${count} blocks.
+- Total text minst ${minWords} ord.
+- Använd rubriker och punktlistor.
+- Inga provfrågor, inga svarsalternativ, ingen correctIndex, ingen quiz-struktur.`
+    : `Return ONLY valid JSON. No markdown.
+Schema:
+{ "blocks": [ { "title": "string", "text": "string" } ] }
+Rules:
+- Exactly ${count} blocks.
+- Total text at least ${minWords} words.
+- Use headings and bullet lists.
+- No quiz questions, no options, no correctIndex, no quiz structure.`;
+
+  const systemPrompt = sv
+    ? "Du skapar dokumentblock (infoblad) för HR-utbildning. Du får INTE skapa provfrågor här. Följ schema exakt."
+    : "You create document blocks (info sheet) for HR training. You MUST NOT create quiz questions. Follow schema exactly.";
+
+  const userPrompt =
+    `${courseInfo}\n\n` +
+    `${subjectHardFacts}\n\n` +
+    (sv ? `LÄGE: ${mode.toUpperCase()} (dokument-innehåll)\n\n` : `MODE: ${mode.toUpperCase()} (document content)\n\n`) +
+    (sv ? `KONTEKST (råtext):\n${contextTextRaw || "(ingen)"}\n\n` : `CONTEXT (raw):\n${contextTextRaw || "(none)"}\n\n`) +
+    schemaHint;
+
+  const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
+
+  function containsForbidden(text, forbiddenList) {
+    const t = safeStr(text).toLowerCase();
+    for (const w of Array.isArray(forbiddenList) ? forbiddenList : []) {
+      const ww = safeStr(w).toLowerCase().trim();
+      if (!ww) continue;
+      if (t.includes(ww)) return true;
+    }
+    return false;
+  }
+
+  async function runOnce(forceStricter) {
+    const extra = forceStricter
+      ? (sv
+          ? "\n\nVIKTIGT: Svara utförligt. Minst 2 konkreta exempel. Använd rubriker och punktlistor."
+          : "\n\nIMPORTANT: Answer in detail. At least 2 concrete examples. Use headings and bullet lists.")
+      : "";
+
+    let answer;
+    try {
+      answer = await env.AI.run(model, { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt + extra }] });
+    } catch (_) {
+      answer = await env.AI.run("@cf/meta/llama-3-8b-instruct", { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt + extra }] });
+    }
+    return answer;
+  }
+
+  function parseDocRows(ans) {
+    const raw = isPlainObject(ans) ? (ans.response || ans.result || ans.output || ans.text || ans) : ans;
+    const parsed0 = safeJsonFromUnknown(raw);
+    const parsed = coerceParsedObjOrArray(parsed0);
+    if (!parsed || !isPlainObject(parsed)) return null;
+
+    const rows = Array.isArray(parsed.blocks) ? parsed.blocks : Array.isArray(parsed.sections) ? parsed.sections : null;
+    if (!rows || !rows.length) return null;
+
+    const blocks = [];
+    for (let i = 0; i < rows.length && blocks.length < count; i++) {
+      const r = rows[i];
+      if (!r) continue;
+      if (typeof r === "string") {
+        const t = safeStr(r).trim();
+        if (!t) continue;
+        blocks.push(makeTextBlock({ i: blocks.length, title: "", text: t }));
+        continue;
+      }
+      if (isPlainObject(r)) {
+        const title = safeStr(r.title || r.heading || "").trim();
+        const text = safeStr(r.text || r.body || r.content || "").trim();
+        if (!text) continue;
+        blocks.push(makeTextBlock({ i: blocks.length, title, text }));
+      }
+    }
+
+    if (!blocks.length) return null;
+    if (!ensureNoQuestionBlocks(blocks)) return null;
+
+    while (blocks.length < count) {
+      blocks.push(makeTextBlock({
+        i: blocks.length,
+        title: sv ? `Block ${blocks.length + 1}` : `Block ${blocks.length + 1}`,
+        text: sv ? "Komplettera med dokumenttext kopplad till ämnet. Lägg till rubriker och exempel." : "Add document text tied to the subject. Add headings and examples."
+      }));
+    }
+
+    return blocks.slice(0, count);
+  }
+
+  function validateAll(blocksToCheck) {
+    const v = validateDocOutput({ language, subjectSpec, blocks: blocksToCheck });
+    if (!v.ok) return v;
+
+    const joined = joinDocBlocksText(blocksToCheck);
+    if (forbidden.length && containsForbidden(joined, forbidden)) {
+      return {
+        ok: false,
+        errorCode: "DOC_FORBIDDEN_CONTENT",
+        message: sv ? "Infoblad innehöll förbjudet quiz-/facit-innehåll. Försök igen." : "Document contained forbidden quiz/answer-key content. Try again.",
+      };
+    }
+    return { ok: true };
+  }
+
+  let answer = await runOnce(false);
+  let blocks = parseDocRows(answer);
+  if (!blocks) return null;
+
+  let v = validateAll(blocks);
+  if (!v.ok) {
+    answer = await runOnce(true);
+    blocks = parseDocRows(answer);
+    if (!blocks) return null;
+    v = validateAll(blocks);
+    if (!v.ok) return null;
+  }
+
+  return { ok: true, v: "training-blocks@v1", mode, subjectId: effectiveSubjectId, language, blocks };
+}
+
+// ============================================================
+// BLOCK 06 — Engine router (per mode)
+// ============================================================
+
+function stripInternal(obj) {
+  if (!obj || !isPlainObject(obj)) return obj;
+  const out = { ...obj };
+  if ("__subjectSpec" in out) delete out.__subjectSpec;
+  return out;
+}
+
+async function buildBlocksForMode(input, env) {
+  const mode = safeStr(input && input.mode).trim() || "training";
+  const hasAI = !!(env && env.AI && typeof env.AI.run === "function");
+
+  if (mode === "training") {
+    if (!hasAI) return buildTrainingBlocksDeterministicFail(input);
+    const ai = await buildTrainingBlocksWithAI(input, env);
+    return stripInternal(ai);
+  }
+
+  if (!hasAI) return buildDocumentBlocksDeterministic(input);
+
+  try {
+    const aiDoc = await buildDocumentBlocksWithAI(input, env);
+    if (aiDoc && aiDoc.ok && Array.isArray(aiDoc.blocks) && aiDoc.blocks.length && ensureNoQuestionBlocks(aiDoc.blocks)) {
+      const subjectSpec = await resolveSubjectSpecAsync(aiDoc.subjectId, aiDoc.language, env);
+      const v = validateDocOutput({ language: aiDoc.language, subjectSpec, blocks: aiDoc.blocks });
+      if (v.ok) return stripInternal(aiDoc);
+    }
+    return buildDocumentBlocksDeterministic(input);
+  } catch (_) {
+    return buildDocumentBlocksDeterministic(input);
+  }
+}
+
+// ============================================================
+// BLOCK 07 — Payload parsing (v1 tolerant)
+// ============================================================
+
+function parseV1RulesetPayload(body) {
+  if (!isPlainObject(body)) return null;
+
+  const rv = safeStr(body.rulesetVersion || body.ruleset || body.version || "").toLowerCase().trim();
+  const v1obj = isPlainObject(body.v1) ? body.v1 : null;
+  if (!v1obj && rv !== "v1" && rv !== "ai-rules/v1") return null;
+
+  const src = v1obj || body;
+
+  const mode = normalizeMode(src.mode || src.type || "training");
+  const count = normalizeCount(src.count ?? src.n);
+  const language = normalizeLanguage(src.language || "sv");
+  const contextText = normalizeContextText(src.context ?? src.contextText ?? src.prompt ?? "");
+  const format = safeStr(src.format || "").trim();
+  const subjectId = safeStr(src.subjectId || src.subject || "").trim();
+  const questionType = normalizeQuestionType(src.questionType || src.qType || "");
+  const difficulty = src.difficultyHint ?? src.difficulty ?? "";
+
+  if (!count) return null;
+  return { mode, count, language, contextText, format, subjectId, questionType, difficulty };
+}
+
+// ============================================================
+// BLOCK 08 — Fetch handler (routing + guards)
+// ============================================================
+
+export default {
+  async fetch(request, env) {
+    let requestId = makeRequestId();
+    const url = new URL(request.url);
+
+    const allowedOriginRaw = safeStr(env && env.ALLOWED_ORIGIN).trim();
+    const requireAuth = safeStr(env && env.REQUIRE_AUTH).trim().toLowerCase() === "true";
+    const aiEnabled = safeStr(env && env.AI_ENABLED).trim().toLowerCase() === "true";
+
+    if (!allowedOriginRaw) {
+      console.error("ERR", requestId, "ENV_MISSING");
+      return okJSON(
+        500,
+        { ok: false, requestId, errorCode: "ENV_MISSING", error: { code: "ENV_MISSING", message: "ALLOWED_ORIGIN saknas i env" } },
+        { "Content-Type": "application/json; charset=utf-8" },
+        requestId
+      );
+    }
+
+    const allowedOrigin = normalizeOrigin(allowedOriginRaw);
+    const origin = normalizeOrigin(request.headers.get("Origin") || "");
+    const corsHeaders = buildCorsHeaders(origin, allowedOrigin);
+
+    if (request.method === "OPTIONS") {
+      if (!origin || origin !== allowedOrigin) {
+        return errorJSON(403, requestId, "CORS_FORBIDDEN", "Origin är inte tillåten", corsHeaders, true);
+      }
+      return new Response(null, { status: 204, headers: corsHeaders });
+    }
+
+    const path = url.pathname || "/";
+
+    if (request.method === "GET" && path === "/v1/health") {
+      if (origin && origin !== allowedOrigin) {
+        return errorJSON(403, requestId, "CORS_FORBIDDEN", "Origin är inte tillåten", corsHeaders, true);
+      }
+      const hasAIBinding = !!(env && env.AI && typeof env.AI.run === "function");
+      const model = safeStr(env && env.AI_MODEL).trim() || "@cf/meta/llama-3.1-8b-instruct";
+      return okJSON(
+        200,
+        {
+          ok: true,
+          requestId,
+          data: {
+            service: "hr-worker",
+            version: VERSION,
+            v: "v1",
+            rulesets: { ok: true, base: "ai-rules" },
+            ai: { enabled: aiEnabled, binding: hasAIBinding, model },
+          },
+        },
+        corsHeaders,
+        requestId
+      );
+    }
+
+    if (request.method === "GET" && path === "/v1/version") {
+      if (origin && origin !== allowedOrigin) {
+        return errorJSON(403, requestId, "CORS_FORBIDDEN", "Origin är inte tillåten", corsHeaders, true);
+      }
+      return okJSON(
+        200,
+        {
+          ok: true,
+          requestId,
+          data: {
+            service: "hr-worker",
+            version: VERSION,
+            build: "wrangler",
+            rulesBase: "ai-rules",
+            outputContract: "training-blocks@v1 + ui-mcq@v1.2 + items-envelope@v1.6",
+          },
+        },
+        corsHeaders,
+        requestId
+      );
+    }
+
+    if (request.method !== "POST") {
+      return errorJSON(405, requestId, "METHOD_NOT_ALLOWED", "Endast POST tillåtet för AI-endpoints", corsHeaders, true);
+    }
+
+    const isAIPath = path === "/v1/ai/generate" || path === "/v1/ai/training" || path === "/v1/ai/document";
+    if (!isAIPath) {
+      return errorJSON(404, requestId, "NOT_FOUND", "Endpoint finns inte", corsHeaders, true);
+    }
+
+    if (!origin || origin !== allowedOrigin) {
+      return errorJSON(403, requestId, "CORS_FORBIDDEN", "Origin är inte tillåten", corsHeaders, true);
+    }
+
+    if (requireAuth) {
+      const token = extractBearerToken(request.headers.get("Authorization") || "");
+      const expected = safeStr(env && env.WORKER_TOKEN).trim();
+      if (!token || !expected || token !== expected) {
+        return errorJSON(401, requestId, "UNAUTHORIZED", "Ogiltig eller saknad token", corsHeaders, true);
+      }
+    }
+
+    const ct = (request.headers.get("Content-Type") || "").toLowerCase();
+    if (!ct.includes("application/json")) {
+      return errorJSON(400, requestId, "BAD_JSON", "Endast application/json tillåtet", corsHeaders, true);
+    }
+
+    const lenHeader = request.headers.get("Content-Length");
+    if (lenHeader) {
+      const len = Number(lenHeader);
+      if (Number.isFinite(len) && len > MAX_BODY_BYTES) {
+        return errorJSON(413, requestId, "PAYLOAD_TOO_LARGE", "Payload för stor", corsHeaders, true);
+      }
+    }
+
+    let rawBytes;
+    try {
+      rawBytes = await request.clone().arrayBuffer();
+    } catch {
+      return errorJSON(400, requestId, "BAD_JSON", "Kunde inte läsa request body", corsHeaders, true);
+    }
+    if (rawBytes.byteLength > MAX_BODY_BYTES) {
+      return errorJSON(413, requestId, "PAYLOAD_TOO_LARGE", "Payload för stor", corsHeaders, true);
+    }
+
+    let body;
+    try {
+      const txt = new TextDecoder("utf-8").decode(rawBytes);
+      body = JSON.parse(txt);
+    } catch {
+      return errorJSON(400, requestId, "BAD_JSON", "Kunde inte tolka JSON", corsHeaders, true);
+    }
+
+    if (!isPlainObject(body)) {
+      return errorJSON(400, requestId, "VALIDATION_ERROR", "Body måste vara ett JSON-objekt", corsHeaders, true);
+    }
+
+    const incomingReqId = safeStr(body.requestId).trim();
+    if (incomingReqId) requestId = incomingReqId;
+
+    if (!aiEnabled) {
+      return errorJSON(503, requestId, "AI_DISABLED", "AI_ENABLED=false (Workern är avstängd)", corsHeaders, true);
+    }
+
+    const v1 = parseV1RulesetPayload(body);
+    const isV1 = !!v1;
+
+    let modeRaw = safeStr(body.mode || body.type).trim();
+    if (path === "/v1/ai/training") modeRaw = "training";
+    if (path === "/v1/ai/document") modeRaw = "document";
+    if (path === "/v1/ai/generate" && !modeRaw) modeRaw = "training";
+
+    let mode = normalizeMode(modeRaw);
+    let countRaw = body.count ?? body.n;
+    let languageRaw = body.language || "sv";
+    let contextText = normalizeContextText(body.context ?? body.prompt ?? body.contextText ?? "");
+    let format = safeStr(body.format || "").trim();
+    let subjectId = safeStr(body.subjectId || body.subject || "").trim();
+    let difficultyHint = body.difficultyHint ?? body.difficulty;
+
+    let questionType = normalizeQuestionType(
+      body.questionType ??
+      body.qType ??
+      body.questionMode ??
+      body.question_mode ??
+      body.questionKind ??
+      body.question_kind ??
+      body.quizMode ??
+      body.mcqMode ??
+      body.mcq_type ??
+      ""
+    );
+
+    if (isV1) {
+      mode = v1.mode;
+      format = v1.format;
+      countRaw = v1.count;
+      languageRaw = v1.language;
+      questionType = v1.questionType;
+      difficultyHint = v1.difficulty;
+      contextText = v1.contextText;
+      subjectId = v1.subjectId || subjectId;
+    }
+
+    const language = normalizeLanguage(languageRaw);
+
+    if (!(mode === "training" || mode === "document" || mode === "mix")) {
+      return errorJSON(400, requestId, "VALIDATION_ERROR", "mode måste vara training, document eller mix", corsHeaders, true);
+    }
+
+    const count = normalizeCount(countRaw);
+    if (count === null) {
+      return errorJSON(400, requestId, "VALIDATION_ERROR", "count måste vara mellan 1 och 12", corsHeaders, true);
+    }
+
+    if (!(language === "sv" || language === "en")) {
+      return errorJSON(400, requestId, "VALIDATION_ERROR", "language måste vara sv eller en", corsHeaders, true);
+    }
+
+    if (contextText.length > 4000) {
+      return errorJSON(400, requestId, "VALIDATION_ERROR", "context max 4000 tecken", corsHeaders, true);
+    }
+
+    // ============================================================
+    // BUILD
+    // ============================================================
+
+    let training;
+    let aiSource = "fallback";
+    let aiReason = "OK";
+
+    try {
+      const hasBinding = !!(env && env.AI && typeof env.AI.run === "function");
+      aiSource = hasBinding ? "cf" : "fallback";
+
+      training = await buildBlocksForMode(
+        { requestId, mode, count, language, context: contextText, format, subjectId, difficultyHint, questionType },
+        env
+      );
+
+      aiReason = training && training.ok === false ? safeStr(training.errorCode || "FAIL") : "OK";
+    } catch (e) {
+      const msg = safeStr(e && (e.message || e.stack || String(e))).slice(0, 200);
+      console.error("ERR", requestId, "WORKER_BUILD_FAILED");
+      return errorJSON(502, requestId, "WORKER_BUILD_FAILED", msg || "Worker kunde inte bygga ett giltigt svar", corsHeaders, true);
+    }
+
+    if (!training || typeof training !== "object") {
+      return errorJSON(502, requestId, "WORKER_BUILD_FAILED", "training är ogiltig (null/ej objekt)", corsHeaders, true);
+    }
+
+    const hdrBase = {
+      ...(corsHeaders || {}),
+      "X-HR-AI": aiSource === "cf" ? "cf" : "fallback",
+      "X-HR-AI-REASON": safeStr(aiReason || "OK"),
+    };
+
+    if (training && training.ok === false) {
+      const code = safeStr(training.errorCode || (training.error && training.error.code) || "AI_FAILED").trim() || "AI_FAILED";
+      const msg =
+        safeStr(training.message || (training.error && training.error.message) || "").trim() ||
+        "AI kunde inte skapa ett giltigt svar.";
+      return errorJSON(422, requestId, code, msg, hdrBase, true);
+    }
+
+    const topBlocks = Array.isArray(training.blocks) ? training.blocks : [];
+    let items = topBlocks;
+
+    if (mode === "training" && isUiQuestionRequest(questionType)) {
+      const mapped = extractUiQuestionsForUi(training, topBlocks);
+      if (!mapped.ok) {
+        return errorJSON(422, requestId, mapped.errorCode, mapped.message, hdrBase, true);
+      }
+      items = mapped.items;
+    }
+
+    return okJSON(
+      200,
+      {
+        ok: true,
+        requestId,
+        items,
+        data: { training },
+        training,
+        blocks: topBlocks,
+        mode: training.mode || mode,
+      },
+      hdrBase,
+      requestId
+    );
+  },
+};
