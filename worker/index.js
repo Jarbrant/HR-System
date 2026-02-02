@@ -1,11 +1,17 @@
 // ============================================================
-// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.7.0)
+// PRC-BYGGORDER — AO-WORKER-TRAINING-BLOCKS-01 (PROD v1.7.1)
 // FIL: worker/index.js
 //
 // MÅL (nu även: subjectSpec för frågor):
 // - Frågor & svar ska bli lika bra som dokument: styrs av ai-rules subjectSpec
 // - TRAINING laddar subjectSpec.questionSpec (via subjects/index.json allowlist)
 // - DOCUMENT/MIX laddar subjectSpec.documentSpec (som tidigare), med minWords + rubriker + forbidden-guard
+//
+// PATCH v1.7.1 (2026-02-02) — P0 FIX (payload/context):
+// 1) FIX: normalizeContextText() klarar nu structured context-objekt (SDK payload.context)
+//    -> JSON.stringify(...) när .text/.contextText/.prompt saknas.
+//    Detta gör att parseContextBundle() kan läsa subjectId/module/area/chapter/step
+//    och att subjectSpec+prompts blir korrekta (minskar AI_BAD_JSON).
 //
 // PATCH v1.7.0 (2026-02-02) — P0 FIX:
 // 1) AI_BAD_JSON fix: safeJsonParseLoose() klarar nu både JSON-objekt {} och JSON-array []
@@ -228,7 +234,7 @@ function extractUiQuestionsForUi(trainingObj, blocksArr) {
 // ============================================================
 
 export const MAX_BODY_BYTES = 64 * 1024;
-const VERSION = "1.7.0";
+const VERSION = "1.7.1";
 
 // ============================================================
 // BLOCK 02B — Local utils (self-contained)
@@ -248,13 +254,26 @@ function normalizeMode(v) {
   return "training";
 }
 
+// P0 (v1.7.1): stöd structured context-objekt från SDK.
+// - Om v är object och saknar .text/.contextText/.prompt -> stringify
+// - Detta gör att parseContextBundle kan läsa subject/course/level/goals.
 function normalizeContextText(v) {
   if (typeof v === "string") return v.trim();
   if (v === null || v === undefined) return "";
   try {
     if (typeof v === "object") {
       const t = safeStr(v.text || v.contextText || v.prompt || "");
-      return t.trim();
+      if (t && t.trim()) return t.trim();
+
+      // Structured context bundle (typ: { subject:{...}, course:{...}, level:'...', goals:'...' })
+      // -> JSON-text så parseContextBundle kan läsa det.
+      try {
+        const s = JSON.stringify(v);
+        // hård cap
+        return safeStr(s).slice(0, 4000).trim();
+      } catch (_) {
+        return "";
+      }
     }
   } catch (_) {}
   return safeStr(v).trim();
@@ -382,6 +401,9 @@ function safeJsonFromUnknown(x) {
 function parseContextBundle(contextTextRaw) {
   const raw = safeStr(contextTextRaw).trim();
   if (!raw) return null;
+
+  // P0 guard: vanlig symptom när någon skickar object utan stringify
+  if (raw === "[object Object]") return null;
 
   let v = safeJsonParseLoose(raw);
   if (typeof v === "string") {
@@ -1664,7 +1686,10 @@ export default {
     let mode = normalizeMode(modeRaw);
     let countRaw = body.count ?? body.n;
     let languageRaw = body.language || "sv";
+
+    // P0: normalizeContextText() tar även structured context-objekt
     let contextText = normalizeContextText(body.context ?? body.prompt ?? body.contextText ?? "");
+
     let format = safeStr(body.format || "").trim();
     let subjectId = safeStr(body.subjectId || body.subject || "").trim();
     let difficultyHint = body.difficultyHint ?? body.difficulty;
