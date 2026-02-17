@@ -10,7 +10,7 @@
 // - Ingen payload-logg
 // ============================================================
 
-import { safeStr, isPlainObject } from "./utils.js";
+import { safeStr, isPlainObject } from "./rules.js";
 
 // ---- Schema definitions ----
 
