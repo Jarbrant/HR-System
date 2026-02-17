@@ -18,6 +18,8 @@
 // ============================================================
 
 // --- Base rules (alltid på) ---
+import MODULES from "../ai-rules/v1/modules.json" assert { type: "json" };
+import SUBJECTS_INDEX from "../ai-rules/v1/subjects/index.json" assert { type: "json" };
 import environment from "../ai-rules/v1/subjects/environment.json" assert { type: "json" };
 import ethics from "../ai-rules/v1/subjects/ethics.json" assert { type: "json" };
 import swedish from "../ai-rules/v1/subjects/swedish.json" assert { type: "json" };
@@ -108,6 +110,82 @@ function pickSubjectRuleset(key) {
     case "environment": return environment;
     default: return generic; // fail-closed
   }
+}
+
+// ------------------------------------------------------------
+// Module/Area → SubjectIds resolver (merge+dedupe)
+// Uses subjectLinks from modules.json
+// ------------------------------------------------------------
+
+/**
+ * resolveSubjectIdsForModule(moduleId, areaId)
+ *
+ * Resolution steps (from modules.json subjectLinks):
+ * 1. start: module.subjectIds
+ * 2. append: area.subjectIds (if exists, merge="append")
+ * 3. dedupe: keep order (primary first)
+ * 4. ignoreMissing: if subjectId not in subjects-index → ignore + log (don't crash)
+ * 5. fallback: if list is empty → ["generic"]
+ *
+ * Returns: string[] of validated subjectIds
+ */
+export function resolveSubjectIdsForModule(moduleId, areaId) {
+  const links = (MODULES && MODULES.subjectLinks && MODULES.subjectLinks.modules) || {};
+  const modLink = links[safeStr(moduleId).trim()];
+
+  if (!modLink) {
+    return ["generic"]; // fallback
+  }
+
+  // Step 1: start with module subjectIds
+  const moduleSubjects = Array.isArray(modLink.subjectIds) ? modLink.subjectIds.slice() : [];
+
+  // Step 2: append area subjectIds if they exist
+  const aid = safeStr(areaId).trim();
+  if (aid && isObj(modLink.areas) && modLink.areas[aid]) {
+    const areaLink = modLink.areas[aid];
+    if (Array.isArray(areaLink.subjectIds)) {
+      for (const s of areaLink.subjectIds) {
+        moduleSubjects.push(s);
+      }
+    }
+  }
+
+  // Step 3: dedupe (keep order, first occurrence wins)
+  const seen = new Set();
+  const deduped = [];
+  for (const s of moduleSubjects) {
+    const key = safeStr(s).trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(safeStr(s).trim());
+  }
+
+  // Step 4: validate against subjects-index (ignoreMissing)
+  const allowlist = buildAllowlistFromIndex();
+  const validated = deduped.filter(sid => {
+    if (allowlist.has(sid)) return true;
+    // ignoreMissing: log but don't crash
+    console.warn(`[bundle] subjectId "${sid}" not in subjects-index, ignoring`);
+    return false;
+  });
+
+  // Step 5: fallback if empty
+  if (validated.length === 0) {
+    return ["generic"];
+  }
+
+  return validated;
+}
+
+function buildAllowlistFromIndex() {
+  const set = new Set();
+  if (SUBJECTS_INDEX && SUBJECTS_INDEX.byId) {
+    for (const key of Object.keys(SUBJECTS_INDEX.byId)) {
+      set.add(key);
+    }
+  }
+  return set;
 }
 
 // ------------------------------------------------------------
