@@ -289,3 +289,23 @@ export function pickDifficultyLabel(difficultyHint, seedN) {
   return "normal";
 }
 
+// Alias used by generate/training-blocks.js
+export function normalizeDifficulty(v) {
+  return pickDifficultyLabel(v, 0);
+}
+
+// Alias for normalizeStepValue used by generate/training-blocks.js
+export function normalizeStep(v) {
+  return normalizeStepValue(v) || "1";
+}
+
+// Normalize count (1–12), used by routes/v1_ai_generate.js
+export function normalizeCount(countRaw) {
+  const n = (countRaw === null || countRaw === undefined || countRaw === "") ? 4 : Number(countRaw);
+  if (!Number.isFinite(n)) return null;
+  const i = Math.trunc(n);
+  if (i !== n) return null;
+  if (i < 1 || i > 12) return null;
+  return i;
+}
+

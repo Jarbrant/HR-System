@@ -18,21 +18,22 @@
 // ============================================================
 
 // --- Base rules (alltid på) ---
-import environment from "../ai-rules/v1/environment.json" assert { type: "json" };
-import ethics from "../ai-rules/v1/ethics.json" assert { type: "json" };
-import swedish from "../ai-rules/v1/swedish.json" assert { type: "json" };
-import generic from "../ai-rules/v1/generic.json" assert { type: "json" };
-import hr_policy from "../ai-rules/v1/hr_policy.json" assert { type: "json" };
+import environment from "../ai-rules/v1/subjects/environment.json" assert { type: "json" };
+import ethics from "../ai-rules/v1/subjects/ethics.json" assert { type: "json" };
+import swedish from "../ai-rules/v1/subjects/swedish.json" assert { type: "json" };
+import generic from "../ai-rules/v1/subjects/generic.json" assert { type: "json" };
+import hr_policy from "../ai-rules/v1/subjects/hr_policy.json" assert { type: "json" };
 
 // --- Subject rules (på när ämnet matchar) ---
-import leadership from "../ai-rules/v1/leadership.json" assert { type: "json" };
-import quality from "../ai-rules/v1/quality.json" assert { type: "json" };
-import information_security from "../ai-rules/v1/information_security.json" assert { type: "json" };
-import haccp from "../ai-rules/v1/haccp.json" assert { type: "json" };
-import work_environment from "../ai-rules/v1/work_environment.json" assert { type: "json" };
-import safety from "../ai-rules/v1/safety.json" assert { type: "json" };
-import math from "../ai-rules/v1/math.json" assert { type: "json" };
-import swot from "../ai-rules/v1/swot.json" assert { type: "json" };
+import leadership from "../ai-rules/v1/subjects/leadership.json" assert { type: "json" };
+import quality from "../ai-rules/v1/subjects/quality.json" assert { type: "json" };
+import information_security from "../ai-rules/v1/subjects/information_security.json" assert { type: "json" };
+import haccp from "../ai-rules/v1/subjects/haccp.json" assert { type: "json" };
+import work_environment from "../ai-rules/v1/subjects/work_environment.json" assert { type: "json" };
+import safety from "../ai-rules/v1/subjects/safety.json" assert { type: "json" };
+import math from "../ai-rules/v1/subjects/math.json" assert { type: "json" };
+import swot from "../ai-rules/v1/subjects/swot.json" assert { type: "json" };
+import feedback_samtal from "../ai-rules/v1/subjects/feedback_samtal.json" assert { type: "json" };
 
 // ------------------------------------------------------------
 // Public API
@@ -87,6 +88,8 @@ function resolveSubjectKey(subjectId) {
   if (prefix === "sakerhet" || prefix === "säkerhet" || prefix === "safety") return "safety";
   if (prefix === "matte" || prefix === "math") return "math";
   if (prefix === "swot") return "swot";
+  if (prefix === "feedback_samtal" || prefix === "feedback" || prefix === "samtal") return "feedback_samtal";
+  if (prefix === "environment" || prefix === "miljö" || prefix === "miljo") return "environment";
 
   return "generic";
 }
@@ -101,6 +104,8 @@ function pickSubjectRuleset(key) {
     case "safety": return safety;
     case "math": return math;
     case "swot": return swot;
+    case "feedback_samtal": return feedback_samtal;
+    case "environment": return environment;
     default: return generic; // fail-closed
   }
 }
