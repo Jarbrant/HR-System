@@ -20,12 +20,18 @@ import TRAINING_BLOCKS_FORMAT from "../ai-rules/v1/formats/training-blocks.json"
 import TRAINING_PROMPT from "../ai-rules/v1/rulesets/training_prompt.json";
 
 // ----------------- tiny utils (lokalt) -----------------
-function safeStr(v) {
+export function safeStr(v) {
   return (v === null || v === undefined) ? "" : String(v);
+}
+export function isPlainObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 function safeArr(a) {
   return Array.isArray(a) ? a : [];
 }
+
+// re-export HTTP helpers so downstream files can do: import { okJSON, errorJSON } from "../rules.js"
+export { okJSON, errorJSON } from "./http.js";
 
 // ============================================================
 // Rules bundle + quality
