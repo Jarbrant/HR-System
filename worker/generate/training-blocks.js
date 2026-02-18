@@ -143,43 +143,99 @@ function buildDocBlock({ i, n, language, courseLabel, place, scenario }) {
   const id = `b_doc_${i + 1}_${hash32(`${courseLabel.step}|${courseLabel.area}|${i}|doc`)}`.slice(0, 32);
 
   const title = (language === "sv")
-    ? `Dokument: En bra notering ${place}`
-    : `Document: A solid note ${place}`;
+    ? `Dokument: ${scenario ? scenario.artifact : "En bra notering"}`
+    : `Document: ${scenario ? scenario.artifact : "A solid note"}`;
 
   const sv = (language === "sv");
-  const docSv = [
-    `Rubrik: Kort saklig rubrik`,
-    `Datum/Tid: ___`,
-    `Läge (1 mening): ___`,
-    `Första åtgärd (1 mening): ___`,
-    `Underlag/Spårbarhet: ___`,
-    `Ansvarig: ___`,
-    `Nästa uppföljning: ___`
-  ];
-
-  const docEn = [
-    `Title: Short, factual title`,
-    `Date/Time: ___`,
-    `Situation (1 sentence): ___`,
-    `First action (1 sentence): ___`,
-    `Evidence/Traceability: ___`,
-    `Owner: ___`,
-    `Next follow-up: ___`
-  ];
-
-  const hint = sv
-    ? (scenario ? `Tips: Skriv så att någon som inte var där kan förstå. (${scenario.artifact})` : `Tips: Skriv så att någon som inte var där kan förstå.`)
-    : (scenario ? `Tip: Write so someone not present can understand. (${scenario.artifact})` : `Tip: Write so someone not present can understand.`);
+  
+  // Generate deterministic content based on scenario and seed
+  const seed = (n ^ hash32(`${i}|${courseLabel.step}|${courseLabel.area}`)) >>> 0;
+  
+  // Generate a realistic date/time (recent past, deterministic)
+  const dayOffset = (seed % 7) + 1; // 1-7 days ago
+  const hour = 8 + (seed % 10); // 8-17 (business hours)
+  const minute = (seed % 12) * 5; // 0, 5, 10, ..., 55
+  const dateTime = sv 
+    ? `${dayOffset} dagar sedan, kl ${hour}:${minute.toString().padStart(2, '0')}`
+    : `${dayOffset} days ago, at ${hour}:${minute.toString().padStart(2, '0')}`;
+  
+  // Generate responsible person (deterministic)
+  const responsiblesSv = ["Skiftansvarig", "Verksamhetschef", "Kvalitetsansvarig", "Teamledare", "Områdesansvarig"];
+  const responsiblesEn = ["Shift manager", "Operations manager", "Quality manager", "Team leader", "Area manager"];
+  const responsible = (sv ? responsiblesSv : responsiblesEn)[(seed >> 4) % 5];
+  
+  // Generate follow-up time (deterministic)
+  const followUpDays = [1, 2, 3, 5, 7][(seed >> 8) % 5];
+  const followUp = sv
+    ? `Uppföljning om ${followUpDays} ${followUpDays === 1 ? 'dag' : 'dagar'}`
+    : `Follow-up in ${followUpDays} ${followUpDays === 1 ? 'day' : 'days'}`;
+  
+  // Build realistic content based on scenario
+  let docTitle, situation, action, evidence;
+  
+  if (scenario) {
+    // Context-aware title
+    docTitle = sv
+      ? `${scenario.id === 'kitchen' ? 'Produktionskontroll' : scenario.id === 'receiving' ? 'Varumottagning' : scenario.id === 'audit' ? 'Internkontroll' : scenario.id === 'customer' ? 'Kundärende' : scenario.id === 'brief' ? 'Avstämning' : 'Händelsenotering'} ${place}`
+      : `${scenario.id === 'kitchen' ? 'Production Check' : scenario.id === 'receiving' ? 'Goods Receipt' : scenario.id === 'audit' ? 'Internal Audit' : scenario.id === 'customer' ? 'Customer Case' : scenario.id === 'brief' ? 'Briefing' : 'Incident Note'} ${place}`;
+    
+    // Situation (based on scenario setting)
+    situation = sv
+      ? `${scenario.setting}. ${scenario.constraintA}`
+      : `${scenario.setting}. ${scenario.constraintA}`;
+    
+    // Action (deterministic based on scenario type)
+    const actionsSv = {
+      kitchen: "Kontrollerade checklista och bekräftade rutinen med ansvarig",
+      receiving: "Verifierade leverans mot kvittens och dokumenterade avvikelse",
+      audit: "Genomförde kontrollpunkter enligt plan och noterade observationer",
+      customer: "Tog emot klagomål, samlade fakta och informerade ansvarig chef",
+      brief: "Klargjorde ansvar och dokumenterade beslutade åtgärder",
+      generic: "Avgränsade läget, valde startåtgärd och förankrade med ansvarig"
+    };
+    
+    const actionsEn = {
+      kitchen: "Verified checklist and confirmed procedure with responsible person",
+      receiving: "Verified delivery against receipt and documented deviation",
+      audit: "Completed control points as planned and noted observations",
+      customer: "Received complaint, gathered facts and informed responsible manager",
+      brief: "Clarified responsibilities and documented agreed actions",
+      generic: "Scoped situation, selected first action and anchored with responsible"
+    };
+    
+    action = (sv ? actionsSv[scenario.id] : actionsEn[scenario.id]) || (sv ? actionsSv.generic : actionsEn.generic);
+    
+    // Evidence (based on artifact)
+    evidence = sv
+      ? `${scenario.artifact}, sparad i logg med tidsstämpel`
+      : `${scenario.artifact}, saved in log with timestamp`;
+  } else {
+    // Fallback for when no scenario available
+    docTitle = sv ? `Händelsenotering ${place}` : `Incident note ${place}`;
+    situation = sv
+      ? "Ett läge som krävde tydlighet och spårbarhet."
+      : "A situation requiring clarity and traceability.";
+    action = sv
+      ? "Avgränsade problemet, valde lämplig åtgärd och dokumenterade beslutet."
+      : "Scoped the issue, selected appropriate action and documented decision.";
+    evidence = sv
+      ? "Notering i logg, kvittens eller motsvarande"
+      : "Note in log, receipt or equivalent";
+  }
+  
+  // Build markdown document
+  const docContent = sv
+    ? `## ${docTitle}\n\n**Datum/Tid:** ${dateTime}\n\n**Läge:** ${situation}\n\n**Första åtgärd:** ${action}\n\n**Underlag/Spårbarhet:** ${evidence}\n\n**Ansvarig:** ${responsible}\n\n**Nästa uppföljning:** ${followUp}`
+    : `## ${docTitle}\n\n**Date/Time:** ${dateTime}\n\n**Situation:** ${situation}\n\n**First action:** ${action}\n\n**Evidence/Traceability:** ${evidence}\n\n**Owner:** ${responsible}\n\n**Next follow-up:** ${followUp}`;
 
   return {
     blockId: id,
     kind: "document",
     title,
     items: [
-      { type: "text", text: hint },
-      { type: "multilineTemplate", lines: sv ? docSv : docEn }
+      { type: "markdown", text: docContent }
     ],
-    meta: { tags: ["document", "template"] }
+    meta: { tags: ["document", "generated"], scenario: scenario ? scenario.id : "generic" }
   };
 }
 
