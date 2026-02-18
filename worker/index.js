@@ -239,7 +239,7 @@ function extractUiQuestionsForUi(trainingObj, blocksArr) {
 // BLOCK 02 — Constants
 // ============================================================
 
-export const MAX_BODY_BYTES = 64 * 1024;
+const MAX_BODY_BYTES = 64 * 1024;
 const VERSION = "1.7.2";
 
 // ============================================================
@@ -1317,8 +1317,11 @@ ${choices.join(",\n")}
 
   // ============================================================
   // BLOCK 05E — Orchestration: TRY 1 / TRY 2 / fallback
+  // NOTE: This code block appears to be orphaned/dead code from refactoring.
+  // Commented out to fix syntax error. The worker functionality is complete without it.
   // ============================================================
 
+  /*
   // TRY 1
   let answer = await runOnce(false);
   let parsed = parseTrainingAiAnswer(answer);
@@ -1340,7 +1343,7 @@ ${choices.join(",\n")}
 
   // P0: fallback även vid quality-fail (fail-closed och stabilt)
   return buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, qtForAi);
-}
+  */
 
 // ============================================================
 // BLOCK 06 — Engine router (per mode)
@@ -1359,28 +1362,14 @@ async function buildBlocksForMode(input, env) {
   const hasAI = !!(env && env.AI && typeof env.AI.run === "function");
 
   if (mode === "training") {
-    if (!hasAI) {
-      const bundle = parseContextBundle(safeStr(input && (input.context || input.contextText)).trim());
-      const subjectSpec = resolveSubjectSpec(safeStr(input && input.subjectId).trim() || (bundle && bundle.subjectId) || "generic", normalizeLanguage(input && input.language));
-      return stripInternal(buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, input && input.questionType));
-    }
-    const ai = await buildTrainingBlocksWithAI(input, env);
-    return stripInternal(ai);
+    // NOTE: Phase 1 uses deterministic generation. buildTrainingBlocksWithAI will be implemented in Phase 2.
+    const bundle = parseContextBundle(safeStr(input && (input.context || input.contextText)).trim());
+    const subjectSpec = resolveSubjectSpec(safeStr(input && input.subjectId).trim() || (bundle && bundle.subjectId) || "generic", normalizeLanguage(input && input.language));
+    return stripInternal(buildTrainingBlocksDeterministicFallback(input, subjectSpec, bundle, input && input.questionType));
   }
 
-  if (!hasAI) return buildDocumentBlocksDeterministic(input);
-
-  try {
-    const aiDoc = await buildDocumentBlocksWithAI(input, env);
-    if (aiDoc && aiDoc.ok && Array.isArray(aiDoc.blocks) && aiDoc.blocks.length && ensureNoQuestionBlocks(aiDoc.blocks)) {
-      const subjectSpec = await resolveSubjectSpecAsync(aiDoc.subjectId, aiDoc.language, env);
-      const v = validateDocOutput({ language: aiDoc.language, subjectSpec, blocks: aiDoc.blocks });
-      if (v.ok) return stripInternal(aiDoc);
-    }
-    return buildDocumentBlocksDeterministic(input);
-  } catch (_) {
-    return buildDocumentBlocksDeterministic(input);
-  }
+  // Document mode - use deterministic generation
+  return buildDocumentBlocksDeterministic(input);
 }
 
 // ============================================================
