@@ -155,9 +155,10 @@ function buildDocBlock({ i, n, language, courseLabel, place, scenario }) {
   const dayOffset = (seed % 7) + 1; // 1-7 days ago
   const hour = 8 + (seed % 10); // 8-17 (business hours)
   const minute = (seed % 12) * 5; // 0, 5, 10, ..., 55
+  const timeFormat = `${hour}:${minute.toString().padStart(2, '0')}`;
   const dateTime = sv 
-    ? `${dayOffset} dagar sedan, kl ${hour}:${minute.toString().padStart(2, '0')}`
-    : `${dayOffset} days ago, at ${hour}:${minute.toString().padStart(2, '0')}`;
+    ? `${dayOffset} dagar sedan, kl ${timeFormat}`
+    : `${dayOffset} days ago, at ${timeFormat}`;
   
   // Generate responsible person (deterministic)
   const responsiblesSv = ["Skiftansvarig", "Verksamhetschef", "Kvalitetsansvarig", "Teamledare", "Områdesansvarig"];
@@ -174,10 +175,27 @@ function buildDocBlock({ i, n, language, courseLabel, place, scenario }) {
   let docTitle, situation, action, evidence;
   
   if (scenario) {
-    // Context-aware title
-    docTitle = sv
-      ? `${scenario.id === 'kitchen' ? 'Produktionskontroll' : scenario.id === 'receiving' ? 'Varumottagning' : scenario.id === 'audit' ? 'Internkontroll' : scenario.id === 'customer' ? 'Kundärende' : scenario.id === 'brief' ? 'Avstämning' : 'Händelsenotering'} ${place}`
-      : `${scenario.id === 'kitchen' ? 'Production Check' : scenario.id === 'receiving' ? 'Goods Receipt' : scenario.id === 'audit' ? 'Internal Audit' : scenario.id === 'customer' ? 'Customer Case' : scenario.id === 'brief' ? 'Briefing' : 'Incident Note'} ${place}`;
+    // Context-aware title with lookup objects
+    const titleMapSv = {
+      kitchen: 'Produktionskontroll',
+      receiving: 'Varumottagning',
+      audit: 'Internkontroll',
+      customer: 'Kundärende',
+      brief: 'Avstämning',
+      generic: 'Händelsenotering'
+    };
+    
+    const titleMapEn = {
+      kitchen: 'Production Check',
+      receiving: 'Goods Receipt',
+      audit: 'Internal Audit',
+      customer: 'Customer Case',
+      brief: 'Briefing',
+      generic: 'Incident Note'
+    };
+    
+    const titleBase = (sv ? titleMapSv[scenario.id] : titleMapEn[scenario.id]) || (sv ? titleMapSv.generic : titleMapEn.generic);
+    docTitle = `${titleBase} ${place}`;
     
     // Situation (based on scenario setting)
     situation = sv
